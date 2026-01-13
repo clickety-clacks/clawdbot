@@ -12,6 +12,12 @@ import Busboy from "busboy";
 import BetterSqlite3 from "better-sqlite3";
 import type { Database as SqliteDatabase } from "better-sqlite3";
 
+import { recordClawlineSessionActivity } from "./session-store.js";
+import {
+  buildClawlineSessionKey,
+  clawlineSessionFileName,
+} from "./session-key.js";
+
 export const PROTOCOL_VERSION = 1;
 
 export type AdapterExecuteParams = {
@@ -76,6 +82,7 @@ export interface ProviderOptions {
   config?: Partial<ProviderConfig>;
   adapter: Adapter;
   logger?: Logger;
+  sessionStorePath: string;
 }
 
 export interface ProviderServer {
@@ -323,6 +330,9 @@ type Session = {
   userId: string;
   isAdmin: boolean;
   sessionId: string;
+  sessionKey: string;
+  claimedName?: string;
+  deviceInfo?: DeviceInfo;
 };
 
 type ConnectionState = {
@@ -549,6 +559,8 @@ function parseServerMessage(json: string): ServerMessage {
 export async function createProviderServer(options: ProviderOptions): Promise<ProviderServer> {
   const config = mergeConfig(options.config);
   const logger: Logger = options.logger ?? console;
+  const sessionStorePath = options.sessionStorePath;
+  const sessionTranscriptsDir = path.join(config.statePath, "sessions");
 
   if (!config.network.allowInsecurePublic && !isLocalhost(config.network.bindAddress)) {
     throw new Error("allowInsecurePublic must be true to bind non-localhost");
@@ -567,6 +579,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const tmpDir = path.join(config.media.storagePath, "tmp");
   await ensureDir(assetsDir);
   await ensureDir(tmpDir);
+  await ensureDir(sessionTranscriptsDir);
   await cleanupTmpDirectory();
 
   const allowlistPath = path.join(config.statePath, ALLOWLIST_FILENAME);
@@ -1310,7 +1323,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
   }
 
-  function registerSession(session: Session) {
+  async function registerSession(session: Session) {
     const existing = sessionsByDevice.get(session.deviceId);
     if (existing && existing.socket !== session.socket) {
       sendJson(existing.socket, { type: "error", code: "session_replaced", message: "Session replaced" })
@@ -1322,6 +1335,21 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     const set = userSessions.get(session.userId) ?? new Set();
     set.add(session);
     userSessions.set(session.userId, set);
+    await syncSessionStore(session);
+  }
+
+  async function syncSessionStore(session: Session) {
+    await recordClawlineSessionActivity({
+      storePath: sessionStorePath,
+      sessionKey: session.sessionKey,
+      sessionId: session.sessionId,
+      sessionFile: path.join(
+        sessionTranscriptsDir,
+        `${clawlineSessionFileName(session.sessionKey)}.jsonl`,
+      ),
+      displayName: session.claimedName ?? session.deviceInfo?.model ?? null,
+      logger,
+    });
   }
 
   async function processClientMessage(session: Session, payload: any) {
@@ -1435,6 +1463,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           });
         }
       });
+      await syncSessionStore(session);
     } catch (err) {
       if (err instanceof ClientMessageError) {
         await sendJson(session.socket, { type: "error", code: err.code, message: err.message });
@@ -1747,14 +1776,18 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       ws.close();
       return;
     }
+    const sessionKey = buildClawlineSessionKey(entry.userId, entry.deviceId);
     const session: Session = {
       socket: ws,
       deviceId: entry.deviceId,
       userId: entry.userId,
       isAdmin: entry.isAdmin,
-      sessionId: `session_${randomUUID()}`
+      sessionId: `session_${randomUUID()}`,
+      sessionKey,
+      claimedName: entry.claimedName,
+      deviceInfo: entry.deviceInfo
     };
-    registerSession(session);
+    await registerSession(session);
     connectionState.set(ws, {
       authenticated: true,
       deviceId: session.deviceId,

@@ -65,7 +65,7 @@ export function clearSessionStoreCacheForTest(): void {
 
 export type SessionScope = "per-sender" | "global";
 
-export type SessionProviderId = ProviderId | "webchat";
+export type SessionProviderId = ProviderId | "webchat" | "clawline";
 
 const GROUP_SURFACES = new Set<string>([...PROVIDER_IDS, "webchat"]);
 
@@ -623,6 +623,22 @@ export async function updateSessionStoreEntry(params: {
     if (!existing) return null;
     const patch = await update(existing);
     if (!patch) return existing;
+    const next = mergeSessionEntry(existing, patch);
+    store[sessionKey] = next;
+    await saveSessionStoreUnlocked(storePath, store);
+    return next;
+  });
+}
+
+export async function upsertSessionStoreEntry(params: {
+  storePath: string;
+  sessionKey: string;
+  patch: Partial<SessionEntry>;
+}): Promise<SessionEntry> {
+  const { storePath, sessionKey, patch } = params;
+  return await withSessionStoreLock(storePath, async () => {
+    const store = loadSessionStore(storePath);
+    const existing = store[sessionKey];
     const next = mergeSessionEntry(existing, patch);
     store[sessionKey] = next;
     await saveSessionStoreUnlocked(storePath, store);

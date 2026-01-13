@@ -17,6 +17,10 @@ import { isContextOverflowError } from "../agents/pi-embedded-helpers.js";
 import type { ReasoningLevel, VerboseLevel } from "../auto-reply/thinking.js";
 import type { AdapterExecuteParams, Logger } from "./server.js";
 import { resolveClawlineConfig, type ResolvedClawlineConfig } from "./config.js";
+import {
+  buildClawlineSessionKey,
+  clawlineSessionFileName,
+} from "./session-key.js";
 
 export type AdapterResult = { exitCode: number; output: string };
 
@@ -62,23 +66,6 @@ function extractErrorText(result: EmbeddedPiRunResult): string | null {
   return errorEntry?.text?.trim() || null;
 }
 
-function normalizeKeyPart(value: string): string {
-  const trimmed = (value ?? "").trim().toLowerCase();
-  const slug = trimmed
-    .replace(/[^a-z0-9_-]+/g, "-")
-    .replace(/^-+/, "")
-    .replace(/-+$/, "");
-  return slug || "unknown";
-}
-
-function buildSessionKey(userId: string, deviceId: string): string {
-  return `clawline:${normalizeKeyPart(userId)}:${normalizeKeyPart(deviceId)}`;
-}
-
-function sessionFileNameForKey(sessionKey: string): string {
-  return sessionKey.replace(/[^a-z0-9_-]/gi, "-");
-}
-
 export async function createClawlineAdapter(
   params: AdapterCreateParams,
 ): Promise<ClawlineAdapter> {
@@ -121,10 +108,10 @@ export async function createClawlineAdapter(
 
   return {
     async execute(ctx) {
-      const sessionKey = buildSessionKey(ctx.userId, ctx.deviceId);
+      const sessionKey = buildClawlineSessionKey(ctx.userId, ctx.deviceId);
       const sessionFile = path.join(
         sessionDir,
-        `${sessionFileNameForKey(sessionKey)}.jsonl`,
+        `${clawlineSessionFileName(sessionKey)}.jsonl`,
       );
       await fs.mkdir(path.dirname(sessionFile), { recursive: true });
       const runId = randomUUID();
