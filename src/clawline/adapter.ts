@@ -7,10 +7,14 @@ import {
   resolveAgentWorkspaceDir,
   resolveDefaultAgentId,
 } from "../agents/agent-scope.js";
+import { resolveClawdbotAgentDir } from "../agents/agent-paths.js";
+import type { ExecElevatedDefaults } from "../agents/bash-tools.js";
 import { runCliAgent } from "../agents/cli-runner.js";
 import { isCliProvider } from "../agents/model-selection.js";
 import { runEmbeddedPiAgent } from "../agents/pi-embedded.js";
 import type { EmbeddedPiRunResult } from "../agents/pi-embedded-runner.js";
+import { isContextOverflowError } from "../agents/pi-embedded-helpers.js";
+import type { ReasoningLevel, VerboseLevel } from "../auto-reply/thinking.js";
 import type { AdapterExecuteParams, Logger } from "./server.js";
 import { resolveClawlineConfig, type ResolvedClawlineConfig } from "./config.js";
 
@@ -38,13 +42,41 @@ function parseModelRef(
   return { provider, model: rest.join("/") };
 }
 
+const CLAWLINE_MESSAGE_PROVIDER = "clawline";
+const CONTEXT_OVERFLOW_FALLBACK =
+  "Context overflow: conversation history is too large. Use /new or /reset to start a fresh session.";
+
 function extractText(result: EmbeddedPiRunResult): string | null {
   const texts =
     result.payloads
-      ?.map((entry) => entry.text?.trim())
+      ?.map((entry) => (entry.isError ? null : entry.text?.trim()))
       .filter((value): value is string => Boolean(value)) ?? [];
   if (texts.length === 0) return null;
   return texts.join("\n\n");
+}
+
+function extractErrorText(result: EmbeddedPiRunResult): string | null {
+  const errorEntry = result.payloads?.find(
+    (entry) => entry.isError && typeof entry.text === "string",
+  );
+  return errorEntry?.text?.trim() || null;
+}
+
+function normalizeKeyPart(value: string): string {
+  const trimmed = (value ?? "").trim().toLowerCase();
+  const slug = trimmed
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+/, "")
+    .replace(/-+$/, "");
+  return slug || "unknown";
+}
+
+function buildSessionKey(userId: string, deviceId: string): string {
+  return `clawline:${normalizeKeyPart(userId)}:${normalizeKeyPart(deviceId)}`;
+}
+
+function sessionFileNameForKey(sessionKey: string): string {
+  return sessionKey.replace(/[^a-z0-9_-]/gi, "-");
 }
 
 export async function createClawlineAdapter(
@@ -72,19 +104,35 @@ export async function createClawlineAdapter(
   const workspaceDir = resolveAgentWorkspaceDir(params.config, agentId);
   const sessionDir = path.join(params.statePath, "sessions");
   await fs.mkdir(sessionDir, { recursive: true });
-  const cliSessionIds = new Map<string, string | undefined>();
+  const agentDirPath = resolveClawdbotAgentDir();
+  const defaultVerboseLevel: VerboseLevel =
+    (params.config.agents?.defaults?.verboseDefault as VerboseLevel | undefined) ??
+    "off";
+  const defaultReasoningLevel: ReasoningLevel = "off";
+  const defaultBashElevated: ExecElevatedDefaults = {
+    enabled: false,
+    allowed: false,
+    defaultLevel:
+      (params.config.agents?.defaults?.elevatedDefault ?? "off") as "on" | "off",
+  };
+  const cliSessionStorePath = path.join(params.statePath, "cli-sessions.json");
+  const cliSessionIds = await loadCliSessionIds(cliSessionStorePath, logger);
   const useCliBackend = isCliProvider(providerName, params.config);
 
   return {
     async execute(ctx) {
-      const sessionFile = path.join(sessionDir, `${ctx.userId}.jsonl`);
+      const sessionKey = buildSessionKey(ctx.userId, ctx.deviceId);
+      const sessionFile = path.join(
+        sessionDir,
+        `${sessionFileNameForKey(sessionKey)}.jsonl`,
+      );
       await fs.mkdir(path.dirname(sessionFile), { recursive: true });
       const runId = randomUUID();
       if (useCliBackend) {
-        const cliSessionId = cliSessionIds.get(ctx.userId);
+        const cliSessionId = cliSessionIds.get(sessionKey);
         const result = await runCliAgent({
           sessionId: ctx.sessionId,
-          sessionKey: ctx.sessionId,
+          sessionKey,
           sessionFile,
           workspaceDir,
           config: params.config,
@@ -99,25 +147,40 @@ export async function createClawlineAdapter(
           cliSessionId,
         });
         const newSessionId = result.meta.agentMeta?.sessionId;
-        if (newSessionId) {
-          cliSessionIds.set(ctx.userId, newSessionId);
+        if (newSessionId && newSessionId !== cliSessionId) {
+          cliSessionIds.set(sessionKey, newSessionId);
+          await persistCliSessionIds(
+            cliSessionStorePath,
+            cliSessionIds,
+            logger,
+          );
         }
         return formatResult(result);
       }
       const embeddedResult = await runEmbeddedPiAgent({
         sessionId: ctx.sessionId,
-        sessionKey: ctx.sessionId,
+        sessionKey,
         sessionFile,
         workspaceDir,
+        agentDir: agentDirPath,
         config: params.config,
+        skillsSnapshot: undefined,
         prompt: ctx.prompt,
         provider: providerName,
         model: parsedModel.model,
         thinkLevel: params.config.agents?.defaults?.thinkingDefault,
+        verboseLevel: defaultVerboseLevel,
+        reasoningLevel: defaultReasoningLevel,
+        bashElevated: defaultBashElevated,
         timeoutMs,
         runId,
         extraSystemPrompt: resolved.adapterOverrides.systemPrompt,
         ownerNumbers: undefined,
+        authProfileId: undefined,
+        enforceFinalTag: false,
+        messageProvider: CLAWLINE_MESSAGE_PROVIDER,
+        agentAccountId: ctx.userId,
+        onAgentEvent: (evt) => logAgentEvent(logger, runId, evt),
       });
       return formatResult(embeddedResult);
     },
@@ -125,15 +188,104 @@ export async function createClawlineAdapter(
 
   function formatResult(result: EmbeddedPiRunResult) {
     const text = extractText(result);
-    if (!text) {
-      const fallback = resolved.adapterOverrides.responseFallback ?? "";
-      if (!fallback) {
-        logger.warn?.(
-          "[clawline] adapter returned no text; consider setting clawline.adapter.responseFallback",
-        );
-      }
-      return { exitCode: 1, output: fallback };
+    if (text) {
+      return { exitCode: 0, output: text };
     }
-    return { exitCode: 0, output: text };
+
+    const errorText = extractErrorText(result);
+    if (errorText && isContextOverflowError(errorText)) {
+      logger.warn?.("[clawline] agent run hit context overflow");
+      return {
+        exitCode: 1,
+        output: CONTEXT_OVERFLOW_FALLBACK,
+      };
+    }
+
+    const fallback = resolved.adapterOverrides.responseFallback ?? "";
+    if (!fallback) {
+      logger.warn?.(
+        "[clawline] adapter returned no text; consider setting clawline.adapter.responseFallback",
+      );
+    }
+    return { exitCode: 1, output: fallback };
+  }
+}
+
+function logAgentEvent(
+  logger: Logger,
+  runId: string,
+  evt: { stream: string; data: Record<string, unknown> },
+) {
+  const phase =
+    typeof evt.data?.phase === "string" ? evt.data.phase : undefined;
+  if (evt.stream === "error") {
+    logger.error?.(
+      `[clawline] agent error (runId=${runId}): ${String(
+        evt.data?.message ?? "",
+      )}`,
+    );
+    return;
+  }
+  if (evt.stream === "compaction" && phase) {
+    logger.info?.(
+      `[clawline] compaction ${phase} (runId=${runId})`,
+    );
+    return;
+  }
+  if (evt.stream === "tool" && phase === "start") {
+    const tool =
+      typeof evt.data?.tool === "string" ? evt.data.tool : undefined;
+    logger.info?.(
+      `[clawline] tool start${tool ? ` (${tool})` : ""} (runId=${runId})`,
+    );
+    return;
+  }
+  if (
+    evt.stream === "lifecycle" &&
+    phase &&
+    (phase === "start" || phase === "end")
+  ) {
+    logger.info?.(
+      `[clawline] run ${phase} (runId=${runId})`,
+    );
+  }
+}
+
+async function loadCliSessionIds(
+  filePath: string,
+  logger: Logger,
+): Promise<Map<string, string>> {
+  try {
+    const raw = await fs.readFile(filePath, "utf8");
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const entries = Object.entries(parsed ?? {}).flatMap<
+      [string, string]
+    >(([key, value]) => {
+      if (typeof value !== "string") return [];
+      return [[key, value]];
+    });
+    return new Map(entries);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      logger.warn?.(
+        `[clawline] failed to load CLI session ids: ${String(err)}`,
+      );
+    }
+    return new Map();
+  }
+}
+
+async function persistCliSessionIds(
+  filePath: string,
+  cliSessionIds: Map<string, string>,
+  logger: Logger,
+): Promise<void> {
+  try {
+    const obj = Object.fromEntries(cliSessionIds.entries());
+    await fs.writeFile(filePath, `${JSON.stringify(obj, null, 2)}\n`, "utf8");
+  } catch (err) {
+    logger.warn?.(
+      `[clawline] failed to persist CLI session ids: ${String(err)}`,
+    );
   }
 }
