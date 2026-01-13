@@ -11,8 +11,12 @@ import { resolveClawlineConfig } from "./config.js";
 vi.mock("../agents/cli-runner.js", () => ({
   runCliAgent: vi.fn(),
 }));
+vi.mock("../agents/pi-embedded.js", () => ({
+  runEmbeddedPiAgent: vi.fn(),
+}));
 
 const { runCliAgent } = await import("../agents/cli-runner.js");
+const { runEmbeddedPiAgent } = await import("../agents/pi-embedded.js");
 
 describe("createClawlineAdapter", () => {
   let tmpDir: string;
@@ -20,6 +24,7 @@ describe("createClawlineAdapter", () => {
   beforeEach(async () => {
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawline-test-"));
     vi.mocked(runCliAgent).mockReset();
+    vi.mocked(runEmbeddedPiAgent).mockReset();
   });
 
   afterEach(async () => {
@@ -31,16 +36,19 @@ describe("createClawlineAdapter", () => {
       agents: {
         defaults: {
           model: { primary: "anthropic/claude-sonnet-4-5" },
-          cliBackends: {
-            anthropic: {
-              command: "claude",
-            },
-          },
           workspace: path.join(tmpDir, "workspace"),
           timeoutSeconds: 30,
         },
       },
     } as ClawdbotConfig;
+  }
+
+  function buildCliConfig(): ClawdbotConfig {
+    const cfg = buildConfig();
+    (cfg.agents!.defaults as any).cliBackends = {
+      anthropic: { command: "claude" },
+    };
+    return cfg;
   }
 
   it("throws when no primary model configured", async () => {
@@ -52,14 +60,14 @@ describe("createClawlineAdapter", () => {
     ).rejects.toThrow(/agents.defaults.model/i);
   });
 
-  it("calls runCliAgent with derived session data", async () => {
+  it("calls runCliAgent when provider uses CLI backend", async () => {
     vi.mocked(runCliAgent).mockResolvedValue({
       payloads: [{ text: "Hello from agent" }],
       meta: { durationMs: 10 },
     });
 
     const adapter = await createClawlineAdapter({
-      config: buildConfig(),
+      config: buildCliConfig(),
       statePath: tmpDir,
     });
 
@@ -79,8 +87,31 @@ describe("createClawlineAdapter", () => {
     expect(result).toEqual({ exitCode: 0, output: "Hello from agent" });
   });
 
+  it("uses embedded agent when provider is not CLI", async () => {
+    vi.mocked(runEmbeddedPiAgent).mockResolvedValue({
+      payloads: [{ text: "Embedded hello" }],
+      meta: { durationMs: 8 },
+    });
+
+    const adapter = await createClawlineAdapter({
+      config: buildConfig(),
+      statePath: tmpDir,
+    });
+
+    const result = await adapter.execute({
+      prompt: "Ping",
+      userId: "user_embedded",
+      sessionId: "sess_embedded",
+      deviceId: "device_embedded",
+    });
+
+    expect(runCliAgent).not.toHaveBeenCalled();
+    expect(runEmbeddedPiAgent).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({ exitCode: 0, output: "Embedded hello" });
+  });
+
   it("returns non-zero exit when payload text missing", async () => {
-    vi.mocked(runCliAgent).mockResolvedValue({
+    vi.mocked(runEmbeddedPiAgent).mockResolvedValue({
       payloads: [],
       meta: { durationMs: 5 },
     });

@@ -8,6 +8,8 @@ import {
   resolveDefaultAgentId,
 } from "../agents/agent-scope.js";
 import { runCliAgent } from "../agents/cli-runner.js";
+import { isCliProvider } from "../agents/model-selection.js";
+import { runEmbeddedPiAgent } from "../agents/pi-embedded.js";
 import type { EmbeddedPiRunResult } from "../agents/pi-embedded-runner.js";
 import type { AdapterExecuteParams, Logger } from "./server.js";
 import { resolveClawlineConfig, type ResolvedClawlineConfig } from "./config.js";
@@ -71,14 +73,38 @@ export async function createClawlineAdapter(
   const sessionDir = path.join(params.statePath, "sessions");
   await fs.mkdir(sessionDir, { recursive: true });
   const cliSessionIds = new Map<string, string | undefined>();
+  const useCliBackend = isCliProvider(providerName, params.config);
 
   return {
     async execute(ctx) {
       const sessionFile = path.join(sessionDir, `${ctx.userId}.jsonl`);
       await fs.mkdir(path.dirname(sessionFile), { recursive: true });
-      const cliSessionId = cliSessionIds.get(ctx.userId);
       const runId = randomUUID();
-      const result = await runCliAgent({
+      if (useCliBackend) {
+        const cliSessionId = cliSessionIds.get(ctx.userId);
+        const result = await runCliAgent({
+          sessionId: ctx.sessionId,
+          sessionKey: ctx.sessionId,
+          sessionFile,
+          workspaceDir,
+          config: params.config,
+          prompt: ctx.prompt,
+          provider: providerName,
+          model: parsedModel.model,
+          thinkLevel: params.config.agents?.defaults?.thinkingDefault,
+          timeoutMs,
+          runId,
+          extraSystemPrompt: resolved.adapterOverrides.systemPrompt,
+          ownerNumbers: undefined,
+          cliSessionId,
+        });
+        const newSessionId = result.meta.agentMeta?.sessionId;
+        if (newSessionId) {
+          cliSessionIds.set(ctx.userId, newSessionId);
+        }
+        return formatResult(result);
+      }
+      const embeddedResult = await runEmbeddedPiAgent({
         sessionId: ctx.sessionId,
         sessionKey: ctx.sessionId,
         sessionFile,
@@ -92,23 +118,22 @@ export async function createClawlineAdapter(
         runId,
         extraSystemPrompt: resolved.adapterOverrides.systemPrompt,
         ownerNumbers: undefined,
-        cliSessionId,
       });
-      const newSessionId = result.meta.agentMeta?.sessionId;
-      if (newSessionId) {
-        cliSessionIds.set(ctx.userId, newSessionId);
-      }
-      const text = extractText(result);
-      if (!text) {
-        const fallback = resolved.adapterOverrides.responseFallback ?? "";
-        if (!fallback) {
-          logger.warn?.(
-            "[clawline] adapter returned no text; consider setting clawline.adapter.responseFallback",
-          );
-        }
-        return { exitCode: 1, output: fallback };
-      }
-      return { exitCode: 0, output: text };
+      return formatResult(embeddedResult);
     },
   };
+
+  function formatResult(result: EmbeddedPiRunResult) {
+    const text = extractText(result);
+    if (!text) {
+      const fallback = resolved.adapterOverrides.responseFallback ?? "";
+      if (!fallback) {
+        logger.warn?.(
+          "[clawline] adapter returned no text; consider setting clawline.adapter.responseFallback",
+        );
+      }
+      return { exitCode: 1, output: fallback };
+    }
+    return { exitCode: 0, output: text };
+  }
 }
