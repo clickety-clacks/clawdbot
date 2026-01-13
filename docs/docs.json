@@ -747,6 +747,7 @@
           "providers/opencode",
           "providers/glm",
           "providers/zai",
+          "providers/clawline",
           "providers/telegram",
           "providers/grammy",
           "providers/discord",

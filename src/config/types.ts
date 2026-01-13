@@ -101,6 +101,59 @@ export type WebConfig = {
   reconnect?: WebReconnectConfig;
 };
 
+export type ClawlineAdapterConfig = {
+  provider?: string;
+  model?: string;
+  timeoutSeconds?: number;
+  responseFallback?: string;
+  systemPrompt?: string;
+};
+
+export type ClawlineConfig = {
+  enabled?: boolean;
+  port?: number;
+  statePath?: string;
+  network?: {
+    bindAddress?: string;
+    allowInsecurePublic?: boolean;
+    allowedOrigins?: string[];
+  };
+  adapter?: ClawlineAdapterConfig;
+  auth?: {
+    jwtSigningKey?: string | null;
+    tokenTtlSeconds?: number | null;
+    maxAttemptsPerMinute?: number;
+    reissueGraceSeconds?: number;
+  };
+  pairing?: {
+    maxPendingRequests?: number;
+    maxRequestsPerMinute?: number;
+    pendingTtlSeconds?: number;
+  };
+  media?: {
+    storagePath?: string;
+    maxInlineBytes?: number;
+    maxUploadBytes?: number;
+    unreferencedUploadTtlSeconds?: number;
+  };
+  sessions?: {
+    maxMessageBytes?: number;
+    maxReplayMessages?: number;
+    maxPromptMessages?: number;
+    maxMessagesPerSecond?: number;
+    maxTypingPerSecond?: number;
+    typingAutoExpireSeconds?: number;
+    maxQueuedMessages?: number;
+    maxWriteQueueDepth?: number;
+    adapterExecuteTimeoutSeconds?: number;
+    streamInactivitySeconds?: number;
+  };
+  streams?: {
+    chunkPersistIntervalMs?: number;
+    chunkBufferBytes?: number;
+  };
+};
+
 // Provider docking: allowlists keyed by provider id (and internal "webchat").
 export type AgentElevatedAllowFromConfig = Partial<
   Record<string, Array<string | number>>
@@ -1764,6 +1817,7 @@ export type ClawdbotConfig = {
   commands?: CommandsConfig;
   session?: SessionConfig;
   web?: WebConfig;
+  clawline?: ClawlineConfig;
   whatsapp?: WhatsAppConfig;
   telegram?: TelegramConfig;
   discord?: DiscordConfig;

@@ -113,6 +113,10 @@ import {
   type PluginServicesHandle,
   startPluginServices,
 } from "../plugins/services.js";
+import {
+  startClawlineService,
+  type ClawlineServiceHandle,
+} from "../clawline/service.js";
 import { setCommandLaneConcurrency } from "../process/command-queue.js";
 import {
   listProviderPlugins,
@@ -203,6 +207,7 @@ const logBridge = log.child("bridge");
 const logDiscovery = log.child("discovery");
 const logTailscale = log.child("tailscale");
 const logProviders = log.child("providers");
+const logClawline = log.child("clawline");
 const logBrowser = log.child("browser");
 const logHealth = log.child("health");
 const logCron = log.child("cron");
@@ -489,6 +494,7 @@ export async function startGatewayServer(
     }
   }
   let pluginServices: PluginServicesHandle | null = null;
+  let clawlineService: ClawlineServiceHandle | null = null;
   const bindMode = opts.bind ?? cfgAtStart.gateway?.bind ?? "loopback";
   const bindHost = opts.host ?? resolveGatewayBindHost(bindMode);
   if (!bindHost) {
@@ -1946,6 +1952,20 @@ export async function startGatewayServer(
     logProviders.info("skipping provider start (CLAWDBOT_SKIP_PROVIDERS=1)");
   }
 
+  if (process.env.CLAWDBOT_SKIP_CLAWLINE === "1") {
+    logClawline.info("skipping clawline service start (CLAWDBOT_SKIP_CLAWLINE=1)");
+  } else {
+    try {
+      const handle = await startClawlineService({
+        config: cfgAtStart,
+        logger: logClawline,
+      });
+      clawlineService = handle;
+    } catch (err) {
+      logClawline.error(`clawline service failed to start: ${String(err)}`);
+    }
+  }
+
   try {
     pluginServices = await startPluginServices({
       registry: pluginRegistry,
@@ -2195,6 +2215,9 @@ export async function startGatewayServer(
       }
       if (pluginServices) {
         await pluginServices.stop().catch(() => {});
+      }
+      if (clawlineService) {
+        await clawlineService.stop().catch(() => {});
       }
       await stopGmailWatcher();
       cron.stop();
