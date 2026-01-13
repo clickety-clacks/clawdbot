@@ -1949,7 +1949,18 @@
           "providers/opencode",
           "providers/glm",
           "providers/zai",
-          "providers/clawline"
+          "providers/clawline",
+          "providers/telegram",
+          "providers/grammy",
+          "providers/discord",
+          "providers/slack",
+          "providers/signal",
+          "providers/imessage",
+          "providers/whatsapp",
+          "broadcast-groups",
+          "providers/msteams",
+          "providers/troubleshooting",
+          "providers/location"
         ]
       },
       {

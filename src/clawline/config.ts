@@ -111,9 +111,9 @@ export function resolveClawlineConfig(
   );
   merged.statePath = merged.statePath || defaultStatePath;
   merged.media.storagePath = merged.media.storagePath || defaultMediaPath;
-  const adapterOverrides: ClawlineAdapterOverrides = input.adapter
-    ? { ...input.adapter }
-    : {};
+  const adapterOverrides: ClawlineAdapterOverrides = {
+    ...(input.adapter ?? {}),
+  };
   merged.adapterOverrides = adapterOverrides;
   merged.enabled = input.enabled ?? true;
   return merged;

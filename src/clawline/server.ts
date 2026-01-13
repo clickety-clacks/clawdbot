@@ -11,12 +11,6 @@ import jwt from "jsonwebtoken";
 import Busboy from "busboy";
 import BetterSqlite3 from "better-sqlite3";
 import type { Database as SqliteDatabase } from "better-sqlite3";
-import { rawDataToString } from "../infra/ws.js";
-import { recordClawlineSessionActivity } from "./session-store.js";
-import {
-  buildClawlineSessionKey,
-  clawlineSessionFileName,
-} from "./session-key.js";
 
 export const PROTOCOL_VERSION = 1;
 
@@ -82,7 +76,6 @@ export interface ProviderOptions {
   config?: Partial<ProviderConfig>;
   adapter: Adapter;
   logger?: Logger;
-  sessionStorePath: string;
 }
 
 export interface ProviderServer {
@@ -117,7 +110,6 @@ type DeviceInfo = {
   appVersion?: string;
 };
 
-// eslint-disable-next-line no-control-regex
 const CONTROL_CHARS_REGEX = /[\u0000-\u001F\u007F]/g;
 const UUID_V4_REGEX = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/;
 const SERVER_EVENT_ID_REGEX = /^s_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
@@ -331,9 +323,6 @@ type Session = {
   userId: string;
   isAdmin: boolean;
   sessionId: string;
-  sessionKey: string;
-  claimedName?: string;
-  deviceInfo?: DeviceInfo;
 };
 
 type ConnectionState = {
@@ -560,8 +549,7 @@ function parseServerMessage(json: string): ServerMessage {
 export async function createProviderServer(options: ProviderOptions): Promise<ProviderServer> {
   const config = mergeConfig(options.config);
   const logger: Logger = options.logger ?? console;
-  const sessionStorePath = options.sessionStorePath;
-  
+
   if (!config.network.allowInsecurePublic && !isLocalhost(config.network.bindAddress)) {
     throw new Error("allowInsecurePublic must be true to bind non-localhost");
   }
@@ -576,11 +564,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   await ensureDir(config.statePath);
   await ensureDir(config.media.storagePath);
   const assetsDir = path.join(config.media.storagePath, "assets");
-  const sessionTranscriptsDir = path.join(config.statePath, "sessions");
   const tmpDir = path.join(config.media.storagePath, "tmp");
   await ensureDir(assetsDir);
   await ensureDir(tmpDir);
-  await ensureDir(sessionTranscriptsDir);
   await cleanupTmpDirectory();
 
   const allowlistPath = path.join(config.statePath, ALLOWLIST_FILENAME);
@@ -824,8 +810,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const connectionState = new WeakMap<WebSocket, ConnectionState>();
   const pendingPairs = new Map<string, PendingPairRequest>();
   const deniedDevices = new Map<string, number>();
-  const deniedDeviceTtlMs = Math.max(1, config.pairing.pendingTtlSeconds) * 1000;
-  const deniedDeviceTtlMs = Math.max(1, config.pairing.pendingTtlSeconds) * 1000;
   const sessionsByDevice = new Map<string, Session>();
   const userSessions = new Map<string, Set<Session>>();
   const perUserQueue = new Map<string, Promise<unknown>>();
@@ -848,7 +832,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     assetCleanupInterval.unref();
   }
   const denylistWatcher = () => {
-    void refreshDenylist();
+    refreshDenylist();
   };
   watchFile(denylistPath, { interval: 5_000 }, denylistWatcher);
 
@@ -1338,21 +1322,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     const set = userSessions.get(session.userId) ?? new Set();
     set.add(session);
     userSessions.set(session.userId, set);
-    void syncSessionStore(session);
-  }
-
-  async function syncSessionStore(session: Session) {
-    await recordClawlineSessionActivity({
-      storePath: sessionStorePath,
-      sessionKey: session.sessionKey,
-      sessionId: session.sessionId,
-      sessionFile: path.join(
-        sessionTranscriptsDir,
-        `${clawlineSessionFileName(session.sessionKey)}.jsonl`,
-      ),
-      displayName: session.claimedName ?? session.deviceInfo?.model ?? null,
-      logger,
-    });
   }
 
   async function processClientMessage(session: Session, payload: any) {
@@ -1456,7 +1425,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           const assistantEvent = await persistAssistantMessage(session, normalizedResult.output ?? "");
           broadcastToUser(session.userId, assistantEvent);
           updateMessageStreamingStmt.run(MessageStreamingState.Finalized, session.deviceId, payload.id);
-        } catch {
+        } catch (err) {
           updateMessageStreamingStmt.run(MessageStreamingState.Failed, session.deviceId, payload.id);
           await sendJson(session.socket, {
             type: "error",
@@ -1497,7 +1466,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     for (const [deviceId, pending] of pendingPairs) {
       if (now - pending.createdAt >= config.pairing.pendingTtlSeconds * 1000) {
         pendingPairs.delete(deviceId);
-        void sendJson(pending.socket, { type: "pair_result", success: false, reason: "pair_timeout" }).finally(() => {
+        sendJson(pending.socket, { type: "pair_result", success: false, reason: "pair_timeout" }).finally(() => {
           pending.socket.close(1000);
         });
       }
@@ -1531,7 +1500,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     ws.on("message", async (raw) => {
       let payload: any;
       try {
-        payload = JSON.parse(rawDataToString(raw));
+        payload = JSON.parse(raw.toString());
       } catch {
         await sendJson(ws, { type: "error", code: "invalid_message", message: "Malformed JSON" });
         ws.close();
@@ -1573,7 +1542,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       await sendJson(ws, { type: "error", code: "invalid_message", message: "Invalid deviceId" });
       return;
     }
-    sweepDeniedDevices();
     if (deniedDevices.has(payload.deviceId)) {
       deniedDevices.delete(payload.deviceId);
       await sendJson(ws, { type: "pair_result", success: false, reason: "pair_denied" });
@@ -1682,15 +1650,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     await notifyAdminsOfPending();
   }
 
-  function sweepDeniedDevices() {
-    const now = nowMs();
-    for (const [deviceId, timestamp] of deniedDevices) {
-      if (now - timestamp >= deniedDeviceTtlMs) {
-        deniedDevices.delete(deviceId);
-      }
-    }
-  }
-
   async function handlePairDecision(ws: WebSocket, payload: any) {
     const state = connectionState.get(ws);
     if (!state || !state.authenticated || !state.deviceId || !state.userId) {
@@ -1788,16 +1747,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       ws.close();
       return;
     }
-    const sessionKey = buildClawlineSessionKey(entry.userId, entry.deviceId);
     const session: Session = {
       socket: ws,
       deviceId: entry.deviceId,
       userId: entry.userId,
       isAdmin: entry.isAdmin,
-      sessionId: `session_${randomUUID()}`,
-      sessionKey,
-      claimedName: entry.claimedName,
-      deviceInfo: entry.deviceInfo,
+      sessionId: `session_${randomUUID()}`
     };
     registerSession(session);
     connectionState.set(ws, {
@@ -1820,7 +1775,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       if (session.isAdmin) {
         await notifyAdminsOfPending();
       }
-    } catch {
+    } catch (err) {
       removeSession(session);
       connectionState.delete(ws);
       await sendJson(ws, { type: "error", code: "server_error", message: "Replay failed" }).catch(() => {});

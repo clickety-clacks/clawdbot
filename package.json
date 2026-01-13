@@ -289,7 +289,7 @@
       "tough-cookie": "4.1.3"
     },
     "patchedDependencies": {
-      "@mariozechner/pi-ai@0.45.7": "patches/@mariozechner__pi-ai@0.45.7.patch"
+      "@mariozechner/pi-ai@0.43.0": "patches/@mariozechner__pi-ai@0.43.0.patch"
     },
     "onlyBuiltDependencies": [
       "@whiskeysockets/baileys",

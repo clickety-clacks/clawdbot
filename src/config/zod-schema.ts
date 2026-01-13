@@ -13,7 +13,411 @@ import {
   SessionSendPolicySchema,
 } from "./zod-schema.session.js";
 
+import { parseDurationMs } from "../cli/parse-duration.js";
+import { isSafeExecutableValue } from "../infra/exec-safety.js";
+
+const ModelApiSchema = z.union([
+  z.literal("openai-completions"),
+  z.literal("openai-responses"),
+  z.literal("anthropic-messages"),
+  z.literal("google-generative-ai"),
+  z.literal("github-copilot"),
+]);
+
+const ModelCompatSchema = z
+  .object({
+    supportsStore: z.boolean().optional(),
+    supportsDeveloperRole: z.boolean().optional(),
+    supportsReasoningEffort: z.boolean().optional(),
+    maxTokensField: z
+      .union([z.literal("max_completion_tokens"), z.literal("max_tokens")])
+      .optional(),
+  })
+  .optional();
+
+const ModelDefinitionSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  api: ModelApiSchema.optional(),
+  reasoning: z.boolean(),
+  input: z.array(z.union([z.literal("text"), z.literal("image")])),
+  cost: z.object({
+    input: z.number(),
+    output: z.number(),
+    cacheRead: z.number(),
+    cacheWrite: z.number(),
+  }),
+  contextWindow: z.number().positive(),
+  maxTokens: z.number().positive(),
+  headers: z.record(z.string(), z.string()).optional(),
+  compat: ModelCompatSchema,
+});
+
+const ModelProviderSchema = z.object({
+  baseUrl: z.string().min(1),
+  apiKey: z.string().optional(),
+  api: ModelApiSchema.optional(),
+  headers: z.record(z.string(), z.string()).optional(),
+  authHeader: z.boolean().optional(),
+  models: z.array(ModelDefinitionSchema),
+});
+
+const ModelsConfigSchema = z
+  .object({
+    mode: z.union([z.literal("merge"), z.literal("replace")]).optional(),
+    providers: z.record(z.string(), ModelProviderSchema).optional(),
+  })
+  .optional();
+
+const GroupChatSchema = z
+  .object({
+    mentionPatterns: z.array(z.string()).optional(),
+    historyLimit: z.number().int().positive().optional(),
+  })
+  .optional();
+
+const DmConfigSchema = z.object({
+  historyLimit: z.number().int().min(0).optional(),
+});
+
+const IdentitySchema = z
+  .object({
+    name: z.string().optional(),
+    theme: z.string().optional(),
+    emoji: z.string().optional(),
+  })
+  .optional();
+
+const QueueModeSchema = z.union([
+  z.literal("steer"),
+  z.literal("followup"),
+  z.literal("collect"),
+  z.literal("steer-backlog"),
+  z.literal("steer+backlog"),
+  z.literal("queue"),
+  z.literal("interrupt"),
+]);
+const QueueDropSchema = z.union([
+  z.literal("old"),
+  z.literal("new"),
+  z.literal("summarize"),
+]);
+const ReplyToModeSchema = z.union([
+  z.literal("off"),
+  z.literal("first"),
+  z.literal("all"),
+]);
+
+// GroupPolicySchema: controls how group messages are handled
+// Used with .default("allowlist").optional() pattern:
+//   - .optional() allows field omission in input config
+//   - .default("allowlist") ensures runtime always resolves to "allowlist" if not provided
+const GroupPolicySchema = z.enum(["open", "disabled", "allowlist"]);
+
+const DmPolicySchema = z.enum(["pairing", "allowlist", "open", "disabled"]);
+
+const BlockStreamingCoalesceSchema = z.object({
+  minChars: z.number().int().positive().optional(),
+  maxChars: z.number().int().positive().optional(),
+  idleMs: z.number().int().nonnegative().optional(),
+});
+
+const BlockStreamingChunkSchema = z.object({
+  minChars: z.number().int().positive().optional(),
+  maxChars: z.number().int().positive().optional(),
+  breakPreference: z
+    .union([
+      z.literal("paragraph"),
+      z.literal("newline"),
+      z.literal("sentence"),
+    ])
+    .optional(),
+});
+
 const ClawlineConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    port: z.number().int().positive().optional(),
+    statePath: z.string().optional(),
+    network: z
+      .object({
+        bindAddress: z.string().optional(),
+        allowInsecurePublic: z.boolean().optional(),
+        allowedOrigins: z.array(z.string()).optional(),
+      })
+      .optional(),
+    adapter: z
+      .object({
+        provider: z.string().optional(),
+        model: z.string().optional(),
+        timeoutSeconds: z.number().int().positive().optional(),
+        responseFallback: z.string().optional(),
+        systemPrompt: z.string().optional(),
+      })
+      .optional(),
+    auth: z
+      .object({
+        jwtSigningKey: z.string().nullable().optional(),
+        tokenTtlSeconds: z.number().int().nullable().optional(),
+        maxAttemptsPerMinute: z.number().int().nonnegative().optional(),
+        reissueGraceSeconds: z.number().int().nonnegative().optional(),
+      })
+      .optional(),
+    pairing: z
+      .object({
+        maxPendingRequests: z.number().int().nonnegative().optional(),
+        maxRequestsPerMinute: z.number().int().nonnegative().optional(),
+        pendingTtlSeconds: z.number().int().nonnegative().optional(),
+      })
+      .optional(),
+    media: z
+      .object({
+        storagePath: z.string().optional(),
+        maxInlineBytes: z.number().int().nonnegative().optional(),
+        maxUploadBytes: z.number().int().nonnegative().optional(),
+        unreferencedUploadTtlSeconds: z
+          .number()
+          .int()
+          .nonnegative()
+          .optional(),
+      })
+      .optional(),
+    sessions: z
+      .object({
+        maxMessageBytes: z.number().int().positive().optional(),
+        maxReplayMessages: z.number().int().nonnegative().optional(),
+        maxPromptMessages: z.number().int().nonnegative().optional(),
+        maxMessagesPerSecond: z.number().int().nonnegative().optional(),
+        maxTypingPerSecond: z.number().int().nonnegative().optional(),
+        typingAutoExpireSeconds: z.number().int().nonnegative().optional(),
+        maxQueuedMessages: z.number().int().nonnegative().optional(),
+        maxWriteQueueDepth: z.number().int().nonnegative().optional(),
+        adapterExecuteTimeoutSeconds: z.number().int().positive().optional(),
+        streamInactivitySeconds: z.number().int().nonnegative().optional(),
+      })
+      .optional(),
+    streams: z
+      .object({
+        chunkPersistIntervalMs: z.number().int().nonnegative().optional(),
+        chunkBufferBytes: z.number().int().nonnegative().optional(),
+      })
+      .optional(),
+  })
+  .optional();
+
+const HumanDelaySchema = z.object({
+  mode: z
+    .union([z.literal("off"), z.literal("natural"), z.literal("custom")])
+    .optional(),
+  minMs: z.number().int().nonnegative().optional(),
+  maxMs: z.number().int().nonnegative().optional(),
+});
+
+const CliBackendSchema = z.object({
+  command: z.string(),
+  args: z.array(z.string()).optional(),
+  output: z
+    .union([z.literal("json"), z.literal("text"), z.literal("jsonl")])
+    .optional(),
+  resumeOutput: z
+    .union([z.literal("json"), z.literal("text"), z.literal("jsonl")])
+    .optional(),
+  input: z.union([z.literal("arg"), z.literal("stdin")]).optional(),
+  maxPromptArgChars: z.number().int().positive().optional(),
+  env: z.record(z.string(), z.string()).optional(),
+  clearEnv: z.array(z.string()).optional(),
+  modelArg: z.string().optional(),
+  modelAliases: z.record(z.string(), z.string()).optional(),
+  sessionArg: z.string().optional(),
+  sessionArgs: z.array(z.string()).optional(),
+  resumeArgs: z.array(z.string()).optional(),
+  sessionMode: z
+    .union([z.literal("always"), z.literal("existing"), z.literal("none")])
+    .optional(),
+  sessionIdFields: z.array(z.string()).optional(),
+  systemPromptArg: z.string().optional(),
+  systemPromptMode: z
+    .union([z.literal("append"), z.literal("replace")])
+    .optional(),
+  systemPromptWhen: z
+    .union([z.literal("first"), z.literal("always"), z.literal("never")])
+    .optional(),
+  imageArg: z.string().optional(),
+  imageMode: z.union([z.literal("repeat"), z.literal("list")]).optional(),
+  serialize: z.boolean().optional(),
+});
+
+const normalizeAllowFrom = (values?: Array<string | number>): string[] =>
+  (values ?? []).map((v) => String(v).trim()).filter(Boolean);
+
+const requireOpenAllowFrom = (params: {
+  policy?: string;
+  allowFrom?: Array<string | number>;
+  ctx: z.RefinementCtx;
+  path: Array<string | number>;
+  message: string;
+}) => {
+  if (params.policy !== "open") return;
+  const allow = normalizeAllowFrom(params.allowFrom);
+  if (allow.includes("*")) return;
+  params.ctx.addIssue({
+    code: z.ZodIssueCode.custom,
+    path: params.path,
+    message: params.message,
+  });
+};
+
+const MSTeamsReplyStyleSchema = z.enum(["thread", "top-level"]);
+
+const RetryConfigSchema = z
+  .object({
+    attempts: z.number().int().min(1).optional(),
+    minDelayMs: z.number().int().min(0).optional(),
+    maxDelayMs: z.number().int().min(0).optional(),
+    jitter: z.number().min(0).max(1).optional(),
+  })
+  .optional();
+
+const QueueModeBySurfaceSchema = z
+  .object({
+    whatsapp: QueueModeSchema.optional(),
+    telegram: QueueModeSchema.optional(),
+    discord: QueueModeSchema.optional(),
+    slack: QueueModeSchema.optional(),
+    signal: QueueModeSchema.optional(),
+    imessage: QueueModeSchema.optional(),
+    msteams: QueueModeSchema.optional(),
+    webchat: QueueModeSchema.optional(),
+  })
+  .optional();
+
+const QueueSchema = z
+  .object({
+    mode: QueueModeSchema.optional(),
+    byProvider: QueueModeBySurfaceSchema,
+    debounceMs: z.number().int().nonnegative().optional(),
+    cap: z.number().int().positive().optional(),
+    drop: QueueDropSchema.optional(),
+  })
+  .optional();
+
+const TranscribeAudioSchema = z
+  .object({
+    command: z.array(z.string()).superRefine((value, ctx) => {
+      const executable = value[0];
+      if (!isSafeExecutableValue(executable)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [0],
+          message: "expected safe executable name or path",
+        });
+      }
+    }),
+    timeoutSeconds: z.number().int().positive().optional(),
+  })
+  .optional();
+
+const HexColorSchema = z
+  .string()
+  .regex(/^#?[0-9a-fA-F]{6}$/, "expected hex color (RRGGBB)");
+
+const ExecutableTokenSchema = z
+  .string()
+  .refine(isSafeExecutableValue, "expected safe executable name or path");
+
+const ToolsAudioTranscriptionSchema = z
+  .object({
+    args: z.array(z.string()).optional(),
+    timeoutSeconds: z.number().int().positive().optional(),
+  })
+  .optional();
+
+const NativeCommandsSettingSchema = z.union([z.boolean(), z.literal("auto")]);
+
+const ProviderCommandsSchema = z
+  .object({
+    native: NativeCommandsSettingSchema.optional(),
+  })
+  .optional();
+
+const TelegramTopicSchema = z.object({
+  requireMention: z.boolean().optional(),
+  skills: z.array(z.string()).optional(),
+  enabled: z.boolean().optional(),
+  allowFrom: z.array(z.union([z.string(), z.number()])).optional(),
+  systemPrompt: z.string().optional(),
+});
+
+const TelegramGroupSchema = z.object({
+  requireMention: z.boolean().optional(),
+  skills: z.array(z.string()).optional(),
+  enabled: z.boolean().optional(),
+  allowFrom: z.array(z.union([z.string(), z.number()])).optional(),
+  systemPrompt: z.string().optional(),
+  topics: z.record(z.string(), TelegramTopicSchema.optional()).optional(),
+});
+
+const TelegramAccountSchemaBase = z.object({
+  name: z.string().optional(),
+  capabilities: z.array(z.string()).optional(),
+  enabled: z.boolean().optional(),
+  commands: ProviderCommandsSchema,
+  dmPolicy: DmPolicySchema.optional().default("pairing"),
+  botToken: z.string().optional(),
+  tokenFile: z.string().optional(),
+  replyToMode: ReplyToModeSchema.optional(),
+  groups: z.record(z.string(), TelegramGroupSchema.optional()).optional(),
+  allowFrom: z.array(z.union([z.string(), z.number()])).optional(),
+  groupAllowFrom: z.array(z.union([z.string(), z.number()])).optional(),
+  groupPolicy: GroupPolicySchema.optional().default("allowlist"),
+  historyLimit: z.number().int().min(0).optional(),
+  dmHistoryLimit: z.number().int().min(0).optional(),
+  dms: z.record(z.string(), DmConfigSchema.optional()).optional(),
+  textChunkLimit: z.number().int().positive().optional(),
+  blockStreaming: z.boolean().optional(),
+  draftChunk: BlockStreamingChunkSchema.optional(),
+  blockStreamingCoalesce: BlockStreamingCoalesceSchema.optional(),
+  streamMode: z.enum(["off", "partial", "block"]).optional().default("partial"),
+  mediaMaxMb: z.number().positive().optional(),
+  retry: RetryConfigSchema,
+  proxy: z.string().optional(),
+  webhookUrl: z.string().optional(),
+  webhookSecret: z.string().optional(),
+  webhookPath: z.string().optional(),
+  actions: z
+    .object({
+      reactions: z.boolean().optional(),
+    })
+    .optional(),
+});
+
+const TelegramAccountSchema = TelegramAccountSchemaBase.superRefine(
+  (value, ctx) => {
+    requireOpenAllowFrom({
+      policy: value.dmPolicy,
+      allowFrom: value.allowFrom,
+      ctx,
+      path: ["allowFrom"],
+      message:
+        'telegram.dmPolicy="open" requires telegram.allowFrom to include "*"',
+    });
+  },
+);
+
+const TelegramConfigSchema = TelegramAccountSchemaBase.extend({
+  accounts: z.record(z.string(), TelegramAccountSchema.optional()).optional(),
+}).superRefine((value, ctx) => {
+  requireOpenAllowFrom({
+    policy: value.dmPolicy,
+    allowFrom: value.allowFrom,
+    ctx,
+    path: ["allowFrom"],
+    message:
+      'telegram.dmPolicy="open" requires telegram.allowFrom to include "*"',
+  });
+});
+
+const DiscordDmSchema = z
   .object({
     enabled: z.boolean().optional(),
     port: z.number().int().positive().optional(),
@@ -406,7 +810,144 @@ export const OpenClawSchema = z
       .strict()
       .optional(),
     clawline: ClawlineConfigSchema,
-    channels: ChannelsSchema,
+    whatsapp: z
+      .object({
+        accounts: z
+          .record(
+            z.string(),
+            z
+              .object({
+                name: z.string().optional(),
+                capabilities: z.array(z.string()).optional(),
+                enabled: z.boolean().optional(),
+                messagePrefix: z.string().optional(),
+                /** Override auth directory for this WhatsApp account (Baileys multi-file auth state). */
+                authDir: z.string().optional(),
+                dmPolicy: DmPolicySchema.optional().default("pairing"),
+                selfChatMode: z.boolean().optional(),
+                allowFrom: z.array(z.string()).optional(),
+                groupAllowFrom: z.array(z.string()).optional(),
+                groupPolicy: GroupPolicySchema.optional().default("allowlist"),
+                historyLimit: z.number().int().min(0).optional(),
+                dmHistoryLimit: z.number().int().min(0).optional(),
+                dms: z.record(z.string(), DmConfigSchema.optional()).optional(),
+                textChunkLimit: z.number().int().positive().optional(),
+                mediaMaxMb: z.number().int().positive().optional(),
+                blockStreaming: z.boolean().optional(),
+                blockStreamingCoalesce: BlockStreamingCoalesceSchema.optional(),
+                groups: z
+                  .record(
+                    z.string(),
+                    z
+                      .object({
+                        requireMention: z.boolean().optional(),
+                      })
+                      .optional(),
+                  )
+                  .optional(),
+                ackReaction: z
+                  .object({
+                    emoji: z.string().optional(),
+                    direct: z.boolean().optional().default(true),
+                    group: z
+                      .enum(["always", "mentions", "never"])
+                      .optional()
+                      .default("mentions"),
+                  })
+                  .optional(),
+              })
+              .superRefine((value, ctx) => {
+                if (value.dmPolicy !== "open") return;
+                const allow = (value.allowFrom ?? [])
+                  .map((v) => String(v).trim())
+                  .filter(Boolean);
+                if (allow.includes("*")) return;
+                ctx.addIssue({
+                  code: z.ZodIssueCode.custom,
+                  path: ["allowFrom"],
+                  message:
+                    'whatsapp.accounts.*.dmPolicy="open" requires allowFrom to include "*"',
+                });
+              })
+              .optional(),
+          )
+          .optional(),
+        capabilities: z.array(z.string()).optional(),
+        dmPolicy: DmPolicySchema.optional().default("pairing"),
+        messagePrefix: z.string().optional(),
+        selfChatMode: z.boolean().optional(),
+        allowFrom: z.array(z.string()).optional(),
+        groupAllowFrom: z.array(z.string()).optional(),
+        groupPolicy: GroupPolicySchema.optional().default("allowlist"),
+        historyLimit: z.number().int().min(0).optional(),
+        dmHistoryLimit: z.number().int().min(0).optional(),
+        dms: z.record(z.string(), DmConfigSchema.optional()).optional(),
+        textChunkLimit: z.number().int().positive().optional(),
+        mediaMaxMb: z.number().int().positive().optional().default(50),
+        blockStreaming: z.boolean().optional(),
+        blockStreamingCoalesce: BlockStreamingCoalesceSchema.optional(),
+        actions: z
+          .object({
+            reactions: z.boolean().optional(),
+            sendMessage: z.boolean().optional(),
+            polls: z.boolean().optional(),
+          })
+          .optional(),
+        groups: z
+          .record(
+            z.string(),
+            z
+              .object({
+                requireMention: z.boolean().optional(),
+              })
+              .optional(),
+          )
+          .optional(),
+        ackReaction: z
+          .object({
+            emoji: z.string().optional(),
+            direct: z.boolean().optional().default(true),
+            group: z
+              .enum(["always", "mentions", "never"])
+              .optional()
+              .default("mentions"),
+          })
+          .optional(),
+      })
+      .superRefine((value, ctx) => {
+        if (value.dmPolicy !== "open") return;
+        const allow = (value.allowFrom ?? [])
+          .map((v) => String(v).trim())
+          .filter(Boolean);
+        if (allow.includes("*")) return;
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["allowFrom"],
+          message:
+            'whatsapp.dmPolicy="open" requires whatsapp.allowFrom to include "*"',
+        });
+      })
+      .optional(),
+    telegram: TelegramConfigSchema.optional(),
+    discord: DiscordConfigSchema.optional(),
+    slack: SlackConfigSchema.optional(),
+    signal: SignalConfigSchema.optional(),
+    imessage: IMessageConfigSchema.optional(),
+    msteams: MSTeamsConfigSchema.optional(),
+    bridge: z
+      .object({
+        enabled: z.boolean().optional(),
+        port: z.number().int().positive().optional(),
+        bind: z
+          .union([
+            z.literal("auto"),
+            z.literal("lan"),
+            z.literal("tailnet"),
+            z.literal("loopback"),
+          ])
+          .optional(),
+      })
+      .optional(),
     discovery: z
       .object({
         wideArea: z
