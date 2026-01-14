@@ -82,7 +82,29 @@ import {
   incrementPresenceVersion,
   refreshGatewayHealthSnapshot,
 } from "./server/health-state.js";
-import { loadGatewayTlsRuntime } from "./server/tls.js";
+import { startGatewayBridgeRuntime } from "./server-bridge-runtime.js";
+import type { startBrowserControlServerIfEnabled } from "./server-browser.js";
+import { createChannelManager } from "./server-channels.js";
+import { createAgentEventHandler } from "./server-chat.js";
+import { createGatewayCloseHandler } from "./server-close.js";
+import { buildGatewayCronService } from "./server-cron.js";
+import { applyGatewayLaneConcurrency } from "./server-lanes.js";
+import { startGatewayMaintenanceTimers } from "./server-maintenance.js";
+import { coreGatewayHandlers } from "./server-methods.js";
+import { GATEWAY_EVENTS, GATEWAY_METHODS } from "./server-methods-list.js";
+import { hasConnectedMobileNode as hasConnectedMobileNodeFromBridge } from "./server-mobile-nodes.js";
+import { loadGatewayModelCatalog } from "./server-model-catalog.js";
+import { loadGatewayPlugins } from "./server-plugins.js";
+import { createGatewayReloadHandlers } from "./server-reload-handlers.js";
+import { resolveGatewayRuntimeConfig } from "./server-runtime-config.js";
+import { createGatewayRuntimeState } from "./server-runtime-state.js";
+import { resolveSessionKeyForRun } from "./server-session-key.js";
+import { startGatewaySidecars } from "./server-startup.js";
+import type { ClawlineServiceHandle } from "../clawline/service.js";
+import { logGatewayStartup } from "./server-startup-log.js";
+import { startGatewayTailscaleExposure } from "./server-tailscale.js";
+import { createWizardSessionTracker } from "./server-wizard-sessions.js";
+import { attachGatewayWsHandlers } from "./server-ws-runtime.js";
 
 export { __resetModelCatalogCacheForTest } from "./server-model-catalog.js";
 
@@ -100,7 +122,7 @@ const logReload = log.child("reload");
 const logHooks = log.child("hooks");
 const logPlugins = log.child("plugins");
 const logWsControl = log.child("ws");
-const gatewayRuntime = runtimeForLogger(log);
+const logClawline = log.child("clawline");
 const canvasRuntime = runtimeForLogger(logCanvas);
 
 export type GatewayServer = {
@@ -272,6 +294,7 @@ export async function startGatewayServer(
   const channelMethods = listChannelPlugins().flatMap((plugin) => plugin.gatewayMethods ?? []);
   const gatewayMethods = Array.from(new Set([...baseGatewayMethods, ...channelMethods]));
   let pluginServices: PluginServicesHandle | null = null;
+  let clawlineService: ClawlineServiceHandle | null = null;
   const runtimeConfig = await resolveGatewayRuntimeConfig({
     cfg: cfgAtStart,
     port,
@@ -625,19 +648,18 @@ export async function startGatewayServer(
       });
 
   let browserControl: Awaited<ReturnType<typeof startBrowserControlServerIfEnabled>> = null;
-  if (!minimalTestGateway) {
-    ({ browserControl, pluginServices } = await startGatewaySidecars({
-      cfg: cfgAtStart,
-      pluginRegistry,
-      defaultWorkspaceDir,
-      deps,
-      startChannels,
-      log,
-      logHooks,
-      logChannels,
-      logBrowser,
-    }));
-  }
+  ({ browserControl, pluginServices, clawlineService } = await startGatewaySidecars({
+    cfg: cfgAtStart,
+    pluginRegistry,
+    defaultWorkspaceDir,
+    deps,
+    startChannels,
+    log,
+    logHooks,
+    logChannels,
+    logBrowser,
+    logClawline,
+  }));
 
   // Run gateway_start plugin hook (fire-and-forget)
   if (!minimalTestGateway) {
@@ -699,6 +721,7 @@ export async function startGatewayServer(
     canvasHostServer,
     stopChannel,
     pluginServices,
+    clawlineService,
     cron,
     heartbeatRunner,
     nodePresenceTimers,
