@@ -6,6 +6,77 @@ import { HookMappingSchema, HooksGmailSchema } from "./zod-schema.hooks.js";
 import { ChannelsSchema } from "./zod-schema.providers.js";
 import { CommandsSchema, MessagesSchema, SessionSchema } from "./zod-schema.session.js";
 
+const ClawlineConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    port: z.number().int().positive().optional(),
+    statePath: z.string().optional(),
+    network: z
+      .object({
+        bindAddress: z.string().optional(),
+        allowInsecurePublic: z.boolean().optional(),
+        allowedOrigins: z.array(z.string()).optional(),
+      })
+      .optional(),
+    adapter: z
+      .object({
+        provider: z.string().optional(),
+        model: z.string().optional(),
+        timeoutSeconds: z.number().int().positive().optional(),
+        responseFallback: z.string().optional(),
+        systemPrompt: z.string().optional(),
+      })
+      .optional(),
+    auth: z
+      .object({
+        jwtSigningKey: z.string().nullable().optional(),
+        tokenTtlSeconds: z.number().int().nullable().optional(),
+        maxAttemptsPerMinute: z.number().int().nonnegative().optional(),
+        reissueGraceSeconds: z.number().int().nonnegative().optional(),
+      })
+      .optional(),
+    pairing: z
+      .object({
+        maxPendingRequests: z.number().int().nonnegative().optional(),
+        maxRequestsPerMinute: z.number().int().nonnegative().optional(),
+        pendingTtlSeconds: z.number().int().nonnegative().optional(),
+      })
+      .optional(),
+    media: z
+      .object({
+        storagePath: z.string().optional(),
+        maxInlineBytes: z.number().int().nonnegative().optional(),
+        maxUploadBytes: z.number().int().nonnegative().optional(),
+        unreferencedUploadTtlSeconds: z
+          .number()
+          .int()
+          .nonnegative()
+          .optional(),
+      })
+      .optional(),
+    sessions: z
+      .object({
+        maxMessageBytes: z.number().int().positive().optional(),
+        maxReplayMessages: z.number().int().nonnegative().optional(),
+        maxPromptMessages: z.number().int().nonnegative().optional(),
+        maxMessagesPerSecond: z.number().int().nonnegative().optional(),
+        maxTypingPerSecond: z.number().int().nonnegative().optional(),
+        typingAutoExpireSeconds: z.number().int().nonnegative().optional(),
+        maxQueuedMessages: z.number().int().nonnegative().optional(),
+        maxWriteQueueDepth: z.number().int().nonnegative().optional(),
+        adapterExecuteTimeoutSeconds: z.number().int().positive().optional(),
+        streamInactivitySeconds: z.number().int().nonnegative().optional(),
+      })
+      .optional(),
+    streams: z
+      .object({
+        chunkPersistIntervalMs: z.number().int().nonnegative().optional(),
+        chunkBufferBytes: z.number().int().nonnegative().optional(),
+      })
+      .optional(),
+  })
+  .optional();
+
 export const ClawdbotSchema = z
   .object({
     env: z
@@ -161,6 +232,7 @@ export const ClawdbotSchema = z
           .optional(),
       })
       .optional(),
+    clawline: ClawlineConfigSchema,
     channels: ChannelsSchema,
     bridge: z
       .object({
