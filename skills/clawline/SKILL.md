@@ -1,5 +1,5 @@
-name: clawline-allowlist
-description: Manage the Clawline mobile provider: inspect/edit the allowlist & denylist, reissue or revoke tokens, explain pairing rules, restart the sidecar, and smoke-test the HTTP/WS endpoints. Use this when asked to pair a phone, unblock/deny a device, or diagnose Clawline connectivity on hosts such as tars.
+name: clawline
+description: Teach Clawdbot how the Clawline mobile provider works: why the allowlist exists, how to pair/reset devices, what the user sees in the iOS/Android clients, how to restart the gateway/sidecar, and how to diagnose socket or rate-limit problems. Use this when users ask about clawline UX, want their device paired/unblocked, or need the allowlist/denylist adjusted on hosts such as tars.
 ---
 
 # Clawline Allowlist
