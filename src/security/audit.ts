@@ -1,39 +1,33 @@
-import type { OpenClawConfig } from "../config/config.js";
-import type { ExecFn } from "./windows-acl.js";
-import { resolveBrowserConfig, resolveProfile } from "../browser/config.js";
-import { resolveBrowserControlAuth } from "../browser/control-auth.js";
 import { listChannelPlugins } from "../channels/plugins/index.js";
-import { formatCliCommand } from "../cli/command-format.js";
+import { resolveChannelDefaultAccountId } from "../channels/plugins/helpers.js";
+import type { ChannelId } from "../channels/plugins/types.js";
+import type { ClawdbotConfig } from "../config/config.js";
+import { resolveBrowserConfig } from "../browser/config.js";
 import { resolveConfigPath, resolveStateDir } from "../config/paths.js";
 import { resolveGatewayAuth } from "../gateway/auth.js";
 import { buildGatewayConnectionDetails } from "../gateway/call.js";
 import { probeGateway } from "../gateway/probe.js";
-import { collectChannelSecurityFindings } from "./audit-channel.js";
 import {
   collectAttackSurfaceSummaryFindings,
   collectExposureMatrixFindings,
-  collectGatewayHttpSessionKeyOverrideFindings,
   collectHooksHardeningFindings,
   collectIncludeFilePermFindings,
-  collectInstalledSkillsCodeSafetyFindings,
-  collectMinimalProfileOverrideFindings,
   collectModelHygieneFindings,
-  collectNodeDenyCommandPatternFindings,
-  collectSmallModelRiskFindings,
-  collectSandboxDockerNoopFindings,
   collectPluginsTrustFindings,
   collectSecretsInConfigFindings,
-  collectPluginsCodeSafetyFindings,
   collectStateDeepFilesystemFindings,
   collectSyncedFolderFindings,
   readConfigSnapshotForAudit,
 } from "./audit-extra.js";
 import {
-  formatPermissionDetail,
-  formatPermissionRemediation,
-  inspectPathPermissions,
+  formatOctal,
+  isGroupReadable,
+  isGroupWritable,
+  isWorldReadable,
+  isWorldWritable,
+  modeBits,
+  safeStat,
 } from "./audit-fs.js";
-import { DEFAULT_GATEWAY_HTTP_TOOL_DENY } from "./dangerous-tools.js";
 
 export type SecurityAuditSeverity = "info" | "warn" | "critical";
 
@@ -67,9 +61,7 @@ export type SecurityAuditReport = {
 };
 
 export type SecurityAuditOptions = {
-  config: OpenClawConfig;
-  env?: NodeJS.ProcessEnv;
-  platform?: NodeJS.Platform;
+  config: ClawdbotConfig;
   deep?: boolean;
   includeFilesystem?: boolean;
   includeChannelSecurity?: boolean;
@@ -83,8 +75,6 @@ export type SecurityAuditOptions = {
   plugins?: ReturnType<typeof listChannelPlugins>;
   /** Dependency injection for tests. */
   probeGatewayFn?: typeof probeGateway;
-  /** Dependency injection for tests (Windows ACL checks). */
-  execIcacls?: ExecFn;
 };
 
 function countBySeverity(findings: SecurityAuditFinding[]): SecurityAuditSummary {
@@ -92,40 +82,46 @@ function countBySeverity(findings: SecurityAuditFinding[]): SecurityAuditSummary
   let warn = 0;
   let info = 0;
   for (const f of findings) {
-    if (f.severity === "critical") {
-      critical += 1;
-    } else if (f.severity === "warn") {
-      warn += 1;
-    } else {
-      info += 1;
-    }
+    if (f.severity === "critical") critical += 1;
+    else if (f.severity === "warn") warn += 1;
+    else info += 1;
   }
   return { critical, warn, info };
 }
 
 function normalizeAllowFromList(list: Array<string | number> | undefined | null): string[] {
-  if (!Array.isArray(list)) {
-    return [];
-  }
+  if (!Array.isArray(list)) return [];
   return list.map((v) => String(v).trim()).filter(Boolean);
+}
+
+function classifyChannelWarningSeverity(message: string): SecurityAuditSeverity {
+  const s = message.toLowerCase();
+  if (
+    s.includes("dms: open") ||
+    s.includes('grouppolicy="open"') ||
+    s.includes('dmpolicy="open"')
+  ) {
+    return "critical";
+  }
+  if (s.includes("allows any") || s.includes("anyone can dm") || s.includes("public")) {
+    return "critical";
+  }
+  if (s.includes("locked") || s.includes("disabled")) {
+    return "info";
+  }
+  return "warn";
 }
 
 async function collectFilesystemFindings(params: {
   stateDir: string;
   configPath: string;
-  env?: NodeJS.ProcessEnv;
-  platform?: NodeJS.Platform;
-  execIcacls?: ExecFn;
 }): Promise<SecurityAuditFinding[]> {
   const findings: SecurityAuditFinding[] = [];
 
-  const stateDirPerms = await inspectPathPermissions(params.stateDir, {
-    env: params.env,
-    platform: params.platform,
-    exec: params.execIcacls,
-  });
-  if (stateDirPerms.ok) {
-    if (stateDirPerms.isSymlink) {
+  const stateDirStat = await safeStat(params.stateDir);
+  if (stateDirStat.ok) {
+    const bits = modeBits(stateDirStat.mode);
+    if (stateDirStat.isSymlink) {
       findings.push({
         checkId: "fs.state_dir.symlink",
         severity: "warn",
@@ -133,58 +129,37 @@ async function collectFilesystemFindings(params: {
         detail: `${params.stateDir} is a symlink; treat this as an extra trust boundary.`,
       });
     }
-    if (stateDirPerms.worldWritable) {
+    if (isWorldWritable(bits)) {
       findings.push({
         checkId: "fs.state_dir.perms_world_writable",
         severity: "critical",
         title: "State dir is world-writable",
-        detail: `${formatPermissionDetail(params.stateDir, stateDirPerms)}; other users can write into your OpenClaw state.`,
-        remediation: formatPermissionRemediation({
-          targetPath: params.stateDir,
-          perms: stateDirPerms,
-          isDir: true,
-          posixMode: 0o700,
-          env: params.env,
-        }),
+        detail: `${params.stateDir} mode=${formatOctal(bits)}; other users can write into your Clawdbot state.`,
+        remediation: `chmod 700 ${params.stateDir}`,
       });
-    } else if (stateDirPerms.groupWritable) {
+    } else if (isGroupWritable(bits)) {
       findings.push({
         checkId: "fs.state_dir.perms_group_writable",
         severity: "warn",
         title: "State dir is group-writable",
-        detail: `${formatPermissionDetail(params.stateDir, stateDirPerms)}; group users can write into your OpenClaw state.`,
-        remediation: formatPermissionRemediation({
-          targetPath: params.stateDir,
-          perms: stateDirPerms,
-          isDir: true,
-          posixMode: 0o700,
-          env: params.env,
-        }),
+        detail: `${params.stateDir} mode=${formatOctal(bits)}; group users can write into your Clawdbot state.`,
+        remediation: `chmod 700 ${params.stateDir}`,
       });
-    } else if (stateDirPerms.groupReadable || stateDirPerms.worldReadable) {
+    } else if (isGroupReadable(bits) || isWorldReadable(bits)) {
       findings.push({
         checkId: "fs.state_dir.perms_readable",
         severity: "warn",
         title: "State dir is readable by others",
-        detail: `${formatPermissionDetail(params.stateDir, stateDirPerms)}; consider restricting to 700.`,
-        remediation: formatPermissionRemediation({
-          targetPath: params.stateDir,
-          perms: stateDirPerms,
-          isDir: true,
-          posixMode: 0o700,
-          env: params.env,
-        }),
+        detail: `${params.stateDir} mode=${formatOctal(bits)}; consider restricting to 700.`,
+        remediation: `chmod 700 ${params.stateDir}`,
       });
     }
   }
 
-  const configPerms = await inspectPathPermissions(params.configPath, {
-    env: params.env,
-    platform: params.platform,
-    exec: params.execIcacls,
-  });
-  if (configPerms.ok) {
-    if (configPerms.isSymlink) {
+  const configStat = await safeStat(params.configPath);
+  if (configStat.ok) {
+    const bits = modeBits(configStat.mode);
+    if (configStat.isSymlink) {
       findings.push({
         checkId: "fs.config.symlink",
         severity: "warn",
@@ -192,47 +167,29 @@ async function collectFilesystemFindings(params: {
         detail: `${params.configPath} is a symlink; make sure you trust its target.`,
       });
     }
-    if (configPerms.worldWritable || configPerms.groupWritable) {
+    if (isWorldWritable(bits) || isGroupWritable(bits)) {
       findings.push({
         checkId: "fs.config.perms_writable",
         severity: "critical",
         title: "Config file is writable by others",
-        detail: `${formatPermissionDetail(params.configPath, configPerms)}; another user could change gateway/auth/tool policies.`,
-        remediation: formatPermissionRemediation({
-          targetPath: params.configPath,
-          perms: configPerms,
-          isDir: false,
-          posixMode: 0o600,
-          env: params.env,
-        }),
+        detail: `${params.configPath} mode=${formatOctal(bits)}; another user could change gateway/auth/tool policies.`,
+        remediation: `chmod 600 ${params.configPath}`,
       });
-    } else if (configPerms.worldReadable) {
+    } else if (isWorldReadable(bits)) {
       findings.push({
         checkId: "fs.config.perms_world_readable",
         severity: "critical",
         title: "Config file is world-readable",
-        detail: `${formatPermissionDetail(params.configPath, configPerms)}; config can contain tokens and private settings.`,
-        remediation: formatPermissionRemediation({
-          targetPath: params.configPath,
-          perms: configPerms,
-          isDir: false,
-          posixMode: 0o600,
-          env: params.env,
-        }),
+        detail: `${params.configPath} mode=${formatOctal(bits)}; config can contain tokens and private settings.`,
+        remediation: `chmod 600 ${params.configPath}`,
       });
-    } else if (configPerms.groupReadable) {
+    } else if (isGroupReadable(bits)) {
       findings.push({
         checkId: "fs.config.perms_group_readable",
         severity: "warn",
         title: "Config file is group-readable",
-        detail: `${formatPermissionDetail(params.configPath, configPerms)}; config can contain tokens and private settings.`,
-        remediation: formatPermissionRemediation({
-          targetPath: params.configPath,
-          perms: configPerms,
-          isDir: false,
-          posixMode: 0o600,
-          env: params.env,
-        }),
+        detail: `${params.configPath} mode=${formatOctal(bits)}; config can contain tokens and private settings.`,
+        remediation: `chmod 600 ${params.configPath}`,
       });
     }
   }
@@ -240,86 +197,20 @@ async function collectFilesystemFindings(params: {
   return findings;
 }
 
-function collectGatewayConfigFindings(
-  cfg: OpenClawConfig,
-  env: NodeJS.ProcessEnv,
-): SecurityAuditFinding[] {
+function collectGatewayConfigFindings(cfg: ClawdbotConfig): SecurityAuditFinding[] {
   const findings: SecurityAuditFinding[] = [];
 
   const bind = typeof cfg.gateway?.bind === "string" ? cfg.gateway.bind : "loopback";
   const tailscaleMode = cfg.gateway?.tailscale?.mode ?? "off";
-  const auth = resolveGatewayAuth({ authConfig: cfg.gateway?.auth, tailscaleMode, env });
-  const controlUiEnabled = cfg.gateway?.controlUi?.enabled !== false;
-  const trustedProxies = Array.isArray(cfg.gateway?.trustedProxies)
-    ? cfg.gateway.trustedProxies
-    : [];
-  const hasToken = typeof auth.token === "string" && auth.token.trim().length > 0;
-  const hasPassword = typeof auth.password === "string" && auth.password.trim().length > 0;
-  const hasSharedSecret =
-    (auth.mode === "token" && hasToken) || (auth.mode === "password" && hasPassword);
-  const hasTailscaleAuth = auth.allowTailscale && tailscaleMode === "serve";
-  const hasGatewayAuth = hasSharedSecret || hasTailscaleAuth;
+  const auth = resolveGatewayAuth({ authConfig: cfg.gateway?.auth, tailscaleMode });
 
-  // HTTP /tools/invoke is intended for narrow automation, not session orchestration/admin operations.
-  // If operators opt-in to re-enabling these tools over HTTP, warn loudly so the choice is explicit.
-  const gatewayToolsAllowRaw = Array.isArray(cfg.gateway?.tools?.allow)
-    ? cfg.gateway?.tools?.allow
-    : [];
-  const gatewayToolsAllow = new Set(
-    gatewayToolsAllowRaw
-      .map((v) => (typeof v === "string" ? v.trim().toLowerCase() : ""))
-      .filter(Boolean),
-  );
-  const reenabledOverHttp = DEFAULT_GATEWAY_HTTP_TOOL_DENY.filter((name) =>
-    gatewayToolsAllow.has(name),
-  );
-  if (reenabledOverHttp.length > 0) {
-    const extraRisk = bind !== "loopback" || tailscaleMode === "funnel";
-    findings.push({
-      checkId: "gateway.tools_invoke_http.dangerous_allow",
-      severity: extraRisk ? "critical" : "warn",
-      title: "Gateway HTTP /tools/invoke re-enables dangerous tools",
-      detail:
-        `gateway.tools.allow includes ${reenabledOverHttp.join(", ")} which removes them from the default HTTP deny list. ` +
-        "This can allow remote session spawning / control-plane actions via HTTP and increases RCE blast radius if the gateway is reachable.",
-      remediation:
-        "Remove these entries from gateway.tools.allow (recommended). " +
-        "If you keep them enabled, keep gateway.bind loopback-only (or tailnet-only), restrict network exposure, and treat the gateway token/password as full-admin.",
-    });
-  }
-  if (bind !== "loopback" && !hasSharedSecret && auth.mode !== "trusted-proxy") {
+  if (bind !== "loopback" && auth.mode === "none") {
     findings.push({
       checkId: "gateway.bind_no_auth",
       severity: "critical",
       title: "Gateway binds beyond loopback without auth",
       detail: `gateway.bind="${bind}" but no gateway.auth token/password is configured.`,
       remediation: `Set gateway.auth (token recommended) or bind to loopback.`,
-    });
-  }
-
-  if (bind === "loopback" && controlUiEnabled && trustedProxies.length === 0) {
-    findings.push({
-      checkId: "gateway.trusted_proxies_missing",
-      severity: "warn",
-      title: "Reverse proxy headers are not trusted",
-      detail:
-        "gateway.bind is loopback and gateway.trustedProxies is empty. " +
-        "If you expose the Control UI through a reverse proxy, configure trusted proxies " +
-        "so local-client checks cannot be spoofed.",
-      remediation:
-        "Set gateway.trustedProxies to your proxy IPs or keep the Control UI local-only.",
-    });
-  }
-
-  if (bind === "loopback" && controlUiEnabled && !hasGatewayAuth) {
-    findings.push({
-      checkId: "gateway.loopback_no_auth",
-      severity: "critical",
-      title: "Gateway auth missing on loopback",
-      detail:
-        "gateway.bind is loopback but no gateway auth secret is configured. " +
-        "If the Control UI is exposed through a reverse proxy, unauthenticated access is possible.",
-      remediation: "Set gateway.auth (token recommended) or keep the Control UI local-only.",
     });
   }
 
@@ -340,28 +231,6 @@ function collectGatewayConfigFindings(
     });
   }
 
-  if (cfg.gateway?.controlUi?.allowInsecureAuth === true) {
-    findings.push({
-      checkId: "gateway.control_ui.insecure_auth",
-      severity: "critical",
-      title: "Control UI allows insecure HTTP auth",
-      detail:
-        "gateway.controlUi.allowInsecureAuth=true allows token-only auth over HTTP and skips device identity.",
-      remediation: "Disable it or switch to HTTPS (Tailscale Serve) or localhost.",
-    });
-  }
-
-  if (cfg.gateway?.controlUi?.dangerouslyDisableDeviceAuth === true) {
-    findings.push({
-      checkId: "gateway.control_ui.device_auth_disabled",
-      severity: "critical",
-      title: "DANGEROUS: Control UI device auth disabled",
-      detail:
-        "gateway.controlUi.dangerouslyDisableDeviceAuth=true disables device identity checks for the Control UI.",
-      remediation: "Disable it unless you are in a short-lived break-glass scenario.",
-    });
-  }
-
   const token =
     typeof auth.token === "string" && auth.token.trim().length > 0 ? auth.token.trim() : null;
   if (auth.mode === "token" && token && token.length < 24) {
@@ -373,137 +242,85 @@ function collectGatewayConfigFindings(
     });
   }
 
-  if (auth.mode === "trusted-proxy") {
-    const trustedProxies = cfg.gateway?.trustedProxies ?? [];
-    const trustedProxyConfig = cfg.gateway?.auth?.trustedProxy;
-
-    findings.push({
-      checkId: "gateway.trusted_proxy_auth",
-      severity: "critical",
-      title: "Trusted-proxy auth mode enabled",
-      detail:
-        'gateway.auth.mode="trusted-proxy" delegates authentication to a reverse proxy. ' +
-        "Ensure your proxy (Pomerium, Caddy, nginx) handles auth correctly and that gateway.trustedProxies " +
-        "only contains IPs of your actual proxy servers.",
-      remediation:
-        "Verify: (1) Your proxy terminates TLS and authenticates users. " +
-        "(2) gateway.trustedProxies is restricted to proxy IPs only. " +
-        "(3) Direct access to the Gateway port is blocked by firewall. " +
-        "See /gateway/trusted-proxy-auth for setup guidance.",
-    });
-
-    if (trustedProxies.length === 0) {
-      findings.push({
-        checkId: "gateway.trusted_proxy_no_proxies",
-        severity: "critical",
-        title: "Trusted-proxy auth enabled but no trusted proxies configured",
-        detail:
-          'gateway.auth.mode="trusted-proxy" but gateway.trustedProxies is empty. ' +
-          "All requests will be rejected.",
-        remediation: "Set gateway.trustedProxies to the IP(s) of your reverse proxy.",
-      });
-    }
-
-    if (!trustedProxyConfig?.userHeader) {
-      findings.push({
-        checkId: "gateway.trusted_proxy_no_user_header",
-        severity: "critical",
-        title: "Trusted-proxy auth missing userHeader config",
-        detail:
-          'gateway.auth.mode="trusted-proxy" but gateway.auth.trustedProxy.userHeader is not configured.',
-        remediation:
-          "Set gateway.auth.trustedProxy.userHeader to the header name your proxy uses " +
-          '(e.g., "x-forwarded-user", "x-pomerium-claim-email").',
-      });
-    }
-
-    const allowUsers = trustedProxyConfig?.allowUsers ?? [];
-    if (allowUsers.length === 0) {
-      findings.push({
-        checkId: "gateway.trusted_proxy_no_allowlist",
-        severity: "warn",
-        title: "Trusted-proxy auth allows all authenticated users",
-        detail:
-          "gateway.auth.trustedProxy.allowUsers is empty, so any user authenticated by your proxy can access the Gateway.",
-        remediation:
-          "Consider setting gateway.auth.trustedProxy.allowUsers to restrict access to specific users " +
-          '(e.g., ["nick@example.com"]).',
-      });
-    }
-  }
-
-  if (bind !== "loopback" && auth.mode !== "trusted-proxy" && !cfg.gateway?.auth?.rateLimit) {
-    findings.push({
-      checkId: "gateway.auth_no_rate_limit",
-      severity: "warn",
-      title: "No auth rate limiting configured",
-      detail:
-        "gateway.bind is not loopback but no gateway.auth.rateLimit is configured. " +
-        "Without rate limiting, brute-force auth attacks are not mitigated.",
-      remediation:
-        "Set gateway.auth.rateLimit (e.g. { maxAttempts: 10, windowMs: 60000, lockoutMs: 300000 }).",
-    });
-  }
-
   return findings;
 }
 
-function collectBrowserControlFindings(
-  cfg: OpenClawConfig,
-  env: NodeJS.ProcessEnv,
-): SecurityAuditFinding[] {
+function isLoopbackClientHost(hostname: string): boolean {
+  const h = hostname.trim().toLowerCase();
+  return h === "localhost" || h === "127.0.0.1" || h === "::1";
+}
+
+function collectBrowserControlFindings(cfg: ClawdbotConfig): SecurityAuditFinding[] {
   const findings: SecurityAuditFinding[] = [];
 
   let resolved: ReturnType<typeof resolveBrowserConfig>;
   try {
-    resolved = resolveBrowserConfig(cfg.browser, cfg);
+    resolved = resolveBrowserConfig(cfg.browser);
   } catch (err) {
     findings.push({
       checkId: "browser.control_invalid_config",
       severity: "warn",
       title: "Browser control config looks invalid",
       detail: String(err),
-      remediation: `Fix browser.cdpUrl in ${resolveConfigPath()} and re-run "${formatCliCommand("openclaw security audit --deep")}".`,
+      remediation: `Fix browser.controlUrl/browser.cdpUrl in ${resolveConfigPath()} and re-run "clawdbot security audit --deep".`,
     });
     return findings;
   }
 
-  if (!resolved.enabled) {
-    return findings;
-  }
+  if (!resolved.enabled) return findings;
 
-  const browserAuth = resolveBrowserControlAuth(cfg, env);
-  if (!browserAuth.token && !browserAuth.password) {
-    findings.push({
-      checkId: "browser.control_no_auth",
-      severity: "critical",
-      title: "Browser control has no auth",
-      detail:
-        "Browser control HTTP routes are enabled but no gateway.auth token/password is configured. " +
-        "Any local process (or SSRF to loopback) can call browser control endpoints.",
-      remediation:
-        "Set gateway.auth.token (recommended) or gateway.auth.password so browser control HTTP routes require authentication. Restarting the gateway will auto-generate gateway.auth.token when browser control is enabled.",
-    });
-  }
+  const url = new URL(resolved.controlUrl);
+  const isLoopback = isLoopbackClientHost(url.hostname);
+  const envToken = process.env.CLAWDBOT_BROWSER_CONTROL_TOKEN?.trim();
+  const controlToken = (envToken || resolved.controlToken)?.trim() || null;
 
-  for (const name of Object.keys(resolved.profiles)) {
-    const profile = resolveProfile(resolved, name);
-    if (!profile || profile.cdpIsLoopback) {
-      continue;
+  if (!isLoopback) {
+    if (!controlToken) {
+      findings.push({
+        checkId: "browser.control_remote_no_token",
+        severity: "critical",
+        title: "Remote browser control is missing an auth token",
+        detail: `browser.controlUrl is non-loopback (${resolved.controlUrl}) but no browser.controlToken (or CLAWDBOT_BROWSER_CONTROL_TOKEN) is configured.`,
+        remediation:
+          "Set browser.controlToken (or export CLAWDBOT_BROWSER_CONTROL_TOKEN) and prefer serving over Tailscale Serve or HTTPS reverse proxy.",
+      });
     }
-    let url: URL;
-    try {
-      url = new URL(profile.cdpUrl);
-    } catch {
-      continue;
-    }
+
     if (url.protocol === "http:") {
       findings.push({
-        checkId: "browser.remote_cdp_http",
+        checkId: "browser.control_remote_http",
         severity: "warn",
-        title: "Remote CDP uses HTTP",
-        detail: `browser profile "${name}" uses http CDP (${profile.cdpUrl}); this is OK only if it's tailnet-only or behind an encrypted tunnel.`,
-        remediation: `Prefer HTTPS/TLS or a tailnet-only endpoint for remote CDP.`,
+        title: "Remote browser control uses HTTP",
+        detail: `browser.controlUrl=${resolved.controlUrl} is http; this is OK only if it's tailnet-only (Tailscale) or behind another encrypted tunnel.`,
+        remediation: `Prefer HTTPS termination (Tailscale Serve) and keep the endpoint tailnet-only.`,
+      });
+    }
+
+    if (controlToken && controlToken.length < 24) {
+      findings.push({
+        checkId: "browser.control_token_too_short",
+        severity: "warn",
+        title: "Browser control token looks short",
+        detail: `browser control token is ${controlToken.length} chars; prefer a long random token.`,
+      });
+    }
+
+    const tailscaleMode = cfg.gateway?.tailscale?.mode ?? "off";
+    const gatewayAuth = resolveGatewayAuth({ authConfig: cfg.gateway?.auth, tailscaleMode });
+    const gatewayToken =
+      gatewayAuth.mode === "token" &&
+      typeof gatewayAuth.token === "string" &&
+      gatewayAuth.token.trim()
+        ? gatewayAuth.token.trim()
+        : null;
+
+    if (controlToken && gatewayToken && controlToken === gatewayToken) {
+      findings.push({
+        checkId: "browser.control_token_reuse_gateway_token",
+        severity: "warn",
+        title: "Browser control token reuses the Gateway token",
+        detail: `browser.controlToken matches gateway.auth token; compromise of browser control expands blast radius to the Gateway API.`,
+        remediation: `Use a separate browser.controlToken dedicated to browser control.`,
       });
     }
   }
@@ -511,11 +328,9 @@ function collectBrowserControlFindings(
   return findings;
 }
 
-function collectLoggingFindings(cfg: OpenClawConfig): SecurityAuditFinding[] {
+function collectLoggingFindings(cfg: ClawdbotConfig): SecurityAuditFinding[] {
   const redact = cfg.logging?.redactSensitive;
-  if (redact !== "off") {
-    return [];
-  }
+  if (redact !== "off") return [];
   return [
     {
       checkId: "logging.redact_off",
@@ -527,18 +342,14 @@ function collectLoggingFindings(cfg: OpenClawConfig): SecurityAuditFinding[] {
   ];
 }
 
-function collectElevatedFindings(cfg: OpenClawConfig): SecurityAuditFinding[] {
+function collectElevatedFindings(cfg: ClawdbotConfig): SecurityAuditFinding[] {
   const findings: SecurityAuditFinding[] = [];
   const enabled = cfg.tools?.elevated?.enabled;
   const allowFrom = cfg.tools?.elevated?.allowFrom ?? {};
   const anyAllowFromKeys = Object.keys(allowFrom).length > 0;
 
-  if (enabled === false) {
-    return findings;
-  }
-  if (!anyAllowFromKeys) {
-    return findings;
-  }
+  if (enabled === false) return findings;
+  if (!anyAllowFromKeys) return findings;
 
   for (const [provider, list] of Object.entries(allowFrom)) {
     const normalized = normalizeAllowFromList(list);
@@ -562,8 +373,110 @@ function collectElevatedFindings(cfg: OpenClawConfig): SecurityAuditFinding[] {
   return findings;
 }
 
+async function collectChannelSecurityFindings(params: {
+  cfg: ClawdbotConfig;
+  plugins: ReturnType<typeof listChannelPlugins>;
+}): Promise<SecurityAuditFinding[]> {
+  const findings: SecurityAuditFinding[] = [];
+
+  const warnDmPolicy = async (input: {
+    label: string;
+    provider: ChannelId;
+    dmPolicy: string;
+    allowFrom?: Array<string | number> | null;
+    policyPath?: string;
+    allowFromPath: string;
+  }) => {
+    const policyPath = input.policyPath ?? `${input.allowFromPath}policy`;
+    const configAllowFrom = normalizeAllowFromList(input.allowFrom);
+    const hasWildcard = configAllowFrom.includes("*");
+
+    if (input.dmPolicy === "open") {
+      const allowFromKey = `${input.allowFromPath}allowFrom`;
+      findings.push({
+        checkId: `channels.${input.provider}.dm.open`,
+        severity: "critical",
+        title: `${input.label} DMs are open`,
+        detail: `${policyPath}="open" allows anyone to DM the bot.`,
+        remediation: `Use pairing/allowlist; if you really need open DMs, ensure ${allowFromKey} includes "*".`,
+      });
+      if (!hasWildcard) {
+        findings.push({
+          checkId: `channels.${input.provider}.dm.open_invalid`,
+          severity: "warn",
+          title: `${input.label} DM config looks inconsistent`,
+          detail: `"open" requires ${allowFromKey} to include "*".`,
+        });
+      }
+      return;
+    }
+
+    if (input.dmPolicy === "disabled") {
+      findings.push({
+        checkId: `channels.${input.provider}.dm.disabled`,
+        severity: "info",
+        title: `${input.label} DMs are disabled`,
+        detail: `${policyPath}="disabled" ignores inbound DMs.`,
+      });
+    }
+  };
+
+  for (const plugin of params.plugins) {
+    if (!plugin.security) continue;
+    const accountIds = plugin.config.listAccountIds(params.cfg);
+    const defaultAccountId = resolveChannelDefaultAccountId({
+      plugin,
+      cfg: params.cfg,
+      accountIds,
+    });
+    const account = plugin.config.resolveAccount(params.cfg, defaultAccountId);
+    const enabled = plugin.config.isEnabled ? plugin.config.isEnabled(account, params.cfg) : true;
+    if (!enabled) continue;
+    const configured = plugin.config.isConfigured
+      ? await plugin.config.isConfigured(account, params.cfg)
+      : true;
+    if (!configured) continue;
+
+    const dmPolicy = plugin.security.resolveDmPolicy?.({
+      cfg: params.cfg,
+      accountId: defaultAccountId,
+      account,
+    });
+    if (dmPolicy) {
+      await warnDmPolicy({
+        label: plugin.meta.label ?? plugin.id,
+        provider: plugin.id,
+        dmPolicy: dmPolicy.policy,
+        allowFrom: dmPolicy.allowFrom,
+        policyPath: dmPolicy.policyPath,
+        allowFromPath: dmPolicy.allowFromPath,
+      });
+    }
+
+    if (plugin.security.collectWarnings) {
+      const warnings = await plugin.security.collectWarnings({
+        cfg: params.cfg,
+        accountId: defaultAccountId,
+        account,
+      });
+      for (const message of warnings ?? []) {
+        const trimmed = String(message).trim();
+        if (!trimmed) continue;
+        findings.push({
+          checkId: `channels.${plugin.id}.warning.${findings.length + 1}`,
+          severity: classifyChannelWarningSeverity(trimmed),
+          title: `${plugin.meta.label ?? plugin.id} security warning`,
+          detail: trimmed.replace(/^-\s*/, ""),
+        });
+      }
+    }
+  }
+
+  return findings;
+}
+
 async function maybeProbeGateway(params: {
-  cfg: OpenClawConfig;
+  cfg: ClawdbotConfig;
   timeoutMs: number;
   probe: typeof probeGateway;
 }): Promise<SecurityAuditReport["deep"]> {
@@ -583,10 +496,10 @@ async function maybeProbeGateway(params: {
         ? typeof remote?.token === "string" && remote.token.trim()
           ? remote.token.trim()
           : undefined
-        : process.env.OPENCLAW_GATEWAY_TOKEN?.trim() ||
+        : process.env.CLAWDBOT_GATEWAY_TOKEN?.trim() ||
           (typeof authToken === "string" && authToken.trim() ? authToken.trim() : undefined);
     const password =
-      process.env.OPENCLAW_GATEWAY_PASSWORD?.trim() ||
+      process.env.CLAWDBOT_GATEWAY_PASSWORD?.trim() ||
       (mode === "remote"
         ? typeof remote?.password === "string" && remote.password.trim()
           ? remote.password.trim()
@@ -597,7 +510,7 @@ async function maybeProbeGateway(params: {
     return { token, password };
   };
 
-  const auth = !isRemoteMode || remoteUrlMissing ? resolveAuth("local") : resolveAuth("remote");
+  const auth = remoteUrlMissing ? resolveAuth("local") : resolveAuth("remote");
   const res = await params.probe({ url, auth, timeoutMs: params.timeoutMs }).catch((err) => ({
     ok: false,
     url,
@@ -624,27 +537,20 @@ async function maybeProbeGateway(params: {
 export async function runSecurityAudit(opts: SecurityAuditOptions): Promise<SecurityAuditReport> {
   const findings: SecurityAuditFinding[] = [];
   const cfg = opts.config;
-  const env = opts.env ?? process.env;
-  const platform = opts.platform ?? process.platform;
-  const execIcacls = opts.execIcacls;
+  const env = process.env;
   const stateDir = opts.stateDir ?? resolveStateDir(env);
   const configPath = opts.configPath ?? resolveConfigPath(env, stateDir);
 
   findings.push(...collectAttackSurfaceSummaryFindings(cfg));
   findings.push(...collectSyncedFolderFindings({ stateDir, configPath }));
 
-  findings.push(...collectGatewayConfigFindings(cfg, env));
-  findings.push(...collectBrowserControlFindings(cfg, env));
+  findings.push(...collectGatewayConfigFindings(cfg));
+  findings.push(...collectBrowserControlFindings(cfg));
   findings.push(...collectLoggingFindings(cfg));
   findings.push(...collectElevatedFindings(cfg));
-  findings.push(...collectHooksHardeningFindings(cfg, env));
-  findings.push(...collectGatewayHttpSessionKeyOverrideFindings(cfg));
-  findings.push(...collectSandboxDockerNoopFindings(cfg));
-  findings.push(...collectNodeDenyCommandPatternFindings(cfg));
-  findings.push(...collectMinimalProfileOverrideFindings(cfg));
+  findings.push(...collectHooksHardeningFindings(cfg));
   findings.push(...collectSecretsInConfigFindings(cfg));
   findings.push(...collectModelHygieneFindings(cfg));
-  findings.push(...collectSmallModelRiskFindings({ cfg, env }));
   findings.push(...collectExposureMatrixFindings(cfg));
 
   const configSnapshot =
@@ -653,28 +559,12 @@ export async function runSecurityAudit(opts: SecurityAuditOptions): Promise<Secu
       : null;
 
   if (opts.includeFilesystem !== false) {
-    findings.push(
-      ...(await collectFilesystemFindings({
-        stateDir,
-        configPath,
-        env,
-        platform,
-        execIcacls,
-      })),
-    );
+    findings.push(...(await collectFilesystemFindings({ stateDir, configPath })));
     if (configSnapshot) {
-      findings.push(
-        ...(await collectIncludeFilePermFindings({ configSnapshot, env, platform, execIcacls })),
-      );
+      findings.push(...(await collectIncludeFilePermFindings({ configSnapshot })));
     }
-    findings.push(
-      ...(await collectStateDeepFilesystemFindings({ cfg, env, stateDir, platform, execIcacls })),
-    );
+    findings.push(...(await collectStateDeepFilesystemFindings({ cfg, env, stateDir })));
     findings.push(...(await collectPluginsTrustFindings({ cfg, stateDir })));
-    if (opts.deep === true) {
-      findings.push(...(await collectPluginsCodeSafetyFindings({ stateDir })));
-      findings.push(...(await collectInstalledSkillsCodeSafetyFindings({ cfg, stateDir })));
-    }
   }
 
   if (opts.includeChannelSecurity !== false) {
@@ -691,13 +581,13 @@ export async function runSecurityAudit(opts: SecurityAuditOptions): Promise<Secu
         })
       : undefined;
 
-  if (deep?.gateway?.attempted && !deep.gateway.ok) {
+  if (deep?.gateway?.attempted && deep.gateway.ok === false) {
     findings.push({
       checkId: "gateway.probe_failed",
       severity: "warn",
       title: "Gateway probe failed (deep)",
       detail: deep.gateway.error ?? "gateway unreachable",
-      remediation: `Run "${formatCliCommand("openclaw status --all")}" to debug connectivity/auth, then re-run "${formatCliCommand("openclaw security audit --deep")}".`,
+      remediation: `Run "clawdbot status --all" to debug connectivity/auth, then re-run "clawdbot security audit --deep".`,
     });
   }
 

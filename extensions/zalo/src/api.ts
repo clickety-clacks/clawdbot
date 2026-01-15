@@ -122,9 +122,7 @@ export async function callZaloApi<T = unknown>(
 
     return data;
   } finally {
-    if (timeoutId) {
-      clearTimeout(timeoutId);
-    }
+    if (timeoutId) clearTimeout(timeoutId);
   }
 }
 

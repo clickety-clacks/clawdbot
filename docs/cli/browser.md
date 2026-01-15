@@ -1,64 +1,58 @@
 ---
-summary: "CLI reference for `openclaw browser` (profiles, tabs, actions, extension relay)"
+summary: "CLI reference for `clawdbot browser` (profiles, tabs, actions, extension relay, remote serve)"
 read_when:
-  - You use `openclaw browser` and want examples for common tasks
-  - You want to control a browser running on another machine via a node host
+  - You use `clawdbot browser` and want examples for common tasks
+  - You want to control a remote browser via `browser.controlUrl`
   - You want to use the Chrome extension relay (attach/detach via toolbar button)
-title: "browser"
 ---
 
-# `openclaw browser`
+# `clawdbot browser`
 
-Manage OpenClaw’s browser control server and run browser actions (tabs, snapshots, screenshots, navigation, clicks, typing).
+Manage Clawdbot’s browser control server and run browser actions (tabs, snapshots, screenshots, navigation, clicks, typing).
 
 Related:
-
 - Browser tool + API: [Browser tool](/tools/browser)
 - Chrome extension relay: [Chrome extension](/tools/chrome-extension)
 
 ## Common flags
 
-- `--url <gatewayWsUrl>`: Gateway WebSocket URL (defaults to config).
-- `--token <token>`: Gateway token (if required).
-- `--timeout <ms>`: request timeout (ms).
-- `--browser-profile <name>`: choose a browser profile (default from config).
+- `--url <controlUrl>`: override `browser.controlUrl` for this command invocation.
+- `--browser-profile <name>`: choose a browser profile (default comes from config).
 - `--json`: machine-readable output (where supported).
 
 ## Quick start (local)
 
 ```bash
-openclaw browser --browser-profile chrome tabs
-openclaw browser --browser-profile openclaw start
-openclaw browser --browser-profile openclaw open https://example.com
-openclaw browser --browser-profile openclaw snapshot
+clawdbot browser status
+clawdbot browser start
+clawdbot browser tabs
+clawdbot browser open https://example.com
+clawdbot browser snapshot
 ```
 
 ## Profiles
 
-Profiles are named browser routing configs. In practice:
-
-- `openclaw`: launches/attaches to a dedicated OpenClaw-managed Chrome instance (isolated user data dir).
-- `chrome`: controls your existing Chrome tab(s) via the Chrome extension relay.
+Profiles are named browser instances with their own data directory and CDP settings.
 
 ```bash
-openclaw browser profiles
-openclaw browser create-profile --name work --color "#FF5A36"
-openclaw browser delete-profile --name work
+clawdbot browser profiles
+clawdbot browser create-profile --name work --color "#FF5A36"
+clawdbot browser delete-profile --name work
 ```
 
 Use a specific profile:
 
 ```bash
-openclaw browser --browser-profile work tabs
+clawdbot browser --browser-profile work tabs
 ```
 
 ## Tabs
 
 ```bash
-openclaw browser tabs
-openclaw browser open https://docs.openclaw.ai
-openclaw browser focus <targetId>
-openclaw browser close <targetId>
+clawdbot browser tabs
+clawdbot browser open https://docs.clawd.bot
+clawdbot browser focus <targetId>
+clawdbot browser close <targetId>
 ```
 
 ## Snapshot / screenshot / actions
@@ -66,21 +60,21 @@ openclaw browser close <targetId>
 Snapshot:
 
 ```bash
-openclaw browser snapshot
+clawdbot browser snapshot
 ```
 
 Screenshot:
 
 ```bash
-openclaw browser screenshot
+clawdbot browser screenshot
 ```
 
 Navigate/click/type (ref-based UI automation):
 
 ```bash
-openclaw browser navigate https://example.com
-openclaw browser click <ref>
-openclaw browser type <ref> "hello"
+clawdbot browser navigate https://example.com
+clawdbot browser click <ref>
+clawdbot browser type <ref> "hello"
 ```
 
 ## Chrome extension relay (attach via toolbar button)
@@ -90,18 +84,23 @@ This mode lets the agent control an existing Chrome tab that you attach manually
 Install the unpacked extension to a stable path:
 
 ```bash
-openclaw browser extension install
-openclaw browser extension path
+clawdbot browser extension install
+clawdbot browser extension path
 ```
 
 Then Chrome → `chrome://extensions` → enable “Developer mode” → “Load unpacked” → select the printed folder.
 
 Full guide: [Chrome extension](/tools/chrome-extension)
 
-## Remote browser control (node host proxy)
+## Remote browser control (`clawdbot browser serve`)
 
-If the Gateway runs on a different machine than the browser, run a **node host** on the machine that has Chrome/Brave/Edge/Chromium. The Gateway will proxy browser actions to that node (no separate browser control server required).
+If the Gateway runs on a different machine than the browser, run a standalone browser control server on the machine that runs Chrome:
 
-Use `gateway.nodes.browser.mode` to control auto-routing and `gateway.nodes.browser.node` to pin a specific node if multiple are connected.
+```bash
+clawdbot browser serve --bind 127.0.0.1 --port 18791 --token <token>
+```
 
-Security + remote setup: [Browser tool](/tools/browser), [Remote access](/gateway/remote), [Tailscale](/gateway/tailscale), [Security](/gateway/security)
+Then point the Gateway at it using `browser.controlUrl` + `browser.controlToken` (or `CLAWDBOT_BROWSER_CONTROL_TOKEN`).
+
+Security + TLS best-practices: [Browser tool](/tools/browser), [Tailscale](/gateway/tailscale), [Security](/gateway/security)
+

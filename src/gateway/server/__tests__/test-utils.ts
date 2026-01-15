@@ -4,16 +4,11 @@ export const createTestRegistry = (overrides: Partial<PluginRegistry> = {}): Plu
   const base: PluginRegistry = {
     plugins: [],
     tools: [],
-    hooks: [],
-    typedHooks: [],
     channels: [],
-    providers: [],
     gatewayHandlers: {},
     httpHandlers: [],
-    httpRoutes: [],
     cliRegistrars: [],
     services: [],
-    commands: [],
     diagnostics: [],
   };
   const merged = { ...base, ...overrides };
@@ -21,6 +16,5 @@ export const createTestRegistry = (overrides: Partial<PluginRegistry> = {}): Plu
     ...merged,
     gatewayHandlers: merged.gatewayHandlers ?? {},
     httpHandlers: merged.httpHandlers ?? [],
-    httpRoutes: merged.httpRoutes ?? [],
   };
 };

@@ -1,63 +1,67 @@
 import fs from "node:fs";
 import path from "node:path";
+import { resolveAgentWorkspaceDir, resolveDefaultAgentId } from "../../agents/agent-scope.js";
 import type { ChannelPluginCatalogEntry } from "../../channels/plugins/catalog.js";
-import type { OpenClawConfig } from "../../config/config.js";
+import type { ClawdbotConfig } from "../../config/config.js";
+import { createSubsystemLogger } from "../../logging.js";
+import { loadClawdbotPlugins } from "../../plugins/loader.js";
+import { installPluginFromNpmSpec } from "../../plugins/install.js";
 import type { RuntimeEnv } from "../../runtime.js";
 import type { WizardPrompter } from "../../wizard/prompts.js";
-import { resolveAgentWorkspaceDir, resolveDefaultAgentId } from "../../agents/agent-scope.js";
-import { createSubsystemLogger } from "../../logging/subsystem.js";
-import { enablePluginInConfig } from "../../plugins/enable.js";
-import { installPluginFromNpmSpec } from "../../plugins/install.js";
-import { recordPluginInstall } from "../../plugins/installs.js";
-import { loadOpenClawPlugins } from "../../plugins/loader.js";
 
 type InstallChoice = "npm" | "local" | "skip";
 
 type InstallResult = {
-  cfg: OpenClawConfig;
+  cfg: ClawdbotConfig;
   installed: boolean;
 };
 
-function hasGitWorkspace(workspaceDir?: string): boolean {
-  const candidates = new Set<string>();
-  candidates.add(path.join(process.cwd(), ".git"));
-  if (workspaceDir && workspaceDir !== process.cwd()) {
-    candidates.add(path.join(workspaceDir, ".git"));
-  }
-  for (const candidate of candidates) {
-    if (fs.existsSync(candidate)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function resolveLocalPath(
-  entry: ChannelPluginCatalogEntry,
-  workspaceDir: string | undefined,
-  allowLocal: boolean,
-): string | null {
-  if (!allowLocal) {
-    return null;
-  }
+function resolveLocalPath(entry: ChannelPluginCatalogEntry, workspaceDir?: string): string | null {
   const raw = entry.install.localPath?.trim();
-  if (!raw) {
-    return null;
-  }
+  if (!raw) return null;
   const candidates = new Set<string>();
   candidates.add(path.resolve(process.cwd(), raw));
   if (workspaceDir && workspaceDir !== process.cwd()) {
     candidates.add(path.resolve(workspaceDir, raw));
   }
   for (const candidate of candidates) {
-    if (fs.existsSync(candidate)) {
-      return candidate;
-    }
+    if (fs.existsSync(candidate)) return candidate;
   }
   return null;
 }
 
-function addPluginLoadPath(cfg: OpenClawConfig, pluginPath: string): OpenClawConfig {
+function ensurePluginEnabled(cfg: ClawdbotConfig, pluginId: string): ClawdbotConfig {
+  const entries = {
+    ...cfg.plugins?.entries,
+    [pluginId]: {
+      ...(cfg.plugins?.entries?.[pluginId] as Record<string, unknown> | undefined),
+      enabled: true,
+    },
+  };
+  const next: ClawdbotConfig = {
+    ...cfg,
+    plugins: {
+      ...cfg.plugins,
+      ...(cfg.plugins?.enabled === false ? { enabled: true } : {}),
+      entries,
+    },
+  };
+  return ensurePluginAllowlist(next, pluginId);
+}
+
+function ensurePluginAllowlist(cfg: ClawdbotConfig, pluginId: string): ClawdbotConfig {
+  const allow = cfg.plugins?.allow;
+  if (!allow || allow.includes(pluginId)) return cfg;
+  return {
+    ...cfg,
+    plugins: {
+      ...cfg.plugins,
+      allow: [...allow, pluginId],
+    },
+  };
+}
+
+function addPluginLoadPath(cfg: ClawdbotConfig, pluginPath: string): ClawdbotConfig {
   const existing = cfg.plugins?.load?.paths ?? [];
   const merged = Array.from(new Set([...existing, pluginPath]));
   return {
@@ -75,10 +79,9 @@ function addPluginLoadPath(cfg: OpenClawConfig, pluginPath: string): OpenClawCon
 async function promptInstallChoice(params: {
   entry: ChannelPluginCatalogEntry;
   localPath?: string | null;
-  defaultChoice: InstallChoice;
   prompter: WizardPrompter;
 }): Promise<InstallChoice> {
-  const { entry, localPath, prompter, defaultChoice } = params;
+  const { entry, localPath, prompter } = params;
   const localOptions: Array<{ value: InstallChoice; label: string; hint?: string }> = localPath
     ? [
         {
@@ -93,8 +96,7 @@ async function promptInstallChoice(params: {
     ...localOptions,
     { value: "skip", label: "Skip for now" },
   ];
-  const initialValue: InstallChoice =
-    defaultChoice === "local" && !localPath ? "npm" : defaultChoice;
+  const initialValue: InstallChoice = localPath ? "local" : "npm";
   return await prompter.select<InstallChoice>({
     message: `Install ${entry.meta.label} plugin?`,
     options,
@@ -102,31 +104,8 @@ async function promptInstallChoice(params: {
   });
 }
 
-function resolveInstallDefaultChoice(params: {
-  cfg: OpenClawConfig;
-  entry: ChannelPluginCatalogEntry;
-  localPath?: string | null;
-}): InstallChoice {
-  const { cfg, entry, localPath } = params;
-  const updateChannel = cfg.update?.channel;
-  if (updateChannel === "dev") {
-    return localPath ? "local" : "npm";
-  }
-  if (updateChannel === "stable" || updateChannel === "beta") {
-    return "npm";
-  }
-  const entryDefault = entry.install.defaultChoice;
-  if (entryDefault === "local") {
-    return localPath ? "local" : "npm";
-  }
-  if (entryDefault === "npm") {
-    return "npm";
-  }
-  return localPath ? "local" : "npm";
-}
-
 export async function ensureOnboardingPluginInstalled(params: {
-  cfg: OpenClawConfig;
+  cfg: ClawdbotConfig;
   entry: ChannelPluginCatalogEntry;
   prompter: WizardPrompter;
   runtime: RuntimeEnv;
@@ -134,17 +113,10 @@ export async function ensureOnboardingPluginInstalled(params: {
 }): Promise<InstallResult> {
   const { entry, prompter, runtime, workspaceDir } = params;
   let next = params.cfg;
-  const allowLocal = hasGitWorkspace(workspaceDir);
-  const localPath = resolveLocalPath(entry, workspaceDir, allowLocal);
-  const defaultChoice = resolveInstallDefaultChoice({
-    cfg: next,
-    entry,
-    localPath,
-  });
+  const localPath = resolveLocalPath(entry, workspaceDir);
   const choice = await promptInstallChoice({
     entry,
     localPath,
-    defaultChoice,
     prompter,
   });
 
@@ -154,7 +126,7 @@ export async function ensureOnboardingPluginInstalled(params: {
 
   if (choice === "local" && localPath) {
     next = addPluginLoadPath(next, localPath);
-    next = enablePluginInConfig(next, entry.id).config;
+    next = ensurePluginEnabled(next, entry.id);
     return { cfg: next, installed: true };
   }
 
@@ -167,14 +139,7 @@ export async function ensureOnboardingPluginInstalled(params: {
   });
 
   if (result.ok) {
-    next = enablePluginInConfig(next, result.pluginId).config;
-    next = recordPluginInstall(next, {
-      pluginId: result.pluginId,
-      source: "npm",
-      spec: entry.install.npmSpec,
-      installPath: result.targetDir,
-      version: result.version,
-    });
+    next = ensurePluginEnabled(next, result.pluginId);
     return { cfg: next, installed: true };
   }
 
@@ -190,7 +155,7 @@ export async function ensureOnboardingPluginInstalled(params: {
     });
     if (fallback) {
       next = addPluginLoadPath(next, localPath);
-      next = enablePluginInConfig(next, entry.id).config;
+      next = ensurePluginEnabled(next, entry.id);
       return { cfg: next, installed: true };
     }
   }
@@ -200,14 +165,14 @@ export async function ensureOnboardingPluginInstalled(params: {
 }
 
 export function reloadOnboardingPluginRegistry(params: {
-  cfg: OpenClawConfig;
+  cfg: ClawdbotConfig;
   runtime: RuntimeEnv;
   workspaceDir?: string;
 }): void {
   const workspaceDir =
     params.workspaceDir ?? resolveAgentWorkspaceDir(params.cfg, resolveDefaultAgentId(params.cfg));
   const log = createSubsystemLogger("plugins");
-  loadOpenClawPlugins({
+  loadClawdbotPlugins({
     config: params.cfg,
     workspaceDir,
     cache: false,

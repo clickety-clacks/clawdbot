@@ -1,14 +1,14 @@
-import type { OpenClawConfig } from "openclaw/plugin-sdk";
+import type { CoreConfig } from "./types.js";
 import type { ZaloFetch } from "./api.js";
-import { resolveZaloAccount } from "./accounts.js";
 import { sendMessage, sendPhoto } from "./api.js";
+import { resolveZaloAccount } from "./accounts.js";
 import { resolveZaloProxyFetch } from "./proxy.js";
 import { resolveZaloToken } from "./token.js";
 
 export type ZaloSendOptions = {
   token?: string;
   accountId?: string;
-  cfg?: OpenClawConfig;
+  cfg?: CoreConfig;
   mediaUrl?: string;
   caption?: string;
   verbose?: boolean;
@@ -37,7 +37,7 @@ function resolveSendContext(options: ZaloSendOptions): {
 
   const token = options.token ?? resolveZaloToken(undefined, options.accountId).token;
   const proxy = options.proxy;
-  return { token, fetcher: resolveZaloProxyFetch(proxy) };
+  return { token: token || process.env.ZALO_BOT_TOKEN?.trim() || "", fetcher: resolveZaloProxyFetch(proxy) };
 }
 
 export async function sendMessageZalo(
@@ -64,14 +64,10 @@ export async function sendMessageZalo(
   }
 
   try {
-    const response = await sendMessage(
-      token,
-      {
-        chat_id: chatId.trim(),
-        text: text.slice(0, 2000),
-      },
-      fetcher,
-    );
+    const response = await sendMessage(token, {
+      chat_id: chatId.trim(),
+      text: text.slice(0, 2000),
+    }, fetcher);
 
     if (response.ok && response.result) {
       return { ok: true, messageId: response.result.message_id };
@@ -103,15 +99,11 @@ export async function sendPhotoZalo(
   }
 
   try {
-    const response = await sendPhoto(
-      token,
-      {
-        chat_id: chatId.trim(),
-        photo: photoUrl.trim(),
-        caption: options.caption?.slice(0, 2000),
-      },
-      fetcher,
-    );
+    const response = await sendPhoto(token, {
+      chat_id: chatId.trim(),
+      photo: photoUrl.trim(),
+      caption: options.caption?.slice(0, 2000),
+    }, fetcher);
 
     if (response.ok && response.result) {
       return { ok: true, messageId: response.result.message_id };

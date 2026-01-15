@@ -1,33 +1,24 @@
-import type {
-  ChannelAccountSnapshot,
-  ChannelDock,
-  ChannelPlugin,
-  OpenClawConfig,
-} from "openclaw/plugin-sdk";
+import type { ChannelDock, ChannelPlugin } from "../../src/channels/plugins/types.js";
+import type { ChannelAccountSnapshot } from "../../src/channels/plugins/types.js";
+
+import { listZaloAccountIds, resolveDefaultZaloAccountId, resolveZaloAccount, type ResolvedZaloAccount } from "./accounts.js";
+import { zaloMessageActions } from "./actions.js";
+import {
+  deleteAccountFromConfigSection,
+  setAccountEnabledInConfigSection,
+} from "./shared/channel-config.js";
+import { zaloOnboardingAdapter } from "./onboarding.js";
+import { formatPairingApproveHint, PAIRING_APPROVED_MESSAGE } from "./shared/pairing.js";
+import { resolveZaloProxyFetch } from "./proxy.js";
+import { probeZalo } from "./probe.js";
+import { sendMessageZalo } from "./send.js";
 import {
   applyAccountNameToChannelSection,
-  buildChannelConfigSchema,
-  DEFAULT_ACCOUNT_ID,
-  deleteAccountFromConfigSection,
-  formatPairingApproveHint,
   migrateBaseNameToDefaultAccount,
-  normalizeAccountId,
-  PAIRING_APPROVED_MESSAGE,
-  setAccountEnabledInConfigSection,
-} from "openclaw/plugin-sdk";
-import {
-  listZaloAccountIds,
-  resolveDefaultZaloAccountId,
-  resolveZaloAccount,
-  type ResolvedZaloAccount,
-} from "./accounts.js";
-import { zaloMessageActions } from "./actions.js";
-import { ZaloConfigSchema } from "./config-schema.js";
-import { zaloOnboardingAdapter } from "./onboarding.js";
-import { probeZalo } from "./probe.js";
-import { resolveZaloProxyFetch } from "./proxy.js";
-import { sendMessageZalo } from "./send.js";
+} from "./shared/channel-setup.js";
 import { collectZaloStatusIssues } from "./status-issues.js";
+import type { CoreConfig } from "./types.js";
+import { DEFAULT_ACCOUNT_ID, normalizeAccountId } from "./shared/account-ids.js";
 
 const meta = {
   id: "zalo",
@@ -41,11 +32,10 @@ const meta = {
   quickstartAllowFrom: true,
 };
 
+
 function normalizeZaloMessagingTarget(raw: string): string | undefined {
   const trimmed = raw?.trim();
-  if (!trimmed) {
-    return undefined;
-  }
+  if (!trimmed) return undefined;
   return trimmed.replace(/^(zalo|zl):/i, "");
 }
 
@@ -59,8 +49,8 @@ export const zaloDock: ChannelDock = {
   outbound: { textChunkLimit: 2000 },
   config: {
     resolveAllowFrom: ({ cfg, accountId }) =>
-      (resolveZaloAccount({ cfg: cfg, accountId }).config.allowFrom ?? []).map((entry) =>
-        String(entry),
+      (resolveZaloAccount({ cfg: cfg as CoreConfig, accountId }).config.allowFrom ?? []).map(
+        (entry) => String(entry),
       ),
     formatAllowFrom: ({ allowFrom }) =>
       allowFrom
@@ -91,14 +81,13 @@ export const zaloPlugin: ChannelPlugin<ResolvedZaloAccount> = {
     blockStreaming: true,
   },
   reload: { configPrefixes: ["channels.zalo"] },
-  configSchema: buildChannelConfigSchema(ZaloConfigSchema),
   config: {
-    listAccountIds: (cfg) => listZaloAccountIds(cfg),
-    resolveAccount: (cfg, accountId) => resolveZaloAccount({ cfg: cfg, accountId }),
-    defaultAccountId: (cfg) => resolveDefaultZaloAccountId(cfg),
+    listAccountIds: (cfg) => listZaloAccountIds(cfg as CoreConfig),
+    resolveAccount: (cfg, accountId) => resolveZaloAccount({ cfg: cfg as CoreConfig, accountId }),
+    defaultAccountId: (cfg) => resolveDefaultZaloAccountId(cfg as CoreConfig),
     setAccountEnabled: ({ cfg, accountId, enabled }) =>
       setAccountEnabledInConfigSection({
-        cfg: cfg,
+        cfg: cfg as CoreConfig,
         sectionKey: "zalo",
         accountId,
         enabled,
@@ -106,7 +95,7 @@ export const zaloPlugin: ChannelPlugin<ResolvedZaloAccount> = {
       }),
     deleteAccount: ({ cfg, accountId }) =>
       deleteAccountFromConfigSection({
-        cfg: cfg,
+        cfg: cfg as CoreConfig,
         sectionKey: "zalo",
         accountId,
         clearBaseFields: ["botToken", "tokenFile", "name"],
@@ -120,8 +109,8 @@ export const zaloPlugin: ChannelPlugin<ResolvedZaloAccount> = {
       tokenSource: account.tokenSource,
     }),
     resolveAllowFrom: ({ cfg, accountId }) =>
-      (resolveZaloAccount({ cfg: cfg, accountId }).config.allowFrom ?? []).map((entry) =>
-        String(entry),
+      (resolveZaloAccount({ cfg: cfg as CoreConfig, accountId }).config.allowFrom ?? []).map(
+        (entry) => String(entry),
       ),
     formatAllowFrom: ({ allowFrom }) =>
       allowFrom
@@ -133,7 +122,9 @@ export const zaloPlugin: ChannelPlugin<ResolvedZaloAccount> = {
   security: {
     resolveDmPolicy: ({ cfg, accountId, account }) => {
       const resolvedAccountId = accountId ?? account.accountId ?? DEFAULT_ACCOUNT_ID;
-      const useAccountPath = Boolean(cfg.channels?.zalo?.accounts?.[resolvedAccountId]);
+      const useAccountPath = Boolean(
+        (cfg as CoreConfig).channels?.zalo?.accounts?.[resolvedAccountId],
+      );
       const basePath = useAccountPath
         ? `channels.zalo.accounts.${resolvedAccountId}.`
         : "channels.zalo.";
@@ -156,42 +147,12 @@ export const zaloPlugin: ChannelPlugin<ResolvedZaloAccount> = {
   actions: zaloMessageActions,
   messaging: {
     normalizeTarget: normalizeZaloMessagingTarget,
-    targetResolver: {
-      looksLikeId: (raw) => {
-        const trimmed = raw.trim();
-        if (!trimmed) {
-          return false;
-        }
-        return /^\d{3,}$/.test(trimmed);
-      },
-      hint: "<chatId>",
-    },
-  },
-  directory: {
-    self: async () => null,
-    listPeers: async ({ cfg, accountId, query, limit }) => {
-      const account = resolveZaloAccount({ cfg: cfg, accountId });
-      const q = query?.trim().toLowerCase() || "";
-      const peers = Array.from(
-        new Set(
-          (account.config.allowFrom ?? [])
-            .map((entry) => String(entry).trim())
-            .filter((entry) => Boolean(entry) && entry !== "*")
-            .map((entry) => entry.replace(/^(zalo|zl):/i, "")),
-        ),
-      )
-        .filter((id) => (q ? id.toLowerCase().includes(q) : true))
-        .slice(0, limit && limit > 0 ? limit : undefined)
-        .map((id) => ({ kind: "user", id }) as const);
-      return peers;
-    },
-    listGroups: async () => [],
   },
   setup: {
     resolveAccountId: ({ accountId }) => normalizeAccountId(accountId),
     applyAccountName: ({ cfg, accountId, name }) =>
       applyAccountNameToChannelSection({
-        cfg: cfg,
+        cfg: cfg as CoreConfig,
         channelKey: "zalo",
         accountId,
         name,
@@ -201,13 +162,13 @@ export const zaloPlugin: ChannelPlugin<ResolvedZaloAccount> = {
         return "ZALO_BOT_TOKEN can only be used for the default account.";
       }
       if (!input.useEnv && !input.token && !input.tokenFile) {
-        return "Zalo requires token or --token-file (or --use-env).";
+        return "Zalo requires --token or --token-file (or --use-env).";
       }
       return null;
     },
     applyAccountConfig: ({ cfg, accountId, input }) => {
       const namedConfig = applyAccountNameToChannelSection({
-        cfg: cfg,
+        cfg: cfg as CoreConfig,
         channelKey: "zalo",
         accountId,
         name: input.name,
@@ -236,7 +197,7 @@ export const zaloPlugin: ChannelPlugin<ResolvedZaloAccount> = {
                     : {}),
             },
           },
-        } as OpenClawConfig;
+        } as CoreConfig;
       }
       return {
         ...next,
@@ -246,9 +207,9 @@ export const zaloPlugin: ChannelPlugin<ResolvedZaloAccount> = {
             ...next.channels?.zalo,
             enabled: true,
             accounts: {
-              ...next.channels?.zalo?.accounts,
+              ...(next.channels?.zalo?.accounts ?? {}),
               [accountId]: {
-                ...next.channels?.zalo?.accounts?.[accountId],
+                ...(next.channels?.zalo?.accounts?.[accountId] ?? {}),
                 enabled: true,
                 ...(input.tokenFile
                   ? { tokenFile: input.tokenFile }
@@ -259,29 +220,23 @@ export const zaloPlugin: ChannelPlugin<ResolvedZaloAccount> = {
             },
           },
         },
-      } as OpenClawConfig;
+      } as CoreConfig;
     },
   },
   pairing: {
     idLabel: "zaloUserId",
     normalizeAllowEntry: (entry) => entry.replace(/^(zalo|zl):/i, ""),
     notifyApproval: async ({ cfg, id }) => {
-      const account = resolveZaloAccount({ cfg: cfg });
-      if (!account.token) {
-        throw new Error("Zalo token not configured");
-      }
+      const account = resolveZaloAccount({ cfg: cfg as CoreConfig });
+      if (!account.token) throw new Error("Zalo token not configured");
       await sendMessageZalo(id, PAIRING_APPROVED_MESSAGE, { token: account.token });
     },
   },
   outbound: {
     deliveryMode: "direct",
     chunker: (text, limit) => {
-      if (!text) {
-        return [];
-      }
-      if (limit <= 0 || text.length <= limit) {
-        return [text];
-      }
+      if (!text) return [];
+      if (limit <= 0 || text.length <= limit) return [text];
       const chunks: string[] = [];
       let remaining = text;
       while (remaining.length > limit) {
@@ -289,29 +244,32 @@ export const zaloPlugin: ChannelPlugin<ResolvedZaloAccount> = {
         const lastNewline = window.lastIndexOf("\n");
         const lastSpace = window.lastIndexOf(" ");
         let breakIdx = lastNewline > 0 ? lastNewline : lastSpace;
-        if (breakIdx <= 0) {
-          breakIdx = limit;
-        }
+        if (breakIdx <= 0) breakIdx = limit;
         const rawChunk = remaining.slice(0, breakIdx);
         const chunk = rawChunk.trimEnd();
-        if (chunk.length > 0) {
-          chunks.push(chunk);
-        }
+        if (chunk.length > 0) chunks.push(chunk);
         const brokeOnSeparator = breakIdx < remaining.length && /\s/.test(remaining[breakIdx]);
         const nextStart = Math.min(remaining.length, breakIdx + (brokeOnSeparator ? 1 : 0));
         remaining = remaining.slice(nextStart).trimStart();
       }
-      if (remaining.length) {
-        chunks.push(remaining);
-      }
+      if (remaining.length) chunks.push(remaining);
       return chunks;
     },
-    chunkerMode: "text",
     textChunkLimit: 2000,
+    resolveTarget: ({ to }) => {
+      const trimmed = to?.trim();
+      if (!trimmed) {
+        return {
+          ok: false,
+          error: new Error("Delivering to Zalo requires --to <chatId>"),
+        };
+      }
+      return { ok: true, to: trimmed };
+    },
     sendText: async ({ to, text, accountId, cfg }) => {
       const result = await sendMessageZalo(to, text, {
         accountId: accountId ?? undefined,
-        cfg: cfg,
+        cfg: cfg as CoreConfig,
       });
       return {
         channel: "zalo",
@@ -324,7 +282,7 @@ export const zaloPlugin: ChannelPlugin<ResolvedZaloAccount> = {
       const result = await sendMessageZalo(to, text, {
         accountId: accountId ?? undefined,
         mediaUrl,
-        cfg: cfg,
+        cfg: cfg as CoreConfig,
       });
       return {
         channel: "zalo",
@@ -384,9 +342,7 @@ export const zaloPlugin: ChannelPlugin<ResolvedZaloAccount> = {
       try {
         const probe = await probeZalo(token, 2500, fetcher);
         const name = probe.ok ? probe.bot?.name?.trim() : null;
-        if (name) {
-          zaloBotLabel = ` (${name})`;
-        }
+        if (name) zaloBotLabel = ` (${name})`;
         ctx.setStatus({
           accountId: account.accountId,
           bot: probe.bot,
@@ -399,7 +355,7 @@ export const zaloPlugin: ChannelPlugin<ResolvedZaloAccount> = {
       return monitorZaloProvider({
         token,
         account,
-        config: ctx.cfg,
+        config: ctx.cfg as CoreConfig,
         runtime: ctx.runtime,
         abortSignal: ctx.abortSignal,
         useWebhook: Boolean(account.config.webhookUrl),

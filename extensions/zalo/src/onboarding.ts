@@ -1,27 +1,21 @@
-import type {
-  ChannelOnboardingAdapter,
-  ChannelOnboardingDmPolicy,
-  OpenClawConfig,
-  WizardPrompter,
-} from "openclaw/plugin-sdk";
+import type { ChannelOnboardingAdapter, ChannelOnboardingDmPolicy } from "../../src/channels/plugins/onboarding-types.js";
+import type { WizardPrompter } from "../../src/wizard/prompts.js";
+
+import { addWildcardAllowFrom, promptAccountId } from "./shared/onboarding.js";
+import { DEFAULT_ACCOUNT_ID, normalizeAccountId } from "./shared/account-ids.js";
 import {
-  addWildcardAllowFrom,
-  DEFAULT_ACCOUNT_ID,
-  normalizeAccountId,
-  promptAccountId,
-} from "openclaw/plugin-sdk";
-import { listZaloAccountIds, resolveDefaultZaloAccountId, resolveZaloAccount } from "./accounts.js";
+  listZaloAccountIds,
+  resolveDefaultZaloAccountId,
+  resolveZaloAccount,
+} from "./accounts.js";
+import type { CoreConfig } from "./types.js";
 
 const channel = "zalo" as const;
 
 type UpdateMode = "polling" | "webhook";
 
-function setZaloDmPolicy(
-  cfg: OpenClawConfig,
-  dmPolicy: "pairing" | "allowlist" | "open" | "disabled",
-) {
-  const allowFrom =
-    dmPolicy === "open" ? addWildcardAllowFrom(cfg.channels?.zalo?.allowFrom) : undefined;
+function setZaloDmPolicy(cfg: CoreConfig, dmPolicy: "pairing" | "allowlist" | "open" | "disabled") {
+  const allowFrom = dmPolicy === "open" ? addWildcardAllowFrom(cfg.channels?.zalo?.allowFrom) : undefined;
   return {
     ...cfg,
     channels: {
@@ -32,17 +26,17 @@ function setZaloDmPolicy(
         ...(allowFrom ? { allowFrom } : {}),
       },
     },
-  } as OpenClawConfig;
+  } as CoreConfig;
 }
 
 function setZaloUpdateMode(
-  cfg: OpenClawConfig,
+  cfg: CoreConfig,
   accountId: string,
   mode: UpdateMode,
   webhookUrl?: string,
   webhookSecret?: string,
   webhookPath?: string,
-): OpenClawConfig {
+): CoreConfig {
   const isDefault = accountId === DEFAULT_ACCOUNT_ID;
   if (mode === "polling") {
     if (isDefault) {
@@ -58,11 +52,19 @@ function setZaloUpdateMode(
           ...cfg.channels,
           zalo: rest,
         },
-      } as OpenClawConfig;
+      } as CoreConfig;
     }
-    const accounts = { ...cfg.channels?.zalo?.accounts } as Record<string, Record<string, unknown>>;
+    const accounts = { ...(cfg.channels?.zalo?.accounts ?? {}) } as Record<
+      string,
+      Record<string, unknown>
+    >;
     const existing = accounts[accountId] ?? {};
-    const { webhookUrl: _url, webhookSecret: _secret, webhookPath: _path, ...rest } = existing;
+    const {
+      webhookUrl: _url,
+      webhookSecret: _secret,
+      webhookPath: _path,
+      ...rest
+    } = existing;
     accounts[accountId] = rest;
     return {
       ...cfg,
@@ -73,7 +75,7 @@ function setZaloUpdateMode(
           accounts,
         },
       },
-    } as OpenClawConfig;
+    } as CoreConfig;
   }
 
   if (isDefault) {
@@ -88,12 +90,15 @@ function setZaloUpdateMode(
           webhookPath,
         },
       },
-    } as OpenClawConfig;
+    } as CoreConfig;
   }
 
-  const accounts = { ...cfg.channels?.zalo?.accounts } as Record<string, Record<string, unknown>>;
+  const accounts = { ...(cfg.channels?.zalo?.accounts ?? {}) } as Record<
+    string,
+    Record<string, unknown>
+  >;
   accounts[accountId] = {
-    ...accounts[accountId],
+    ...(accounts[accountId] ?? {}),
     webhookUrl,
     webhookSecret,
     webhookPath,
@@ -107,7 +112,7 @@ function setZaloUpdateMode(
         accounts,
       },
     },
-  } as OpenClawConfig;
+  } as CoreConfig;
 }
 
 async function noteZaloTokenHelp(prompter: WizardPrompter): Promise<void> {
@@ -117,17 +122,17 @@ async function noteZaloTokenHelp(prompter: WizardPrompter): Promise<void> {
       "2) Create a bot and get the token",
       "3) Token looks like 12345689:abc-xyz",
       "Tip: you can also set ZALO_BOT_TOKEN in your env.",
-      "Docs: https://docs.openclaw.ai/channels/zalo",
+      "Docs: https://docs.clawd.bot/channels/zalo",
     ].join("\n"),
     "Zalo bot token",
   );
 }
 
 async function promptZaloAllowFrom(params: {
-  cfg: OpenClawConfig;
+  cfg: CoreConfig;
   prompter: WizardPrompter;
   accountId: string;
-}): Promise<OpenClawConfig> {
+}): Promise<CoreConfig> {
   const { cfg, prompter, accountId } = params;
   const resolved = resolveZaloAccount({ cfg, accountId });
   const existingAllowFrom = resolved.config.allowFrom ?? [];
@@ -137,12 +142,8 @@ async function promptZaloAllowFrom(params: {
     initialValue: existingAllowFrom[0] ? String(existingAllowFrom[0]) : undefined,
     validate: (value) => {
       const raw = String(value ?? "").trim();
-      if (!raw) {
-        return "Required";
-      }
-      if (!/^\d+$/.test(raw)) {
-        return "Use a numeric Zalo user id";
-      }
+      if (!raw) return "Required";
+      if (!/^\d+$/.test(raw)) return "Use a numeric Zalo user id";
       return undefined;
     },
   });
@@ -165,7 +166,7 @@ async function promptZaloAllowFrom(params: {
           allowFrom: unique,
         },
       },
-    } as OpenClawConfig;
+    } as CoreConfig;
   }
 
   return {
@@ -176,9 +177,9 @@ async function promptZaloAllowFrom(params: {
         ...cfg.channels?.zalo,
         enabled: true,
         accounts: {
-          ...cfg.channels?.zalo?.accounts,
+          ...(cfg.channels?.zalo?.accounts ?? {}),
           [accountId]: {
-            ...cfg.channels?.zalo?.accounts?.[accountId],
+            ...(cfg.channels?.zalo?.accounts?.[accountId] ?? {}),
             enabled: cfg.channels?.zalo?.accounts?.[accountId]?.enabled ?? true,
             dmPolicy: "allowlist",
             allowFrom: unique,
@@ -186,7 +187,7 @@ async function promptZaloAllowFrom(params: {
         },
       },
     },
-  } as OpenClawConfig;
+  } as CoreConfig;
 }
 
 const dmPolicy: ChannelOnboardingDmPolicy = {
@@ -195,26 +196,15 @@ const dmPolicy: ChannelOnboardingDmPolicy = {
   policyKey: "channels.zalo.dmPolicy",
   allowFromKey: "channels.zalo.allowFrom",
   getCurrent: (cfg) => (cfg.channels?.zalo?.dmPolicy ?? "pairing") as "pairing",
-  setPolicy: (cfg, policy) => setZaloDmPolicy(cfg, policy),
-  promptAllowFrom: async ({ cfg, prompter, accountId }) => {
-    const id =
-      accountId && normalizeAccountId(accountId)
-        ? (normalizeAccountId(accountId) ?? DEFAULT_ACCOUNT_ID)
-        : resolveDefaultZaloAccountId(cfg);
-    return promptZaloAllowFrom({
-      cfg: cfg,
-      prompter,
-      accountId: id,
-    });
-  },
+  setPolicy: (cfg, policy) => setZaloDmPolicy(cfg as CoreConfig, policy),
 };
 
 export const zaloOnboardingAdapter: ChannelOnboardingAdapter = {
   channel,
   dmPolicy,
   getStatus: async ({ cfg }) => {
-    const configured = listZaloAccountIds(cfg).some((accountId) =>
-      Boolean(resolveZaloAccount({ cfg: cfg, accountId }).token),
+    const configured = listZaloAccountIds(cfg as CoreConfig).some((accountId) =>
+      Boolean(resolveZaloAccount({ cfg: cfg as CoreConfig, accountId }).token),
     );
     return {
       channel,
@@ -224,19 +214,15 @@ export const zaloOnboardingAdapter: ChannelOnboardingAdapter = {
       quickstartScore: configured ? 1 : 10,
     };
   },
-  configure: async ({
-    cfg,
-    prompter,
-    accountOverrides,
-    shouldPromptAccountIds,
-    forceAllowFrom,
-  }) => {
+  configure: async ({ cfg, prompter, accountOverrides, shouldPromptAccountIds, forceAllowFrom }) => {
     const zaloOverride = accountOverrides.zalo?.trim();
-    const defaultZaloAccountId = resolveDefaultZaloAccountId(cfg);
-    let zaloAccountId = zaloOverride ? normalizeAccountId(zaloOverride) : defaultZaloAccountId;
+    const defaultZaloAccountId = resolveDefaultZaloAccountId(cfg as CoreConfig);
+    let zaloAccountId = zaloOverride
+      ? normalizeAccountId(zaloOverride)
+      : defaultZaloAccountId;
     if (shouldPromptAccountIds && !zaloOverride) {
       zaloAccountId = await promptAccountId({
-        cfg: cfg,
+        cfg: cfg as CoreConfig,
         prompter,
         label: "Zalo",
         currentId: zaloAccountId,
@@ -245,7 +231,7 @@ export const zaloOnboardingAdapter: ChannelOnboardingAdapter = {
       });
     }
 
-    let next = cfg;
+    let next = cfg as CoreConfig;
     const resolvedAccount = resolveZaloAccount({ cfg: next, accountId: zaloAccountId });
     const accountConfigured = Boolean(resolvedAccount.token);
     const allowEnv = zaloAccountId === DEFAULT_ACCOUNT_ID;
@@ -273,7 +259,7 @@ export const zaloOnboardingAdapter: ChannelOnboardingAdapter = {
               enabled: true,
             },
           },
-        } as OpenClawConfig;
+        } as CoreConfig;
       } else {
         token = String(
           await prompter.text({
@@ -316,7 +302,7 @@ export const zaloOnboardingAdapter: ChannelOnboardingAdapter = {
               botToken: token,
             },
           },
-        } as OpenClawConfig;
+        } as CoreConfig;
       } else {
         next = {
           ...next,
@@ -326,16 +312,16 @@ export const zaloOnboardingAdapter: ChannelOnboardingAdapter = {
               ...next.channels?.zalo,
               enabled: true,
               accounts: {
-                ...next.channels?.zalo?.accounts,
+                ...(next.channels?.zalo?.accounts ?? {}),
                 [zaloAccountId]: {
-                  ...next.channels?.zalo?.accounts?.[zaloAccountId],
+                  ...(next.channels?.zalo?.accounts?.[zaloAccountId] ?? {}),
                   enabled: true,
                   botToken: token,
                 },
               },
             },
           },
-        } as OpenClawConfig;
+        } as CoreConfig;
       }
     }
 
@@ -347,8 +333,7 @@ export const zaloOnboardingAdapter: ChannelOnboardingAdapter = {
       const webhookUrl = String(
         await prompter.text({
           message: "Webhook URL (https://...) ",
-          validate: (value) =>
-            value?.trim()?.startsWith("https://") ? undefined : "HTTPS URL required",
+          validate: (value) => (value?.trim()?.startsWith("https://") ? undefined : "HTTPS URL required"),
         }),
       ).trim();
       const defaultPath = (() => {
@@ -363,9 +348,7 @@ export const zaloOnboardingAdapter: ChannelOnboardingAdapter = {
           message: "Webhook secret (8-256 chars)",
           validate: (value) => {
             const raw = String(value ?? "");
-            if (raw.length < 8 || raw.length > 256) {
-              return "8-256 chars";
-            }
+            if (raw.length < 8 || raw.length > 256) return "8-256 chars";
             return undefined;
           },
         }),
