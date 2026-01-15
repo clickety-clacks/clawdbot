@@ -93,6 +93,7 @@ group messages, so use admin if you need full visibility.
 - Multi-agent override: set per-agent patterns on `agents.list[].groupChat.mentionPatterns`.
 - Replies always route back to the same Telegram chat.
 - Long-polling uses grammY runner with per-chat sequencing; overall concurrency is capped by `agents.defaults.maxConcurrent`.
+- Telegram Bot API does not support read receipts; there is no `sendReadReceipts` option.
 
 ## Formatting (Telegram HTML)
 - Outbound Telegram text uses `parse_mode: "HTML"` (Telegram’s supported tag subset).
@@ -105,6 +106,7 @@ group messages, so use admin if you need full visibility.
 - Media downloads/uploads are capped by `channels.telegram.mediaMaxMb` (default 5).
 - Telegram Bot API requests time out after `channels.telegram.timeoutSeconds` (default 500 via grammY). Set lower to avoid long hangs.
 - Group history context uses `channels.telegram.historyLimit` (or `channels.telegram.accounts.*.historyLimit`), falling back to `messages.groupChat.historyLimit`. Set `0` to disable (default 50).
+- DM history can be limited with `channels.telegram.dmHistoryLimit` (user turns). Per-user overrides: `channels.telegram.dms["<user_id>"].historyLimit`.
 
 ## Group activation modes
 
@@ -166,7 +168,21 @@ Forward any message from the group to `@userinfobot` or `@getidsbot` on Telegram
 
 **Tip:** For your own user ID, DM the bot and it will reply with your user ID (pairing message), or use `/whoami` once commands are enabled.
 
-**Privacy note:** `@userinfobot` is a third-party bot. If you prefer, use gateway logs (`clawdbot logs`) or Telegram developer tools to find user/chat IDs.
+**Privacy note:** `@userinfobot` is a third-party bot. If you prefer, add the bot to the group, send a message, and use `clawdbot logs --follow` to read `chat.id`, or use the Bot API `getUpdates`.
+
+## Config writes
+By default, Telegram is allowed to write config updates triggered by channel events or `/config set|unset`.
+
+This happens when:
+- A group is upgraded to a supergroup and Telegram emits `migrate_to_chat_id` (chat ID changes). Clawdbot can migrate `channels.telegram.groups` automatically.
+- You run `/config set` or `/config unset` in a Telegram chat (requires `commands.config: true`).
+
+Disable with:
+```json5
+{
+  channels: { telegram: { configWrites: false } }
+}
+```
 
 ## Topics (forum supergroups)
 Telegram forum topics include a `message_thread_id` per message. Clawdbot:
@@ -185,7 +201,22 @@ Private chats can include `message_thread_id` in some edge cases. Clawdbot keeps
   - `clawdbot pairing list telegram`
   - `clawdbot pairing approve telegram <CODE>`
 - Pairing is the default token exchange used for Telegram DMs. Details: [Pairing](/start/pairing)
-- `channels.telegram.allowFrom` accepts numeric user IDs (recommended) or `@username` entries. It is **not** the bot username; use the human sender’s ID (get it from `@userinfobot` or the `from.id` field in the gateway log).
+- `channels.telegram.allowFrom` accepts numeric user IDs (recommended) or `@username` entries. It is **not** the bot username; use the human sender’s ID.
+
+#### Finding your Telegram user ID
+Safer (no third-party bot):
+1) Start the gateway and DM your bot.
+2) Run `clawdbot logs --follow` and look for `from.id`.
+
+Alternate (official Bot API):
+1) DM your bot.
+2) Fetch updates with your bot token and read `message.from.id`:
+   ```bash
+   curl "https://api.telegram.org/bot<bot_token>/getUpdates"
+   ```
+
+Third-party (less private):
+- DM `@userinfobot` or `@getidsbot` and use the returned user id.
 
 ### Group access
 
@@ -262,8 +293,52 @@ Outbound Telegram API calls retry on transient network/429 errors with exponenti
 ## Agent tool (messages + reactions)
 - Tool: `telegram` with `sendMessage` action (`to`, `content`, optional `mediaUrl`, `replyToMessageId`, `messageThreadId`).
 - Tool: `telegram` with `react` action (`chatId`, `messageId`, `emoji`).
+- Tool: `telegram` with `deleteMessage` action (`chatId`, `messageId`).
 - Reaction removal semantics: see [/tools/reactions](/tools/reactions).
-- Tool gating: `channels.telegram.actions.reactions` and `channels.telegram.actions.sendMessage` (default: enabled).
+- Tool gating: `channels.telegram.actions.reactions`, `channels.telegram.actions.sendMessage`, `channels.telegram.actions.deleteMessage` (default: enabled).
+
+## Reaction notifications
+
+**How reactions work:**
+Telegram reactions arrive as **separate `message_reaction` events**, not as properties in message payloads. When a user adds a reaction, Clawdbot:
+
+1. Receives the `message_reaction` update from Telegram API
+2. Converts it to a **system event** with format: `"Telegram reaction added: {emoji} by {user} on msg {id}"`
+3. Enqueues the system event using the **same session key** as regular messages
+4. When the next message arrives in that conversation, system events are drained and prepended to the agent's context
+
+The agent sees reactions as **system notifications** in the conversation history, not as message metadata.
+
+**Configuration:**
+- `channels.telegram.reactionNotifications`: Controls which reactions trigger notifications
+  - `"off"` — ignore all reactions (default when not set)
+  - `"own"` — notify when users react to bot messages (best-effort; in-memory)
+  - `"all"` — notify for all reactions
+
+- `channels.telegram.reactionLevel`: Controls agent's reaction capability
+  - `"off"` — agent cannot react to messages
+  - `"ack"` — bot sends acknowledgment reactions (👀 while processing) (default)
+  - `"minimal"` — agent can react sparingly (guideline: 1 per 5-10 exchanges)
+  - `"extensive"` — agent can react liberally when appropriate
+
+**Forum groups:** Reactions in forum groups include `message_thread_id` and use session keys like `agent:main:telegram:group:{chatId}:topic:{threadId}`. This ensures reactions and messages in the same topic stay together.
+
+**Example config:**
+```json5
+{
+  channels: {
+    telegram: {
+      reactionNotifications: "all",  // See all reactions
+      reactionLevel: "minimal"        // Agent can react sparingly
+    }
+  }
+}
+```
+
+**Requirements:**
+- Telegram bots must explicitly request `message_reaction` in `allowed_updates` (configured automatically by Clawdbot)
+- For webhook mode, reactions are included in the webhook `allowed_updates`
+- For polling mode, reactions are included in the `getUpdates` `allowed_updates`
 
 ## Delivery targets (CLI/cron)
 - Use a chat id (`123456789`) or a username (`@name`) as the target.
@@ -291,6 +366,11 @@ Outbound Telegram API calls retry on transient network/429 errors with exponenti
 **Commands like `/status` don't work:**
 - Make sure your Telegram user ID is authorized (via pairing or `channels.telegram.allowFrom`)
 - Commands require authorization even in groups with `groupPolicy: "open"`
+
+**Bot starts, then silently stops responding (or logs `HttpError: Network request ... failed`):**
+- Some hosts resolve `api.telegram.org` to IPv6 first. If your server does not have working IPv6 egress, grammY can get stuck on IPv6-only requests.
+- Fix by enabling IPv6 egress **or** forcing IPv4 resolution for `api.telegram.org` (for example, add an `/etc/hosts` entry using the IPv4 A record, or prefer IPv4 in your OS DNS stack), then restart the gateway.
+- Quick check: `dig +short api.telegram.org A` and `dig +short api.telegram.org AAAA` to confirm what DNS returns.
 
 ## Configuration reference (Telegram)
 Full configuration: [Configuration](/gateway/configuration)
@@ -322,6 +402,9 @@ Provider options:
 - `channels.telegram.webhookPath`: local webhook path (default `/telegram-webhook`).
 - `channels.telegram.actions.reactions`: gate Telegram tool reactions.
 - `channels.telegram.actions.sendMessage`: gate Telegram tool message sends.
+- `channels.telegram.actions.deleteMessage`: gate Telegram tool message deletes.
+- `channels.telegram.reactionNotifications`: `off | own | all` — control which reactions trigger system events (default: `off` when not set).
+- `channels.telegram.reactionLevel`: `off | ack | minimal | extensive` — control agent's reaction capability (default: `ack` when not set).
 
 Related global options:
 - `agents.list[].groupChat.mentionPatterns` (mention gating patterns).

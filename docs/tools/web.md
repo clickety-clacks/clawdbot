@@ -22,12 +22,12 @@ These are **not** browser automation. For JS-heavy sites or logins, use the
 - Results are cached by query for 15 minutes (configurable).
 - `web_fetch` does a plain HTTP GET and extracts readable content
   (HTML → markdown/text). It does **not** execute JavaScript.
-- In sandboxed sessions, `web_fetch` is enabled automatically (unless explicitly disabled).
+- `web_fetch` is enabled by default (unless explicitly disabled).
 
 ## Getting a Brave API key
 
 1) Create a Brave Search API account at https://brave.com/search/api/
-2) Generate an API key in the dashboard.
+2) In the dashboard, choose the **Data for Search** plan (not “Data for AI”) and generate an API key.
 3) Run `clawdbot configure --section web` to store the key in config (recommended), or set `BRAVE_API_KEY` in your environment.
 
 Brave provides a free tier plus paid plans; check the Brave API portal for the
@@ -48,7 +48,7 @@ Search the web with Brave’s API.
 
 ### Requirements
 
-- `tools.web.search.enabled: true`
+- `tools.web.search.enabled` must not be `false` (default: enabled)
 - Brave API key (recommended: `clawdbot configure --section web`, or set `BRAVE_API_KEY`)
 
 ### Config
@@ -80,7 +80,7 @@ Fetch a URL and extract readable content.
 
 ### Requirements
 
-- `tools.web.fetch.enabled: true`
+- `tools.web.fetch.enabled` must not be `false` (default: enabled)
 
 ### Config
 
@@ -93,7 +93,7 @@ Fetch a URL and extract readable content.
         maxChars: 50000,
         timeoutSeconds: 30,
         cacheTtlMinutes: 15,
-        userAgent: "clawdbot/2026.1.14"
+        userAgent: "clawdbot/2026.1.15"
       }
     }
   }

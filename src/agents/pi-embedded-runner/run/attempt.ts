@@ -9,6 +9,7 @@ import { createAgentSession, SessionManager, SettingsManager } from "@mariozechn
 import { resolveHeartbeatPrompt } from "../../../auto-reply/heartbeat.js";
 import { resolveChannelCapabilities } from "../../../config/channel-capabilities.js";
 import { getMachineDisplayName } from "../../../infra/machine-name.js";
+import { resolveTelegramReactionLevel } from "../../../telegram/reaction-level.js";
 import { normalizeMessageChannel } from "../../../utils/message-channel.js";
 import { isReasoningTagProvider } from "../../../utils/provider-utils.js";
 import { resolveUserPath } from "../../../utils.js";
@@ -37,6 +38,7 @@ import {
   loadWorkspaceSkillEntries,
   resolveSkillsPromptForRun,
 } from "../../skills.js";
+import { buildSystemPromptReport } from "../../system-prompt-report.js";
 import { filterBootstrapFilesForSession, loadWorkspaceBootstrapFiles } from "../../workspace.js";
 
 import { isAbortError } from "../abort.js";
@@ -62,6 +64,7 @@ import {
   resolveExecToolDefaults,
   resolveUserTimezone,
 } from "../utils.js";
+import { resolveSandboxRuntimeStatus } from "../../sandbox/runtime-status.js";
 
 import type { EmbeddedRunAttemptParams, EmbeddedRunAttemptResult } from "./types.js";
 
@@ -159,6 +162,17 @@ export async function runEmbeddedAttempt(
           accountId: params.agentAccountId,
         }) ?? [])
       : undefined;
+    const reactionGuidance =
+      runtimeChannel === "telegram" && params.config
+        ? (() => {
+            const resolved = resolveTelegramReactionLevel({
+              cfg: params.config,
+              accountId: params.agentAccountId ?? undefined,
+            });
+            const level = resolved.agentReactionGuidance;
+            return level ? { level, channel: "Telegram" } : undefined;
+          })()
+        : undefined;
     const runtimeInfo = {
       host: machineName,
       os: `${os.type()} ${os.release()}`,
@@ -190,6 +204,7 @@ export async function runEmbeddedAttempt(
         ? resolveHeartbeatPrompt(params.config?.agents?.defaults?.heartbeat?.prompt)
         : undefined,
       skillsPrompt,
+      reactionGuidance,
       runtimeInfo,
       sandboxInfo,
       tools,
@@ -197,6 +212,28 @@ export async function runEmbeddedAttempt(
       userTimezone,
       userTime,
       contextFiles,
+    });
+    const systemPromptReport = buildSystemPromptReport({
+      source: "run",
+      generatedAt: Date.now(),
+      sessionId: params.sessionId,
+      sessionKey: params.sessionKey,
+      provider: params.provider,
+      model: params.modelId,
+      workspaceDir: effectiveWorkspace,
+      bootstrapMaxChars: resolveBootstrapMaxChars(params.config),
+      sandbox: (() => {
+        const runtime = resolveSandboxRuntimeStatus({
+          cfg: params.config,
+          sessionKey: params.sessionKey ?? params.sessionId,
+        });
+        return { mode: runtime.mode, sandboxed: runtime.sandboxed };
+      })(),
+      systemPrompt: appendPrompt,
+      bootstrapFiles,
+      injectedFiles: contextFiles,
+      skillsPrompt,
+      tools,
     });
     const systemPrompt = createSystemPromptOverride(appendPrompt);
 
@@ -279,6 +316,7 @@ export async function runEmbeddedAttempt(
         const prior = await sanitizeSessionHistory({
           messages: activeSession.messages,
           modelApi: params.model.api,
+          modelId: params.modelId,
           sessionManager,
           sessionId: params.sessionId,
         });
@@ -427,6 +465,7 @@ export async function runEmbeddedAttempt(
         timedOut,
         promptError,
         sessionIdUsed,
+        systemPromptReport,
         messagesSnapshot,
         assistantTexts,
         toolMetas: toolMetasNormalized,

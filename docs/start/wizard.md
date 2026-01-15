@@ -24,6 +24,10 @@ Follow‑up reconfiguration:
 clawdbot configure
 ```
 
+Recommended: set up a Brave Search API key so the agent can use `web_search`
+(`web_fetch` works without a key). Easiest path: `clawdbot configure --section web`
+which stores `tools.web.search.apiKey`. Docs: [Web tools](/tools/web).
+
 ## QuickStart vs Advanced
 
 The wizard starts with **QuickStart** (defaults) vs **Advanced** (full control).
@@ -284,6 +288,9 @@ Typical fields in `~/.clawdbot/clawdbot.json`:
 
 WhatsApp credentials go under `~/.clawdbot/credentials/whatsapp/<accountId>/`.
 Sessions are stored under `~/.clawdbot/agents/<agentId>/sessions/`.
+
+Some channels are delivered as plugins. When you pick one during onboarding, the wizard
+will prompt to install it (npm or a local path) before it can be configured.
 
 ## Related docs
 

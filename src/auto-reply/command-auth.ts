@@ -1,7 +1,7 @@
 import type { ChannelDock } from "../channels/dock.js";
 import { getChannelDock, listChannelDocks } from "../channels/dock.js";
 import type { ChannelId } from "../channels/plugins/types.js";
-import { normalizeChannelId } from "../channels/registry.js";
+import { normalizeChannelId } from "../channels/plugins/index.js";
 import type { ClawdbotConfig } from "../config/config.js";
 import type { MsgContext } from "./templating.js";
 
@@ -13,31 +13,6 @@ export type CommandAuthorization = {
   from?: string;
   to?: string;
 };
-
-function resolveSenderId(params: {
-  dock?: ChannelDock;
-  cfg: ClawdbotConfig;
-  accountId?: string | null;
-  ctx: MsgContext;
-}): string | undefined {
-  const { dock, cfg, accountId, ctx } = params;
-
-  const senderCandidates = [ctx.SenderId, ctx.SenderE164, ctx.From]
-    .map((value) => (value ?? "").trim())
-    .filter(Boolean);
-
-  for (const sender of senderCandidates) {
-    const normalized = formatAllowFromList({
-      dock,
-      cfg,
-      accountId,
-      allowFrom: [sender],
-    })[0];
-    if (normalized) return normalized;
-  }
-
-  return undefined;
-}
 
 function resolveProviderFromContext(ctx: MsgContext, cfg: ClawdbotConfig): ChannelId | undefined {
   const direct =
@@ -81,6 +56,56 @@ function formatAllowFromList(params: {
   return allowFrom.map((entry) => String(entry).trim()).filter(Boolean);
 }
 
+function normalizeAllowFromEntry(params: {
+  dock?: ChannelDock;
+  cfg: ClawdbotConfig;
+  accountId?: string | null;
+  value: string;
+}): string[] {
+  const normalized = formatAllowFromList({
+    dock: params.dock,
+    cfg: params.cfg,
+    accountId: params.accountId,
+    allowFrom: [params.value],
+  });
+  return normalized.filter((entry) => entry.trim().length > 0);
+}
+
+function resolveSenderCandidates(params: {
+  dock?: ChannelDock;
+  providerId?: ChannelId;
+  cfg: ClawdbotConfig;
+  accountId?: string | null;
+  senderId?: string | null;
+  senderE164?: string | null;
+  from?: string | null;
+}): string[] {
+  const { dock, cfg, accountId } = params;
+  const candidates: string[] = [];
+  const pushCandidate = (value?: string | null) => {
+    const trimmed = (value ?? "").trim();
+    if (!trimmed) return;
+    candidates.push(trimmed);
+  };
+  if (params.providerId === "whatsapp") {
+    pushCandidate(params.senderE164);
+    pushCandidate(params.senderId);
+  } else {
+    pushCandidate(params.senderId);
+    pushCandidate(params.senderE164);
+  }
+  pushCandidate(params.from);
+
+  const normalized: string[] = [];
+  for (const sender of candidates) {
+    const entries = normalizeAllowFromEntry({ dock, cfg, accountId, value: sender });
+    for (const entry of entries) {
+      if (!normalized.includes(entry)) normalized.push(entry);
+    }
+  }
+  return normalized;
+}
+
 export function resolveCommandAuthorization(params: {
   ctx: MsgContext;
   cfg: ClawdbotConfig;
@@ -105,32 +130,32 @@ export function resolveCommandAuthorization(params: {
 
   const ownerCandidates = allowAll ? [] : allowFromList.filter((entry) => entry !== "*");
   if (!allowAll && ownerCandidates.length === 0 && to) {
-    const normalizedTo = formatAllowFromList({
+    const normalizedTo = normalizeAllowFromEntry({
       dock,
       cfg,
       accountId: ctx.AccountId,
-      allowFrom: [to],
-    })[0];
-    if (normalizedTo) ownerCandidates.push(normalizedTo);
+      value: to,
+    });
+    if (normalizedTo.length > 0) ownerCandidates.push(...normalizedTo);
   }
-  const ownerList = ownerCandidates;
+  const ownerList = Array.from(new Set(ownerCandidates));
 
-  const senderId = resolveSenderId({
+  const senderCandidates = resolveSenderCandidates({
     dock,
+    providerId,
     cfg,
     accountId: ctx.AccountId,
-    ctx: {
-      ...ctx,
-      From: from,
-    },
+    senderId: ctx.SenderId,
+    senderE164: ctx.SenderE164,
+    from,
   });
+  const matchedSender = ownerList.length
+    ? senderCandidates.find((candidate) => ownerList.includes(candidate))
+    : undefined;
+  const senderId = matchedSender ?? senderCandidates[0];
 
   const enforceOwner = Boolean(dock?.commands?.enforceOwnerForCommands);
-  const isOwner =
-    !enforceOwner ||
-    allowAll ||
-    ownerList.length === 0 ||
-    (senderId ? ownerList.includes(senderId) : false);
+  const isOwner = !enforceOwner || allowAll || ownerList.length === 0 || Boolean(matchedSender);
   const isAuthorizedSender = commandAuthorized && isOwner;
 
   return {

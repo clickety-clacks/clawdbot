@@ -2,7 +2,12 @@ import {
   resolveAckReaction,
   resolveEffectiveMessagesConfig,
   resolveHumanDelayConfig,
+  resolveIdentityName,
 } from "../../agents/identity.js";
+import {
+  extractShortModelName,
+  type ResponsePrefixContext,
+} from "../../auto-reply/reply/response-prefix-template.js";
 import { formatAgentEnvelope, formatThreadStarterEnvelope } from "../../auto-reply/envelope.js";
 import { dispatchReplyFromConfig } from "../../auto-reply/reply/dispatch-from-config.js";
 import { buildHistoryContextFromMap, clearHistoryEntries } from "../../auto-reply/reply/history.js";
@@ -24,10 +29,7 @@ import {
 } from "./message-utils.js";
 import { buildDirectLabel, buildGuildLabel, resolveReplyContext } from "./reply-context.js";
 import { deliverDiscordReply } from "./reply-delivery.js";
-import {
-  resolveDiscordAutoThreadReplyPlan,
-  resolveDiscordThreadStarter,
-} from "./threading.js";
+import { resolveDiscordAutoThreadReplyPlan, resolveDiscordThreadStarter } from "./threading.js";
 import { sendTyping } from "./typing.js";
 
 export async function processDiscordMessage(ctx: DiscordMessagePreflightContext) {
@@ -191,72 +193,72 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
         peer: { kind: "channel", id: threadParentId },
       });
     }
-	  }
-	  const mediaPayload = buildDiscordMediaPayload(mediaList);
-	  const threadKeys = resolveThreadSessionKeys({
-	    baseSessionKey,
-	    threadId: threadChannel ? message.channelId : undefined,
-	    parentSessionKey,
-	    useSuffix: false,
-	  });
-	  const replyPlan = await resolveDiscordAutoThreadReplyPlan({
-	    client,
-	    message,
-	    isGuildMessage,
-	    channelConfig,
-	    threadChannel,
-	    baseText: baseText ?? "",
-	    combinedBody,
-	    replyToMode,
-	    agentId: route.agentId,
-	    channel: route.channel,
-	  });
-	  const deliverTarget = replyPlan.deliverTarget;
-	  const replyTarget = replyPlan.replyTarget;
-	  const replyReference = replyPlan.replyReference;
-	  const autoThreadContext = replyPlan.autoThreadContext;
+  }
+  const mediaPayload = buildDiscordMediaPayload(mediaList);
+  const threadKeys = resolveThreadSessionKeys({
+    baseSessionKey,
+    threadId: threadChannel ? message.channelId : undefined,
+    parentSessionKey,
+    useSuffix: false,
+  });
+  const replyPlan = await resolveDiscordAutoThreadReplyPlan({
+    client,
+    message,
+    isGuildMessage,
+    channelConfig,
+    threadChannel,
+    baseText: baseText ?? "",
+    combinedBody,
+    replyToMode,
+    agentId: route.agentId,
+    channel: route.channel,
+  });
+  const deliverTarget = replyPlan.deliverTarget;
+  const replyTarget = replyPlan.replyTarget;
+  const replyReference = replyPlan.replyReference;
+  const autoThreadContext = replyPlan.autoThreadContext;
 
-	  const effectiveFrom = isDirectMessage
-	    ? `discord:${author.id}`
-	    : (autoThreadContext?.From ?? `group:${message.channelId}`);
-	  const effectiveTo = autoThreadContext?.To ?? replyTarget;
-	  if (!effectiveTo) {
-	    runtime.error?.(danger("discord: missing reply target"));
-	    return;
-	  }
+  const effectiveFrom = isDirectMessage
+    ? `discord:${author.id}`
+    : (autoThreadContext?.From ?? `group:${message.channelId}`);
+  const effectiveTo = autoThreadContext?.To ?? replyTarget;
+  if (!effectiveTo) {
+    runtime.error?.(danger("discord: missing reply target"));
+    return;
+  }
 
-	  const ctxPayload = {
-	    Body: combinedBody,
-	    RawBody: baseText,
-	    CommandBody: baseText,
-	    From: effectiveFrom,
-	    To: effectiveTo,
-	    SessionKey: autoThreadContext?.SessionKey ?? threadKeys.sessionKey,
-	    AccountId: route.accountId,
-	    ChatType: isDirectMessage ? "direct" : "group",
-	    SenderName: data.member?.nickname ?? author.globalName ?? author.username,
-	    SenderId: author.id,
-	    SenderUsername: author.username,
-	    SenderTag: formatDiscordUserTag(author),
-	    GroupSubject: groupSubject,
-	    GroupRoom: groupRoom,
-	    GroupSystemPrompt: isGuildMessage ? groupSystemPrompt : undefined,
-	    GroupSpace: isGuildMessage ? (guildInfo?.id ?? guildSlug) || undefined : undefined,
-	    Provider: "discord" as const,
-	    Surface: "discord" as const,
-	    WasMentioned: effectiveWasMentioned,
-	    MessageSid: message.id,
-	    ParentSessionKey: autoThreadContext?.ParentSessionKey ?? threadKeys.parentSessionKey,
-	    ThreadStarterBody: threadStarterBody,
-	    ThreadLabel: threadLabel,
-	    Timestamp: resolveTimestampMs(message.timestamp),
-	    ...mediaPayload,
-	    CommandAuthorized: commandAuthorized,
-	    CommandSource: "text" as const,
-	    // Originating channel for reply routing.
-	    OriginatingChannel: "discord" as const,
-	    OriginatingTo: autoThreadContext?.OriginatingTo ?? replyTarget,
-	  };
+  const ctxPayload = {
+    Body: combinedBody,
+    RawBody: baseText,
+    CommandBody: baseText,
+    From: effectiveFrom,
+    To: effectiveTo,
+    SessionKey: autoThreadContext?.SessionKey ?? threadKeys.sessionKey,
+    AccountId: route.accountId,
+    ChatType: isDirectMessage ? "direct" : "group",
+    SenderName: data.member?.nickname ?? author.globalName ?? author.username,
+    SenderId: author.id,
+    SenderUsername: author.username,
+    SenderTag: formatDiscordUserTag(author),
+    GroupSubject: groupSubject,
+    GroupRoom: groupRoom,
+    GroupSystemPrompt: isGuildMessage ? groupSystemPrompt : undefined,
+    GroupSpace: isGuildMessage ? (guildInfo?.id ?? guildSlug) || undefined : undefined,
+    Provider: "discord" as const,
+    Surface: "discord" as const,
+    WasMentioned: effectiveWasMentioned,
+    MessageSid: message.id,
+    ParentSessionKey: autoThreadContext?.ParentSessionKey ?? threadKeys.parentSessionKey,
+    ThreadStarterBody: threadStarterBody,
+    ThreadLabel: threadLabel,
+    Timestamp: resolveTimestampMs(message.timestamp),
+    ...mediaPayload,
+    CommandAuthorized: commandAuthorized,
+    CommandSource: "text" as const,
+    // Originating channel for reply routing.
+    OriginatingChannel: "discord" as const,
+    OriginatingTo: autoThreadContext?.OriginatingTo ?? replyTarget,
+  };
 
   if (isDirectMessage) {
     const sessionCfg = cfg.session;
@@ -272,20 +274,27 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
     });
   }
 
-	  if (shouldLogVerbose()) {
-	    const preview = truncateUtf16Safe(combinedBody, 200).replace(/\n/g, "\\n");
-	    logVerbose(
-	      `discord inbound: channel=${message.channelId} deliver=${deliverTarget} from=${ctxPayload.From} preview="${preview}"`,
-	    );
-	  }
+  if (shouldLogVerbose()) {
+    const preview = truncateUtf16Safe(combinedBody, 200).replace(/\n/g, "\\n");
+    logVerbose(
+      `discord inbound: channel=${message.channelId} deliver=${deliverTarget} from=${ctxPayload.From} preview="${preview}"`,
+    );
+  }
 
-	  let didSendReply = false;
-	  const typingChannelId = deliverTarget.startsWith("channel:")
-	    ? deliverTarget.slice("channel:".length)
-	    : message.channelId;
-	  const { dispatcher, replyOptions, markDispatchIdle } = createReplyDispatcherWithTyping({
-	    responsePrefix: resolveEffectiveMessagesConfig(cfg, route.agentId).responsePrefix,
-	    humanDelay: resolveHumanDelayConfig(cfg, route.agentId),
+  let didSendReply = false;
+  const typingChannelId = deliverTarget.startsWith("channel:")
+    ? deliverTarget.slice("channel:".length)
+    : message.channelId;
+
+  // Create mutable context for response prefix template interpolation
+  let prefixContext: ResponsePrefixContext = {
+    identityName: resolveIdentityName(cfg, route.agentId),
+  };
+
+  const { dispatcher, replyOptions, markDispatchIdle } = createReplyDispatcherWithTyping({
+    responsePrefix: resolveEffectiveMessagesConfig(cfg, route.agentId).responsePrefix,
+    responsePrefixContextProvider: () => prefixContext,
+    humanDelay: resolveHumanDelayConfig(cfg, route.agentId),
     deliver: async (payload: ReplyPayload) => {
       const replyToId = replyReference.use();
       await deliverDiscordReply({
@@ -302,11 +311,11 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
       didSendReply = true;
       replyReference.markSent();
     },
-	    onError: (err, info) => {
-	      runtime.error?.(danger(`discord ${info.kind} reply failed: ${String(err)}`));
-	    },
-	    onReplyStart: () => sendTyping({ client, channelId: typingChannelId }),
-	  });
+    onError: (err, info) => {
+      runtime.error?.(danger(`discord ${info.kind} reply failed: ${String(err)}`));
+    },
+    onReplyStart: () => sendTyping({ client, channelId: typingChannelId }),
+  });
 
   const { queuedFinal, counts } = await dispatchReplyFromConfig({
     ctx: ctxPayload,
@@ -319,6 +328,13 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
         typeof discordConfig?.blockStreaming === "boolean"
           ? !discordConfig.blockStreaming
           : undefined,
+      onModelSelected: (ctx) => {
+        // Mutate the object directly instead of reassigning to ensure the closure sees updates
+        prefixContext.provider = ctx.provider;
+        prefixContext.model = extractShortModelName(ctx.model);
+        prefixContext.modelFull = `${ctx.provider}/${ctx.model}`;
+        prefixContext.thinkingLevel = ctx.thinkLevel ?? "off";
+      },
     },
   });
   markDispatchIdle();

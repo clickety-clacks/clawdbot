@@ -1,7 +1,12 @@
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import { resolveChannelCapabilities } from "../../config/channel-capabilities.js";
 import type { ClawdbotConfig } from "../../config/config.js";
-import { reactMessageTelegram, sendMessageTelegram } from "../../telegram/send.js";
+import { resolveTelegramReactionLevel } from "../../telegram/reaction-level.js";
+import {
+  deleteMessageTelegram,
+  reactMessageTelegram,
+  sendMessageTelegram,
+} from "../../telegram/send.js";
 import { resolveTelegramToken } from "../../telegram/token.js";
 import {
   createActionGate,
@@ -78,8 +83,20 @@ export async function handleTelegramAction(
   const isActionEnabled = createActionGate(cfg.channels?.telegram?.actions);
 
   if (action === "react") {
+    // Check reaction level first
+    const reactionLevelInfo = resolveTelegramReactionLevel({
+      cfg,
+      accountId: accountId ?? undefined,
+    });
+    if (!reactionLevelInfo.agentReactionsEnabled) {
+      throw new Error(
+        `Telegram agent reactions disabled (reactionLevel="${reactionLevelInfo.level}"). ` +
+          `Set channels.telegram.reactionLevel to "minimal" or "extensive" to enable.`,
+      );
+    }
+    // Also check the existing action gate for backward compatibility
     if (!isActionEnabled("reactions")) {
-      throw new Error("Telegram reactions are disabled.");
+      throw new Error("Telegram reactions are disabled via actions.reactions.");
     }
     const chatId = readStringOrNumberParam(params, "chatId", {
       required: true,
@@ -147,6 +164,30 @@ export async function handleTelegramAction(
       messageId: result.messageId,
       chatId: result.chatId,
     });
+  }
+
+  if (action === "deleteMessage") {
+    if (!isActionEnabled("deleteMessage")) {
+      throw new Error("Telegram deleteMessage is disabled.");
+    }
+    const chatId = readStringOrNumberParam(params, "chatId", {
+      required: true,
+    });
+    const messageId = readNumberParam(params, "messageId", {
+      required: true,
+      integer: true,
+    });
+    const token = resolveTelegramToken(cfg, { accountId }).token;
+    if (!token) {
+      throw new Error(
+        "Telegram bot token missing. Set TELEGRAM_BOT_TOKEN or channels.telegram.botToken.",
+      );
+    }
+    await deleteMessageTelegram(chatId ?? "", messageId ?? 0, {
+      token,
+      accountId: accountId ?? undefined,
+    });
+    return jsonResult({ ok: true, deleted: true });
   }
 
   throw new Error(`Unsupported Telegram action: ${action}`);

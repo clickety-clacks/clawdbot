@@ -1,9 +1,7 @@
 import type { ReasoningLevel, ThinkLevel } from "../auto-reply/thinking.js";
 import { SILENT_REPLY_TOKEN } from "../auto-reply/tokens.js";
-import { CHANNEL_IDS } from "../channels/registry.js";
+import { listDeliverableMessageChannels } from "../utils/message-channel.js";
 import type { EmbeddedContextFile } from "./pi-embedded-helpers.js";
-
-const MESSAGE_CHANNEL_OPTIONS = CHANNEL_IDS.join("|");
 
 export function buildAgentSystemPrompt(params: {
   workspaceDir: string;
@@ -45,6 +43,11 @@ export function buildAgentSystemPrompt(params: {
       defaultLevel: "on" | "off";
     };
   };
+  /** Reaction guidance for the agent (for Telegram minimal/extensive modes). */
+  reactionGuidance?: {
+    level: "minimal" | "extensive";
+    channel: string;
+  };
 }) {
   const coreToolSummaries: Record<string, string> = {
     read: "Read file contents",
@@ -56,6 +59,8 @@ export function buildAgentSystemPrompt(params: {
     ls: "List directory contents",
     exec: "Run shell commands",
     process: "Manage background exec sessions",
+    web_search: "Search the web (Brave API)",
+    web_fetch: "Fetch and extract readable content from a URL",
     // Channel docking: add login tools here when a channel needs interactive linking.
     browser: "Control web browser",
     canvas: "Present/eval/snapshot the Canvas",
@@ -83,6 +88,8 @@ export function buildAgentSystemPrompt(params: {
     "ls",
     "exec",
     "process",
+    "web_search",
+    "web_fetch",
     "browser",
     "canvas",
     "nodes",
@@ -169,6 +176,7 @@ export function buildAgentSystemPrompt(params: {
     .filter(Boolean);
   const runtimeCapabilitiesLower = new Set(runtimeCapabilities.map((cap) => cap.toLowerCase()));
   const inlineButtonsEnabled = runtimeCapabilitiesLower.has("inlinebuttons");
+  const messageChannelOptions = listDeliverableMessageChannels().join("|");
   const skillsLines = skillsPrompt ? [skillsPrompt, ""] : [];
   const skillsSection = skillsPrompt
     ? [
@@ -213,6 +221,15 @@ export function buildAgentSystemPrompt(params: {
         ].join("\n"),
     "TOOLS.md does not control tool availability; it is user guidance for how to use external tools.",
     "If a task is more complex or takes longer, spawn a sub-agent. It will do the work for you and ping you when it's done. You can always check up on it.",
+    "",
+    "## Clawdbot CLI Quick Reference",
+    "Clawdbot is controlled via subcommands. Do not invent commands.",
+    "To manage the Gateway daemon service (start/stop/restart):",
+    "- clawdbot daemon status",
+    "- clawdbot daemon start",
+    "- clawdbot daemon stop",
+    "- clawdbot daemon restart",
+    "If unsure, ask the user to run `clawdbot help` (or `clawdbot daemon --help`) and paste the output.",
     "",
     ...skillsSection,
     ...memorySection,
@@ -299,7 +316,11 @@ export function buildAgentSystemPrompt(params: {
     "These user-editable files are loaded by Clawdbot and included below in Project Context.",
     "",
     userTimezone || userTime
-      ? `Time: assume UTC unless stated. User TZ=${userTimezone ?? "unknown"}. Current user time (converted)=${userTime ?? "unknown"}.`
+      ? `Time: assume UTC unless stated. User time zone: ${
+          userTimezone ?? "unknown"
+        }. Current user time (local, 24-hour): ${userTime ?? "unknown"} (${
+          userTimezone ?? "unknown"
+        }).`
       : "",
     userTimezone || userTime ? "" : "",
     "## Reply Tags",
@@ -319,7 +340,7 @@ export function buildAgentSystemPrompt(params: {
           "### message tool",
           "- Use `message` for proactive sends + channel actions (polls, reactions, etc.).",
           "- For `action=send`, include `to` and `message`.",
-          `- If multiple channels are configured, pass \`channel\` (${MESSAGE_CHANNEL_OPTIONS}).`,
+          `- If multiple channels are configured, pass \`channel\` (${messageChannelOptions}).`,
           inlineButtonsEnabled
             ? "- Inline buttons supported. Use `action=send` with `buttons=[[{text,callback_data}]]` (callback_data routes back as a user message)."
             : runtimeChannel
@@ -334,6 +355,29 @@ export function buildAgentSystemPrompt(params: {
 
   if (extraSystemPrompt) {
     lines.push("## Group Chat Context", extraSystemPrompt, "");
+  }
+  if (params.reactionGuidance) {
+    const { level, channel } = params.reactionGuidance;
+    const guidanceText =
+      level === "minimal"
+        ? [
+            `Reactions are enabled for ${channel} in MINIMAL mode.`,
+            "React ONLY when truly relevant:",
+            "- Acknowledge important user requests or confirmations",
+            "- Express genuine sentiment (humor, appreciation) sparingly",
+            "- Avoid reacting to routine messages or your own replies",
+            "Guideline: at most 1 reaction per 5-10 exchanges.",
+          ].join("\n")
+        : [
+            `Reactions are enabled for ${channel} in EXTENSIVE mode.`,
+            "Feel free to react liberally:",
+            "- Acknowledge messages with appropriate emojis",
+            "- Express sentiment and personality through reactions",
+            "- React to interesting content, humor, or notable events",
+            "- Use reactions to confirm understanding or agreement",
+            "Guideline: react whenever it feels natural.",
+          ].join("\n");
+    lines.push("## Reactions", guidanceText, "");
   }
   if (reasoningHint) {
     lines.push("## Reasoning Format", reasoningHint, "");
