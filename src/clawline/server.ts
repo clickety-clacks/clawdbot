@@ -825,7 +825,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const pendingPairs = new Map<string, PendingPairRequest>();
   const deniedDevices = new Map<string, number>();
   const deniedDeviceTtlMs = Math.max(1, config.pairing.pendingTtlSeconds) * 1000;
-  const deniedDeviceTtlMs = Math.max(1, config.pairing.pendingTtlSeconds) * 1000;
   const sessionsByDevice = new Map<string, Session>();
   const userSessions = new Map<string, Set<Session>>();
   const perUserQueue = new Map<string, Promise<unknown>>();
