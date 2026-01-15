@@ -34,6 +34,10 @@ address, port, or media paths:
 }
 ```
 
+The default `allowedOrigins: ["null"]` matches how the mobile apps connect when their embedded WebViews emit
+`Origin: null` (file:// contexts). When you expose the provider beyond loopback, replace this list with the exact
+https origins (and set `allowInsecurePublic` accordingly).
+
 Set `clawline.enabled` to `false` to disable the service entirely.
 
 ## Adapter overrides

@@ -2,11 +2,8 @@ import type { ClawdbotConfig } from "../config/config.js";
 import { resolveStorePath } from "../config/sessions.js";
 import { createClawlineAdapter } from "./adapter.js";
 import { resolveClawlineConfig } from "./config.js";
-import {
-  createProviderServer,
-  type Logger,
-  type ProviderServer,
-} from "./server.js";
+import { createProviderServer } from "./server.js";
+import type { Logger, ProviderServer } from "./domain.js";
 
 export type ClawlineServiceHandle = {
   stop: () => Promise<void>;
