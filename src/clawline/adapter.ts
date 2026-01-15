@@ -7,8 +7,8 @@ import {
   resolveAgentWorkspaceDir,
   resolveDefaultAgentId,
 } from "../agents/agent-scope.js";
-import { runCliAgent } from "../agents/cli-runner.js";
 import type { EmbeddedPiRunResult } from "../agents/pi-embedded-runner.js";
+import { runEmbeddedPiAgent } from "../agents/pi-embedded-runner.js";
 import type { AdapterExecuteParams, Logger } from "./server.js";
 import { resolveClawlineConfig, type ResolvedClawlineConfig } from "./config.js";
 
@@ -70,15 +70,12 @@ export async function createClawlineAdapter(
   const workspaceDir = resolveAgentWorkspaceDir(params.config, agentId);
   const sessionDir = path.join(params.statePath, "sessions");
   await fs.mkdir(sessionDir, { recursive: true });
-  const cliSessionIds = new Map<string, string | undefined>();
-
   return {
     async execute(ctx) {
       const sessionFile = path.join(sessionDir, `${ctx.userId}.jsonl`);
       await fs.mkdir(path.dirname(sessionFile), { recursive: true });
-      const cliSessionId = cliSessionIds.get(ctx.userId);
       const runId = randomUUID();
-      const result = await runCliAgent({
+      const result = await runEmbeddedPiAgent({
         sessionId: ctx.sessionId,
         sessionKey: ctx.sessionId,
         sessionFile,
@@ -92,12 +89,7 @@ export async function createClawlineAdapter(
         runId,
         extraSystemPrompt: resolved.adapterOverrides.systemPrompt,
         ownerNumbers: undefined,
-        cliSessionId,
       });
-      const newSessionId = result.meta.agentMeta?.sessionId;
-      if (newSessionId) {
-        cliSessionIds.set(ctx.userId, newSessionId);
-      }
       const text = extractText(result);
       if (!text) {
         const fallback = resolved.adapterOverrides.responseFallback ?? "";

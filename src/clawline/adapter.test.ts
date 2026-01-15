@@ -8,18 +8,18 @@ import type { ClawdbotConfig } from "../config/config.js";
 import { createClawlineAdapter } from "./adapter.js";
 import { resolveClawlineConfig } from "./config.js";
 
-vi.mock("../agents/cli-runner.js", () => ({
-  runCliAgent: vi.fn(),
+vi.mock("../agents/pi-embedded-runner.js", () => ({
+  runEmbeddedPiAgent: vi.fn(),
 }));
 
-const { runCliAgent } = await import("../agents/cli-runner.js");
+const { runEmbeddedPiAgent } = await import("../agents/pi-embedded-runner.js");
 
 describe("createClawlineAdapter", () => {
   let tmpDir: string;
 
   beforeEach(async () => {
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawline-test-"));
-    vi.mocked(runCliAgent).mockReset();
+    vi.mocked(runEmbeddedPiAgent).mockReset();
   });
 
   afterEach(async () => {
@@ -52,8 +52,8 @@ describe("createClawlineAdapter", () => {
     ).rejects.toThrow(/agents.defaults.model/i);
   });
 
-  it("calls runCliAgent with derived session data", async () => {
-    vi.mocked(runCliAgent).mockResolvedValue({
+  it("calls runEmbeddedPiAgent with derived session data", async () => {
+    vi.mocked(runEmbeddedPiAgent).mockResolvedValue({
       payloads: [{ text: "Hello from agent" }],
       meta: { durationMs: 10 },
     });
@@ -70,8 +70,8 @@ describe("createClawlineAdapter", () => {
       deviceId: "device_a",
     });
 
-    expect(runCliAgent).toHaveBeenCalledTimes(1);
-    const call = vi.mocked(runCliAgent).mock.calls[0]?.[0];
+    expect(runEmbeddedPiAgent).toHaveBeenCalledTimes(1);
+    const call = vi.mocked(runEmbeddedPiAgent).mock.calls[0]?.[0];
     expect(call?.prompt).toBe("Hi there");
     expect(call?.sessionId).toBe("sess_123");
     expect(call?.provider).toBe("anthropic");
@@ -80,7 +80,7 @@ describe("createClawlineAdapter", () => {
   });
 
   it("returns non-zero exit when payload text missing", async () => {
-    vi.mocked(runCliAgent).mockResolvedValue({
+    vi.mocked(runEmbeddedPiAgent).mockResolvedValue({
       payloads: [],
       meta: { durationMs: 5 },
     });
