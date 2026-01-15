@@ -189,6 +189,9 @@ jobs:
             task: protocol
             command: pnpm protocol:check
           - runtime: bun
+            task: lint
+            command: bunx biome check src
+          - runtime: bun
             task: test
             command: pnpm canvas:a2ui:bundle && bunx vitest run --config vitest.unit.config.ts
     steps:
