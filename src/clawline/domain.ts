@@ -18,6 +18,15 @@ export type AllowlistEntry = {
 
 export type AllowlistFile = { version: 1; entries: AllowlistEntry[] };
 
+export type PendingEntry = {
+  deviceId: string;
+  claimedName?: string;
+  deviceInfo: DeviceInfo;
+  requestedAt: number;
+};
+
+export type PendingFile = { version: 1; entries: PendingEntry[] };
+
 export type NormalizedAttachment =
   | { type: "image"; mimeType: string; data: string }
   | { type: "asset"; assetId: string };

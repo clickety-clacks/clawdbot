@@ -1,195 +1,162 @@
 name: clawline
-description: Teach Clawdbot how the Clawline mobile provider works: why the allowlist exists, how to pair/reset devices, what the user sees in the iOS/Android clients, how to restart the gateway/sidecar, and how to diagnose socket or rate-limit problems. Use this when users ask about clawline UX, want their device paired/unblocked, or need the allowlist/denylist adjusted on hosts such as tars.
+description: Operate the Clawline mobile provider: approve or deny pending devices, explain the UX to users, restart/verify the gateway, and diagnose allowlist/denylist/rate-limit issues on hosts like tars.
 ---
 
-# Clawline Allowlist
+# Clawline Pairing Flow (Pending ➜ Allowlist)
 
-## Overview
+Clawline now uses a **pending → allowlist** workflow:
 
-Clawline is the local/mobile provider that the iOS + Android Clawline apps talk to over `http(s)://<gateway>:18792`.  
-The allowlist (`~/.clawdbot/clawline/allowlist.json`) is the source of truth for which device IDs are trusted, whether they are admins, and whether their pairing token has been delivered. Manual edits therefore control who can reach the socket at all.
+1. The iOS/Android app sends `pair_request`.
+2. The provider writes/updates `pending.json` and keeps the socket open.
+3. When an operator (you) approves the device, its entry moves to `allowlist.json`.
+4. The provider sees the change, issues the JWT, and the client finishes pairing automatically.
 
-Use this skill whenever you need to:
-- pair a new phone or reset one that lost its token
-- explain what the allowlist does and how it differs from `denylist.json`
-- reissue/revoke a device token outside of the UI
-- confirm the Clawline HTTP/WS endpoints are alive after config changes
-- restart the gateway sidecar when the allowlist file is changed by hand
+There is no longer any in-app admin approval UI—everything is controlled via the JSON files and this skill.
 
-## Key Paths & Defaults
+## Key Paths
 
-- State path: `~/.clawdbot/clawline` (configurable via `clawline.statePath`)
-- Allowlist file: `${statePath}/allowlist.json` (schema below)
-- Denylist file: `${statePath}/denylist.json` (hot-reloaded watcher)
-- Media path: `~/.clawdbot/clawline-media`
-- Default bind: `127.0.0.1:18792`. When binding to anything else you must set `clawline.network.allowInsecurePublic=true` **and** populate `clawline.network.allowedOrigins`.
-- tars restart flow: `ssh tars 'PATH="/opt/homebrew/bin:$PATH" tmux kill-session -t clawgate; cd ~/src/clawdbot && PATH="$HOME/Library/pnpm:/opt/homebrew/bin:$PATH" tmux new-session -d -s clawgate "pnpm clawdbot gateway"'`
+All paths live under `~/.clawdbot/clawline/` (configurable via `clawline.statePath`):
 
-`allowlist.json` entries:
+| File | Purpose |
+| --- | --- |
+| `allowlist.json` | Approved devices (`deviceId`, `userId`, admin flag, metadata) |
+| `pending.json` | Waiting devices (claimed name, platform, requested timestamp) |
+| `denylist.json` | Hot-reload kill switch; immediately terminates matching sessions |
 
-```json5
+The provider now watches **allowlist** and **pending** for changes, so edits take effect without restarting.
+Updates propagate immediately (the watcher reacts as soon as the file write completes), so you can approve/deny and tell the user to retry right away.
+
+## Inspect Pending & Allowlist
+
+```bash
+# Pending devices (waiting for approval)
+ssh -i ~/.ssh/id_ed25519_tars -o IdentitiesOnly=yes tars \
+  'jq ".entries" ~/.clawdbot/clawline/pending.json 2>/dev/null'
+
+# Approved devices
+ssh -i ~/.ssh/id_ed25519_tars -o IdentitiesOnly=yes tars \
+  'jq ".entries" ~/.clawdbot/clawline/allowlist.json 2>/dev/null'
+```
+
+Each pending entry looks like:
+
+```json
 {
-  "version": 1,
-  "entries": [
-    {
-      "deviceId": "UUIDv4",
-      "claimedName": "Mike's iPhone",        // optional label shown to admins
-      "deviceInfo": {                        // sanitized copy of app handshake
-        "platform": "iOS" | "Android",
-        "model": "iPhone 15",
-        "osVersion": "17.2.1",
-        "appVersion": "2026.1.5"
-      },
-      "userId": "user_<uuid>",               // server-generated user identity
-      "isAdmin": true | false,
-      "tokenDelivered": true | false,        // false => next pairing request re-sends token
-      "createdAt": 1768346561762,            // ms epoch
-      "lastSeenAt": 1768436564355 | null
-    }
-  ]
+  "deviceId": "E3F4…",
+  "claimedName": "Flynn’s iPhone",
+  "deviceInfo": { "platform": "iOS", "model": "iPhone 17 Pro" },
+  "requestedAt": 1768510800000
 }
 ```
 
-⚠️ The gateway loads the allowlist once at startup. Any manual file edits require a gateway restart to take effect. (Only the denylist has a file watcher.)
+## Approve a Device
 
-## Workflow
-
-### 1. Health check / discovery
-
-1. Verify the process is running: `curl -sS http://<host>:18792/version` should return `{"protocolVersion":1}`.  
-2. Spot-check WS upgrades: use Node/Bun `ws` to connect (`node -e 'const ws=new (require("ws"))("ws://.../ws"); ...'`). Receiving `{"type":"error","code":"invalid_message"}` for a dummy payload confirms the socket is alive.  
-3. If either fails, restart the gateway (see commands above) and tail `~/.clawdbot/logs/gateway.log`.
-
-### 2. Inspect current allowlist state
+Move the entry from `pending.json` to `allowlist.json`. The helper below runs entirely on the gateway host (tars):
 
 ```bash
-cd ~/.clawdbot/clawline
-cat allowlist.json | jq '{entries: [.entries[] | {deviceId, userId, isAdmin, claimedName, lastSeenAt}] }'
-```
+ssh -i ~/.ssh/id_ed25519_tars -o IdentitiesOnly=yes tars 'python3 - <<\"PY\"
+import json, pathlib, uuid, time
+root = pathlib.Path.home() / ".clawdbot" / "clawline"
+pending = json.loads((root / "pending.json").read_text())
+allowlist_path = root / "allowlist.json"
+allowlist = json.loads(allowlist_path.read_text()) if allowlist_path.exists() else {"version": 1, "entries": []}
 
-Notes:
-- Admin detection is `entry.isAdmin === true`. The first paired device becomes admin automatically when the list is empty (`server.ts:1628-1650`).
-- `lastSeenAt: null` means the device has never authenticated with the issued token.
-- To list pending devices still waiting on approval, query `pendingPairs` via gateway logs (`[clawline] pending pair`). Manual allowlist edits bypass the admin approval flow entirely, so only use them when you trust the device identity.
+device_id = "E3F4..."           # <-- fill in from pending list
+entry = next(e for e in pending["entries"] if e["deviceId"] == device_id)
 
-### 3. Add or update an allowlist entry manually
-
-Use Python to maintain JSON fidelity (avoids jq quoting issues):
-
-```bash
-python3 - <<'PY'
-import json, pathlib, time, uuid
-state = pathlib.Path.home() / ".clawdbot" / "clawline" / "allowlist.json"
-data = json.loads(state.read_text()) if state.exists() else {"version": 1, "entries": []}
-
-entry = {
-    "deviceId": "INSERT-DEVICE-UUID",
-    "claimedName": "INSERT LABEL",
-    "deviceInfo": {"platform": "iOS", "model": "iPhone", "osVersion": "17.2.1", "appVersion": "2026.1.5"},
+pending["entries"] = [e for e in pending["entries"] if e["deviceId"] != device_id]
+allowlist["entries"] = [e for e in allowlist["entries"] if e["deviceId"] != device_id]
+allowlist["entries"].append({
+    "deviceId": entry["deviceId"],
+    "claimedName": entry.get("claimedName"),
+    "deviceInfo": entry["deviceInfo"],
     "userId": "user_" + str(uuid.uuid4()),
-    "isAdmin": True,
+    "isAdmin": False,
     "tokenDelivered": False,
-    "createdAt": int(time.time() * 1000),
-    "lastSeenAt": None,
-}
+    "createdAt": int(time.time()*1000),
+    "lastSeenAt": None
+})
 
-data["entries"] = [e for e in data["entries"] if e["deviceId"] != entry["deviceId"]]
-data["entries"].append(entry)
-state.write_text(json.dumps(data, indent=2) + "\n")
-PY
+(root / "pending.json").write_text(json.dumps(pending, indent=2) + "\\n")
+allowlist_path.write_text(json.dumps(allowlist, indent=2) + "\\n")
+print("Approved", device_id)
+PY'
 ```
 
-- `tokenDelivered=false` tells Clawline to return the token on the very next `pair_request` from that device ID.  
-- Set `isAdmin=true` only for trusted devices—admins can approve other pairings via the app.  
-- For an existing user restoring access, re-use the same `userId` (grab it from the file before overwriting) so history stays linked.
+As soon as the allowlist entry is written:
+- The waiting socket receives `pair_result` with the JWT.
+- `pending.json` is cleaned up automatically (the provider removes matching entries or, if the device disconnects, it prunes the stale record immediately).
 
-### 4. Reissue a token for an existing device
+## Deny / Block a Device
 
-If the device already has an entry:
-1. Set `tokenDelivered` to `false` and `lastSeenAt` to `null`.
-2. Restart the gateway. On the next pairing attempt the server will resend the JWT with the same `userId`.
-3. Optional: if the device was soft-deleted, you can also refresh `createdAt` to now for auditing clarity.
-
-### 5. Revoke or block a device
-
-**Immediate cut-off (hot reload):**
-1. Append `{ "deviceId": "<uuid>", "reason": "lost phone", "createdAt": 1768... }` to `~/.clawdbot/clawline/denylist.json`.  
-2. The server watches this file; matching sessions are force-closed with `token_revoked`.
-
-**Permanent removal:**
-1. Delete the entry from `allowlist.json`.  
-2. Restart the gateway so the removal is loaded.  
-3. (Optional) Leave the denylist entry for belt-and-suspenders if you expect the token to resurface.
-
-### 6. Restart after manual edits
-
-- **Local dev:** run `pnpm clawdbot gateway` (Ctrl+C, rerun) or `scripts/restart-mac.sh` on macOS.  
-- **tars (production-like):**
-  ```bash
-  ssh -i ~/.ssh/id_ed25519_tars -o IdentitiesOnly=yes tars \
-    'PATH="/opt/homebrew/bin:$PATH" tmux kill-session -t clawgate; \
-      cd ~/src/clawdbot && PATH="$HOME/Library/pnpm:/opt/homebrew/bin:$PATH" \
-      tmux new-session -d -s clawgate "pnpm clawdbot gateway"'
-  ```
-- Always watch `~/.clawdbot/logs/gateway.log` for `[clawline] listening on ...` to confirm it bound to the port. If you see `commands.native: Invalid input...`, fix `~/.clawdbot/clawdbot.json` and restart again.
-
-### 7. Smoke-test after restart
+1. Remove it from `pending.json`.
+2. Optionally add the `deviceId` to `denylist.json` to kill future attempts:
 
 ```bash
-curl -sS http://localhost:18792/version
+ssh -i ~/.ssh/id_ed25519_tars -o IdentitiesOnly=yes tars 'python3 - <<\"PY\"
+import json, pathlib, time
+root = pathlib.Path.home() / ".clawdbot" / "clawline"
+pending = json.loads((root / "pending.json").read_text())
+device_id = "E3F4..."  # fill in
+pending["entries"] = [e for e in pending["entries"] if e["deviceId"] != device_id]
+(root / "pending.json").write_text(json.dumps(pending, indent=2) + "\\n")
 
-node - <<'JS'
-const WebSocket = require('ws');
-const ws = new WebSocket('ws://localhost:18792/ws');
-ws.once('open', () => ws.send(JSON.stringify({type: 'ping_test'})));
-ws.once('message', (msg) => { console.log(msg.toString()); ws.close(); });
-ws.once('error', (err) => { console.error(err); process.exit(1); });
-JS
+deny_path = root / "denylist.json"
+deny = json.loads(deny_path.read_text()) if deny_path.exists() else []
+deny.append({"deviceId": device_id, "createdAt": int(time.time()*1000)})
+deny_path.write_text(json.dumps(deny, indent=2) + "\\n")
+print("Denied", device_id)
+PY'
 ```
 
-Use `tailscale serve status` or `curl https://tars.tail4105e8.ts.net/version` when testing over the tailnet (port-forwarded).
+The provider notifies the waiting client (`pair_denied`) and closes the socket.
 
-### 8. Explain the system to users
+## Accessing Uploaded Attachments
 
-- **Allowlist** = who is trusted + role (admin/user) + token bookkeeping.  
-- **Denylist** = emergency kill switch (hot reload).  
-- Pairing flow: a device sends `pair_request`; admins approve via their app, which calls `pair_decision`. Manual allowlist edits bypass that flow, so reserve them for operational fixes or bootstrap scenarios.  
-- Admin creation: first device in an empty allowlist becomes admin automatically. To add another admin later, set `isAdmin=true` manually or elevate via the UI.
+Clawline stores every uploaded asset in the media directory (defaults to `~/.clawdbot/clawline-media/`). Each file name is the asset ID from the message payload, e.g. `a_f45e...`.
 
-### 9. Mobile UX walkthrough
+**Preferred (local) workflow**
 
-**New device (no admins yet)**  
-1. User opens the Clawline app, enters the Gateway URL or scans the QR.  
-2. App shows “Pairing…” while it pings `/version` and then tries the WebSocket.  
-3. Because no admins exist, the server auto-approves, the phone immediately sees “Paired as admin” and lands in the inbox. No additional prompts.
+1. When an event includes `{ "type": "asset", "assetId": "a_123" }`, read the file directly:
+   ```bash
+   cat ~/.clawdbot/clawline-media/a_123 > /tmp/a_123.bin
+   ```
+2. Use the MIME type recorded earlier (usually provided alongside the attachment) to interpret it. If unknown, run `file --mime-type`.
+3. Clean up any temp copies after processing.
 
-**Subsequent device**  
-1. User opens the app, enters URL, sees “Requesting approval”.  
-2. Existing admins receive a notification banner + inbox card with the device name the user typed (“Pixel 8 Pro”) and Accept/Deny buttons. Pending requests are listed under Settings → Clawline Devices as well.  
-3. Admin taps Accept → requester sees “Approved! Fetching messages” as the JWT arrives; Deny shows “Pairing denied, ask an admin or try again later”.
+**Fallback (remote or path unknown)**
 
-**Restore/Reissue**  
-1. User with a formerly paired phone reinstalls the app. After entering URL it jumps straight to “Downloading token…” because the allowlist entry already exists.  
-2. If you manually set `tokenDelivered=false`, the app briefly shows “Token reissued” before the standard inbox view.  
-3. If the device was removed, it falls back to the pending flow above (admins must re-approve).
+If you’re not on the gateway host or the media path isn’t mounted, use the provider’s authenticated endpoint:
+```bash
+curl -f -H "Authorization: Bearer $TOKEN" \
+     "http://<gateway-host>:<port>/download/a_123" \
+     -o /tmp/a_123.bin
+```
 
-**Revoked device**  
-1. Device already connected suddenly sees “Session expired (token revoked)” when you add it to the denylist; the socket closes.  
-2. Attempts to re-pair show “Pairing denied” until you clear the denylist entry.
+This mirrors what the mobile app and adapter do. Either approach yields the same bytes; prefer the local path when possible to avoid unnecessary HTTP hops.
 
-### 10. End-to-end pairing lifecycle (reference)
+## Explaining the UX to Users
 
-1. **Client boot** → mobile app generates/stores a UUID (deviceId) + device info, then opens a WS connection and sends `pair_request` containing protocolVersion/deviceId/deviceInfo/claimedName.  
-2. **Server receives request**  
-   - Rejects immediately if deviceId format invalid, denylisted, or rate-limited.  
-   - If the allowlist already contains that device with `tokenDelivered=false`, it re-sends the JWT and closes the socket.  
-   - If no admin exists yet, it auto-creates a new allowlist entry with `isAdmin=true`, writes it to disk, emits the JWT, and closes the socket.  
-   - Otherwise it stores a `pendingPairs` entry keyed by deviceId and notifies all connected admins via `pair_pending`.  
-3. **Admin approval** (mobile UI) → admin session sends `pair_decision` with `deviceId`, `approve`, and `userId` (usually prefilled).  
-4. **Server outcome**  
-   - Approve: creates/updates the allowlist entry, marks `tokenDelivered=false`, issues JWT, notifies the waiting socket with `pair_result success`, and deletes the pending request.  
-   - Deny: sends `pair_result success:false reason:"pair_denied"`, tracks the deviceId in `deniedDevices` for a cooling-off window, then drops the pending entry.  
-5. **Auth/login** → client connects again with `auth` (token + deviceId). Server verifies JWT, ensures pending pairs don’t exist for that device, registers a session, updates `lastSeenAt`, and replays missed events.  
-6. **Long-term state** → device keeps its JWT until it expires or is revoked. To force re-login, set `tokenDelivered=false` (or remove the entry) and restart. To revoke immediately, add to `denylist.json`.
+- When the user says “Anyone trying to connect?”, read `pending.json` and summarize device names + wait duration.
+- Approvals happen conversationally: “Let Flynn’s iPhone in” ➜ run the approval snippet and confirm.
+- Users can retry on the phone; if the socket closed (timeout/denied), the client reconnects and keeps polling automatically.
+- The first-ever device still bootstraps itself as admin (empty allowlist). After that, *all* approvals go through this pending flow.
 
-Remind requestors that Clawline is for “external things that talk to the agent” (phones). The allowlist has nothing to do with WhatsApp/Telegram provider allowlists even though the names overlap; those live in `clawbot.json`.
+## Gateway Ops (tars)
+
+- **Restart** (only needed if the binary changed):  
+  `ssh … tars 'PATH="/opt/homebrew/bin:$PATH" tmux kill-session -t clawgate; cd ~/src/clawdbot && PATH="$HOME/Library/pnpm:/opt/homebrew/bin:$PATH" tmux new-session -d -s clawgate "pnpm clawdbot gateway"'`
+- **Health check**:  
+  `curl -sS http://tars.tail4105e8.ts.net:18792/version` → `{"protocolVersion":1}`  
+  `wscat -c ws://tars.tail4105e8.ts.net:18792/ws` → send junk, expect `invalid_message`.
+- **Rate limits** (override via `~/.clawdbot/clawdbot.json`):  
+  `pairing.maxRequestsPerMinute`, `pairing.maxPendingRequests`, `sessions.maxMessagesPerSecond`, etc.
+
+## When Things Go Wrong
+
+- **“Rate limited” during pairing** → inspect `clawdbot.json` overrides and ensure the watchdog on tars was updated (run `ssh … cat ~/.clawdbot/clawdbot.json | jq .clawline`).
+- **Stuck pending entry** → remove it from `pending.json` (the socket will get `pair_denied`) and ask the user to retry.
+- **Tokens not delivered** → confirm the device appears in `allowlist.json` with `"tokenDelivered": false`; the next `pair_request` will resend automatically.
+- **Manual allowlist edits** (e.g., restoring a backup) now apply immediately—still restart if you edit schemas or other gateway config files.
+
+Use this skill whenever someone asks about Clawline pairing, wants a device approved/blocked, or needs help interpreting the pending/allow/deny files.

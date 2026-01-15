@@ -3,7 +3,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs/promises";
-import { watchFile, unwatchFile } from "node:fs";
+import { watch, type FSWatcher } from "node:fs";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 
 import WebSocket, { WebSocketServer } from "ws";
@@ -22,6 +22,8 @@ import type {
   AllowlistFile,
   DeviceInfo,
   NormalizedAttachment,
+  PendingEntry,
+  PendingFile,
   ProviderConfig,
   ProviderOptions,
   ProviderServer,
@@ -38,7 +40,6 @@ const CONTROL_CHARS_REGEX = /[\u0000-\u001F\u007F]/g;
 const UUID_V4_REGEX = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/;
 const SERVER_EVENT_ID_REGEX = /^s_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 const ASSET_ID_REGEX = /^a_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
-const USER_ID_PREFIX = "user_";
 const INLINE_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "image/heic"]);
 const MAX_ATTACHMENTS_COUNT = 4;
 // Hard ceiling for a single client payload: 64 KB text budget + 256 KB inline assets + JSON overhead.
@@ -177,7 +178,7 @@ function validateDeviceInfo(value: any): value is DeviceInfo {
   return true;
 }
 
-type PendingPairRequest = {
+type PendingConnection = {
   deviceId: string;
   socket: WebSocket;
   claimedName?: string;
@@ -266,6 +267,7 @@ const DEFAULT_CONFIG: ProviderConfig = {
 };
 
 const ALLOWLIST_FILENAME = "allowlist.json";
+const PENDING_FILENAME = "pending.json";
 const DENYLIST_FILENAME = "denylist.json";
 const JWT_KEY_FILENAME = "jwt.key";
 const DB_FILENAME = "clawline.sqlite";
@@ -281,13 +283,6 @@ function mergeConfig(partial?: Partial<ProviderConfig>): ProviderConfig {
 
 function isLocalhost(address: string): boolean {
   return ["127.0.0.1", "::1", "localhost"].includes(address);
-}
-
-function validateUserId(value: unknown): value is string {
-  if (typeof value !== "string" || !value.startsWith(USER_ID_PREFIX)) {
-    return false;
-  }
-  return UUID_V4_REGEX.test(value.slice(USER_ID_PREFIX.length));
 }
 
 async function ensureDir(dir: string) {
@@ -309,6 +304,10 @@ async function loadJsonFile<T>(filePath: string, fallback: T): Promise<T> {
 
 async function loadAllowlist(filePath: string): Promise<AllowlistFile> {
   return loadJsonFile<AllowlistFile>(filePath, { version: 1, entries: [] });
+}
+
+async function loadPending(filePath: string): Promise<PendingFile> {
+  return loadJsonFile<PendingFile>(filePath, { version: 1, entries: [] });
 }
 
 async function loadDenylist(filePath: string): Promise<{ deviceId: string }[]> {
@@ -432,11 +431,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   await ensureDir(sessionTranscriptsDir);
 
   const allowlistPath = path.join(config.statePath, ALLOWLIST_FILENAME);
+  const pendingPath = path.join(config.statePath, PENDING_FILENAME);
   const denylistPath = path.join(config.statePath, DENYLIST_FILENAME);
   const jwtKeyPath = path.join(config.statePath, JWT_KEY_FILENAME);
   const dbPath = path.join(config.statePath, DB_FILENAME);
 
   let allowlist = await loadAllowlist(allowlistPath);
+  let pendingFile = await loadPending(pendingPath);
   let denylist = await loadDenylist(denylistPath);
   const jwtKey = await ensureJwtKey(jwtKeyPath, config.auth.jwtSigningKey);
 
@@ -694,9 +695,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   });
 
   const connectionState = new WeakMap<WebSocket, ConnectionState>();
-  const pendingPairs = new Map<string, PendingPairRequest>();
-  const deniedDevices = new Map<string, number>();
-  const deniedDeviceTtlMs = Math.max(1, config.pairing.pendingTtlSeconds) * 1000;
+  const pendingSockets = new Map<string, PendingConnection>();
   const sessionsByDevice = new Map<string, Session>();
   const userSessions = new Map<string, Set<Session>>();
   const perUserQueue = new Map<string, Promise<unknown>>();
@@ -718,10 +717,18 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   if (assetCleanupInterval && typeof assetCleanupInterval.unref === "function") {
     assetCleanupInterval.unref();
   }
-  const denylistWatcher = () => {
-    refreshDenylist();
-  };
-  watchFile(denylistPath, { interval: 5_000 }, denylistWatcher);
+  const allowlistWatcher: FSWatcher = watch(allowlistPath, { persistent: false }, () => {
+    void refreshAllowlistFromDisk();
+  });
+  allowlistWatcher.on("error", (err) => logger.warn?.("allowlist_watch_failed", err));
+  const pendingFileWatcher: FSWatcher = watch(pendingPath, { persistent: false }, () => {
+    void refreshPendingFile();
+  });
+  pendingFileWatcher.on("error", (err) => logger.warn?.("pending_watch_failed", err));
+  const denylistWatcher: FSWatcher = watch(denylistPath, { persistent: false }, () => {
+    void refreshDenylist();
+  });
+  denylistWatcher.on("error", (err) => logger.warn?.("denylist_watch_failed", err));
 
   function runPerUserTask<T>(userId: string, task: () => Promise<T>): Promise<T> {
     const previous = perUserQueue.get(userId) ?? Promise.resolve();
@@ -746,6 +753,29 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
   async function persistAllowlist() {
     await fs.writeFile(allowlistPath, JSON.stringify(allowlist, null, 2));
+    handleAllowlistChanged();
+  }
+
+  async function persistPendingFile() {
+    await fs.writeFile(pendingPath, JSON.stringify(pendingFile, null, 2));
+  }
+
+  async function refreshAllowlistFromDisk() {
+    try {
+      allowlist = await loadAllowlist(allowlistPath);
+      handleAllowlistChanged();
+    } catch (err) {
+      logger.warn?.("allowlist_reload_failed", err);
+    }
+  }
+
+  async function refreshPendingFile() {
+    try {
+      pendingFile = await loadPending(pendingPath);
+      reconcilePendingSocketsWithFile();
+    } catch (err) {
+      logger.warn?.("pending_reload_failed", err);
+    }
   }
 
   async function refreshDenylist() {
@@ -763,6 +793,15 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             .finally(() => session.socket.close(1008));
         }
       }
+      for (const [deviceId, pending] of pendingSockets) {
+        if (isDenylisted(deviceId)) {
+          pendingSockets.delete(deviceId);
+          void removePendingEntry(deviceId).catch(() => {});
+          void sendJson(pending.socket, { type: "pair_result", success: false, reason: "pair_rejected" })
+            .catch(() => {})
+            .finally(() => pending.socket.close(1000));
+        }
+      }
     } catch (err) {
       logger.warn("denylist_reload_failed", err);
     }
@@ -772,14 +811,73 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     return allowlist.entries.find((entry) => entry.deviceId === deviceId);
   }
 
-  async function upsertAllowlistEntry(entry: AllowlistEntry) {
-    const idx = allowlist.entries.findIndex((existing) => existing.deviceId === entry.deviceId);
+  function findPendingEntry(deviceId: string) {
+    return pendingFile.entries.find((entry) => entry.deviceId === deviceId);
+  }
+
+  async function upsertPendingEntry(entry: PendingEntry) {
+    const idx = pendingFile.entries.findIndex((existing) => existing.deviceId === entry.deviceId);
     if (idx >= 0) {
-      allowlist.entries[idx] = entry;
+      pendingFile.entries[idx] = entry;
     } else {
-      allowlist.entries.push(entry);
+      pendingFile.entries.push(entry);
     }
-    await persistAllowlist();
+    await persistPendingFile();
+  }
+
+  async function removePendingEntry(deviceId: string) {
+    const next = pendingFile.entries.filter((entry) => entry.deviceId !== deviceId);
+    if (next.length === pendingFile.entries.length) {
+      return;
+    }
+    pendingFile = { ...pendingFile, entries: next };
+    await persistPendingFile();
+  }
+
+  function handleAllowlistChanged() {
+    for (const deviceId of pendingSockets.keys()) {
+      const entry = findAllowlistEntry(deviceId);
+      if (entry) {
+        void deliverPendingApproval(entry);
+      }
+    }
+  }
+
+  function reconcilePendingSocketsWithFile() {
+    for (const [deviceId, pending] of pendingSockets) {
+      if (findPendingEntry(deviceId)) {
+        continue;
+      }
+      const allowlisted = findAllowlistEntry(deviceId);
+      if (allowlisted) {
+        void deliverPendingApproval(allowlisted);
+        continue;
+      }
+      void sendJson(pending.socket, { type: "pair_result", success: false, reason: "pair_denied" })
+        .catch(() => {})
+        .finally(() => pending.socket.close(1000));
+      pendingSockets.delete(deviceId);
+    }
+  }
+
+  async function deliverPendingApproval(entry: AllowlistEntry) {
+    const pending = pendingSockets.get(entry.deviceId);
+    if (!pending) return;
+    pendingSockets.delete(entry.deviceId);
+    const token = issueToken(entry);
+    const delivered = await sendJson(pending.socket, {
+      type: "pair_result",
+      success: true,
+      token,
+      userId: entry.userId
+    })
+      .then(() => true)
+      .catch(() => false);
+    if (delivered) {
+      await setTokenDelivered(entry.deviceId, true);
+    }
+    pending.socket.close();
+    await removePendingEntry(entry.deviceId).catch(() => {});
   }
 
   function isDenylisted(deviceId: string) {
@@ -1142,45 +1240,45 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
   }
 
-  async function notifyAdminsOfPending() {
-    for (const session of sessionsByDevice.values()) {
-      if (!session.isAdmin) continue;
-      for (const pending of pendingPairs.values()) {
-        await sendJson(session.socket, {
-          type: "pair_approval_request",
-          deviceId: pending.deviceId,
-          claimedName: pending.claimedName,
-          deviceInfo: pending.deviceInfo
-        }).catch(() => {});
-      }
-    }
-  }
-
   function expirePendingPairs() {
     if (config.pairing.pendingTtlSeconds <= 0) {
       return;
     }
     const now = nowMs();
-    for (const [deviceId, pending] of pendingPairs) {
+    const ttlMs = config.pairing.pendingTtlSeconds * 1000;
+    for (const [deviceId, pending] of pendingSockets) {
       if (now - pending.createdAt >= config.pairing.pendingTtlSeconds * 1000) {
-        pendingPairs.delete(deviceId);
-        sendJson(pending.socket, { type: "pair_result", success: false, reason: "pair_timeout" }).finally(() => {
-          pending.socket.close(1000);
-        });
+        pendingSockets.delete(deviceId);
+        void removePendingEntry(deviceId).catch(() => {});
+        void sendJson(pending.socket, { type: "pair_result", success: false, reason: "pair_timeout" })
+          .catch(() => {})
+          .finally(() => {
+            pending.socket.close(1000);
+          });
       }
+    }
+    const nextEntries = pendingFile.entries.filter((entry) => now - entry.requestedAt < ttlMs);
+    if (nextEntries.length !== pendingFile.entries.length) {
+      pendingFile = { ...pendingFile, entries: nextEntries };
+      void persistPendingFile().catch((err) => logger.warn?.("pending_prune_failed", err));
     }
   }
 
   function handleSocketClose(socket: WebSocket) {
     const state = connectionState.get(socket);
-    if (!state) return;
-    if (state.deviceId && state.userId && state.sessionId) {
+    if (state && state.deviceId && state.userId && state.sessionId) {
       const session = sessionsByDevice.get(state.deviceId);
       if (session && session.socket === socket) {
         removeSession(session);
       }
     }
-
+    for (const [deviceId, pending] of pendingSockets) {
+      if (pending.socket === socket) {
+        pendingSockets.delete(deviceId);
+        void removePendingEntry(deviceId).catch((err) => logger.warn?.("pending_cleanup_failed", err));
+        break;
+      }
+    }
     connectionState.delete(socket);
   }
 
@@ -1212,9 +1310,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         case "pair_request":
           await handlePairRequest(ws, payload);
           break;
-        case "pair_decision":
-          await handlePairDecision(ws, payload);
-          break;
         case "auth":
           await handleAuth(ws, payload);
           break;
@@ -1240,12 +1335,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       await sendJson(ws, { type: "error", code: "invalid_message", message: "Invalid deviceId" });
       return;
     }
-    if (deniedDevices.has(payload.deviceId)) {
-      deniedDevices.delete(payload.deviceId);
-      await sendJson(ws, { type: "pair_result", success: false, reason: "pair_denied" });
-      ws.close();
-      return;
-    }
     if (!pairRateLimiter.attempt(payload.deviceId)) {
       await sendJson(ws, { type: "error", code: "rate_limited", message: "Pairing rate limited" });
       ws.close(1008);
@@ -1266,15 +1355,15 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       return;
     }
     const sanitizedClaimedName = sanitizeLabel(payload.claimedName);
-
-    const entry = findAllowlistEntry(payload.deviceId);
+    const deviceId = payload.deviceId;
+    const entry = findAllowlistEntry(deviceId);
     if (entry && !entry.tokenDelivered) {
       const token = issueToken(entry);
       const delivered = await sendJson(ws, { type: "pair_result", success: true, token, userId: entry.userId })
         .then(() => true)
         .catch(() => false);
       if (delivered) {
-        await setTokenDelivered(payload.deviceId, true);
+        await setTokenDelivered(deviceId, true);
       }
       ws.close();
       return;
@@ -1297,7 +1386,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     if (!hasAdmin()) {
       const userId = generateUserId();
       const newEntry: AllowlistEntry = {
-        deviceId: payload.deviceId,
+        deviceId,
         claimedName: sanitizedClaimedName,
         deviceInfo: sanitizedInfo,
         userId,
@@ -1313,7 +1402,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         .then(() => true)
         .catch(() => false);
       if (delivered) {
-        await setTokenDelivered(payload.deviceId, true);
+        await setTokenDelivered(deviceId, true);
       }
       ws.close();
       return;
@@ -1325,79 +1414,32 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       return;
     }
 
-    const pending = pendingPairs.get(payload.deviceId);
-    if (pending) {
-      pending.socket = ws;
-      await notifyAdminsOfPending();
-      return;
-    }
-
-    if (pendingPairs.size >= config.pairing.maxPendingRequests) {
+    const existingPendingEntry = findPendingEntry(deviceId);
+    const pendingCount = pendingFile.entries.length + (existingPendingEntry ? 0 : 1);
+    if (pendingCount > config.pairing.maxPendingRequests) {
       await sendJson(ws, { type: "error", code: "rate_limited", message: "Too many pending requests" });
       ws.close(1008);
       return;
     }
-
-    pendingPairs.set(payload.deviceId, {
-      deviceId: payload.deviceId,
+    const now = nowMs();
+    const pendingEntry: PendingEntry = {
+      deviceId,
+      claimedName: sanitizedClaimedName,
+      deviceInfo: sanitizedInfo,
+      requestedAt: existingPendingEntry ? existingPendingEntry.requestedAt : now
+    };
+    await upsertPendingEntry(pendingEntry);
+    const existingSocket = pendingSockets.get(deviceId);
+    if (existingSocket) {
+      existingSocket.socket.close(1000);
+    }
+    pendingSockets.set(deviceId, {
+      deviceId,
       socket: ws,
       claimedName: sanitizedClaimedName,
       deviceInfo: sanitizedInfo,
-      createdAt: nowMs()
+      createdAt: now
     });
-    await notifyAdminsOfPending();
-  }
-
-  async function handlePairDecision(ws: WebSocket, payload: any) {
-    const state = connectionState.get(ws);
-    if (!state || !state.authenticated || !state.deviceId || !state.userId) {
-      await sendJson(ws, { type: "error", code: "invalid_message", message: "Not authenticated" });
-      return;
-    }
-    const session = sessionsByDevice.get(state.deviceId);
-    if (!session || !session.isAdmin) {
-      await sendJson(ws, { type: "error", code: "invalid_message", message: "Not admin" });
-      return;
-    }
-    const pending = pendingPairs.get(payload.deviceId);
-    if (!pending) {
-      await sendJson(ws, { type: "error", code: "invalid_message", message: "Unknown device" });
-      return;
-    }
-    if (payload.approve !== true) {
-      const delivered = await sendJson(pending.socket, { type: "pair_result", success: false, reason: "pair_denied" })
-        .then(() => true)
-        .catch(() => false);
-      if (!delivered) {
-        deniedDevices.set(payload.deviceId, nowMs());
-      }
-      pendingPairs.delete(payload.deviceId);
-      return;
-    }
-    if (!validateUserId(payload.userId)) {
-      await sendJson(ws, { type: "error", code: "invalid_message", message: "Invalid userId" });
-      return;
-    }
-    const userId = payload.userId;
-    const newEntry: AllowlistEntry = {
-      deviceId: pending.deviceId,
-      claimedName: pending.claimedName,
-      deviceInfo: pending.deviceInfo,
-      userId,
-      isAdmin: false,
-      tokenDelivered: false,
-      createdAt: nowMs(),
-      lastSeenAt: null
-    };
-    await upsertAllowlistEntry(newEntry);
-    const token = issueToken(newEntry);
-    const delivered = await sendJson(pending.socket, { type: "pair_result", success: true, token, userId })
-      .then(() => true)
-      .catch(() => false);
-    if (delivered) {
-      await setTokenDelivered(pending.deviceId, true);
-    }
-    pendingPairs.delete(pending.deviceId);
   }
 
   async function handleAuth(ws: WebSocket, payload: any) {
@@ -1411,7 +1453,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       ws.close();
       return;
     }
-    if (pendingPairs.has(payload.deviceId)) {
+    if (pendingSockets.has(payload.deviceId)) {
       await sendJson(ws, { type: "auth_result", success: false, reason: "device_not_approved" });
       ws.close();
       return;
@@ -1474,10 +1516,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         return;
       }
       await sendReplay(session, lastMessageId);
-      if (session.isAdmin) {
-        await notifyAdminsOfPending();
-      }
-    } catch (err) {
+    } catch {
       removeSession(session);
       connectionState.delete(ws);
       await sendJson(ws, { type: "error", code: "server_error", message: "Replay failed" }).catch(() => {});
@@ -1523,7 +1562,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     },
     async stop() {
       if (!started) return;
-      unwatchFile(denylistPath, denylistWatcher);
+      allowlistWatcher.close();
+      pendingFileWatcher.close();
+      denylistWatcher.close();
       clearInterval(pendingCleanupInterval);
       if (assetCleanupInterval) {
         clearInterval(assetCleanupInterval);
