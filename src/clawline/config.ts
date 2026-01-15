@@ -2,7 +2,8 @@ import os from "node:os";
 import path from "node:path";
 
 import type { ClawdbotConfig } from "../config/config.js";
-import type { ProviderConfig } from "./server.js";
+import type { ProviderConfig } from "./domain.js";
+import { deepMerge } from "./utils/deep-merge.js";
 
 export type ClawlineAdapterOverrides = {
   provider?: string;
@@ -72,34 +73,6 @@ const DEFAULTS: ResolvedClawlineConfig = {
     chunkBufferBytes: 1_048_576,
   },
 };
-
-function deepMerge<T extends Record<string, any>>(
-  target: T,
-  source: Partial<T>,
-): T {
-  const targetRecord = target as Record<string, any>;
-  const sourceRecord = source as Record<string, any>;
-  for (const rawKey of Object.keys(sourceRecord)) {
-    const key = rawKey as keyof T & string;
-    const value = sourceRecord[key];
-    if (
-      value &&
-      typeof value === "object" &&
-      !Array.isArray(value) &&
-      typeof targetRecord[key] === "object" &&
-      targetRecord[key] !== null &&
-      !Array.isArray(targetRecord[key])
-    ) {
-      targetRecord[key] = deepMerge(
-        { ...(targetRecord[key] as Record<string, any>) },
-        value,
-      );
-    } else if (value !== undefined) {
-      targetRecord[key] = value;
-    }
-  }
-  return target;
-}
 
 export function resolveClawlineConfig(
   cfg: ClawdbotConfig,

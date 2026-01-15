@@ -9,7 +9,7 @@ import {
 } from "../agents/agent-scope.js";
 import type { EmbeddedPiRunResult } from "../agents/pi-embedded-runner.js";
 import { runEmbeddedPiAgent } from "../agents/pi-embedded-runner.js";
-import type { AdapterExecuteParams, Logger } from "./server.js";
+import type { AdapterExecuteParams, Logger } from "./domain.js";
 import { resolveClawlineConfig, type ResolvedClawlineConfig } from "./config.js";
 import {
   buildClawlineSessionKey,

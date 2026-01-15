@@ -3,12 +3,11 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs/promises";
-import { watchFile, unwatchFile, createWriteStream } from "node:fs";
+import { watchFile, unwatchFile } from "node:fs";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 
 import WebSocket, { WebSocketServer } from "ws";
 import jwt from "jsonwebtoken";
-import Busboy from "busboy";
 import BetterSqlite3 from "better-sqlite3";
 import type { Database as SqliteDatabase } from "better-sqlite3";
 
@@ -17,106 +16,24 @@ import {
   buildClawlineSessionKey,
   clawlineSessionFileName,
 } from "./session-key.js";
+import { deepMerge } from "./utils/deep-merge.js";
+import type {
+  AllowlistEntry,
+  AllowlistFile,
+  DeviceInfo,
+  NormalizedAttachment,
+  ProviderConfig,
+  ProviderOptions,
+  ProviderServer,
+  Logger,
+} from "./domain.js";
+import { ClientMessageError, HttpError } from "./errors.js";
+import { SlidingWindowRateLimiter } from "./rate-limiter.js";
+import { createAssetHandlers } from "./http-assets.js";
 
 export const PROTOCOL_VERSION = 1;
 
-export type AdapterExecuteParams = {
-  prompt: string;
-  userId: string;
-  sessionId: string;
-  deviceId: string;
-};
-
-export interface Adapter {
-  capabilities?: { streaming?: boolean };
-  execute: (
-    params: AdapterExecuteParams
-  ) => Promise<{ exitCode: number; output: string } | { exitCode?: number; output?: string } | string>;
-}
-
-export interface ProviderConfig {
-  port: number;
-  statePath: string;
-  network: {
-    bindAddress: string;
-    allowInsecurePublic: boolean;
-    allowedOrigins?: string[];
-  };
-  adapter?: string | null;
-  auth: {
-    jwtSigningKey?: string | null;
-    tokenTtlSeconds: number | null;
-    maxAttemptsPerMinute: number;
-    reissueGraceSeconds: number;
-  };
-  pairing: {
-    maxPendingRequests: number;
-    maxRequestsPerMinute: number;
-    pendingTtlSeconds: number;
-  };
-  media: {
-    storagePath: string;
-    maxInlineBytes: number;
-    maxUploadBytes: number;
-    unreferencedUploadTtlSeconds: number;
-  };
-  sessions: {
-    maxMessageBytes: number;
-    maxReplayMessages: number;
-    maxPromptMessages: number;
-    maxMessagesPerSecond: number;
-    maxTypingPerSecond: number;
-    typingAutoExpireSeconds: number;
-    maxQueuedMessages: number;
-    maxWriteQueueDepth: number;
-    adapterExecuteTimeoutSeconds: number;
-    streamInactivitySeconds: number;
-  };
-  streams: {
-    chunkPersistIntervalMs: number;
-    chunkBufferBytes: number;
-  };
-}
-
-export interface ProviderOptions {
-  config?: Partial<ProviderConfig>;
-  adapter: Adapter;
-  logger?: Logger;
-  sessionStorePath: string;
-}
-
-export interface ProviderServer {
-  start(): Promise<void>;
-  stop(): Promise<void>;
-  getPort(): number;
-}
-
-export type Logger = {
-  info: (...args: any[]) => void;
-  warn: (...args: any[]) => void;
-  error: (...args: any[]) => void;
-};
-
-type AllowlistEntry = {
-  deviceId: string;
-  claimedName?: string;
-  deviceInfo: DeviceInfo;
-  userId: string;
-  isAdmin: boolean;
-  tokenDelivered: boolean;
-  createdAt: number;
-  lastSeenAt: number | null;
-};
-
-type AllowlistFile = { version: 1; entries: AllowlistEntry[] };
-
-type DeviceInfo = {
-  platform: string;
-  model: string;
-  osVersion?: string;
-  appVersion?: string;
-};
-
+// eslint-disable-next-line no-control-regex
 const CONTROL_CHARS_REGEX = /[\u0000-\u001F\u007F]/g;
 const UUID_V4_REGEX = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/;
 const SERVER_EVENT_ID_REGEX = /^s_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
@@ -124,64 +41,8 @@ const ASSET_ID_REGEX = /^a_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA
 const USER_ID_PREFIX = "user_";
 const INLINE_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "image/heic"]);
 const MAX_ATTACHMENTS_COUNT = 4;
+// Hard ceiling for a single client payload: 64 KB text budget + 256 KB inline assets + JSON overhead.
 const MAX_TOTAL_PAYLOAD_BYTES = 320 * 1024;
-
-type NormalizedAttachment =
-  | { type: "image"; mimeType: string; data: string }
-  | { type: "asset"; assetId: string };
-
-class ClientMessageError extends Error {
-  constructor(public code: string, message: string) {
-    super(message);
-  }
-}
-
-class HttpError extends Error {
-  constructor(public status: number, public code: string, message: string) {
-    super(message);
-  }
-}
-
-class SlidingWindowRateLimiter {
-  private readonly history = new Map<string, number[]>();
-  private cleanupCounter = 0;
-
-  constructor(private readonly limit: number, private readonly windowMs: number) {}
-
-  attempt(key: string): boolean {
-    if (this.limit <= 0) {
-      return true;
-    }
-    const now = Date.now();
-    if (++this.cleanupCounter % 1000 === 0) {
-      this.cleanup(now);
-    }
-    const timestamps = this.history.get(key) ?? [];
-    while (timestamps.length > 0 && now - timestamps[0] >= this.windowMs) {
-      timestamps.shift();
-    }
-    if (timestamps.length >= this.limit) {
-      this.history.set(key, timestamps);
-      return false;
-    }
-    timestamps.push(now);
-    this.history.set(key, timestamps);
-    return true;
-  }
-
-  private cleanup(now: number) {
-    for (const [key, timestamps] of this.history) {
-      if (timestamps.length === 0) {
-        this.history.delete(key);
-        continue;
-      }
-      const last = timestamps[timestamps.length - 1];
-      if (now - last >= this.windowMs) {
-        this.history.delete(key);
-      }
-    }
-  }
-}
 
 function truncateUtf8(value: string, maxBytes: number): string {
   if (Buffer.byteLength(value, "utf8") <= maxBytes) {
@@ -418,17 +279,6 @@ function mergeConfig(partial?: Partial<ProviderConfig>): ProviderConfig {
   return deepMerge(merged, partial);
 }
 
-function deepMerge<T>(target: T, source: Partial<T>): T {
-  for (const [key, value] of Object.entries(source) as [keyof T, any][]) {
-    if (value && typeof value === "object" && !Array.isArray(value)) {
-      (target as any)[key] = deepMerge((target as any)[key] ?? {}, value);
-    } else if (value !== undefined) {
-      (target as any)[key] = value;
-    }
-  }
-  return target;
-}
-
 function isLocalhost(address: string): boolean {
   return ["127.0.0.1", "::1", "localhost"].includes(address);
 }
@@ -580,7 +430,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   await ensureDir(assetsDir);
   await ensureDir(tmpDir);
   await ensureDir(sessionTranscriptsDir);
-  await cleanupTmpDirectory();
 
   const allowlistPath = path.join(config.statePath, ALLOWLIST_FILENAME);
   const denylistPath = path.join(config.statePath, DENYLIST_FILENAME);
@@ -685,6 +534,30 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
          SELECT 1 FROM message_assets WHERE message_assets.assetId = assets.assetId
        )`
   );
+  const {
+    handleUpload,
+    handleDownload,
+    cleanupTmpDirectory,
+    cleanupOrphanedAssetFiles,
+    cleanupUnreferencedAssets,
+  } = createAssetHandlers({
+    config,
+    tmpDir,
+    assetsDir,
+    logger,
+    selectAssetStmt,
+    deleteAssetStmt,
+    insertAssetStmt,
+    selectExpiredAssetsStmt,
+    enqueueWriteTask,
+    authenticateHttpRequest,
+    sendHttpError,
+    safeUnlink,
+    nowMs,
+    assetIdRegex: ASSET_ID_REGEX,
+  });
+
+  await cleanupTmpDirectory();
   await cleanupOrphanedAssetFiles();
   const insertUserMessageTx = db.transaction(
     (
@@ -1010,211 +883,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         return;
       }
       logger.warn("file_unlink_failed", err);
-    }
-  }
-
-  async function cleanupTmpDirectory() {
-    try {
-      const entries = await fs.readdir(tmpDir);
-      await Promise.all(entries.map((entry) => safeUnlink(path.join(tmpDir, entry))));
-    } catch (err) {
-      logger.warn("tmp_cleanup_failed", err);
-    }
-  }
-
-  async function cleanupOrphanedAssetFiles() {
-    const startedAt = nowMs();
-    try {
-      const entries = await fs.readdir(assetsDir);
-      const now = nowMs();
-      const batchSize = 10_000;
-      for (let i = 0; i < entries.length; i += batchSize) {
-        const batch = entries.slice(i, i + batchSize);
-        for (const entry of batch) {
-          if (!ASSET_ID_REGEX.test(entry)) continue;
-          const asset = selectAssetStmt.get(entry);
-          if (asset) continue;
-          const filePath = path.join(assetsDir, entry);
-          if (config.media.unreferencedUploadTtlSeconds > 0) {
-            try {
-              const stats = await fs.stat(filePath);
-              const ageMs = now - stats.mtimeMs;
-              if (ageMs < config.media.unreferencedUploadTtlSeconds * 1000) {
-                continue;
-              }
-            } catch {
-              continue;
-            }
-          }
-          await safeUnlink(filePath);
-        }
-      }
-    } catch (err) {
-      logger.warn("asset_orphan_scan_failed", err);
-    } finally {
-      const elapsedMs = nowMs() - startedAt;
-      if (elapsedMs > 30_000) {
-        logger.warn("asset_orphan_scan_slow", { elapsedMs });
-      }
-    }
-  }
-
-  async function cleanupUnreferencedAssets() {
-    if (config.media.unreferencedUploadTtlSeconds <= 0) {
-      return;
-    }
-    const cutoff = nowMs() - config.media.unreferencedUploadTtlSeconds * 1000;
-    const deletedAssetIds = (await enqueueWriteTask(() => {
-      const rows = selectExpiredAssetsStmt.all(cutoff) as { assetId: string }[];
-      const deleted: string[] = [];
-      for (const row of rows) {
-        const result = deleteAssetStmt.run(row.assetId);
-        if (result.changes > 0) {
-          deleted.push(row.assetId);
-        }
-      }
-      return deleted;
-    })) as string[];
-    for (const assetId of deletedAssetIds) {
-      const assetPath = path.join(assetsDir, assetId);
-      await safeUnlink(assetPath);
-    }
-  }
-
-  async function handleUpload(req: http.IncomingMessage, res: http.ServerResponse) {
-    let tmpPath: string | undefined;
-    try {
-      const auth = authenticateHttpRequest(req);
-      const assetId = `a_${randomUUID()}`;
-      tmpPath = path.join(tmpDir, `${assetId}.tmp`);
-      let detectedMime = "application/octet-stream";
-      let size = 0;
-      await new Promise<void>((resolve, reject) => {
-        const busboy = Busboy({
-          headers: req.headers,
-          limits: { files: 1, fileSize: config.media.maxUploadBytes }
-        });
-        let handled = false;
-        busboy.on("file", (fieldname, file, info) => {
-          if (handled || fieldname !== "file") {
-            handled = true;
-            file.resume();
-            reject(new ClientMessageError("invalid_message", "Invalid upload field"));
-            return;
-          }
-          handled = true;
-          detectedMime = info.mimeType || "application/octet-stream";
-          const writeStream = createWriteStream(tmpPath!);
-          let aborted = false;
-          file.on("data", (chunk) => {
-            size += chunk.length;
-            if (!aborted && size > config.media.maxUploadBytes) {
-              aborted = true;
-              file.unpipe(writeStream);
-              writeStream.destroy();
-              file.resume();
-              reject(new ClientMessageError("payload_too_large", "Upload too large"));
-            }
-          });
-          file.on("limit", () => reject(new ClientMessageError("payload_too_large", "Upload too large")));
-          file.on("error", reject);
-          writeStream.on("error", reject);
-          file.pipe(writeStream);
-          file.on("end", () => writeStream.end());
-        });
-        busboy.on("finish", () => {
-          if (!handled) {
-            reject(new ClientMessageError("invalid_message", "Missing file field"));
-            return;
-          }
-          resolve();
-        });
-        busboy.on("error", reject);
-        req.pipe(busboy);
-      });
-      if (size === 0) {
-        throw new ClientMessageError("invalid_message", "Empty upload");
-      }
-      const finalPath = path.join(assetsDir, assetId);
-      await fs.rename(tmpPath, finalPath);
-      await enqueueWriteTask(() => insertAssetStmt.run(assetId, auth.userId, detectedMime, size, nowMs(), auth.deviceId));
-      res.setHeader("Content-Type", "application/json");
-      res.writeHead(200);
-      res.end(JSON.stringify({ assetId, mimeType: detectedMime, size }));
-    } catch (err) {
-      if (tmpPath) {
-        await safeUnlink(tmpPath);
-      }
-      if (err instanceof HttpError) {
-        sendHttpError(res, err.status, err.code, err.message);
-        return;
-      }
-      if (err instanceof ClientMessageError) {
-        const status = err.code === "payload_too_large" ? 413 : 400;
-        sendHttpError(res, status, err.code, err.message);
-        return;
-      }
-      logger.error("upload_failed", err);
-      sendHttpError(res, 503, "upload_failed_retryable", "Upload failed");
-    }
-  }
-
-  async function handleDownload(req: http.IncomingMessage, res: http.ServerResponse, assetId: string) {
-    try {
-      const auth = authenticateHttpRequest(req);
-      if (!ASSET_ID_REGEX.test(assetId)) {
-        sendHttpError(res, 400, "invalid_message", "Invalid assetId");
-        return;
-      }
-      const asset = selectAssetStmt.get(assetId) as
-        | { assetId: string; userId: string; mimeType: string; size: number }
-        | undefined;
-      if (!asset) {
-        sendHttpError(res, 404, "asset_not_found", "Asset not found");
-        return;
-      }
-      if (asset.userId !== auth.userId) {
-        sendHttpError(res, 404, "asset_not_found", "Asset not found");
-        return;
-      }
-      const filePath = path.join(assetsDir, assetId);
-      let fileHandle: fs.FileHandle;
-      try {
-        fileHandle = await fs.open(filePath, "r");
-      } catch (err: any) {
-        if (err && err.code === "ENOENT") {
-          await enqueueWriteTask(() => deleteAssetStmt.run(assetId));
-          sendHttpError(res, 404, "asset_not_found", "Asset not found");
-          return;
-        }
-        throw err;
-      }
-      res.writeHead(200, {
-        "Content-Type": asset.mimeType || "application/octet-stream",
-        "Content-Length": asset.size
-      });
-      const stream = fileHandle.createReadStream();
-      stream.on("error", (err) => {
-        logger.error("download_stream_failed", err);
-        if (!res.headersSent) {
-          sendHttpError(res, 500, "server_error", "Download failed");
-        } else {
-          res.end();
-        }
-      });
-      stream.on("close", () => {
-        fileHandle
-          .close()
-          .catch(() => {});
-      });
-      stream.pipe(res);
-    } catch (err) {
-      if (err instanceof HttpError) {
-        sendHttpError(res, err.status, err.code, err.message);
-        return;
-      }
-      logger.error("download_failed", err);
-      sendHttpError(res, 500, "server_error", "Download failed");
     }
   }
 
@@ -1879,7 +1547,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       httpServer.closeAllConnections?.();
       const closeWithTimeout = (fn: (cb: () => void) => void, label: string) =>
         new Promise<void>((resolve, reject) => {
-          const timer = setTimeout(() => reject(new Error(`${label} close timeout`)), 5000);
+          const timer = setTimeout(() => {
+            logger.warn("shutdown_timeout", { label });
+            reject(new Error(`${label} close timeout`));
+          }, 5000);
           fn(() => {
             clearTimeout(timer);
             resolve();
