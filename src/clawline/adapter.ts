@@ -7,14 +7,8 @@ import {
   resolveAgentWorkspaceDir,
   resolveDefaultAgentId,
 } from "../agents/agent-scope.js";
-import { resolveClawdbotAgentDir } from "../agents/agent-paths.js";
-import type { ExecElevatedDefaults } from "../agents/bash-tools.js";
-import { runCliAgent } from "../agents/cli-runner.js";
-import { isCliProvider } from "../agents/model-selection.js";
-import { runEmbeddedPiAgent } from "../agents/pi-embedded.js";
 import type { EmbeddedPiRunResult } from "../agents/pi-embedded-runner.js";
-import { isContextOverflowError } from "../agents/pi-embedded-helpers.js";
-import type { ReasoningLevel, VerboseLevel } from "../auto-reply/thinking.js";
+import { runEmbeddedPiAgent } from "../agents/pi-embedded-runner.js";
 import type { AdapterExecuteParams, Logger } from "./server.js";
 import { resolveClawlineConfig, type ResolvedClawlineConfig } from "./config.js";
 import {
@@ -91,21 +85,6 @@ export async function createClawlineAdapter(
   const workspaceDir = resolveAgentWorkspaceDir(params.config, agentId);
   const sessionDir = path.join(params.statePath, "sessions");
   await fs.mkdir(sessionDir, { recursive: true });
-  const agentDirPath = resolveClawdbotAgentDir();
-  const defaultVerboseLevel: VerboseLevel =
-    (params.config.agents?.defaults?.verboseDefault as VerboseLevel | undefined) ??
-    "off";
-  const defaultReasoningLevel: ReasoningLevel = "off";
-  const defaultBashElevated: ExecElevatedDefaults = {
-    enabled: false,
-    allowed: false,
-    defaultLevel:
-      (params.config.agents?.defaults?.elevatedDefault ?? "off") as "on" | "off",
-  };
-  const cliSessionStorePath = path.join(params.statePath, "cli-sessions.json");
-  const cliSessionIds = await loadCliSessionIds(cliSessionStorePath, logger);
-  const useCliBackend = isCliProvider(providerName, params.config);
-
   return {
     async execute(ctx) {
       const sessionKey = buildClawlineSessionKey(ctx.userId, ctx.deviceId);
@@ -115,36 +94,7 @@ export async function createClawlineAdapter(
       );
       await fs.mkdir(path.dirname(sessionFile), { recursive: true });
       const runId = randomUUID();
-      if (useCliBackend) {
-        const cliSessionId = cliSessionIds.get(sessionKey);
-        const result = await runCliAgent({
-          sessionId: ctx.sessionId,
-          sessionKey,
-          sessionFile,
-          workspaceDir,
-          config: params.config,
-          prompt: ctx.prompt,
-          provider: providerName,
-          model: parsedModel.model,
-          thinkLevel: params.config.agents?.defaults?.thinkingDefault,
-          timeoutMs,
-          runId,
-          extraSystemPrompt: resolved.adapterOverrides.systemPrompt,
-          ownerNumbers: undefined,
-          cliSessionId,
-        });
-        const newSessionId = result.meta.agentMeta?.sessionId;
-        if (newSessionId && newSessionId !== cliSessionId) {
-          cliSessionIds.set(sessionKey, newSessionId);
-          await persistCliSessionIds(
-            cliSessionStorePath,
-            cliSessionIds,
-            logger,
-          );
-        }
-        return formatResult(result);
-      }
-      const embeddedResult = await runEmbeddedPiAgent({
+      const result = await runEmbeddedPiAgent({
         sessionId: ctx.sessionId,
         sessionKey,
         sessionFile,
@@ -163,13 +113,18 @@ export async function createClawlineAdapter(
         runId,
         extraSystemPrompt: resolved.adapterOverrides.systemPrompt,
         ownerNumbers: undefined,
-        authProfileId: undefined,
-        enforceFinalTag: false,
-        messageProvider: CLAWLINE_MESSAGE_PROVIDER,
-        agentAccountId: ctx.userId,
-        onAgentEvent: (evt) => logAgentEvent(logger, runId, evt),
       });
-      return formatResult(embeddedResult);
+      const text = extractText(result);
+      if (!text) {
+        const fallback = resolved.adapterOverrides.responseFallback ?? "";
+        if (!fallback) {
+          logger.warn?.(
+            "[clawline] adapter returned no text; consider setting clawline.adapter.responseFallback",
+          );
+        }
+        return { exitCode: 1, output: fallback };
+      }
+      return { exitCode: 0, output: text };
     },
   };
 

@@ -43,6 +43,7 @@ export async function startGatewaySidecars(params: {
   logBrowser: { error: (msg: string) => void };
   logClawline: {
     info: (msg: string) => void;
+    warn: (msg: string) => void;
     error: (msg: string) => void;
   };
 }) {
