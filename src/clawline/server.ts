@@ -635,20 +635,23 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     return sequenceRow.sequence;
   });
 
-  const logHttpRequest = (info: Record<string, unknown>) => {
-    logger.info?.("[clawline:http]", info);
+  const logHttpRequest = (event: string, info?: Record<string, unknown>) => {
+    if (info) {
+      logger.info?.(`[clawline:http] ${event}`, info);
+    } else {
+      logger.info?.(`[clawline:http] ${event}`);
+    }
   };
 
   const httpServer = http.createServer(async (req, res) => {
     try {
       if (!req.url) {
-        logHttpRequest({ event: "request_missing_url", method: req.method ?? "UNKNOWN" });
+        logHttpRequest("request_missing_url", { method: req.method ?? "UNKNOWN" });
         res.writeHead(404).end();
         return;
       }
       const parsedUrl = new URL(req.url, "http://localhost");
-      logHttpRequest({
-        event: "request_received",
+      logHttpRequest("request_received", {
         method: req.method ?? "UNKNOWN",
         path: parsedUrl.pathname
       });
@@ -656,24 +659,23 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         res.setHeader("Content-Type", "application/json");
         res.writeHead(200);
         res.end(JSON.stringify({ protocolVersion: PROTOCOL_VERSION }));
-        logHttpRequest({ event: "request_handled", method: req.method, path: parsedUrl.pathname, status: 200 });
+        logHttpRequest("request_handled", { method: req.method, path: parsedUrl.pathname, status: 200 });
         return;
       }
       if (req.method === "POST" && parsedUrl.pathname === "/upload") {
-        logHttpRequest({ event: "upload_start" });
+        logHttpRequest("upload_start");
         await handleUpload(req, res);
-        logHttpRequest({ event: "upload_complete" });
+        logHttpRequest("upload_complete");
         return;
       }
       if (req.method === "GET" && parsedUrl.pathname.startsWith("/download/")) {
         const assetId = parsedUrl.pathname.slice("/download/".length);
-        logHttpRequest({ event: "download_start", assetId });
+        logHttpRequest("download_start", { assetId });
         await handleDownload(req, res, assetId);
-        logHttpRequest({ event: "download_complete", assetId });
+        logHttpRequest("download_complete", { assetId });
         return;
       }
-      logHttpRequest({
-        event: "request_not_found",
+      logHttpRequest("request_not_found", {
         method: req.method ?? "UNKNOWN",
         path: parsedUrl.pathname
       });
