@@ -635,28 +635,48 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     return sequenceRow.sequence;
   });
 
+  const logHttpRequest = (info: Record<string, unknown>) => {
+    logger.info?.("[clawline:http]", info);
+  };
+
   const httpServer = http.createServer(async (req, res) => {
     try {
       if (!req.url) {
+        logHttpRequest({ event: "request_missing_url", method: req.method ?? "UNKNOWN" });
         res.writeHead(404).end();
         return;
       }
       const parsedUrl = new URL(req.url, "http://localhost");
+      logHttpRequest({
+        event: "request_received",
+        method: req.method ?? "UNKNOWN",
+        path: parsedUrl.pathname
+      });
       if (req.method === "GET" && parsedUrl.pathname === "/version") {
         res.setHeader("Content-Type", "application/json");
         res.writeHead(200);
         res.end(JSON.stringify({ protocolVersion: PROTOCOL_VERSION }));
+        logHttpRequest({ event: "request_handled", method: req.method, path: parsedUrl.pathname, status: 200 });
         return;
       }
       if (req.method === "POST" && parsedUrl.pathname === "/upload") {
+        logHttpRequest({ event: "upload_start" });
         await handleUpload(req, res);
+        logHttpRequest({ event: "upload_complete" });
         return;
       }
       if (req.method === "GET" && parsedUrl.pathname.startsWith("/download/")) {
         const assetId = parsedUrl.pathname.slice("/download/".length);
+        logHttpRequest({ event: "download_start", assetId });
         await handleDownload(req, res, assetId);
+        logHttpRequest({ event: "download_complete", assetId });
         return;
       }
+      logHttpRequest({
+        event: "request_not_found",
+        method: req.method ?? "UNKNOWN",
+        path: parsedUrl.pathname
+      });
       res.writeHead(404).end();
     } catch (err) {
       logger.error("http_request_failed", err);
