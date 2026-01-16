@@ -240,7 +240,8 @@ const DEFAULT_CONFIG: ProviderConfig = {
   pairing: {
     maxPendingRequests: 100,
     maxRequestsPerMinute: 5,
-    pendingTtlSeconds: 300
+    pendingTtlSeconds: 300,
+    pendingSocketTimeoutSeconds: 300
   },
   media: {
     storagePath: path.join(os.homedir(), ".clawdbot", "clawline-media"),
@@ -1295,13 +1296,18 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   }
 
   function expirePendingPairs() {
-    if (config.pairing.pendingTtlSeconds <= 0) {
+    if (config.pairing.pendingTtlSeconds <= 0 && config.pairing.pendingSocketTimeoutSeconds <= 0) {
       return;
     }
     const now = nowMs();
-    const ttlMs = config.pairing.pendingTtlSeconds * 1000;
+    const socketTtlMs =
+      Math.max(
+        1,
+        config.pairing.pendingSocketTimeoutSeconds ?? config.pairing.pendingTtlSeconds
+      ) * 1000;
+    const entryTtlMs = Math.max(1, config.pairing.pendingTtlSeconds) * 1000;
     for (const [deviceId, pending] of pendingSockets) {
-      if (now - pending.createdAt >= config.pairing.pendingTtlSeconds * 1000) {
+      if (now - pending.createdAt >= socketTtlMs) {
         pendingSockets.delete(deviceId);
         void removePendingEntry(deviceId).catch(() => {});
         void sendJson(pending.socket, { type: "pair_result", success: false, reason: "pair_timeout" })
@@ -1311,7 +1317,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           });
       }
     }
-    const nextEntries = pendingFile.entries.filter((entry) => now - entry.requestedAt < ttlMs);
+    const nextEntries = pendingFile.entries.filter((entry) => now - entry.requestedAt < entryTtlMs);
     if (nextEntries.length !== pendingFile.entries.length) {
       pendingFile = { ...pendingFile, entries: nextEntries };
       void persistPendingFile().catch((err) => logger.warn?.("pending_prune_failed", err));

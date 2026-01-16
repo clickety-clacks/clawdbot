@@ -26,6 +26,7 @@ export type ClawlineConfig = {
     maxPendingRequests?: number;
     maxRequestsPerMinute?: number;
     pendingTtlSeconds?: number;
+    pendingSocketTimeoutSeconds?: number;
   };
   media?: {
     storagePath?: string;

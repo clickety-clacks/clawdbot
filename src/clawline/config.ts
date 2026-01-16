@@ -49,6 +49,7 @@ const DEFAULTS: ResolvedClawlineConfig = {
     maxPendingRequests: 100,
     maxRequestsPerMinute: 5,
     pendingTtlSeconds: 300,
+    pendingSocketTimeoutSeconds: 300,
   },
   media: {
     storagePath: defaultMediaPath,

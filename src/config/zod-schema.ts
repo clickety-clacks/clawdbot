@@ -168,6 +168,7 @@ const ClawlineConfigSchema = z
         maxPendingRequests: z.number().int().nonnegative().optional(),
         maxRequestsPerMinute: z.number().int().nonnegative().optional(),
         pendingTtlSeconds: z.number().int().nonnegative().optional(),
+        pendingSocketTimeoutSeconds: z.number().int().nonnegative().optional(),
       })
       .optional(),
     media: z
