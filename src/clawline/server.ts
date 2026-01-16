@@ -1430,6 +1430,14 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     const sanitizedClaimedName = sanitizeLabel(payload.claimedName);
     const deviceId = payload.deviceId;
     const entry = findAllowlistEntry(deviceId);
+    if (entry) {
+      logger.info?.("[clawline:http] pair_request_allowlist_entry", {
+        deviceId,
+        isAdmin: entry.isAdmin,
+        tokenDelivered: entry.tokenDelivered,
+        lastSeenAt: entry.lastSeenAt
+      });
+    }
     if (entry && !entry.tokenDelivered) {
       const token = issueToken(entry);
       const delivered = await sendJson(ws, { type: "pair_result", success: true, token, userId: entry.userId })
@@ -1482,6 +1490,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
 
     if (entry && entry.tokenDelivered) {
+      logger.warn?.("[clawline:http] pair_request_duplicate_device", { deviceId });
       await sendJson(ws, { type: "error", code: "invalid_message", message: "Device already paired" });
       ws.close();
       return;
@@ -1501,7 +1510,16 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       deviceInfo: sanitizedInfo,
       requestedAt: existingPendingEntry ? existingPendingEntry.requestedAt : now
     };
+    logger.info?.("[clawline:http] pair_request_upsert_pending", {
+      deviceId,
+      claimedName: sanitizedClaimedName,
+      pendingCount: pendingFile.entries.length + (existingPendingEntry ? 0 : 1)
+    });
     await upsertPendingEntry(pendingEntry);
+    logger.info?.("[clawline:http] pair_request_pending_persisted", {
+      deviceId,
+      pendingEntries: pendingFile.entries.length
+    });
     const existingSocket = pendingSockets.get(deviceId);
     if (existingSocket) {
       existingSocket.socket.close(1000);
