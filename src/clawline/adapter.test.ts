@@ -44,21 +44,36 @@ describe("createClawlineAdapter", () => {
     } as ClawdbotConfig;
   }
 
-  function buildCliConfig(): ClawdbotConfig {
-    const cfg = buildConfig();
-    (cfg.agents!.defaults as any).cliBackends = {
-      anthropic: { command: "claude" },
-    };
-    return cfg;
-  }
+  it("falls back to default model when primary not configured", async () => {
+    vi.mocked(runEmbeddedPiAgent).mockResolvedValue({ payloads: [{ text: "ok" }] });
+    const warn = vi.fn();
+    const adapter = await createClawlineAdapter({
+      config: { agents: { defaults: {} } } as unknown as ClawdbotConfig,
+      statePath: tmpDir,
+      logger: { warn },
+    });
+    await adapter.execute({
+      prompt: "Hi",
+      sessionId: "sess",
+      userId: "user",
+      deviceId: "dev",
+    });
+    const call = vi.mocked(runEmbeddedPiAgent).mock.calls.at(-1)?.[0];
+    expect(call?.provider).toBe("anthropic");
+    expect(call?.model).toBe("claude-opus-4-5");
+    expect(warn).toHaveBeenCalled();
+  });
 
-  it("throws when no primary model configured", async () => {
+  it("rejects invalid adapter override", async () => {
     await expect(
       createClawlineAdapter({
-        config: { agents: { defaults: {} } } as unknown as ClawdbotConfig,
+        config: buildConfig(),
         statePath: tmpDir,
+        clawlineConfig: resolveClawlineConfig({
+          clawline: { adapter: { model: "anthropic/" } },
+        } as ClawdbotConfig),
       }),
-    ).rejects.toThrow(/agents.defaults.model/i);
+    ).rejects.toThrow(/clawline.adapter.model/i);
   });
 
   it("calls runEmbeddedPiAgent with derived session data", async () => {

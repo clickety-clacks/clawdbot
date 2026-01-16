@@ -7,6 +7,12 @@ import {
   resolveAgentWorkspaceDir,
   resolveDefaultAgentId,
 } from "../agents/agent-scope.js";
+import { DEFAULT_MODEL, DEFAULT_PROVIDER } from "../agents/defaults.js";
+import {
+  buildModelAliasIndex,
+  resolveConfiguredModelRef,
+  resolveModelRefFromString,
+} from "../agents/model-selection.js";
 import type { EmbeddedPiRunResult } from "../agents/pi-embedded-runner.js";
 import { runEmbeddedPiAgent } from "../agents/pi-embedded-runner.js";
 import type { AdapterExecuteParams, Logger } from "./domain.js";
@@ -29,21 +35,6 @@ type AdapterCreateParams = {
   clawlineConfig?: ResolvedClawlineConfig;
 };
 
-function parseModelRef(
-  ref?: string | null,
-): { provider: string; model: string } | null {
-  if (!ref) return null;
-  const trimmed = ref.trim();
-  if (!trimmed) return null;
-  const [provider, ...rest] = trimmed.split("/");
-  if (!provider || rest.length === 0) return null;
-  return { provider, model: rest.join("/") };
-}
-
-const CLAWLINE_MESSAGE_PROVIDER = "clawline";
-const CONTEXT_OVERFLOW_FALLBACK =
-  "Context overflow: conversation history is too large. Use /new or /reset to start a fresh session.";
-
 function extractText(result: EmbeddedPiRunResult): string | null {
   const texts =
     result.payloads
@@ -65,17 +56,43 @@ export async function createClawlineAdapter(
 ): Promise<ClawlineAdapter> {
   const logger = params.logger ?? console;
   const resolved = params.clawlineConfig ?? resolveClawlineConfig(params.config);
-  const defaultModelRef =
-    resolved.adapterOverrides.model ??
-    params.config.agents?.defaults?.model?.primary;
-  const parsedModel = parseModelRef(defaultModelRef);
-  if (!parsedModel) {
-    throw new Error(
-      "Clawline adapter requires agents.defaults.model.primary in config",
-    );
+  const aliasIndex = buildModelAliasIndex({
+    cfg: params.config,
+    defaultProvider: DEFAULT_PROVIDER,
+  });
+  const adapterOverride = resolved.adapterOverrides.model?.trim();
+  let providerName: string;
+  let modelName: string;
+  if (adapterOverride) {
+    const overrideRef = resolveModelRefFromString({
+      raw: adapterOverride,
+      defaultProvider: DEFAULT_PROVIDER,
+      aliasIndex,
+    });
+    if (!overrideRef) {
+      throw new Error(
+        `Invalid clawline.adapter.model "${adapterOverride}"; expected provider/model or alias`,
+      );
+    }
+    providerName = resolved.adapterOverrides.provider ?? overrideRef.ref.provider;
+    modelName = overrideRef.ref.model;
+  } else {
+    const configuredRef = resolveConfiguredModelRef({
+      cfg: params.config,
+      defaultProvider: DEFAULT_PROVIDER,
+      defaultModel: DEFAULT_MODEL,
+    });
+    if (
+      !params.config.agents?.defaults?.model?.primary &&
+      !params.config.agents?.defaults?.model
+    ) {
+      logger.warn?.(
+        "[clawline] agents.defaults.model.primary missing; using default anthropic/claude-opus-4-5",
+      );
+    }
+    providerName = resolved.adapterOverrides.provider ?? configuredRef.provider;
+    modelName = configuredRef.model;
   }
-  const providerName =
-    resolved.adapterOverrides.provider ?? parsedModel.provider;
   const timeoutSeconds =
     resolved.adapterOverrides.timeoutSeconds ??
     params.config.agents?.defaults?.timeoutSeconds ??
@@ -104,7 +121,7 @@ export async function createClawlineAdapter(
         skillsSnapshot: undefined,
         prompt: ctx.prompt,
         provider: providerName,
-        model: parsedModel.model,
+        model: modelName,
         thinkLevel: params.config.agents?.defaults?.thinkingDefault,
         verboseLevel: defaultVerboseLevel,
         reasoningLevel: defaultReasoningLevel,
