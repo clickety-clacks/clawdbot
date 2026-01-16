@@ -132,11 +132,14 @@ function readDiscordCommandArgs(
   for (const definition of definitions) {
     let value: string | number | boolean | null | undefined;
     if (definition.type === "number") {
-      value = interaction.options.getNumber(definition.name) ?? null;
+      const raw = interaction.options.getNumber(definition.name);
+      value = raw ?? null;
     } else if (definition.type === "boolean") {
-      value = interaction.options.getBoolean(definition.name) ?? null;
+      const raw = interaction.options.getBoolean(definition.name);
+      value = raw ?? null;
     } else {
-      value = interaction.options.getString(definition.name) ?? null;
+      const raw = interaction.options.getString(definition.name);
+      value = raw ?? null;
     }
     if (value != null) {
       values[definition.name] = value;

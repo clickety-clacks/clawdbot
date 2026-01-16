@@ -218,11 +218,20 @@ function formatPositionalArgs(
     let rendered: string;
     if (typeof value === "string") {
       rendered = value.trim();
-    } else {
+    } else if (
+      typeof value === "number" ||
+      typeof value === "boolean" ||
+      typeof value === "bigint" ||
+      typeof value === "symbol" ||
+      typeof value === "function"
+    ) {
       rendered = String(value);
-    }
-    if (!rendered) {
-      continue;
+    } else {
+      try {
+        rendered = JSON.stringify(value);
+      } catch {
+        rendered = String(value ?? "");
+      }
     }
     parts.push(rendered);
     if (definition.captureRemaining) {
