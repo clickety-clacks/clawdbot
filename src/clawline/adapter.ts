@@ -7,12 +7,6 @@ import {
   resolveAgentWorkspaceDir,
   resolveDefaultAgentId,
 } from "../agents/agent-scope.js";
-import { DEFAULT_MODEL, DEFAULT_PROVIDER } from "../agents/defaults.js";
-import {
-  buildModelAliasIndex,
-  resolveConfiguredModelRef,
-  resolveModelRefFromString,
-} from "../agents/model-selection.js";
 import type { EmbeddedPiRunResult } from "../agents/pi-embedded-runner.js";
 import { runEmbeddedPiAgent } from "../agents/pi-embedded-runner.js";
 import type { AdapterExecuteParams, Logger } from "./domain.js";
@@ -56,42 +50,20 @@ export async function createClawlineAdapter(
 ): Promise<ClawlineAdapter> {
   const logger = params.logger ?? console;
   const resolved = params.clawlineConfig ?? resolveClawlineConfig(params.config);
-  const aliasIndex = buildModelAliasIndex({
-    cfg: params.config,
-    defaultProvider: DEFAULT_PROVIDER,
-  });
-  const adapterOverride = resolved.adapterOverrides.model?.trim();
-  let providerName: string;
-  let modelName: string;
-  if (adapterOverride) {
-    const overrideRef = resolveModelRefFromString({
-      raw: adapterOverride,
-      defaultProvider: DEFAULT_PROVIDER,
-      aliasIndex,
-    });
-    if (!overrideRef) {
-      throw new Error(
-        `Invalid clawline.adapter.model "${adapterOverride}"; expected provider/model or alias`,
-      );
+  const adapterProvider = resolved.adapterOverrides.provider?.trim() || undefined;
+  let adapterModel = resolved.adapterOverrides.model?.trim() || undefined;
+  let providerOverride = adapterProvider;
+  let modelOverride = adapterModel;
+  if (!providerOverride && adapterModel) {
+    const slash = adapterModel.indexOf("/");
+    if (slash > 0 && slash < adapterModel.length - 1) {
+      const provider = adapterModel.slice(0, slash).trim();
+      const model = adapterModel.slice(slash + 1).trim();
+      if (provider && model) {
+        providerOverride = provider;
+        modelOverride = model;
+      }
     }
-    providerName = resolved.adapterOverrides.provider ?? overrideRef.ref.provider;
-    modelName = overrideRef.ref.model;
-  } else {
-    const configuredRef = resolveConfiguredModelRef({
-      cfg: params.config,
-      defaultProvider: DEFAULT_PROVIDER,
-      defaultModel: DEFAULT_MODEL,
-    });
-    if (
-      !params.config.agents?.defaults?.model?.primary &&
-      !params.config.agents?.defaults?.model
-    ) {
-      logger.warn?.(
-        "[clawline] agents.defaults.model.primary missing; using default anthropic/claude-opus-4-5",
-      );
-    }
-    providerName = resolved.adapterOverrides.provider ?? configuredRef.provider;
-    modelName = configuredRef.model;
   }
   const timeoutSeconds =
     resolved.adapterOverrides.timeoutSeconds ??
@@ -120,8 +92,8 @@ export async function createClawlineAdapter(
         config: params.config,
         skillsSnapshot: undefined,
         prompt: ctx.prompt,
-        provider: providerName,
-        model: modelName,
+        provider: providerOverride,
+        model: modelOverride,
         thinkLevel: params.config.agents?.defaults?.thinkingDefault,
         verboseLevel: defaultVerboseLevel,
         reasoningLevel: defaultReasoningLevel,

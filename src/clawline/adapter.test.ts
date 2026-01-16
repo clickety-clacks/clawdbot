@@ -44,13 +44,11 @@ describe("createClawlineAdapter", () => {
     } as ClawdbotConfig;
   }
 
-  it("falls back to default model when primary not configured", async () => {
+  it("lets pi runner resolve models when not overridden", async () => {
     vi.mocked(runEmbeddedPiAgent).mockResolvedValue({ payloads: [{ text: "ok" }] });
-    const warn = vi.fn();
     const adapter = await createClawlineAdapter({
       config: { agents: { defaults: {} } } as unknown as ClawdbotConfig,
       statePath: tmpDir,
-      logger: { warn },
     });
     await adapter.execute({
       prompt: "Hi",
@@ -59,21 +57,28 @@ describe("createClawlineAdapter", () => {
       deviceId: "dev",
     });
     const call = vi.mocked(runEmbeddedPiAgent).mock.calls.at(-1)?.[0];
-    expect(call?.provider).toBe("anthropic");
-    expect(call?.model).toBe("claude-opus-4-5");
-    expect(warn).toHaveBeenCalled();
+    expect(call?.provider).toBeUndefined();
+    expect(call?.model).toBeUndefined();
   });
 
-  it("rejects invalid adapter override", async () => {
-    await expect(
-      createClawlineAdapter({
-        config: buildConfig(),
-        statePath: tmpDir,
-        clawlineConfig: resolveClawlineConfig({
-          clawline: { adapter: { model: "anthropic/" } },
-        } as ClawdbotConfig),
-      }),
-    ).rejects.toThrow(/clawline.adapter.model/i);
+  it("parses inline provider/model override", async () => {
+    vi.mocked(runEmbeddedPiAgent).mockResolvedValue({ payloads: [{ text: "ok" }] });
+    const adapter = await createClawlineAdapter({
+      config: buildConfig(),
+      statePath: tmpDir,
+      clawlineConfig: resolveClawlineConfig({
+        clawline: { adapter: { model: "anthropic/claude-3-7" } },
+      } as ClawdbotConfig),
+    });
+    await adapter.execute({
+      prompt: "hi",
+      sessionId: "sess",
+      userId: "user",
+      deviceId: "dev",
+    });
+    const call = vi.mocked(runEmbeddedPiAgent).mock.calls.at(-1)?.[0];
+    expect(call?.provider).toBe("anthropic");
+    expect(call?.model).toBe("claude-3-7");
   });
 
   it("calls runEmbeddedPiAgent with derived session data", async () => {
@@ -98,10 +103,8 @@ describe("createClawlineAdapter", () => {
     const call = vi.mocked(runEmbeddedPiAgent).mock.calls[0]?.[0];
     expect(call?.prompt).toBe("Hi there");
     expect(call?.sessionId).toBe("sess_123");
-    expect(call?.sessionKey).toContain("clawline");
-    expect(call?.sessionKey).toContain("user");
-    expect(call?.provider).toBe("anthropic");
-    expect(call?.model).toBe("claude-sonnet-4-5");
+    expect(call?.provider).toBeUndefined();
+    expect(call?.model).toBeUndefined();
     expect(result).toEqual({ exitCode: 0, output: "Hello from agent" });
   });
 
