@@ -30,7 +30,7 @@ const defaultMediaPath = path.join(os.homedir(), ".clawdbot", "clawline-media");
 
 const DEFAULTS: ResolvedClawlineConfig = {
   enabled: true,
-  port: 18792,
+  port: 18800,
   statePath: defaultStatePath,
   network: {
     bindAddress: "127.0.0.1",
