@@ -64,6 +64,7 @@ export interface ProviderConfig {
     maxPendingRequests: number;
     maxRequestsPerMinute: number;
     pendingTtlSeconds: number;
+    pendingSocketTimeoutSeconds: number;
   };
   media: {
     storagePath: string;
