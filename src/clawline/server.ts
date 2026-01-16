@@ -223,7 +223,7 @@ enum MessageStreamingState {
 }
 
 const DEFAULT_CONFIG: ProviderConfig = {
-  port: 18792,
+  port: 18800,
   statePath: path.join(os.homedir(), ".clawdbot", "clawline"),
   network: {
     bindAddress: "127.0.0.1",
@@ -1478,6 +1478,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       deviceInfo: sanitizedInfo,
       createdAt: now
     });
+    await sendJson(ws, { type: "pair_result", success: false, reason: "pair_pending" }).catch(() => {});
   }
 
   async function handleAuth(ws: WebSocket, payload: any) {
