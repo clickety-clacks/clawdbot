@@ -1,0 +1,103 @@
+I'll review this diff thoroughly. It adds the Clawline mobile provider - a WebSocket/HTTP server for iOS/Android clients to connect to the Clawdbot gateway.
+
+## Overall Assessment
+
+This is a substantial, well-structured addition with good security practices. The code is generally clean with proper TypeScript types, error handling, and configuration management.
+
+## Positives
+
+1. **Security is solid:**
+   - JWT authentication with timing-safe comparisons
+   - Rate limiting on auth, pairing, and messages
+   - Denylist with hot-reload for immediate revocation
+   - Origin checking for CORS
+   - Input validation (UUID v4 format, content sanitization, payload limits)
+
+2. **Good operational design:**
+   - Allowlist/denylist separation with clear semantics
+   - Auto-admin creation for bootstrap scenario
+   - Token reissue grace period for device restore
+   - Session replacement handling
+
+3. **Clean architecture:**
+   - Adapter pattern separates agent execution from transport
+   - Config resolution with sensible defaults
+   - Integration with existing session store
+
+4. **Documentation and skill are comprehensive** - the SKILL.md is a genuinely useful operational runbook
+
+## Issues to Address
+
+### 1. Duplicated `deepMerge` function
+`src/clawline/config.ts:72-95` and `src/clawline/server.ts:454-467` have different implementations of `deepMerge`. Should extract to a shared utility:
+
+```typescript
+// server.ts version handles undefined differently
+function deepMerge<T>(target: T, source: Partial<T>): T {
+  for (const [key, value] of Object.entries(source) as [keyof T, any][]) {
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      (target as any)[key] = deepMerge((target as any)[key] ?? {}, value);
+    } else if (value !== undefined) {
+      (target as any)[key] = value;
+    }
+  }
+  return target;
+}
+```
+
+### 2. Potential race condition in admin creation
+`src/clawline/server.ts:1628-1650` - If two devices connect simultaneously when no admin exists, both could become admins:
+
+```typescript
+if (!hasAdmin()) {
+  // Race: another connection could be creating admin between check and push
+  const userId = generateUserId();
+  const newEntry: AllowlistEntry = { ... isAdmin: true ... };
+  allowlist.entries.push(newEntry);  // Not atomic with hasAdmin() check
+  await persistAllowlist();
+```
+
+Consider using `enqueueWriteTask` to serialize this check-and-create operation.
+
+### 3. Large file size
+`server.ts` is ~1900 lines. Per project guidelines (~500-700 LOC), consider splitting into:
+- `handlers.ts` - HTTP/WS message handlers
+- `database.ts` - SQLite operations
+- `sessions.ts` - Session management
+- `pairing.ts` - Pairing flow logic
+
+### 4. Missing tests for server.ts
+No test file for the main server implementation. At minimum, consider testing:
+- Pairing flow (happy path, rate limiting, denylist)
+- Auth flow (valid token, expired token, revoked device)
+- Message idempotency
+- Asset upload/download
+
+### 5. Minor issues
+
+**`src/clawline/server.ts:180`** - The relationship between `MAX_TOTAL_PAYLOAD_BYTES` (320KB) and `maxMessageBytes` (64KB) / `maxInlineBytes` (256KB) isn't obvious. Add a comment explaining the budget.
+
+**`src/clawline/server.ts:1830-1840`** - Timeout errors in `stop()` are rejected but not logged:
+```typescript
+const closeWithTimeout = (fn: (cb: () => void) => void, label: string) =>
+  new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} close timeout`)), 5000);
+    // ...
+```
+Consider logging the timeout error instead of silently rejecting.
+
+**`src/clawline/adapter.ts:4`** - Import order: `randomUUID` from `node:crypto` should be grouped with other node imports at the top.
+
+### 6. Documentation nit
+
+`docs/providers/clawline.md:23` - The `allowedOrigins: ["null"]` default is unusual. Should clarify this is for local development with file:// origins or apps sending `null` origin.
+
+## Questions for the Author
+
+1. Is there an integration test plan for the pairing and messaging flows?
+2. Should the server support graceful degradation if the adapter fails repeatedly (circuit breaker)?
+3. Is the 31,536,000 second (1 year) token TTL intentional for mobile devices?
+
+## Summary
+
+This is a solid implementation with good security foundations. The main concerns are the file size of `server.ts`, the duplicated `deepMerge`, and the missing test coverage for the core server logic. The admin creation race condition should be fixed before merge.

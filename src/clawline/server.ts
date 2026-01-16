@@ -715,19 +715,35 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const wss = new WebSocketServer({ noServer: true });
 
   httpServer.on("upgrade", (request, socket, head) => {
+    const origin = request.headers.origin ?? "null";
+    logger.info?.("[clawline:http] ws_upgrade_received", {
+      url: request.url,
+      origin
+    });
     if (request.url !== "/ws") {
+      logger.info?.("[clawline:http] ws_upgrade_rejected_path", { url: request.url });
       socket.destroy();
       return;
     }
+    let originAllowed = true;
     if (config.network.allowedOrigins && config.network.allowedOrigins.length > 0) {
-      const origin = request.headers.origin ?? "null";
-      if (!config.network.allowedOrigins.includes(origin)) {
+      originAllowed = config.network.allowedOrigins.includes(origin);
+      logger.info?.("[clawline:http] ws_upgrade_origin_check", {
+        origin,
+        allowed: config.network.allowedOrigins,
+        originAllowed
+      });
+      if (!originAllowed) {
         socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
         socket.destroy();
         return;
       }
+    } else {
+      logger.info?.("[clawline:http] ws_upgrade_origin_check", { origin, allowed: "any", originAllowed });
     }
+    logger.info?.("[clawline:http] ws_upgrade_forward", { origin });
     wss.handleUpgrade(request, socket, head, (ws) => {
+      logger.info?.("[clawline:http] ws_handle_upgrade_complete", { origin });
       wss.emit("connection", ws, request);
     });
   });
@@ -1328,7 +1344,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     return typeof value === "string" && UUID_V4_REGEX.test(value);
   }
 
-  wss.on("connection", (ws) => {
+  wss.on("connection", (ws, req) => {
+    logger.info?.("[clawline:http] ws_connection_open", {
+      origin: req?.headers?.origin ?? "null",
+      remoteAddress: req?.socket?.remoteAddress
+    });
     connectionState.set(ws, { authenticated: false });
 
     ws.on("message", async (raw) => {
