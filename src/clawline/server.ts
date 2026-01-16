@@ -1575,8 +1575,16 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   return {
     async start() {
       if (started) return;
-      await new Promise<void>((resolve) => {
-        httpServer.listen(config.port, config.network.bindAddress, () => resolve());
+      await new Promise<void>((resolve, reject) => {
+        const onError = (err: Error) => {
+          httpServer.removeListener("error", onError);
+          reject(err);
+        };
+        httpServer.once("error", onError);
+        httpServer.listen(config.port, config.network.bindAddress, () => {
+          httpServer.removeListener("error", onError);
+          resolve();
+        });
       });
       started = true;
       const port = readBoundPort();
@@ -1609,14 +1617,21 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       httpServer.closeIdleConnections?.();
       httpServer.closeAllConnections?.();
       const closeWithTimeout = (fn: (cb: () => void) => void, label: string) =>
-        new Promise<void>((resolve, reject) => {
+        new Promise<void>((resolve) => {
+          let resolved = false;
           const timer = setTimeout(() => {
-            logger.warn("shutdown_timeout", { label });
-            reject(new Error(`${label} close timeout`));
+            if (!resolved) {
+              resolved = true;
+              logger.warn("shutdown_timeout", { label });
+              resolve();
+            }
           }, 5000);
           fn(() => {
-            clearTimeout(timer);
-            resolve();
+            if (!resolved) {
+              resolved = true;
+              clearTimeout(timer);
+              resolve();
+            }
           });
         });
       await closeWithTimeout((cb) => wss.close(cb), "wss");
