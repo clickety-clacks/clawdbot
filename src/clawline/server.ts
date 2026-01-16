@@ -650,6 +650,22 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         res.writeHead(404).end();
         return;
       }
+      const headerIncludes = (headerValue: string | string[] | undefined, needle: string): boolean => {
+        if (typeof headerValue === "string") return headerValue.toLowerCase().includes(needle);
+        if (Array.isArray(headerValue)) return headerValue.some((value) => value.toLowerCase().includes(needle));
+        return false;
+      };
+      const isUpgradeRequest =
+        headerIncludes(req.headers.upgrade, "websocket") &&
+        headerIncludes(req.headers.connection, "upgrade");
+      if (isUpgradeRequest) {
+        // Let the upgrade handler take over without sending an HTTP response.
+        logHttpRequest("request_upgrade_passthrough", {
+          method: req.method ?? "UNKNOWN",
+          path: req.url ?? "UNKNOWN"
+        });
+        return;
+      }
       const parsedUrl = new URL(req.url, "http://localhost");
       logHttpRequest("request_received", {
         method: req.method ?? "UNKNOWN",
