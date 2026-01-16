@@ -143,16 +143,17 @@ function formatPositionalArgs(
     } else if (
       typeof value === "number" ||
       typeof value === "boolean" ||
-      typeof value === "bigint"
+      typeof value === "bigint" ||
+      typeof value === "symbol" ||
+      typeof value === "function"
     ) {
       rendered = String(value);
-    } else if (typeof value === "symbol") {
-      rendered = value.toString();
-    } else if (typeof value === "function") {
-      rendered = value.toString();
     } else {
-      // Objects and arrays
-      rendered = JSON.stringify(value);
+      try {
+        rendered = JSON.stringify(value);
+      } catch {
+        rendered = String(value ?? "");
+      }
     }
     if (!rendered) continue;
     parts.push(rendered);
