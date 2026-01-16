@@ -1352,9 +1352,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     connectionState.set(ws, { authenticated: false });
 
     ws.on("message", async (raw) => {
+      const rawString = rawDataToString(raw);
+      logger.info?.("[clawline:http] ws_message_received", {
+        bytes: Buffer.byteLength(rawString, "utf8")
+      });
       let payload: any;
       try {
-        payload = JSON.parse(raw.toString());
+        payload = JSON.parse(rawString);
       } catch {
         await sendJson(ws, { type: "error", code: "invalid_message", message: "Malformed JSON" });
         ws.close();
@@ -1366,6 +1370,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       }
       switch (payload.type) {
         case "pair_request":
+          logger.info?.("[clawline:http] ws_pair_request_dispatch", {
+            deviceId: payload.deviceId,
+            protocolVersion: payload.protocolVersion
+          });
           await handlePairRequest(ws, payload);
           break;
         case "auth":
@@ -1384,21 +1392,28 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   });
 
   async function handlePairRequest(ws: WebSocket, payload: any) {
+    logger.info?.("[clawline:http] pair_request_start", {
+      deviceId: payload?.deviceId,
+      protocolVersion: payload?.protocolVersion
+    });
     if (payload.protocolVersion !== PROTOCOL_VERSION) {
       await sendJson(ws, { type: "error", code: "invalid_message", message: "Unsupported protocol" });
       ws.close();
       return;
     }
     if (!validateDeviceId(payload.deviceId)) {
+      logger.warn?.("[clawline:http] pair_request_invalid_device_id", { deviceId: payload.deviceId });
       await sendJson(ws, { type: "error", code: "invalid_message", message: "Invalid deviceId" });
       return;
     }
     if (!pairRateLimiter.attempt(payload.deviceId)) {
+      logger.warn?.("[clawline:http] pair_request_rate_limited", { deviceId: payload.deviceId });
       await sendJson(ws, { type: "error", code: "rate_limited", message: "Pairing rate limited" });
       ws.close(1008);
       return;
     }
     if (isDenylisted(payload.deviceId)) {
+      logger.warn?.("[clawline:http] pair_request_denylisted", { deviceId: payload.deviceId });
       await sendJson(ws, { type: "pair_result", success: false, reason: "pair_rejected" });
       ws.close();
       return;
