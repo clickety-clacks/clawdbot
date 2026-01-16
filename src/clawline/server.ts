@@ -1328,6 +1328,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     for (const [deviceId, pending] of pendingSockets) {
       if (pending.socket === socket) {
         pendingSockets.delete(deviceId);
+        logger.info?.("[clawline:http] pending_socket_closed", { deviceId });
         void removePendingEntry(deviceId).catch((err) => logger.warn?.("pending_cleanup_failed", err));
         break;
       }
