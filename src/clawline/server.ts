@@ -968,17 +968,17 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   }
 
   function sendJson(ws: WebSocket, payload: unknown): Promise<void> {
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve) => {
       if (ws.readyState !== WebSocket.OPEN) {
-        reject(new Error("socket not open"));
+        logger.warn?.("[clawline:http] send_json_socket_not_open");
+        resolve();
         return;
       }
       ws.send(JSON.stringify(payload), (err) => {
         if (err) {
-          reject(err);
-        } else {
-          resolve();
+          logger.warn?.("[clawline:http] send_json_failed", err);
         }
+        resolve();
       });
     });
   }
