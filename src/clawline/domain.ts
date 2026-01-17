@@ -22,6 +22,9 @@ export type AllowlistEntry = {
 
 export type AllowlistFile = { version: 1; entries: AllowlistEntry[] };
 
+export type NormalizedAttachment =
+  | { type: "image"; mimeType: string; data: string; assetId?: string }
+  | { type: "asset"; assetId: string };
 export type PendingEntry = {
   deviceId: string;
   claimedName?: string;
@@ -30,11 +33,6 @@ export type PendingEntry = {
 };
 
 export type PendingFile = { version: 1; entries: PendingEntry[] };
-
-export type NormalizedAttachment =
-  | { type: "image"; mimeType: string; data: string }
-  | { type: "asset"; assetId: string };
-
 export interface ProviderConfig {
   port: number;
   statePath: string;
@@ -86,6 +84,7 @@ export interface ProviderOptions {
   replyResolver?: typeof getReplyFromConfig;
   logger?: Logger;
   sessionStorePath: string;
+  mainSessionKey?: string;
 }
 
 export interface ProviderServer {

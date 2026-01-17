@@ -6,8 +6,8 @@ function normalizeKeyPart(value: string): string {
   return slug || "unknown";
 }
 
-export function buildClawlineSessionKey(userId: string, deviceId: string): string {
-  return `clawline:${normalizeKeyPart(userId)}:${normalizeKeyPart(deviceId)}`;
+export function buildClawlineSessionKey(userId: string): string {
+  return `clawline:${normalizeKeyPart(userId)}:personal`;
 }
 
 export function clawlineSessionFileName(sessionKey: string): string {

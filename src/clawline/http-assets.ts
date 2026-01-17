@@ -10,7 +10,7 @@ import type { Statement } from "better-sqlite3";
 import { ClientMessageError, HttpError } from "./errors.js";
 import type { Logger, ProviderConfig } from "./domain.js";
 
-type AuthDetails = { deviceId: string; userId: string };
+export type AuthDetails = { deviceId: string; userId: string; isAdmin: boolean };
 
 export type AssetHandlerDeps = {
   config: ProviderConfig;
@@ -27,6 +27,7 @@ export type AssetHandlerDeps = {
   safeUnlink: (filePath: string) => Promise<void>;
   nowMs: () => number;
   assetIdRegex: RegExp;
+  canAccessAsset?: (params: { assetOwnerId: string; auth: AuthDetails }) => boolean;
 };
 
 export function createAssetHandlers(deps: AssetHandlerDeps) {
@@ -45,6 +46,7 @@ export function createAssetHandlers(deps: AssetHandlerDeps) {
     safeUnlink,
     nowMs,
     assetIdRegex,
+    canAccessAsset,
   } = deps;
 
   async function handleUpload(req: http.IncomingMessage, res: http.ServerResponse) {
@@ -135,7 +137,15 @@ export function createAssetHandlers(deps: AssetHandlerDeps) {
       const asset = selectAssetStmt.get(assetId) as
         | { assetId: string; userId: string; mimeType: string; size: number }
         | undefined;
-      if (!asset || asset.userId !== auth.userId) {
+      if (!asset) {
+        sendHttpError(res, 404, "asset_not_found", "Asset not found");
+        return;
+      }
+      const ownsAsset = asset.userId === auth.userId;
+      const hasSharedAccess = !ownsAsset && typeof canAccessAsset === "function"
+        ? canAccessAsset({ assetOwnerId: asset.userId, auth })
+        : false;
+      if (!ownsAsset && !hasSharedAccess) {
         sendHttpError(res, 404, "asset_not_found", "Asset not found");
         return;
       }

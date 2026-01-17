@@ -1,5 +1,9 @@
 import type { ClawdbotConfig } from "../config/config.js";
-import { resolveStorePath } from "../config/sessions.js";
+import {
+  resolveStorePath,
+  resolveMainSessionKey,
+  resolveAgentIdFromSessionKey,
+} from "../config/sessions.js";
 import { resolveClawlineConfig } from "./config.js";
 import { createProviderServer } from "./server.js";
 import type { Logger, ProviderServer } from "./domain.js";
@@ -18,12 +22,17 @@ export async function startClawlineService(params: {
     logger.info?.("[clawline] service disabled in config");
     return null;
   }
-  const sessionStorePath = resolveStorePath(params.config.session?.store);
+  const mainSessionKey = resolveMainSessionKey(params.config);
+  const mainSessionAgentId = resolveAgentIdFromSessionKey(mainSessionKey);
+  const sessionStorePath = resolveStorePath(params.config.session?.store, {
+    agentId: mainSessionAgentId,
+  });
   const server: ProviderServer = await createProviderServer({
     config: resolved,
     clawdbotConfig: params.config,
     logger,
     sessionStorePath,
+    mainSessionKey,
   });
   await server.start();
   logger.info?.(
