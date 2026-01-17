@@ -9,7 +9,7 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypt
 import WebSocket, { WebSocketServer } from "ws";
 import jwt from "jsonwebtoken";
 import BetterSqlite3 from "better-sqlite3";
-import type { Database as SqliteDatabase } from "better-sqlite3";
+import type { Database as SqliteDatabase, Statement as SqliteStatement } from "better-sqlite3";
 import type { MsgContext } from "../auto-reply/templating.js";
 import { dispatchReplyFromConfig } from "../auto-reply/reply/dispatch-from-config.js";
 import { createReplyDispatcher } from "../auto-reply/reply/reply-dispatcher.js";
@@ -411,7 +411,11 @@ async function loadAllowlist(filePath: string): Promise<AllowlistFile> {
 }
 
 async function loadPending(filePath: string): Promise<PendingFile> {
-  return loadJsonFile<PendingFile>(filePath, { version: 1, entries: [] });
+  const pending = await loadJsonFile<PendingFile>(filePath, { version: 1, entries: [] });
+  if (!Array.isArray(pending.entries)) {
+    pending.entries = [];
+  }
+  return pending;
 }
 
 async function loadDenylist(filePath: string): Promise<{ deviceId: string }[]> {
@@ -524,124 +528,267 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   let denylist = await loadDenylist(denylistPath);
   const jwtKey = await ensureJwtKey(jwtKeyPath, config.auth.jwtSigningKey);
 
-  const db = new BetterSqlite3(dbPath, { fileMustExist: false });
-  db.exec("PRAGMA journal_mode = WAL");
-  db.exec("PRAGMA foreign_keys = ON");
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS user_sequences (
-      userId TEXT PRIMARY KEY,
-      nextSequence INTEGER NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS events (
-      id TEXT PRIMARY KEY,
-      userId TEXT NOT NULL,
-      sequence INTEGER NOT NULL,
-      originatingDeviceId TEXT,
-      payloadJson TEXT NOT NULL,
-      payloadBytes INTEGER NOT NULL,
-      timestamp INTEGER NOT NULL
-    );
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_events_userId_sequence ON events(userId, sequence);
-    CREATE INDEX IF NOT EXISTS idx_events_userId ON events(userId);
-    CREATE TABLE IF NOT EXISTS messages (
-      deviceId TEXT NOT NULL,
-      userId TEXT NOT NULL,
-      clientId TEXT NOT NULL,
-      serverEventId TEXT NOT NULL,
-      serverSequence INTEGER NOT NULL,
-      content TEXT NOT NULL,
-      contentHash TEXT NOT NULL,
-      attachmentsHash TEXT NOT NULL,
-      timestamp INTEGER NOT NULL,
-      streaming INTEGER NOT NULL,
-      ackSent INTEGER NOT NULL DEFAULT 0,
-      PRIMARY KEY (deviceId, clientId)
-    );
-    CREATE INDEX IF NOT EXISTS idx_messages_userId ON messages(userId);
-    CREATE INDEX IF NOT EXISTS idx_messages_serverEventId ON messages(serverEventId);
-    CREATE TABLE IF NOT EXISTS assets (
-      assetId TEXT PRIMARY KEY,
-      userId TEXT NOT NULL,
-      mimeType TEXT NOT NULL,
-      size INTEGER NOT NULL,
-      createdAt INTEGER NOT NULL,
-      uploaderDeviceId TEXT NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS idx_assets_userId ON assets(userId);
-    CREATE INDEX IF NOT EXISTS idx_assets_createdAt ON assets(createdAt);
-    CREATE TABLE IF NOT EXISTS message_assets (
-      deviceId TEXT NOT NULL,
-      clientId TEXT NOT NULL,
-      assetId TEXT NOT NULL,
-      PRIMARY KEY (deviceId, clientId, assetId),
-      FOREIGN KEY (deviceId, clientId) REFERENCES messages(deviceId, clientId) ON DELETE CASCADE,
-      FOREIGN KEY (assetId) REFERENCES assets(assetId) ON DELETE RESTRICT
-    );
-    CREATE INDEX IF NOT EXISTS idx_message_assets_assetId ON message_assets(assetId);
-  `);
+  type AssetHandlers = ReturnType<typeof createAssetHandlers>;
 
-  const sequenceStatement = userSequenceStmt(db);
-  const insertEventStmt = db.prepare(
-    `INSERT INTO events (id, userId, sequence, originatingDeviceId, payloadJson, payloadBytes, timestamp)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`
-  );
-  const updateMessageAckStmt = db.prepare(`UPDATE messages SET ackSent = 1 WHERE deviceId = ? AND clientId = ?`);
-  const insertMessageStmt = db.prepare(
-    `INSERT INTO messages (deviceId, userId, clientId, serverEventId, serverSequence, content, contentHash, attachmentsHash, timestamp, streaming, ackSent)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ${MessageStreamingState.Active}, 0)`
-  );
-  const selectMessageStmt = db.prepare(
-    `SELECT deviceId, userId, clientId, serverEventId, serverSequence, content, contentHash, attachmentsHash, timestamp, streaming, ackSent
-     FROM messages WHERE deviceId = ? AND clientId = ?`
-  );
-  const updateMessageStreamingStmt = db.prepare(`UPDATE messages SET streaming = ? WHERE deviceId = ? AND clientId = ?`);
-  const insertMessageAssetStmt = db.prepare(
-    `INSERT INTO message_assets (deviceId, clientId, assetId) VALUES (?, ?, ?)`
-  );
-  const insertAssetStmt = db.prepare(
-    `INSERT INTO assets (assetId, userId, mimeType, size, createdAt, uploaderDeviceId) VALUES (?, ?, ?, ?, ?, ?)`
-  );
-  const selectAssetStmt = db.prepare(
-    `SELECT assetId, userId, mimeType, size, createdAt FROM assets WHERE assetId = ?`
-  );
-  const selectExpiredAssetsStmt = db.prepare(
-    `SELECT assetId FROM assets
-     WHERE createdAt <= ?
-       AND NOT EXISTS (
-         SELECT 1 FROM message_assets WHERE message_assets.assetId = assets.assetId
-       )`
-  );
-  const deleteAssetStmt = db.prepare(
-    `DELETE FROM assets
-     WHERE assetId = ?
-       AND NOT EXISTS (
-         SELECT 1 FROM message_assets WHERE message_assets.assetId = assets.assetId
-       )`
-  );
-  const {
-    handleUpload,
-    handleDownload,
-    cleanupTmpDirectory,
-    cleanupOrphanedAssetFiles,
-    cleanupUnreferencedAssets,
-  } = createAssetHandlers({
-    config,
-    tmpDir,
-    assetsDir,
-    logger,
-    selectAssetStmt,
-    deleteAssetStmt,
-    insertAssetStmt,
-    selectExpiredAssetsStmt,
-    enqueueWriteTask,
-    authenticateHttpRequest,
-    sendHttpError,
-    safeUnlink,
-    nowMs,
-    assetIdRegex: ASSET_ID_REGEX,
-    canAccessAsset: ({ assetOwnerId, auth }) =>
-      assetOwnerId === ADMIN_TRANSCRIPT_USER_ID && auth.isAdmin === true,
-  });
+  let db: SqliteDatabase | null = null;
+  let sequenceStatement!: ReturnType<typeof userSequenceStmt>;
+  let insertEventStmt!: SqliteStatement;
+  let updateMessageAckStmt!: SqliteStatement;
+  let insertMessageStmt!: SqliteStatement;
+  let selectMessageStmt!: SqliteStatement;
+  let updateMessageStreamingStmt!: SqliteStatement;
+  let insertMessageAssetStmt!: SqliteStatement;
+  let insertAssetStmt!: SqliteStatement;
+  let selectAssetStmt!: SqliteStatement;
+  let selectExpiredAssetsStmt!: SqliteStatement;
+  let deleteAssetStmt!: SqliteStatement;
+  let selectEventsAfterStmt!: SqliteStatement;
+  let selectEventsTailStmt!: SqliteStatement;
+  let selectEventByIdStmt!: SqliteStatement;
+  let selectEventsAfterTimestampStmt!: SqliteStatement;
+  let insertUserMessageTx!: ReturnType<SqliteDatabase["transaction"]>;
+  let insertEventTx!: ReturnType<SqliteDatabase["transaction"]>;
+  let handleUpload!: AssetHandlers["handleUpload"];
+  let handleDownload!: AssetHandlers["handleDownload"];
+  let cleanupTmpDirectory!: AssetHandlers["cleanupTmpDirectory"];
+  let cleanupOrphanedAssetFiles!: AssetHandlers["cleanupOrphanedAssetFiles"];
+  let cleanupUnreferencedAssets!: AssetHandlers["cleanupUnreferencedAssets"];
+
+  function initializeDatabaseResources(): boolean {
+    if (db) {
+      return false;
+    }
+    const newDb = new BetterSqlite3(dbPath, { fileMustExist: false });
+    newDb.exec("PRAGMA journal_mode = WAL");
+    newDb.exec("PRAGMA foreign_keys = ON");
+    newDb.exec(`
+      CREATE TABLE IF NOT EXISTS user_sequences (
+        userId TEXT PRIMARY KEY,
+        nextSequence INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS events (
+        id TEXT PRIMARY KEY,
+        userId TEXT NOT NULL,
+        sequence INTEGER NOT NULL,
+        originatingDeviceId TEXT,
+        payloadJson TEXT NOT NULL,
+        payloadBytes INTEGER NOT NULL,
+        timestamp INTEGER NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_events_userId_sequence ON events(userId, sequence);
+      CREATE INDEX IF NOT EXISTS idx_events_userId ON events(userId);
+      CREATE TABLE IF NOT EXISTS messages (
+        deviceId TEXT NOT NULL,
+        userId TEXT NOT NULL,
+        clientId TEXT NOT NULL,
+        serverEventId TEXT NOT NULL,
+        serverSequence INTEGER NOT NULL,
+        content TEXT NOT NULL,
+        contentHash TEXT NOT NULL,
+        attachmentsHash TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        streaming INTEGER NOT NULL,
+        ackSent INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (deviceId, clientId)
+      );
+      CREATE INDEX IF NOT EXISTS idx_messages_userId ON messages(userId);
+      CREATE INDEX IF NOT EXISTS idx_messages_serverEventId ON messages(serverEventId);
+      CREATE TABLE IF NOT EXISTS assets (
+        assetId TEXT PRIMARY KEY,
+        userId TEXT NOT NULL,
+        mimeType TEXT NOT NULL,
+        size INTEGER NOT NULL,
+        createdAt INTEGER NOT NULL,
+        uploaderDeviceId TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_assets_userId ON assets(userId);
+      CREATE INDEX IF NOT EXISTS idx_assets_createdAt ON assets(createdAt);
+      CREATE TABLE IF NOT EXISTS message_assets (
+        deviceId TEXT NOT NULL,
+        clientId TEXT NOT NULL,
+        assetId TEXT NOT NULL,
+        PRIMARY KEY (deviceId, clientId, assetId),
+        FOREIGN KEY (deviceId, clientId) REFERENCES messages(deviceId, clientId) ON DELETE CASCADE,
+        FOREIGN KEY (assetId) REFERENCES assets(assetId) ON DELETE RESTRICT
+      );
+      CREATE INDEX IF NOT EXISTS idx_message_assets_assetId ON message_assets(assetId);
+    `);
+
+    sequenceStatement = userSequenceStmt(newDb);
+    insertEventStmt = newDb.prepare(
+      `INSERT INTO events (id, userId, sequence, originatingDeviceId, payloadJson, payloadBytes, timestamp)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    );
+    updateMessageAckStmt = newDb.prepare(`UPDATE messages SET ackSent = 1 WHERE deviceId = ? AND clientId = ?`);
+    insertMessageStmt = newDb.prepare(
+      `INSERT INTO messages (deviceId, userId, clientId, serverEventId, serverSequence, content, contentHash, attachmentsHash, timestamp, streaming, ackSent)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ${MessageStreamingState.Active}, 0)`
+    );
+    selectMessageStmt = newDb.prepare(
+      `SELECT deviceId, userId, clientId, serverEventId, serverSequence, content, contentHash, attachmentsHash, timestamp, streaming, ackSent
+       FROM messages WHERE deviceId = ? AND clientId = ?`
+    );
+    updateMessageStreamingStmt = newDb.prepare(
+      `UPDATE messages SET streaming = ? WHERE deviceId = ? AND clientId = ?`
+    );
+    insertMessageAssetStmt = newDb.prepare(
+      `INSERT INTO message_assets (deviceId, clientId, assetId) VALUES (?, ?, ?)`
+    );
+    insertAssetStmt = newDb.prepare(
+      `INSERT INTO assets (assetId, userId, mimeType, size, createdAt, uploaderDeviceId) VALUES (?, ?, ?, ?, ?, ?)`
+    );
+    selectAssetStmt = newDb.prepare(
+      `SELECT assetId, userId, mimeType, size, createdAt FROM assets WHERE assetId = ?`
+    );
+    selectExpiredAssetsStmt = newDb.prepare(
+      `SELECT assetId FROM assets
+       WHERE createdAt <= ?
+         AND NOT EXISTS (
+           SELECT 1 FROM message_assets WHERE message_assets.assetId = assets.assetId
+         )`
+    );
+    deleteAssetStmt = newDb.prepare(
+      `DELETE FROM assets
+       WHERE assetId = ?
+         AND NOT EXISTS (
+           SELECT 1 FROM message_assets WHERE message_assets.assetId = assets.assetId
+         )`
+    );
+    ({
+      handleUpload,
+      handleDownload,
+      cleanupTmpDirectory,
+      cleanupOrphanedAssetFiles,
+      cleanupUnreferencedAssets,
+    } = createAssetHandlers({
+      config,
+      tmpDir,
+      assetsDir,
+      logger,
+      selectAssetStmt,
+      deleteAssetStmt,
+      insertAssetStmt,
+      selectExpiredAssetsStmt,
+      enqueueWriteTask,
+      authenticateHttpRequest,
+      sendHttpError,
+      safeUnlink,
+      nowMs,
+      assetIdRegex: ASSET_ID_REGEX,
+      canAccessAsset: ({ assetOwnerId, auth }) =>
+        assetOwnerId === ADMIN_TRANSCRIPT_USER_ID && auth.isAdmin === true,
+    }));
+
+    insertUserMessageTx = newDb.transaction(
+      (
+        session: Session,
+        targetUserId: string,
+        messageId: string,
+        content: string,
+        timestamp: number,
+        attachments: NormalizedAttachment[],
+        attachmentsHash: string,
+        assetIds: string[],
+        channelType: ChannelType
+      ) => {
+        for (const assetId of assetIds) {
+          const asset = selectAssetStmt.get(assetId) as { assetId: string; userId: string } | undefined;
+          if (!asset) {
+            throw new ClientMessageError("asset_not_found", "Asset not found");
+          }
+          const allowedOwners =
+            channelType === ADMIN_CHANNEL_TYPE
+              ? new Set([session.userId, ADMIN_TRANSCRIPT_USER_ID])
+              : new Set([session.userId]);
+          if (!allowedOwners.has(asset.userId)) {
+            throw new ClientMessageError("asset_not_found", "Asset not found");
+          }
+        }
+        const serverMessageId = generateServerMessageId();
+        const event: ServerMessage = {
+          type: "message",
+          id: serverMessageId,
+          role: "user",
+          content,
+          timestamp,
+          streaming: false,
+          deviceId: session.deviceId,
+          attachments: attachments.length > 0 ? attachments : undefined,
+          channelType
+        };
+        const payloadJson = JSON.stringify(event);
+        const payloadBytes = Buffer.byteLength(payloadJson, "utf8");
+        const sequenceRow = sequenceStatement.get(targetUserId) as { sequence: number };
+        insertEventStmt.run(
+          serverMessageId,
+          targetUserId,
+          sequenceRow.sequence,
+          session.deviceId,
+          payloadJson,
+          payloadBytes,
+          timestamp
+        );
+        insertMessageStmt.run(
+          session.deviceId,
+          targetUserId,
+          messageId,
+          serverMessageId,
+          sequenceRow.sequence,
+          content,
+          sha256(content),
+          attachmentsHash,
+          timestamp
+        );
+        for (const assetId of assetIds) {
+          insertMessageAssetStmt.run(session.deviceId, messageId, assetId);
+        }
+        return { event, sequence: sequenceRow.sequence };
+      }
+    );
+
+    selectEventsAfterStmt = newDb.prepare(
+      `SELECT id, payloadJson FROM events WHERE userId = ? AND sequence > ? ORDER BY sequence ASC`
+    );
+    selectEventsTailStmt = newDb.prepare(
+      `SELECT id, payloadJson FROM events WHERE userId = ? ORDER BY sequence DESC LIMIT ?`
+    );
+    selectEventByIdStmt = newDb.prepare(
+      `SELECT id, userId, sequence, timestamp FROM events WHERE id = ?`
+    );
+    selectEventsAfterTimestampStmt = newDb.prepare(
+      `SELECT id, payloadJson FROM events WHERE userId = ? AND timestamp > ? ORDER BY sequence ASC`
+    );
+    insertEventTx = newDb.transaction((event: ServerMessage, userId: string, originatingDeviceId?: string) => {
+      const payloadJson = JSON.stringify(event);
+      const payloadBytes = Buffer.byteLength(payloadJson, "utf8");
+      const sequenceRow = sequenceStatement.get(userId) as { sequence: number };
+      insertEventStmt.run(
+        event.id,
+        userId,
+        sequenceRow.sequence,
+        originatingDeviceId ?? null,
+        payloadJson,
+        payloadBytes,
+        event.timestamp
+      );
+      return sequenceRow.sequence;
+    });
+
+    db = newDb;
+    return true;
+  }
+
+  function disposeDatabaseResources() {
+    if (db) {
+      db.close();
+      db = null;
+    }
+  }
+
+  if (initializeDatabaseResources()) {
+    await cleanupTmpDirectory();
+    await cleanupOrphanedAssetFiles();
+  }
 
   async function materializeInlineAttachments(params: {
     attachments: NormalizedAttachment[];
@@ -760,95 +907,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     return { attachments: updatedAttachments, assetIds: updatedAssetIds };
   }
 
-  await cleanupTmpDirectory();
-  await cleanupOrphanedAssetFiles();
-  const insertUserMessageTx = db.transaction(
-    (
-      session: Session,
-      targetUserId: string,
-      messageId: string,
-      content: string,
-      timestamp: number,
-      attachments: NormalizedAttachment[],
-      attachmentsHash: string,
-      assetIds: string[],
-      channelType: ChannelType
-    ) => {
-      for (const assetId of assetIds) {
-        const asset = selectAssetStmt.get(assetId) as { assetId: string; userId: string } | undefined;
-        if (!asset) {
-          throw new ClientMessageError("asset_not_found", "Asset not found");
-        }
-        const allowedOwners =
-          channelType === ADMIN_CHANNEL_TYPE
-            ? new Set([session.userId, ADMIN_TRANSCRIPT_USER_ID])
-            : new Set([session.userId]);
-        if (!allowedOwners.has(asset.userId)) {
-          throw new ClientMessageError("asset_not_found", "Asset not found");
-        }
-      }
-      const serverMessageId = generateServerMessageId();
-      const event: ServerMessage = {
-        type: "message",
-        id: serverMessageId,
-        role: "user",
-        content,
-        timestamp,
-        streaming: false,
-        deviceId: session.deviceId,
-        attachments: attachments.length > 0 ? attachments : undefined,
-        channelType
-      };
-      const payloadJson = JSON.stringify(event);
-      const payloadBytes = Buffer.byteLength(payloadJson, "utf8");
-      const sequenceRow = sequenceStatement.get(targetUserId) as { sequence: number };
-      insertEventStmt.run(
-        serverMessageId,
-        targetUserId,
-        sequenceRow.sequence,
-        session.deviceId,
-        payloadJson,
-        payloadBytes,
-        timestamp
-      );
-      insertMessageStmt.run(
-        session.deviceId,
-        targetUserId,
-        messageId,
-        serverMessageId,
-        sequenceRow.sequence,
-        content,
-        sha256(content),
-        attachmentsHash,
-        timestamp
-      );
-      for (const assetId of assetIds) {
-        insertMessageAssetStmt.run(session.deviceId, messageId, assetId);
-      }
-      return { event, sequence: sequenceRow.sequence };
-    }
-  );
-
   type EventRow = { id: string; payloadJson: string };
-  const selectEventsAfterStmt = db.prepare(
-    `SELECT id, payloadJson FROM events WHERE userId = ? AND sequence > ? ORDER BY sequence ASC`
-  );
-  const selectEventsTailStmt = db.prepare(
-    `SELECT id, payloadJson FROM events WHERE userId = ? ORDER BY sequence DESC LIMIT ?`
-  );
-  const selectEventByIdStmt = db.prepare(
-    `SELECT id, userId, sequence, timestamp FROM events WHERE id = ?`
-  );
-  const selectEventsAfterTimestampStmt = db.prepare(
-    `SELECT id, payloadJson FROM events WHERE userId = ? AND timestamp > ? ORDER BY sequence ASC`
-  );
-  const insertEventTx = db.transaction((event: ServerMessage, userId: string, originatingDeviceId?: string) => {
-    const payloadJson = JSON.stringify(event);
-    const payloadBytes = Buffer.byteLength(payloadJson, "utf8");
-    const sequenceRow = sequenceStatement.get(userId) as { sequence: number };
-    insertEventStmt.run(event.id, userId, sequenceRow.sequence, originatingDeviceId ?? null, payloadJson, payloadBytes, event.timestamp);
-    return sequenceRow.sequence;
-  });
 
   const logHttpRequest = (event: string, info?: Record<string, unknown>) => {
     if (info) {
@@ -2057,6 +2116,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
   return {
     async start() {
+      const initialized = initializeDatabaseResources();
+      if (initialized) {
+        await cleanupTmpDirectory();
+        await cleanupOrphanedAssetFiles();
+      }
       if (started) return;
       await new Promise<void>((resolve, reject) => {
         const onError = (err: Error) => {
@@ -2119,7 +2183,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         });
       await closeWithTimeout((cb) => wss.close(cb), "wss");
       await closeWithTimeout((cb) => httpServer.close(cb), "httpServer");
-      db.close();
+      disposeDatabaseResources();
       started = false;
     },
     getPort() {
