@@ -1,3 +1,6 @@
+import type { ClawdbotConfig } from "../config/config.js";
+import type { getReplyFromConfig } from "../auto-reply/reply.js";
+
 export type DeviceInfo = {
   platform: string;
   model: string;
@@ -10,6 +13,7 @@ export type AllowlistEntry = {
   claimedName?: string;
   deviceInfo: DeviceInfo;
   userId: string;
+  bindingId?: string;
   isAdmin: boolean;
   tokenDelivered: boolean;
   createdAt: number;
@@ -30,20 +34,6 @@ export type PendingFile = { version: 1; entries: PendingEntry[] };
 export type NormalizedAttachment =
   | { type: "image"; mimeType: string; data: string }
   | { type: "asset"; assetId: string };
-
-export type AdapterExecuteParams = {
-  prompt: string;
-  userId: string;
-  sessionId: string;
-  deviceId: string;
-};
-
-export interface Adapter {
-  capabilities?: { streaming?: boolean };
-  execute: (
-    params: AdapterExecuteParams
-  ) => Promise<{ exitCode: number; output: string } | { exitCode?: number; output?: string } | string>;
-}
 
 export interface ProviderConfig {
   port: number;
@@ -92,7 +82,8 @@ export interface ProviderConfig {
 
 export interface ProviderOptions {
   config?: Partial<ProviderConfig>;
-  adapter: Adapter;
+  clawdbotConfig: ClawdbotConfig;
+  replyResolver?: typeof getReplyFromConfig;
   logger?: Logger;
   sessionStorePath: string;
 }
