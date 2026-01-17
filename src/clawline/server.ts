@@ -10,8 +10,22 @@ import WebSocket, { WebSocketServer } from "ws";
 import jwt from "jsonwebtoken";
 import BetterSqlite3 from "better-sqlite3";
 import type { Database as SqliteDatabase } from "better-sqlite3";
-
+import type { MsgContext } from "../auto-reply/templating.js";
+import { dispatchReplyFromConfig } from "../auto-reply/reply/dispatch-from-config.js";
+import { createReplyDispatcher } from "../auto-reply/reply/reply-dispatcher.js";
+import { extractShortModelName } from "../auto-reply/reply/response-prefix-template.js";
+import type { ResponsePrefixContext } from "../auto-reply/reply/response-prefix-template.js";
+import type { ReplyPayload } from "../auto-reply/types.js";
+import { resolveAgentRoute } from "../routing/resolve-route.js";
+import {
+  resolveEffectiveMessagesConfig,
+  resolveHumanDelayConfig,
+  resolveIdentityName,
+} from "../agents/identity.js";
+import { updateLastRoute } from "../config/sessions.js";
+import { rawDataToString } from "../infra/ws.js";
 import { recordClawlineSessionActivity } from "./session-store.js";
+import type { ClawlineAdapterOverrides } from "./config.js";
 import {
   buildClawlineSessionKey,
   clawlineSessionFileName,
@@ -92,6 +106,18 @@ function sanitizeDeviceInfo(info: DeviceInfo): DeviceInfo {
   };
 }
 
+function derivePeerId(entry: AllowlistEntry): string {
+  const sources = [
+    entry.bindingId?.trim(),
+    entry.claimedName?.trim(),
+    entry.deviceInfo.model?.trim(),
+    entry.deviceInfo.platform?.trim(),
+    entry.userId.trim(),
+    entry.deviceId.trim(),
+  ].filter((value): value is string => Boolean(value && value.length > 0));
+  return sources[0] ?? entry.deviceId;
+}
+
 function normalizeAttachmentsInput(
   raw: unknown,
   mediaConfig: ProviderConfig["media"]
@@ -151,6 +177,50 @@ function normalizeAttachmentsInput(
   return { attachments, inlineBytes, assetIds };
 }
 
+function describeClawlineAttachments(
+  attachments: NormalizedAttachment[],
+  assetsDir: string,
+): string | null {
+  if (attachments.length === 0) {
+    return null;
+  }
+  const lines = attachments.map((attachment, index) => {
+    const label = `Attachment ${index + 1}`;
+    if (attachment.type === "asset") {
+      const assetPath = path.join(assetsDir, attachment.assetId);
+      return `${label}: uploaded asset ${attachment.assetId} at ${assetPath}`;
+    }
+    const approxBytes = Math.round((attachment.data.length / 4) * 3);
+    return `${label}: inline image (${attachment.mimeType}, ~${approxBytes} bytes)`;
+  });
+  return `Attachments:\n${lines.join("\n")}`;
+}
+
+function buildAssistantTextFromPayload(payload: ReplyPayload, fallback: string): string | null {
+  const parts: string[] = [];
+  const text = payload.text?.trim();
+  if (text) {
+    parts.push(text);
+  }
+  const mediaUrls = payload.mediaUrls?.length
+    ? payload.mediaUrls
+    : payload.mediaUrl
+      ? [payload.mediaUrl]
+      : [];
+  if (mediaUrls.length > 0) {
+    parts.push(mediaUrls.map((url) => `[media] ${url}`).join("\n"));
+  }
+  if (payload.isError && parts.length > 0) {
+    parts[0] = `⚠️ ${parts[0]}`;
+  }
+  const combined = parts.join("\n\n").trim();
+  if (combined) {
+    return combined;
+  }
+  const fallbackText = fallback.trim();
+  return fallbackText || null;
+}
+
 function timingSafeStringEqual(a: string, b: string): boolean {
   const bufA = Buffer.from(a);
   const bufB = Buffer.from(b);
@@ -193,6 +263,7 @@ type Session = {
   isAdmin: boolean;
   sessionId: string;
   sessionKey: string;
+  peerId: string;
   claimedName?: string;
   deviceInfo?: DeviceInfo;
 };
@@ -365,18 +436,6 @@ function hashAttachments(attachments: NormalizedAttachment[]): string {
   return sha256(`[${parts.join(",")}]`);
 }
 
-type AdapterExecutionResult = { exitCode?: number; output?: string } | string;
-
-function normalizeAdapterResult(result: AdapterExecutionResult): { exitCode: number; output: string } {
-  if (typeof result === "string") {
-    return { exitCode: 0, output: result };
-  }
-  return {
-    exitCode: result?.exitCode ?? 0,
-    output: result?.output ?? ""
-  };
-}
-
 function nowMs(): number {
   return Date.now();
 }
@@ -389,25 +448,15 @@ function generateUserId(): string {
   return `user_${randomUUID()}`;
 }
 
-function buildPromptFromEvents(
-  events: ServerMessage[],
-  maxPromptMessages: number,
-  appendedUserContent: string
-): string {
-  const trimmed = events
-    .filter((event) => event.role === "user" || event.role === "assistant")
-    .slice(-maxPromptMessages + 1);
-  const lines = trimmed.map((event) => `${event.role === "user" ? "User" : "Assistant"}: ${event.content}`);
-  lines.push(`User: ${appendedUserContent}`);
-  return lines.join("\n");
-}
-
 function parseServerMessage(json: string): ServerMessage {
   return JSON.parse(json) as ServerMessage;
 }
 
 export async function createProviderServer(options: ProviderOptions): Promise<ProviderServer> {
   const config = mergeConfig(options.config);
+  const adapterOverrides =
+    ((options.config as { adapterOverrides?: ClawlineAdapterOverrides } | undefined)?.adapterOverrides) ?? {};
+  const clawdbotCfg = options.clawdbotConfig;
   const logger: Logger = options.logger ?? console;
   const sessionStorePath = options.sessionStorePath;
   const sessionTranscriptsDir = path.join(config.statePath, "sessions");
@@ -1127,13 +1176,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     return event;
   }
 
-  function getConversationEvents(userId: string) {
-    const rows = db
-      .prepare(`SELECT payloadJson FROM events WHERE userId = ? ORDER BY sequence ASC LIMIT ?`)
-      .all(userId, config.sessions.maxPromptMessages - 1) as Array<{ payloadJson: string }>;
-    return rows.map((row) => parseServerMessage(row.payloadJson));
-  }
-
   function removeSession(session: Session) {
     sessionsByDevice.delete(session.deviceId);
     const sessions = userSessions.get(session.userId);
@@ -1247,43 +1289,105 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         });
         broadcastToUser(session.userId, event);
 
-        const priorEvents = getConversationEvents(session.userId);
-        const prompt = buildPromptFromEvents(priorEvents, config.sessions.maxPromptMessages, payload.content);
-        try {
-          const adapterResult = await Promise.race<AdapterExecutionResult>([
-            options.adapter.execute({
-              prompt,
-              userId: session.userId,
-              sessionId: session.sessionId,
-              deviceId: session.deviceId
-            }),
-            new Promise((_, reject) =>
-              setTimeout(() => reject(new Error("adapter_timeout")), config.sessions.adapterExecuteTimeoutSeconds * 1000)
-            )
-          ]);
-          const normalizedResult = normalizeAdapterResult(adapterResult);
-          if ((normalizedResult.exitCode ?? 0) !== 0) {
-            updateMessageStreamingStmt.run(MessageStreamingState.Failed, session.deviceId, payload.id);
-            await sendJson(session.socket, {
-              type: "error",
-              code: "server_error",
-              message: "Adapter error",
-              messageId: payload.id
+        const attachmentSummary = describeClawlineAttachments(
+          attachmentsInfo.attachments,
+          assetsDir,
+        );
+        const inboundBody = attachmentSummary
+          ? `${payload.content}\n\n${attachmentSummary}`
+          : payload.content;
+        const peerId = session.peerId;
+        const route = resolveAgentRoute({
+          cfg: clawdbotCfg,
+          channel: "clawline",
+          peer: { kind: "dm", id: peerId },
+        });
+
+        const ctxPayload: MsgContext = {
+          Body: inboundBody,
+          RawBody: payload.content,
+          CommandBody: payload.content,
+          From: `clawline:${peerId}`,
+          To: `device:${session.deviceId}`,
+          SessionKey: route.sessionKey,
+          AccountId: route.accountId,
+          MessageSid: payload.id,
+          ChatType: "direct",
+          SenderName: session.claimedName ?? session.deviceInfo?.model ?? peerId,
+          SenderId: peerId,
+          Provider: "clawline",
+          Surface: "clawline",
+          OriginatingChannel: "clawline",
+          OriginatingTo: peerId,
+        };
+
+        await updateLastRoute({
+          storePath: sessionStorePath,
+          sessionKey: route.mainSessionKey,
+          channel: "clawline",
+          to: peerId,
+          accountId: route.accountId,
+        });
+
+        const fallbackText = adapterOverrides.responseFallback?.trim() ?? "";
+        const prefixContext: ResponsePrefixContext = {
+          identityName: resolveIdentityName(clawdbotCfg, route.agentId),
+        };
+
+        const dispatcher = createReplyDispatcher({
+          responsePrefix: resolveEffectiveMessagesConfig(clawdbotCfg, route.agentId).responsePrefix,
+          responsePrefixContextProvider: () => prefixContext,
+          humanDelay: resolveHumanDelayConfig(clawdbotCfg, route.agentId),
+          deliver: async (replyPayload) => {
+            const assistantText = buildAssistantTextFromPayload(replyPayload, fallbackText);
+            if (!assistantText) {
+              return;
+            }
+            const assistantEvent = await persistAssistantMessage(session, assistantText);
+            broadcastToUser(session.userId, assistantEvent);
+          },
+          onError: (err, info) => {
+            logger.error?.("[clawline] reply_delivery_failed", {
+              kind: info.kind,
+              error: err instanceof Error ? err.message : String(err),
             });
-            return;
-          }
-          const assistantEvent = await persistAssistantMessage(session, normalizedResult.output ?? "");
-          broadcastToUser(session.userId, assistantEvent);
-          updateMessageStreamingStmt.run(MessageStreamingState.Finalized, session.deviceId, payload.id);
+          },
+        });
+
+        let queuedFinal = false;
+        try {
+          const result = await dispatchReplyFromConfig({
+            ctx: ctxPayload,
+            cfg: clawdbotCfg,
+            dispatcher,
+            replyOptions: {
+              onModelSelected: (ctx) => {
+                prefixContext.provider = ctx.provider;
+                prefixContext.model = extractShortModelName(ctx.model);
+                prefixContext.modelFull = `${ctx.provider}/${ctx.model}`;
+                prefixContext.thinkingLevel = ctx.thinkLevel ?? "off";
+              },
+            },
+            replyResolver: options.replyResolver,
+          });
+          queuedFinal = result.queuedFinal;
         } catch (err) {
+          logger.error?.("[clawline] dispatch_failed", err);
+          queuedFinal = false;
+        }
+        await dispatcher.waitForIdle();
+
+        if (!queuedFinal) {
           updateMessageStreamingStmt.run(MessageStreamingState.Failed, session.deviceId, payload.id);
           await sendJson(session.socket, {
             type: "error",
             code: "server_error",
-            message: "Adapter failure",
-            messageId: payload.id
+            message: "Unable to deliver reply",
+            messageId: payload.id,
           });
+          return;
         }
+        updateMessageStreamingStmt.run(MessageStreamingState.Finalized, session.deviceId, payload.id);
       });
       await syncSessionStore(session);
     } catch (err) {
@@ -1496,8 +1600,15 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
 
     if (entry && entry.tokenDelivered) {
-      logger.warn?.("[clawline:http] pair_request_duplicate_device", { deviceId });
-      await sendJson(ws, { type: "error", code: "invalid_message", message: "Device already paired" });
+      logger.info?.("[clawline:http] pair_request_token_redispatch", { deviceId });
+      const token = issueToken(entry);
+      const delivered = await sendJson(ws, { type: "pair_result", success: true, token, userId: entry.userId })
+        .then(() => true)
+        .catch(() => false);
+      if (delivered) {
+        await updateLastSeen(entry.deviceId, nowMs());
+        await setTokenDelivered(entry.deviceId, true);
+      }
       ws.close();
       return;
     }
@@ -1586,6 +1697,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       return;
     }
     const sessionKey = buildClawlineSessionKey(entry.userId, entry.deviceId);
+    const peerId = derivePeerId(entry);
     const session: Session = {
       socket: ws,
       deviceId: entry.deviceId,
@@ -1593,6 +1705,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       isAdmin: entry.isAdmin,
       sessionId: `session_${randomUUID()}`,
       sessionKey,
+      peerId,
       claimedName: entry.claimedName,
       deviceInfo: entry.deviceInfo
     };

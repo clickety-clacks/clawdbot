@@ -28,6 +28,23 @@ export type ClawlineConfigInput = {
 const defaultStatePath = path.join(os.homedir(), ".clawdbot", "clawline");
 const defaultMediaPath = path.join(os.homedir(), ".clawdbot", "clawline-media");
 
+function expandUserPath(input: string): string {
+  if (input === "~") {
+    return os.homedir();
+  }
+  if (input.startsWith("~/")) {
+    return path.join(os.homedir(), input.slice(2));
+  }
+  return input;
+}
+
+function resolvePathValue(value: string | undefined, fallback: string): string {
+  const trimmed = value?.trim();
+  const raw = trimmed && trimmed.length > 0 ? trimmed : fallback;
+  const expanded = expandUserPath(raw);
+  return path.isAbsolute(expanded) ? expanded : path.resolve(expanded);
+}
+
 const DEFAULTS: ResolvedClawlineConfig = {
   enabled: true,
   port: 18800,
@@ -83,11 +100,14 @@ export function resolveClawlineConfig(
     structuredClone(DEFAULTS) as ResolvedClawlineConfig,
     input as Partial<ResolvedClawlineConfig>,
   );
-  merged.statePath = merged.statePath || defaultStatePath;
-  merged.media.storagePath = merged.media.storagePath || defaultMediaPath;
-  const adapterOverrides: ClawlineAdapterOverrides = {
-    ...(input.adapter ?? {}),
-  };
+  merged.statePath = resolvePathValue(merged.statePath, defaultStatePath);
+  merged.media.storagePath = resolvePathValue(
+    merged.media.storagePath,
+    defaultMediaPath,
+  );
+  const adapterOverrides: ClawlineAdapterOverrides = input.adapter
+    ? { ...input.adapter }
+    : {};
   merged.adapterOverrides = adapterOverrides;
   merged.enabled = input.enabled ?? true;
   return merged;

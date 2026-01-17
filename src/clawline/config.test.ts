@@ -45,4 +45,34 @@ describe("resolveClawlineConfig", () => {
     expect(cfg.network.allowInsecurePublic).toBe(true);
     expect(cfg.network.allowedOrigins).toEqual(["https://example.com"]);
   });
+
+  it("expands tildes in configurable paths", () => {
+    const cfg = resolveClawlineConfig({
+      clawline: {
+        statePath: "~/custom/clawline",
+        media: {
+          storagePath: "~/custom/media",
+        },
+      },
+    } as ClawdbotConfig);
+
+    expect(cfg.statePath).toBe(path.join(home, "custom", "clawline"));
+    expect(cfg.media.storagePath).toBe(
+      path.join(home, "custom", "media"),
+    );
+  });
+
+  it("resolves relative media paths to absolute", () => {
+    const cfg = resolveClawlineConfig({
+      clawline: {
+        media: {
+          storagePath: "relative/media",
+        },
+      },
+    } as ClawdbotConfig);
+
+    expect(cfg.media.storagePath).toBe(
+      path.resolve("relative/media"),
+    );
+  });
 });
