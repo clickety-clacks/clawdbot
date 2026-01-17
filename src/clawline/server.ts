@@ -16,13 +16,13 @@ import { createReplyDispatcher } from "../auto-reply/reply/reply-dispatcher.js";
 import { extractShortModelName } from "../auto-reply/reply/response-prefix-template.js";
 import type { ResponsePrefixContext } from "../auto-reply/reply/response-prefix-template.js";
 import type { ReplyPayload } from "../auto-reply/types.js";
-import { resolveAgentRoute } from "../routing/resolve-route.js";
+import { resolveAgentRoute, DEFAULT_ACCOUNT_ID } from "../routing/resolve-route.js";
 import {
   resolveEffectiveMessagesConfig,
   resolveHumanDelayConfig,
   resolveIdentityName,
 } from "../agents/identity.js";
-import { updateLastRoute } from "../config/sessions.js";
+import { resolveAgentIdFromSessionKey, updateLastRoute } from "../config/sessions.js";
 import { rawDataToString } from "../infra/ws.js";
 import { recordClawlineSessionActivity } from "./session-store.js";
 import type { ClawlineAdapterOverrides } from "./config.js";
@@ -58,6 +58,10 @@ const INLINE_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif",
 const MAX_ATTACHMENTS_COUNT = 4;
 // Hard ceiling for a single client payload: 64 KB text budget + 256 KB inline assets + JSON overhead.
 const MAX_TOTAL_PAYLOAD_BYTES = 320 * 1024;
+type ChannelType = "personal" | "admin";
+const DEFAULT_CHANNEL_TYPE: ChannelType = "personal";
+const ADMIN_CHANNEL_TYPE: ChannelType = "admin";
+const ADMIN_TRANSCRIPT_USER_ID = "__clawline_admin__";
 
 function truncateUtf8(value: string, maxBytes: number): string {
   if (Buffer.byteLength(value, "utf8") <= maxBytes) {
@@ -177,6 +181,13 @@ function normalizeAttachmentsInput(
   return { attachments, inlineBytes, assetIds };
 }
 
+function normalizeChannelType(value: unknown): ChannelType {
+  if (typeof value === "string" && value.trim().toLowerCase() === ADMIN_CHANNEL_TYPE) {
+    return ADMIN_CHANNEL_TYPE;
+  }
+  return DEFAULT_CHANNEL_TYPE;
+}
+
 function describeClawlineAttachments(
   attachments: NormalizedAttachment[],
   assetsDir: string,
@@ -285,6 +296,7 @@ type ServerMessage = {
   streaming: boolean;
   attachments?: unknown[];
   deviceId?: string;
+  channelType?: ChannelType;
 };
 
 enum MessageStreamingState {
@@ -459,8 +471,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const clawdbotCfg = options.clawdbotConfig;
   const logger: Logger = options.logger ?? console;
   const sessionStorePath = options.sessionStorePath;
-  const sessionTranscriptsDir = path.join(config.statePath, "sessions");
-
+  const mainSessionKey = options.mainSessionKey?.trim() || "agent:main:main";
+  const mainSessionAgentId = resolveAgentIdFromSessionKey(mainSessionKey);
+  
   if (!config.network.allowInsecurePublic && !isLocalhost(config.network.bindAddress)) {
     throw new Error("allowInsecurePublic must be true to bind non-localhost");
   }
@@ -606,23 +619,151 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     safeUnlink,
     nowMs,
     assetIdRegex: ASSET_ID_REGEX,
+    canAccessAsset: ({ assetOwnerId, auth }) =>
+      assetOwnerId === ADMIN_TRANSCRIPT_USER_ID && auth.isAdmin === true,
   });
+
+  async function materializeInlineAttachments(params: {
+    attachments: NormalizedAttachment[];
+    ownerUserId: string;
+    deviceId: string;
+  }): Promise<{ attachments: NormalizedAttachment[]; inlineAssetIds: string[] }> {
+    const updated: NormalizedAttachment[] = [];
+    const inlineAssetIds: string[] = [];
+    for (const attachment of params.attachments) {
+      if (attachment.type !== "image" || attachment.assetId) {
+        updated.push(attachment);
+        continue;
+      }
+      let buffer: Buffer;
+      try {
+        buffer = Buffer.from(attachment.data, "base64");
+      } catch (err) {
+        logger.warn?.("[clawline] inline_attachment_decode_failed", err);
+        updated.push(attachment);
+        continue;
+      }
+      if (buffer.length === 0) {
+        updated.push(attachment);
+        continue;
+      }
+      const assetId = `a_${randomUUID()}`;
+      const assetPath = path.join(assetsDir, assetId);
+      try {
+        await fs.writeFile(assetPath, buffer);
+        await enqueueWriteTask(() =>
+          insertAssetStmt.run(
+            assetId,
+            params.ownerUserId,
+            attachment.mimeType,
+            buffer.length,
+            nowMs(),
+            params.deviceId
+          )
+        );
+        inlineAssetIds.push(assetId);
+        updated.push({ ...attachment, assetId });
+      } catch (err) {
+        logger.warn?.("[clawline] inline_attachment_persist_failed", err);
+        updated.push(attachment);
+      }
+    }
+    return { attachments: updated, inlineAssetIds };
+  }
+
+  async function ensureAdminSharedAsset(assetId: string, session: Session): Promise<string> {
+    const asset = selectAssetStmt.get(assetId) as
+      | { assetId: string; userId: string; mimeType: string; size: number }
+      | undefined;
+    if (!asset) {
+      throw new ClientMessageError("asset_not_found", "Asset not found");
+    }
+    if (asset.userId === ADMIN_TRANSCRIPT_USER_ID) {
+      return assetId;
+    }
+    if (asset.userId !== session.userId) {
+      throw new ClientMessageError("asset_not_found", "Asset not found");
+    }
+    const sourcePath = path.join(assetsDir, asset.assetId);
+    const newAssetId = `a_${randomUUID()}`;
+    const destPath = path.join(assetsDir, newAssetId);
+    try {
+      await fs.copyFile(sourcePath, destPath);
+    } catch (err: any) {
+      if (err && err.code === "ENOENT") {
+        throw new ClientMessageError("asset_not_found", "Asset not found");
+      }
+      throw err;
+    }
+    await enqueueWriteTask(() =>
+      insertAssetStmt.run(
+        newAssetId,
+        ADMIN_TRANSCRIPT_USER_ID,
+        asset.mimeType,
+        asset.size,
+        nowMs(),
+        session.deviceId
+      )
+    );
+    return newAssetId;
+  }
+
+  async function ensureChannelAttachmentOwnership(params: {
+    attachments: NormalizedAttachment[];
+    assetIds: string[];
+    session: Session;
+    channelType: ChannelType;
+  }): Promise<{ attachments: NormalizedAttachment[]; assetIds: string[] }> {
+    if (params.channelType !== ADMIN_CHANNEL_TYPE) {
+      return { attachments: params.attachments, assetIds: params.assetIds };
+    }
+    const replacements = new Map<string, string>();
+    const cache = new Map<string, string>();
+    const updatedAttachments = params.attachments.map((attachment) => ({ ...attachment }));
+    for (let index = 0; index < updatedAttachments.length; index += 1) {
+      const attachment = updatedAttachments[index];
+      if (attachment.type !== "asset" || typeof attachment.assetId !== "string") {
+        continue;
+      }
+      if (!cache.has(attachment.assetId)) {
+        const sharedId = await ensureAdminSharedAsset(attachment.assetId, params.session);
+        cache.set(attachment.assetId, sharedId);
+      }
+      const ensuredId = cache.get(attachment.assetId)!;
+      updatedAttachments[index] = { ...attachment, assetId: ensuredId };
+      replacements.set(attachment.assetId, ensuredId);
+    }
+    if (replacements.size === 0) {
+      return { attachments: updatedAttachments, assetIds: params.assetIds };
+    }
+    const updatedAssetIds = params.assetIds.map((assetId) => replacements.get(assetId) ?? assetId);
+    return { attachments: updatedAttachments, assetIds: updatedAssetIds };
+  }
 
   await cleanupTmpDirectory();
   await cleanupOrphanedAssetFiles();
   const insertUserMessageTx = db.transaction(
     (
       session: Session,
+      targetUserId: string,
       messageId: string,
       content: string,
       timestamp: number,
       attachments: NormalizedAttachment[],
       attachmentsHash: string,
-      assetIds: string[]
+      assetIds: string[],
+      channelType: ChannelType
     ) => {
       for (const assetId of assetIds) {
         const asset = selectAssetStmt.get(assetId) as { assetId: string; userId: string } | undefined;
-        if (!asset || asset.userId !== session.userId) {
+        if (!asset) {
+          throw new ClientMessageError("asset_not_found", "Asset not found");
+        }
+        const allowedOwners =
+          channelType === ADMIN_CHANNEL_TYPE
+            ? new Set([session.userId, ADMIN_TRANSCRIPT_USER_ID])
+            : new Set([session.userId]);
+        if (!allowedOwners.has(asset.userId)) {
           throw new ClientMessageError("asset_not_found", "Asset not found");
         }
       }
@@ -635,14 +776,15 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         timestamp,
         streaming: false,
         deviceId: session.deviceId,
-        attachments: attachments.length > 0 ? attachments : undefined
+        attachments: attachments.length > 0 ? attachments : undefined,
+        channelType
       };
       const payloadJson = JSON.stringify(event);
       const payloadBytes = Buffer.byteLength(payloadJson, "utf8");
-      const sequenceRow = sequenceStatement.get(session.userId) as { sequence: number };
+      const sequenceRow = sequenceStatement.get(targetUserId) as { sequence: number };
       insertEventStmt.run(
         serverMessageId,
-        session.userId,
+        targetUserId,
         sequenceRow.sequence,
         session.deviceId,
         payloadJson,
@@ -651,7 +793,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       );
       insertMessageStmt.run(
         session.deviceId,
-        session.userId,
+        targetUserId,
         messageId,
         serverMessageId,
         sequenceRow.sequence,
@@ -674,8 +816,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const selectEventsTailStmt = db.prepare(
     `SELECT id, payloadJson FROM events WHERE userId = ? ORDER BY sequence DESC LIMIT ?`
   );
-  const selectAnchorStmt = db.prepare(
-    `SELECT sequence FROM events WHERE id = ? AND userId = ?`
+  const selectEventByIdStmt = db.prepare(
+    `SELECT id, userId, sequence, timestamp FROM events WHERE id = ?`
+  );
+  const selectEventsAfterTimestampStmt = db.prepare(
+    `SELECT id, payloadJson FROM events WHERE userId = ? AND timestamp > ? ORDER BY sequence ASC`
   );
   const insertEventTx = db.transaction((event: ServerMessage, userId: string, originatingDeviceId?: string) => {
     const payloadJson = JSON.stringify(event);
@@ -1074,7 +1219,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     if (typeof decoded.exp === "number" && decoded.exp * 1000 < Date.now()) {
       throw new HttpError(401, "auth_failed", "Token expired");
     }
-    return { deviceId, userId: entry.userId };
+    return { deviceId, userId: entry.userId, isAdmin: entry.isAdmin };
   }
 
   async function safeUnlink(filePath: string) {
@@ -1088,35 +1233,61 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
   }
 
-  function selectEventsAfter(userId: string, lastMessageId: string | null) {
-    if (!lastMessageId) {
-      const rows = selectEventsTailStmt.all(userId, config.sessions.maxReplayMessages) as EventRow[];
-      return rows.map((row) => parseServerMessage(row.payloadJson)).reverse();
-    }
-    const anchor = selectAnchorStmt.get(lastMessageId, userId) as
-      | { sequence: number }
-      | undefined;
-    if (!anchor) {
-      const tail = selectEventsTailStmt.all(userId, config.sessions.maxReplayMessages) as EventRow[];
-      return tail.map((row) => parseServerMessage(row.payloadJson)).reverse();
-    }
-    const rows = selectEventsAfterStmt.all(userId, anchor.sequence) as EventRow[];
-    return rows.map((row) => parseServerMessage(row.payloadJson));
-  }
-
   async function sendReplay(session: Session, lastMessageId: string | null) {
-    const events = selectEventsAfter(session.userId, lastMessageId);
+    const transcriptTargets: Array<{ userId: string; channelType: ChannelType }> = [
+      { userId: session.userId, channelType: DEFAULT_CHANNEL_TYPE },
+    ];
+    if (session.isAdmin) {
+      transcriptTargets.push({ userId: ADMIN_TRANSCRIPT_USER_ID, channelType: ADMIN_CHANNEL_TYPE });
+    }
+    let anchor: { userId: string; sequence: number; timestamp: number } | null = null;
+    if (lastMessageId) {
+      const anchorRow = selectEventByIdStmt.get(lastMessageId) as
+        | { id: string; userId: string; sequence: number; timestamp: number }
+        | undefined;
+      if (anchorRow) {
+        anchor = { userId: anchorRow.userId, sequence: anchorRow.sequence, timestamp: anchorRow.timestamp };
+      }
+    }
+    const combined: ServerMessage[] = [];
+    for (const target of transcriptTargets) {
+      let rows: EventRow[] = [];
+      if (!anchor) {
+        rows = selectEventsTailStmt.all(target.userId, config.sessions.maxReplayMessages) as EventRow[];
+      } else if (target.userId === anchor.userId) {
+        rows = selectEventsAfterStmt.all(target.userId, anchor.sequence) as EventRow[];
+      } else {
+        rows = selectEventsAfterTimestampStmt.all(target.userId, anchor.timestamp) as EventRow[];
+      }
+      const parsed = rows
+        .map((row) => parseServerMessage(row.payloadJson))
+        .map((event) => {
+          if (!event.channelType) {
+            event.channelType = target.channelType;
+          }
+          return event;
+        });
+      combined.push(...parsed);
+    }
+    combined.sort((a, b) => a.timestamp - b.timestamp);
+    const limited =
+      combined.length > config.sessions.maxReplayMessages
+        ? combined.slice(combined.length - config.sessions.maxReplayMessages)
+        : combined;
     const payload = {
       type: "auth_result",
       success: true,
       userId: session.userId,
       sessionId: session.sessionId,
-      replayCount: events.length,
-      replayTruncated: false,
+      replayCount: limited.length,
+      replayTruncated: combined.length > limited.length,
       historyReset: lastMessageId ? false : true
     };
     await sendJson(session.socket, payload);
-    for (const event of events) {
+    for (const event of limited) {
+      if (!event.channelType) {
+        event.channelType = DEFAULT_CHANNEL_TYPE;
+      }
       await sendJson(session.socket, event);
     }
   }
@@ -1134,22 +1305,58 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
   }
 
+  function broadcastToAdmins(payload: ServerMessage) {
+    for (const session of sessionsByDevice.values()) {
+      if (!session.isAdmin) continue;
+      if (session.socket.readyState !== WebSocket.OPEN) continue;
+      session.socket.send(JSON.stringify(payload), (err) => {
+        if (err) {
+          session.socket.close();
+        }
+      });
+    }
+  }
+
+  function broadcastToChannelSessions(channelType: ChannelType, session: Session, payload: ServerMessage) {
+    if (channelType === ADMIN_CHANNEL_TYPE) {
+      broadcastToAdmins(payload);
+      return;
+    }
+    broadcastToUser(session.userId, payload);
+  }
+
+  function getTranscriptUserId(session: Session, channelType: ChannelType): string {
+    return channelType === ADMIN_CHANNEL_TYPE ? ADMIN_TRANSCRIPT_USER_ID : session.userId;
+  }
+
   async function appendEvent(event: ServerMessage, userId: string, originatingDeviceId?: string) {
     return enqueueWriteTask(() => insertEventTx(event, userId, originatingDeviceId));
   }
 
   async function persistUserMessage(
     session: Session,
+    targetUserId: string,
     messageId: string,
     content: string,
     attachments: NormalizedAttachment[],
     attachmentsHash: string,
-    assetIds: string[]
+    assetIds: string[],
+    channelType: ChannelType
   ): Promise<{ event: ServerMessage; sequence: number }> {
     const timestamp = nowMs();
     try {
       return await enqueueWriteTask(() =>
-        insertUserMessageTx(session, messageId, content, timestamp, attachments, attachmentsHash, assetIds)
+        insertUserMessageTx(
+          session,
+          targetUserId,
+          messageId,
+          content,
+          timestamp,
+          attachments,
+          attachmentsHash,
+          assetIds,
+          channelType
+        )
       );
     } catch (err: any) {
       if (err && typeof err.message === "string" && err.message.includes("FOREIGN KEY")) {
@@ -1161,7 +1368,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
   async function persistAssistantMessage(
     session: Session,
-    content: string
+    targetUserId: string,
+    content: string,
+    channelType: ChannelType
   ): Promise<ServerMessage> {
     const timestamp = nowMs();
     const event: ServerMessage = {
@@ -1170,9 +1379,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       role: "assistant",
       content,
       timestamp,
-      streaming: false
+      streaming: false,
+      channelType
     };
-    await appendEvent(event, session.userId);
+    await appendEvent(event, targetUserId);
     return event;
   }
 
@@ -1236,6 +1446,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         throw new ClientMessageError("payload_too_large", "Message too large");
       }
       const attachmentsHash = hashAttachments(attachmentsInfo.attachments);
+      const channelType = normalizeChannelType(payload.channelType);
+      if (channelType === ADMIN_CHANNEL_TYPE && !session.isAdmin) {
+        throw new ClientMessageError("forbidden", "Admin channel requires admin access");
+      }
+      const targetUserId = getTranscriptUserId(session, channelType);
 
       await runPerUserTask(session.userId, async () => {
         const existing = selectMessageStmt.get(session.deviceId, payload.id) as
@@ -1271,13 +1486,28 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           throw new ClientMessageError("rate_limited", "Too many messages");
         }
 
+        const materialized = await materializeInlineAttachments({
+          attachments: attachmentsInfo.attachments,
+          ownerUserId: targetUserId,
+          deviceId: session.deviceId
+        });
+        const assetIds = attachmentsInfo.assetIds.concat(materialized.inlineAssetIds);
+        const ownership = await ensureChannelAttachmentOwnership({
+          attachments: materialized.attachments,
+          assetIds,
+          session,
+          channelType
+        });
+
         const { event } = await persistUserMessage(
           session,
+          targetUserId,
           payload.id,
           payload.content,
-          attachmentsInfo.attachments,
+          ownership.attachments,
           attachmentsHash,
-          attachmentsInfo.assetIds
+          ownership.assetIds,
+          channelType
         );
         await new Promise<void>((resolve) => {
           session.socket.send(JSON.stringify({ type: "ack", id: payload.id }), (err) => {
@@ -1287,27 +1517,52 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             resolve();
           });
         });
-        broadcastToUser(session.userId, event);
+        broadcastToChannelSessions(channelType, session, event);
 
         const attachmentSummary = describeClawlineAttachments(
-          attachmentsInfo.attachments,
+          ownership.attachments,
           assetsDir,
         );
         const inboundBody = attachmentSummary
           ? `${payload.content}\n\n${attachmentSummary}`
           : payload.content;
-        const peerId = session.peerId;
-        const route = resolveAgentRoute({
-          cfg: clawdbotCfg,
-          channel: "clawline",
-          peer: { kind: "dm", id: peerId },
-        });
+
+        let route:
+          | ReturnType<typeof resolveAgentRoute>
+          | {
+              agentId: string;
+              channel: string;
+              accountId: string;
+              sessionKey: string;
+              mainSessionKey: string;
+            };
+        let peerId: string;
+        let channelLabel = "clawline";
+
+        if (channelType === ADMIN_CHANNEL_TYPE) {
+          peerId = ADMIN_TRANSCRIPT_USER_ID;
+          channelLabel = "clawline-admin";
+          route = {
+            agentId: mainSessionAgentId,
+            channel: "clawline",
+            accountId: DEFAULT_ACCOUNT_ID,
+            sessionKey: mainSessionKey,
+            mainSessionKey,
+          };
+        } else {
+          peerId = session.peerId;
+          route = resolveAgentRoute({
+            cfg: clawdbotCfg,
+            channel: "clawline",
+            peer: { kind: "dm", id: peerId },
+          });
+        }
 
         const ctxPayload: MsgContext = {
           Body: inboundBody,
           RawBody: payload.content,
           CommandBody: payload.content,
-          From: `clawline:${peerId}`,
+          From: `${channelLabel}:${peerId}`,
           To: `device:${session.deviceId}`,
           SessionKey: route.sessionKey,
           AccountId: route.accountId,
@@ -1317,14 +1572,14 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           SenderId: peerId,
           Provider: "clawline",
           Surface: "clawline",
-          OriginatingChannel: "clawline",
+          OriginatingChannel: channelLabel,
           OriginatingTo: peerId,
         };
 
         await updateLastRoute({
           storePath: sessionStorePath,
           sessionKey: route.mainSessionKey,
-          channel: "clawline",
+          channel: channelLabel,
           to: peerId,
           accountId: route.accountId,
         });
@@ -1343,8 +1598,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             if (!assistantText) {
               return;
             }
-            const assistantEvent = await persistAssistantMessage(session, assistantText);
-            broadcastToUser(session.userId, assistantEvent);
+            const assistantEvent = await persistAssistantMessage(
+              session,
+              targetUserId,
+              assistantText,
+              channelType
+            );
+            broadcastToChannelSessions(channelType, session, assistantEvent);
           },
           onError: (err, info) => {
             logger.error?.("[clawline] reply_delivery_failed", {
@@ -1696,7 +1956,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       ws.close();
       return;
     }
-    const sessionKey = buildClawlineSessionKey(entry.userId, entry.deviceId);
+    const sessionKey = buildClawlineSessionKey(entry.userId);
     const peerId = derivePeerId(entry);
     const session: Session = {
       socket: ws,

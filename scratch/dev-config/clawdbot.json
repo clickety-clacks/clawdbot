@@ -7,16 +7,20 @@
     "defaults": {
       "workspace": "~/clawdbot-workspace",
       "model": {
-        "primary": "anthropic/claude-3-sonnet"
+        "primary": "claude-opus-4-5"
       }
     }
   },
   "clawline": {
     "port": 19992,
+    "statePath": "/Users/mike/src/clawdbot-multiuser/scratch/dev-state/clawline",
+    "media": {
+      "storagePath": "/Users/mike/src/clawdbot-multiuser/scratch/dev-state/clawline-media"
+    },
     "network": {
-      "bindAddress": "127.0.0.1",
+      "bindAddress": "0.0.0.0",
       "allowInsecurePublic": true,
-      "allowedOrigins": ["null"]
+      "allowedOrigins": ["null", "https://clawline.app"]
     }
   }
 }
