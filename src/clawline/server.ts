@@ -46,6 +46,8 @@ import type {
 import { ClientMessageError, HttpError } from "./errors.js";
 import { SlidingWindowRateLimiter } from "./rate-limiter.js";
 import { createAssetHandlers } from "./http-assets.js";
+import { callGateway } from "../gateway/call.js";
+import { GATEWAY_CLIENT_MODES, GATEWAY_CLIENT_NAMES } from "../gateway/protocol/client-info.js";
 
 export const PROTOCOL_VERSION = 1;
 
@@ -120,6 +122,24 @@ function derivePeerId(entry: AllowlistEntry): string {
     entry.deviceId.trim(),
   ].filter((value): value is string => Boolean(value && value.length > 0));
   return sources[0] ?? entry.deviceId;
+}
+
+async function notifyGatewayOfPending(entry: PendingEntry) {
+  const name = entry.claimedName ?? "New device";
+  const platform = entry.deviceInfo.platform || "Unknown platform";
+  const text = `New device pending approval: ${name} (${platform})`;
+  try {
+    await callGateway({
+      method: "wake",
+      params: { text, mode: "now" },
+      clientName: GATEWAY_CLIENT_NAMES.CLI,
+      mode: GATEWAY_CLIENT_MODES.BACKEND,
+      clientDisplayName: "clawline",
+      clientVersion: "clawline",
+    });
+  } catch (error) {
+    throw error instanceof Error ? error : new Error(String(error));
+  }
 }
 
 function normalizeAttachmentsInput(
@@ -1897,6 +1917,20 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       deviceId,
       pendingEntries: pendingFile.entries.length
     });
+    notifyGatewayOfPending(pendingEntry)
+      .then(() =>
+        logger.info?.("[clawline:http] pair_request_pending_notified", {
+          deviceId,
+          claimedName: pendingEntry.claimedName,
+          platform: pendingEntry.deviceInfo.platform,
+        }),
+      )
+      .catch((err) =>
+        logger.warn?.("[clawline:http] pair_request_pending_notify_failed", {
+          deviceId,
+          error: err.message,
+        }),
+      );
     const existingSocket = pendingSockets.get(deviceId);
     if (existingSocket) {
       existingSocket.socket.close(1000);
