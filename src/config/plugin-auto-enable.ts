@@ -134,6 +134,13 @@ function isWhatsAppConfigured(cfg: ClawdbotConfig): boolean {
   return recordHasKeys(entry);
 }
 
+function isClawlineConfigured(cfg: ClawdbotConfig): boolean {
+  const entry = cfg.clawline;
+  if (!isRecord(entry)) return false;
+  if (entry.enabled === false) return false;
+  return true;
+}
+
 function isGenericChannelConfigured(cfg: ClawdbotConfig, channelId: string): boolean {
   const entry = resolveChannelConfig(cfg, channelId);
   return recordHasKeys(entry);
@@ -243,6 +250,12 @@ function resolveConfiguredPlugins(cfg: ClawdbotConfig, env: NodeJS.ProcessEnv): 
         reason: `${channelId} configured`,
       });
     }
+  }
+  if (isClawlineConfigured(cfg)) {
+    changes.push({
+      pluginId: "clawline",
+      reason: "clawline configured",
+    });
   }
   for (const mapping of PROVIDER_PLUGIN_IDS) {
     if (isProviderConfigured(cfg, mapping.providerId)) {

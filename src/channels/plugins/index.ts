@@ -1,7 +1,6 @@
 import { CHAT_CHANNEL_ORDER, type ChatChannelId, normalizeAnyChannelId } from "../registry.js";
 import type { ChannelId, ChannelPlugin } from "./types.js";
 import { requireActivePluginRegistry } from "../../plugins/runtime.js";
-import { clawlinePlugin } from "./clawline.js";
 
 // Channel plugins registry (runtime).
 //
@@ -9,13 +8,10 @@ import { clawlinePlugin } from "./clawline.js";
 // Shared code paths (reply flow, command auth, sandbox explain) should depend on `src/channels/dock.ts`
 // instead, and only call `getChannelPlugin()` at execution boundaries.
 //
-const CORE_CHANNEL_PLUGINS: ChannelPlugin[] = [clawlinePlugin];
-
 // Channel plugins are registered by the plugin loader (extensions/ or configured paths).
 function listPluginChannels(): ChannelPlugin[] {
   const registry = requireActivePluginRegistry();
-  const dynamicPlugins = registry.channels.map((entry) => entry.plugin);
-  return [...CORE_CHANNEL_PLUGINS, ...dynamicPlugins];
+  return registry.channels.map((entry) => entry.plugin);
 }
 
 function dedupeChannels(channels: ChannelPlugin[]): ChannelPlugin[] {

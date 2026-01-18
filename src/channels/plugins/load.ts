@@ -1,13 +1,9 @@
 import type { ChannelId, ChannelPlugin } from "./types.js";
 import type { PluginRegistry } from "../../plugins/registry.js";
 import { getActivePluginRegistry } from "../../plugins/runtime.js";
-import { clawlinePlugin } from "./clawline.js";
 
 const cache = new Map<ChannelId, ChannelPlugin>();
 let lastRegistry: PluginRegistry | null = null;
-const CORE_CHANNEL_PLUGINS = new Map<ChannelId, ChannelPlugin>([
-  ["clawline", clawlinePlugin],
-]);
 
 function ensureCacheForRegistry(registry: PluginRegistry | null) {
   if (registry === lastRegistry) return;
@@ -24,11 +20,6 @@ export async function loadChannelPlugin(id: ChannelId): Promise<ChannelPlugin | 
   if (pluginEntry) {
     cache.set(id, pluginEntry.plugin);
     return pluginEntry.plugin;
-  }
-  const corePlugin = CORE_CHANNEL_PLUGINS.get(id);
-  if (corePlugin) {
-    cache.set(id, corePlugin);
-    return corePlugin;
   }
   return undefined;
 }

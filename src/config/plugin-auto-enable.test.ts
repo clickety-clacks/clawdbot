@@ -55,4 +55,15 @@ describe("applyPluginAutoEnable", () => {
     expect(result.config.plugins?.entries?.slack?.enabled).toBeUndefined();
     expect(result.changes).toEqual([]);
   });
+
+  it("enables clawline plugin when configured", () => {
+    const result = applyPluginAutoEnable({
+      config: {
+        clawline: { port: 18800 },
+      },
+    });
+
+    expect(result.config.plugins?.entries?.clawline?.enabled).toBe(true);
+    expect(result.changes.join("\n")).toContain('Enabled plugin "clawline"');
+  });
 });
