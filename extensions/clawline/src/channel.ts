@@ -1,8 +1,7 @@
-import type { ClawdbotConfig } from "../../config/config.js";
-import { DEFAULT_ACCOUNT_ID } from "../../routing/session-key.js";
-import { getChatChannelMeta } from "../registry.js";
-import { clawlineOutbound } from "./outbound/clawline.js";
-import type { ChannelPlugin } from "./types.js";
+import type { ChannelPlugin, ClawdbotConfig } from "clawdbot/plugin-sdk";
+import { DEFAULT_ACCOUNT_ID, getChatChannelMeta } from "clawdbot/plugin-sdk";
+
+import { clawlineOutbound } from "./outbound.js";
 
 type ResolvedClawlineAccount = {
   accountId: string;

@@ -100,7 +100,6 @@ import { resolveGatewayRuntimeConfig } from "./server-runtime-config.js";
 import { createGatewayRuntimeState } from "./server-runtime-state.js";
 import { resolveSessionKeyForRun } from "./server-session-key.js";
 import { startGatewaySidecars } from "./server-startup.js";
-import type { ClawlineServiceHandle } from "../clawline/service.js";
 import { logGatewayStartup } from "./server-startup-log.js";
 import { startGatewayTailscaleExposure } from "./server-tailscale.js";
 import { createWizardSessionTracker } from "./server-wizard-sessions.js";
@@ -122,7 +121,6 @@ const logReload = log.child("reload");
 const logHooks = log.child("hooks");
 const logPlugins = log.child("plugins");
 const logWsControl = log.child("ws");
-const logClawline = log.child("clawline");
 const canvasRuntime = runtimeForLogger(logCanvas);
 
 export type GatewayServer = {
@@ -294,7 +292,6 @@ export async function startGatewayServer(
   const channelMethods = listChannelPlugins().flatMap((plugin) => plugin.gatewayMethods ?? []);
   const gatewayMethods = Array.from(new Set([...baseGatewayMethods, ...channelMethods]));
   let pluginServices: PluginServicesHandle | null = null;
-  let clawlineService: ClawlineServiceHandle | null = null;
   const runtimeConfig = await resolveGatewayRuntimeConfig({
     cfg: cfgAtStart,
     port,
@@ -648,7 +645,7 @@ export async function startGatewayServer(
       });
 
   let browserControl: Awaited<ReturnType<typeof startBrowserControlServerIfEnabled>> = null;
-  ({ browserControl, pluginServices, clawlineService } = await startGatewaySidecars({
+  ({ browserControl, pluginServices } = await startGatewaySidecars({
     cfg: cfgAtStart,
     pluginRegistry,
     defaultWorkspaceDir,
@@ -658,7 +655,6 @@ export async function startGatewayServer(
     logHooks,
     logChannels,
     logBrowser,
-    logClawline,
   }));
 
   // Run gateway_start plugin hook (fire-and-forget)
@@ -721,7 +717,6 @@ export async function startGatewayServer(
     canvasHostServer,
     stopChannel,
     pluginServices,
-    clawlineService,
     cron,
     heartbeatRunner,
     nodePresenceTimers,

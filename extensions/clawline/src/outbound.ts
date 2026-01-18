@@ -1,6 +1,8 @@
-import { chunkText } from "../../../auto-reply/chunk.js";
-import { sendClawlineOutboundMessage } from "../../../clawline/outbound.js";
-import type { ChannelOutboundAdapter } from "../types.js";
+import {
+  chunkText,
+  sendClawlineOutboundMessage,
+  type ChannelOutboundAdapter,
+} from "clawdbot/plugin-sdk";
 
 export const clawlineOutbound: ChannelOutboundAdapter = {
   deliveryMode: "direct",

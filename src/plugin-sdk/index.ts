@@ -58,26 +58,12 @@ export type {
   ChannelToolSend,
 } from "../channels/plugins/types.js";
 export type { ChannelConfigSchema, ChannelPlugin } from "../channels/plugins/types.plugin.js";
-export type {
-  AnyAgentTool,
-  OpenClawPluginApi,
-  OpenClawPluginService,
-  OpenClawPluginServiceContext,
-  ProviderAuthContext,
-  ProviderAuthResult,
-} from "../plugins/types.js";
-export type {
-  GatewayRequestHandler,
-  GatewayRequestHandlerOptions,
-  RespondFn,
-} from "../gateway/server-methods/types.js";
-export type { PluginRuntime, RuntimeLogger } from "../plugins/runtime/types.js";
-export { normalizePluginHttpPath } from "../plugins/http-path.js";
-export { registerPluginHttpRoute } from "../plugins/http-registry.js";
-export { emptyPluginConfigSchema } from "../plugins/config-schema.js";
-export type { OpenClawConfig } from "../config/config.js";
-/** @deprecated Use OpenClawConfig instead */
-export type { OpenClawConfig as ClawdbotConfig } from "../config/config.js";
+export type { ClawdbotPluginApi } from "../plugins/types.js";
+export type { PluginRuntime } from "../plugins/runtime/types.js";
+export type { ClawdbotConfig } from "../config/config.js";
+export { chunkText } from "../auto-reply/chunk.js";
+export { sendClawlineOutboundMessage } from "../clawline/outbound.js";
+export { startClawlineService, type ClawlineServiceHandle } from "../clawline/service.js";
 export type { ChannelDock } from "../channels/dock.js";
 export { getChatChannelMeta } from "../channels/registry.js";
 export type {
