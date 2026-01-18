@@ -1721,7 +1721,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       throw new Error("Clawline message exceeds max size");
     }
     const target = resolveSendTarget(targetInput);
-    const channelType = target.kind === "admin" ? ADMIN_CHANNEL_TYPE : DEFAULT_CHANNEL_TYPE;
     const event: ServerMessage = {
       type: "message",
       id: generateServerMessageId(),
@@ -1729,15 +1728,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       content: text,
       timestamp: nowMs(),
       streaming: false,
-      channelType,
+      channelType: DEFAULT_CHANNEL_TYPE,
     };
     await runPerUserTask(target.userId, async () => {
       await appendEvent(event, target.userId);
     });
     if (target.kind === "device") {
       deliverToDevice(target.deviceId, event);
-    } else if (target.kind === "admin") {
-      broadcastToAdmins(event);
     } else {
       broadcastToUser(target.userId, event);
     }
@@ -2079,16 +2076,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
   type ResolvedSendTarget =
     | { kind: "user"; userId: string }
-    | { kind: "device"; userId: string; deviceId: string }
-    | { kind: "admin"; userId: string };
+    | { kind: "device"; userId: string; deviceId: string };
 
   function resolveSendTarget(raw: string): ResolvedSendTarget {
     const trimmed = raw.trim();
     if (!trimmed) {
       throw new Error("Delivering to clawline requires --to <userId|deviceId>");
-    }
-    if (trimmed === ADMIN_TRANSCRIPT_USER_ID || trimmed.toLowerCase() === "admin") {
-      return { kind: "admin", userId: ADMIN_TRANSCRIPT_USER_ID };
     }
     const lower = trimmed.toLowerCase();
     if (lower.startsWith("user:")) {
@@ -2212,14 +2205,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
     const sanitizedClaimedName = sanitizeLabel(payload.claimedName);
     const deviceId = payload.deviceId;
-    let entry = findAllowlistEntry(deviceId);
-    if (!entry) {
-      await refreshAllowlistFromDisk();
-      entry = findAllowlistEntry(deviceId);
-      if (entry) {
-        logger.warn?.("[clawline:http] pair_request_allowlist_refresh", { deviceId });
-      }
-    }
+    const entry = findAllowlistEntry(deviceId);
     if (entry) {
       logger.info?.("[clawline:http] pair_request_allowlist_entry", {
         deviceId,
