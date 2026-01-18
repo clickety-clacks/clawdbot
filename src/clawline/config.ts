@@ -28,6 +28,12 @@ export type ClawlineConfigInput = {
 
 const defaultStatePath = path.join(os.homedir(), ".clawdbot", "clawline");
 const defaultMediaPath = path.join(os.homedir(), ".clawdbot", "clawline-media");
+const defaultAlertInstructionsPath = path.join(
+  os.homedir(),
+  ".clawdbot",
+  "clawline",
+  "alert-instructions.md",
+);
 
 function expandUserPath(input: string): string {
   if (input === "~") {
@@ -50,6 +56,7 @@ const DEFAULTS: ResolvedClawlineConfig = {
   enabled: true,
   port: 18800,
   statePath: defaultStatePath,
+  alertInstructionsPath: defaultAlertInstructionsPath,
   network: {
     bindAddress: "127.0.0.1",
     allowInsecurePublic: false,
@@ -109,6 +116,10 @@ export function resolveClawlineConfig(
   merged.media.storagePath = resolvePathValue(
     merged.media.storagePath,
     defaultMediaPath,
+  );
+  merged.alertInstructionsPath = resolvePathValue(
+    merged.alertInstructionsPath ?? defaultAlertInstructionsPath,
+    defaultAlertInstructionsPath,
   );
   const adapterOverrides: ClawlineAdapterOverrides = input.adapter
     ? { ...input.adapter }

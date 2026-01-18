@@ -16,6 +16,9 @@ describe("resolveClawlineConfig", () => {
     expect(cfg.media.storagePath).toBe(
       path.join(home, ".clawdbot", "clawline-media"),
     );
+    expect(cfg.alertInstructionsPath).toBe(
+      path.join(home, ".clawdbot", "clawline", "alert-instructions.md"),
+    );
     expect(cfg.network.bindAddress).toBe("127.0.0.1");
     expect(cfg.network.allowInsecurePublic).toBe(false);
     expect(cfg.alertTarget).toEqual({ channel: "clawline", to: "flynn" });
@@ -35,6 +38,7 @@ describe("resolveClawlineConfig", () => {
         media: {
           storagePath: "/tmp/media",
         },
+        alertInstructionsPath: "/tmp/clawline/alerts.md",
       },
     } as ClawdbotConfig);
 
@@ -42,6 +46,7 @@ describe("resolveClawlineConfig", () => {
     expect(cfg.port).toBe(1234);
     expect(cfg.statePath).toBe("/tmp/clawline");
     expect(cfg.media.storagePath).toBe("/tmp/media");
+    expect(cfg.alertInstructionsPath).toBe("/tmp/clawline/alerts.md");
     expect(cfg.network.bindAddress).toBe("0.0.0.0");
     expect(cfg.network.allowInsecurePublic).toBe(true);
     expect(cfg.network.allowedOrigins).toEqual(["https://example.com"]);
@@ -54,12 +59,16 @@ describe("resolveClawlineConfig", () => {
         media: {
           storagePath: "~/custom/media",
         },
+        alertInstructionsPath: "~/custom/instructions.md",
       },
     } as ClawdbotConfig);
 
     expect(cfg.statePath).toBe(path.join(home, "custom", "clawline"));
     expect(cfg.media.storagePath).toBe(
       path.join(home, "custom", "media"),
+    );
+    expect(cfg.alertInstructionsPath).toBe(
+      path.join(home, "custom", "instructions.md"),
     );
   });
 
@@ -69,11 +78,15 @@ describe("resolveClawlineConfig", () => {
         media: {
           storagePath: "relative/media",
         },
+        alertInstructionsPath: "relative/instructions.md",
       },
     } as ClawdbotConfig);
 
     expect(cfg.media.storagePath).toBe(
       path.resolve("relative/media"),
+    );
+    expect(cfg.alertInstructionsPath).toBe(
+      path.resolve("relative/instructions.md"),
     );
   });
 

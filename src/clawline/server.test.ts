@@ -22,7 +22,11 @@ vi.mock("../infra/outbound/message.js", () => ({
   sendMessage: (...args: unknown[]) => sendMessageMock(...args),
 }));
 
-import { createProviderServer, PROTOCOL_VERSION } from "./server.js";
+import {
+  createProviderServer,
+  DEFAULT_ALERT_INSTRUCTIONS_TEXT,
+  PROTOCOL_VERSION,
+} from "./server.js";
 
 const silentLogger: Logger = {
   info: () => {},
@@ -54,10 +58,14 @@ type TestServerContext = {
   port: number;
   allowlistPath: string;
   mediaPath: string;
+  alertInstructionsPath: string;
   cleanup: () => Promise<void>;
 };
 
-async function setupTestServer(initialAllowlist: AllowlistEntry[] = []): Promise<TestServerContext> {
+async function setupTestServer(
+  initialAllowlist: AllowlistEntry[] = [],
+  options: { alertInstructionsText?: string | null } = {},
+): Promise<TestServerContext> {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "clawline-server-test-"));
   const statePath = path.join(root, "state");
   const mediaPath = path.join(root, "media");
@@ -76,12 +84,18 @@ async function setupTestServer(initialAllowlist: AllowlistEntry[] = []): Promise
     JSON.stringify({ version: 1, entries: [] }, null, 2),
   );
   await fs.writeFile(path.join(statePath, "denylist.json"), "[]");
+  const alertInstructionsPath = path.join(root, "alert-instructions.md");
+  if (options.alertInstructionsText !== null) {
+    const contents = options.alertInstructionsText ?? "";
+    await fs.writeFile(alertInstructionsPath, contents);
+  }
 
   const server = await createProviderServer({
     config: {
       port: 0,
       statePath,
       media: { storagePath: mediaPath },
+      alertInstructionsPath,
     },
     clawdbotConfig: testClawdbotConfig,
     replyResolver: testReplyResolver,
@@ -98,6 +112,7 @@ async function setupTestServer(initialAllowlist: AllowlistEntry[] = []): Promise
     port: server.getPort(),
     allowlistPath,
     mediaPath,
+    alertInstructionsPath,
     cleanup,
   };
 }
@@ -288,6 +303,48 @@ describe.sequential("clawline provider server", () => {
       expect(sendCall?.channel).toBe("clawline");
       expect(sendCall?.to).toBe("flynn");
       expect(sendCall?.content).toBe("[codex] Check on Flynn");
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("appends alert instructions text to alert payloads", async () => {
+    const ctx = await setupTestServer([], { alertInstructionsText: "Follow up with Flynn ASAP." });
+    try {
+      const response = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: "Check on Flynn", source: "codex" }),
+      });
+      expect(response.status).toBe(200);
+      const payload = await response.json();
+      expect(payload).toEqual({ ok: true });
+      const expected = "[codex] Check on Flynn\n\nFollow up with Flynn ASAP.";
+      const wakeCall = gatewayCallMock.mock.calls[0]?.[0] as { params?: { text?: string } } | undefined;
+      expect(wakeCall?.params?.text).toBe(expected);
+      const sendCall = sendMessageMock.mock.calls[0]?.[0] as { content?: string } | undefined;
+      expect(sendCall?.content).toBe(expected);
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("initializes alert instructions file with default text when missing", async () => {
+    const ctx = await setupTestServer([], { alertInstructionsText: null });
+    try {
+      const fileContents = (await fs.readFile(ctx.alertInstructionsPath, "utf8")).trim();
+      expect(fileContents).toBe(DEFAULT_ALERT_INSTRUCTIONS_TEXT);
+      const response = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: "Check on Flynn", source: "codex" }),
+      });
+      expect(response.status).toBe(200);
+      const expected = `[codex] Check on Flynn\n\n${DEFAULT_ALERT_INSTRUCTIONS_TEXT}`;
+      const wakeCall = gatewayCallMock.mock.calls[0]?.[0] as { params?: { text?: string } } | undefined;
+      expect(wakeCall?.params?.text).toBe(expected);
+      const sendCall = sendMessageMock.mock.calls[0]?.[0] as { content?: string } | undefined;
+      expect(sendCall?.content).toBe(expected);
     } finally {
       await ctx.cleanup();
     }
