@@ -10,7 +10,7 @@ import WebSocket, { WebSocketServer } from "ws";
 import jwt from "jsonwebtoken";
 import BetterSqlite3 from "better-sqlite3";
 import type { Database as SqliteDatabase, Statement as SqliteStatement } from "better-sqlite3";
-import type { MsgContext } from "../auto-reply/templating.js";
+import { finalizeInboundContext } from "../auto-reply/reply/inbound-context.js";
 import { dispatchReplyFromConfig } from "../auto-reply/reply/dispatch-from-config.js";
 import { createReplyDispatcher } from "../auto-reply/reply/reply-dispatcher.js";
 import { extractShortModelName } from "../auto-reply/reply/response-prefix-template.js";
@@ -1638,7 +1638,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           });
         }
 
-        const ctxPayload: MsgContext = {
+        const ctxPayload = finalizeInboundContext({
           Body: inboundBody,
           RawBody: payload.content,
           CommandBody: payload.content,
@@ -1654,7 +1654,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           Surface: "clawline",
           OriginatingChannel: channelLabel,
           OriginatingTo: peerId,
-        };
+          CommandAuthorized: true,
+        });
 
         await updateLastRoute({
           storePath: sessionStorePath,
