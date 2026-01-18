@@ -16,6 +16,7 @@ const LOADERS: Record<ChatChannelId, PluginLoader> = {
   signal: async () => (await import("./signal.js")).signalPlugin,
   imessage: async () => (await import("./imessage.js")).imessagePlugin,
   msteams: async () => (await import("./msteams.js")).msteamsPlugin,
+  clawline: async () => (await import("./clawline.js")).clawlinePlugin,
 };
 
 const cache = new Map<ChannelId, ChannelPlugin>();
