@@ -2212,7 +2212,14 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
     const sanitizedClaimedName = sanitizeLabel(payload.claimedName);
     const deviceId = payload.deviceId;
-    const entry = findAllowlistEntry(deviceId);
+    let entry = findAllowlistEntry(deviceId);
+    if (!entry) {
+      await refreshAllowlistFromDisk();
+      entry = findAllowlistEntry(deviceId);
+      if (entry) {
+        logger.warn?.("[clawline:http] pair_request_allowlist_refresh", { deviceId });
+      }
+    }
     if (entry) {
       logger.info?.("[clawline:http] pair_request_allowlist_entry", {
         deviceId,
