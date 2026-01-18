@@ -58,3 +58,4 @@ apps/ios/*.mobileprovision
 IDENTITY.md
 USER.md
 .tgz
+scratch/
