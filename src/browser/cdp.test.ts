@@ -165,4 +165,20 @@ describe("cdp", () => {
     );
     expect(normalized).toBe("ws://example.com:9222/devtools/browser/ABC");
   });
+
+  it("propagates auth and query params onto normalized websocket URLs", () => {
+    const normalized = normalizeCdpWsUrl(
+      "ws://127.0.0.1:9222/devtools/browser/ABC",
+      "https://user:pass@example.com?token=abc",
+    );
+    expect(normalized).toBe("wss://user:pass@example.com/devtools/browser/ABC?token=abc");
+  });
+
+  it("upgrades ws to wss when CDP uses https", () => {
+    const normalized = normalizeCdpWsUrl(
+      "ws://production-sfo.browserless.io",
+      "https://production-sfo.browserless.io?token=abc",
+    );
+    expect(normalized).toBe("wss://production-sfo.browserless.io/?token=abc");
+  });
 });

@@ -2,7 +2,7 @@ import { resolveAgentDir, resolveSessionAgentId } from "../../agents/agent-scope
 import type { ModelAliasIndex } from "../../agents/model-selection.js";
 import { resolveSandboxRuntimeStatus } from "../../agents/sandbox.js";
 import type { ClawdbotConfig } from "../../config/config.js";
-import { type SessionEntry, saveSessionStore } from "../../config/sessions.js";
+import { type SessionEntry, updateSessionStore } from "../../config/sessions.js";
 import { enqueueSystemEvent } from "../../infra/system-events.js";
 import { applyVerboseOverride } from "../../sessions/level-overrides.js";
 import { formatThinkingLevels, formatXHighModelHint, supportsXHighThinking } from "../thinking.js";
@@ -137,11 +137,11 @@ export async function handleDirectiveOnly(params: {
     if (!directives.rawVerboseLevel) {
       const level = currentVerboseLevel ?? "off";
       return {
-        text: withOptions(`Current verbose level: ${level}.`, "on, off"),
+        text: withOptions(`Current verbose level: ${level}.`, "on, full, off"),
       };
     }
     return {
-      text: `Unrecognized verbose level "${directives.rawVerboseLevel}". Valid levels: off, on.`,
+      text: `Unrecognized verbose level "${directives.rawVerboseLevel}". Valid levels: off, on, full.`,
     };
   }
   if (directives.hasReasoningDirective && !directives.reasoningLevel) {
@@ -264,8 +264,12 @@ export async function handleDirectiveOnly(params: {
       }
       if (profileOverride) {
         sessionEntry.authProfileOverride = profileOverride;
+        sessionEntry.authProfileOverrideSource = "user";
+        delete sessionEntry.authProfileOverrideCompactionCount;
       } else if (directives.hasModelDirective) {
         delete sessionEntry.authProfileOverride;
+        delete sessionEntry.authProfileOverrideSource;
+        delete sessionEntry.authProfileOverrideCompactionCount;
       }
     }
     if (directives.hasQueueDirective && directives.queueReset) {
@@ -288,7 +292,9 @@ export async function handleDirectiveOnly(params: {
     sessionEntry.updatedAt = Date.now();
     sessionStore[sessionKey] = sessionEntry;
     if (storePath) {
-      await saveSessionStore(storePath, sessionStore);
+      await updateSessionStore(storePath, (store) => {
+        store[sessionKey] = sessionEntry;
+      });
     }
     if (modelSelection) {
       const nextLabel = `${modelSelection.provider}/${modelSelection.model}`;
@@ -327,7 +333,9 @@ export async function handleDirectiveOnly(params: {
     parts.push(
       directives.verboseLevel === "off"
         ? formatDirectiveAck("Verbose logging disabled.")
-        : formatDirectiveAck("Verbose logging enabled."),
+        : directives.verboseLevel === "full"
+          ? formatDirectiveAck("Verbose logging set to full.")
+          : formatDirectiveAck("Verbose logging enabled."),
     );
   }
   if (directives.hasReasoningDirective && directives.reasoningLevel) {

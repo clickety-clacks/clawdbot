@@ -15,6 +15,8 @@ export type InboundAccessControlResult = {
   resolvedAccountId: string;
 };
 
+const PAIRING_REPLY_HISTORY_GRACE_MS = 30_000;
+
 export async function checkInboundAccessControl(params: {
   accountId: string;
   from: string;
@@ -23,6 +25,9 @@ export async function checkInboundAccessControl(params: {
   group: boolean;
   pushName?: string;
   isFromMe: boolean;
+  messageTimestampMs?: number;
+  connectedAtMs?: number;
+  pairingGraceMs?: number;
   sock: {
     sendMessage: (jid: string, content: { text: string }) => Promise<unknown>;
   };
@@ -48,6 +53,14 @@ export async function checkInboundAccessControl(params: {
     (configuredAllowFrom && configuredAllowFrom.length > 0 ? configuredAllowFrom : undefined);
   const isSamePhone = params.from === params.selfE164;
   const isSelfChat = isSelfChatMode(params.selfE164, configuredAllowFrom);
+  const pairingGraceMs =
+    typeof params.pairingGraceMs === "number" && params.pairingGraceMs > 0
+      ? params.pairingGraceMs
+      : PAIRING_REPLY_HISTORY_GRACE_MS;
+  const suppressPairingReply =
+    typeof params.connectedAtMs === "number" &&
+    typeof params.messageTimestampMs === "number" &&
+    params.messageTimestampMs < params.connectedAtMs - pairingGraceMs;
 
   // Pre-compute normalized allowlists for filtering.
   const dmHasWildcard = allowFrom?.includes("*") ?? false;
@@ -65,7 +78,8 @@ export async function checkInboundAccessControl(params: {
   // - "open": groups bypass allowFrom, only mention-gating applies
   // - "disabled": block all group messages entirely
   // - "allowlist": only allow group messages from senders in groupAllowFrom/allowFrom
-  const groupPolicy = account.groupPolicy ?? "open";
+  const defaultGroupPolicy = cfg.channels?.defaults?.groupPolicy;
+  const groupPolicy = account.groupPolicy ?? defaultGroupPolicy ?? "open";
   if (params.group && groupPolicy === "disabled") {
     logVerbose("Blocked group message (groupPolicy: disabled)");
     return {
@@ -128,25 +142,29 @@ export async function checkInboundAccessControl(params: {
         (normalizedAllowFrom.length > 0 && normalizedAllowFrom.includes(candidate));
       if (!allowed) {
         if (dmPolicy === "pairing") {
-          const { code, created } = await upsertChannelPairingRequest({
-            channel: "whatsapp",
-            id: candidate,
-            meta: { name: (params.pushName ?? "").trim() || undefined },
-          });
-          if (created) {
-            logVerbose(
-              `whatsapp pairing request sender=${candidate} name=${params.pushName ?? "unknown"}`,
-            );
-            try {
-              await params.sock.sendMessage(params.remoteJid, {
-                text: buildPairingReply({
-                  channel: "whatsapp",
-                  idLine: `Your WhatsApp phone number: ${candidate}`,
-                  code,
-                }),
-              });
-            } catch (err) {
-              logVerbose(`whatsapp pairing reply failed for ${candidate}: ${String(err)}`);
+          if (suppressPairingReply) {
+            logVerbose(`Skipping pairing reply for historical DM from ${candidate}.`);
+          } else {
+            const { code, created } = await upsertChannelPairingRequest({
+              channel: "whatsapp",
+              id: candidate,
+              meta: { name: (params.pushName ?? "").trim() || undefined },
+            });
+            if (created) {
+              logVerbose(
+                `whatsapp pairing request sender=${candidate} name=${params.pushName ?? "unknown"}`,
+              );
+              try {
+                await params.sock.sendMessage(params.remoteJid, {
+                  text: buildPairingReply({
+                    channel: "whatsapp",
+                    idLine: `Your WhatsApp phone number: ${candidate}`,
+                    code,
+                  }),
+                });
+              } catch (err) {
+                logVerbose(`whatsapp pairing reply failed for ${candidate}: ${String(err)}`);
+              }
             }
           }
         } else {

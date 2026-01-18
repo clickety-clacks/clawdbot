@@ -45,7 +45,7 @@ The wizard starts with **QuickStart** (defaults) vs **Advanced** (full control).
 ## What the wizard does
 
 **Local mode (default)** walks you through:
-- Model/auth (OpenAI Code (Codex) subscription OAuth, Anthropic API key (recommended) or `claude setup-token`, plus MiniMax/GLM/Moonshot options)
+  - Model/auth (OpenAI Code (Codex) subscription OAuth, Anthropic API key (recommended) or `claude setup-token`, plus MiniMax/GLM/Moonshot/AI Gateway options)
 - Workspace location + bootstrap files
 - Gateway settings (port/bind/auth/tailscale)
 - Providers (Telegram, WhatsApp, Discord, Signal)
@@ -68,6 +68,8 @@ Tip: `--json` does **not** imply non-interactive mode. Use `--non-interactive` (
 
 1) **Existing config detection**
    - If `~/.clawdbot/clawdbot.json` exists, choose **Keep / Modify / Reset**.
+   - Re-running the wizard does **not** wipe anything unless you explicitly choose **Reset**
+     (or pass `--reset`).
    - If the config is invalid or contains legacy keys, the wizard stops and asks
      you to run `clawdbot doctor` before continuing.
    - Reset uses `trash` (never `rm`) and offers scopes:
@@ -77,7 +79,7 @@ Tip: `--json` does **not** imply non-interactive mode. Use `--non-interactive` (
 
 2) **Model/Auth**
    - **Anthropic API key (recommended)**: uses `ANTHROPIC_API_KEY` if present or prompts for a key, then saves it for daemon use.
-   - **Anthropic token (setup-token)**: run `claude setup-token` on the gateway host (the wizard can run it for you and reuse the token).
+   - **Anthropic token (setup-token)**: run `claude setup-token` locally (the wizard can run it for you and reuse the token) or run it elsewhere and paste the token.
    - **Anthropic OAuth (Claude Code CLI)**: on macOS the wizard checks Keychain item "Claude Code-credentials" (choose "Always Allow" so launchd starts don't block); on Linux/Windows it reuses `~/.claude/.credentials.json` if present.
    - **Anthropic token (paste setup-token)**: run `claude setup-token` in your terminal, then paste the token (you can name it; blank = default).
    - **OpenAI Code (Codex) subscription (Codex CLI)**: if `~/.codex/auth.json` exists, the wizard can reuse it.
@@ -86,12 +88,15 @@ Tip: `--json` does **not** imply non-interactive mode. Use `--non-interactive` (
    - **OpenAI API key**: uses `OPENAI_API_KEY` if present or prompts for a key, then saves it to `~/.clawdbot/.env` so launchd can read it.
    - **OpenCode Zen (multi-model proxy)**: prompts for `OPENCODE_API_KEY` (or `OPENCODE_ZEN_API_KEY`, get it at https://opencode.ai/auth).
    - **API key**: stores the key for you.
+   - **Vercel AI Gateway (multi-model proxy)**: prompts for `AI_GATEWAY_API_KEY`.
+   - More detail: [Vercel AI Gateway](/providers/vercel-ai-gateway)
    - **MiniMax M2.1**: config is auto-written.
    - More detail: [MiniMax](/providers/minimax)
    - **Synthetic (Anthropic-compatible)**: prompts for `SYNTHETIC_API_KEY`.
    - More detail: [Synthetic](/providers/synthetic)
    - **Moonshot (Kimi K2)**: config is auto-written.
-   - More detail: [Moonshot AI](/providers/moonshot)
+   - **Kimi Code**: config is auto-written.
+   - More detail: [Moonshot AI (Kimi + Kimi Code)](/providers/moonshot)
    - **Skip**: no auth configured yet.
    - Pick a default model from detected options (or enter provider/model manually).
    - Wizard runs a model check and warns if the configured model is unknown or missing auth.
@@ -209,6 +214,17 @@ clawdbot onboard --non-interactive \
   --gateway-bind loopback
 ```
 
+Vercel AI Gateway example:
+
+```bash
+clawdbot onboard --non-interactive \
+  --mode local \
+  --auth-choice ai-gateway-api-key \
+  --ai-gateway-api-key "$AI_GATEWAY_API_KEY" \
+  --gateway-port 18789 \
+  --gateway-bind loopback
+```
+
 Moonshot example:
 
 ```bash
@@ -277,6 +293,7 @@ Typical fields in `~/.clawdbot/clawdbot.json`:
 - `agents.defaults.model` / `models.providers` (if Minimax chosen)
 - `gateway.*` (mode, bind, auth, tailscale)
 - `channels.telegram.botToken`, `channels.discord.token`, `channels.signal.*`, `channels.imessage.*`
+- Channel allowlists (Slack/Discord/Matrix/Microsoft Teams) when you opt in during the prompts (names resolve to IDs when possible).
 - `skills.install.nodeManager`
 - `wizard.lastRunAt`
 - `wizard.lastRunVersion`

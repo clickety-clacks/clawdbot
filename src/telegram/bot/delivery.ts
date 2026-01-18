@@ -1,5 +1,6 @@
 import { type Bot, InputFile } from "grammy";
 import { markdownToTelegramChunks, markdownToTelegramHtml } from "../format.js";
+import { splitTelegramCaption } from "../caption.js";
 import type { ReplyPayload } from "../../auto-reply/types.js";
 import type { ReplyToMode } from "../../config/config.js";
 import { danger, logVerbose } from "../../globals.js";
@@ -25,12 +26,19 @@ export async function deliverReplies(params: {
   replyToMode: ReplyToMode;
   textLimit: number;
   messageThreadId?: number;
+  /** Callback invoked before sending a voice message to switch typing indicator. */
+  onVoiceRecording?: () => Promise<void> | void;
 }) {
   const { replies, chatId, runtime, bot, replyToMode, textLimit, messageThreadId } = params;
   const threadParams = buildTelegramThreadParams(messageThreadId);
   let hasReplied = false;
   for (const reply of replies) {
-    if (!reply?.text && !reply?.mediaUrl && !(reply?.mediaUrls?.length ?? 0)) {
+    const hasMedia = Boolean(reply?.mediaUrl) || (reply?.mediaUrls?.length ?? 0) > 0;
+    if (!reply?.text && !hasMedia) {
+      if (reply?.audioAsVoice) {
+        logVerbose("telegram reply has audioAsVoice without media/text; skipping");
+        continue;
+      }
       runtime.error?.(danger("reply missing text/media"));
       continue;
     }
@@ -58,7 +66,11 @@ export async function deliverReplies(params: {
     }
     // media with optional caption on first item
     let first = true;
+    // Track if we need to send a follow-up text message after media
+    // (when caption exceeds Telegram's 1024-char limit)
+    let pendingFollowUpText: string | undefined;
     for (const mediaUrl of mediaList) {
+      const isFirstMedia = first;
       const media = await loadWebMedia(mediaUrl);
       const kind = mediaKindFromMime(media.contentType ?? undefined);
       const isGif = isGifMedia({
@@ -67,7 +79,13 @@ export async function deliverReplies(params: {
       });
       const fileName = media.fileName ?? (isGif ? "animation.gif" : "file");
       const file = new InputFile(media.buffer, fileName);
-      const caption = first ? (reply.text ?? undefined) : undefined;
+      // Caption only on first item; if text exceeds limit, defer to follow-up message.
+      const { caption, followUpText } = splitTelegramCaption(
+        isFirstMedia ? (reply.text ?? undefined) : undefined,
+      );
+      if (followUpText) {
+        pendingFollowUpText = followUpText;
+      }
       first = false;
       const replyToMessageId =
         replyToId && (replyToMode === "all" || !hasReplied) ? replyToId : undefined;
@@ -99,6 +117,8 @@ export async function deliverReplies(params: {
         });
         if (useVoice) {
           // Voice message - displays as round playable bubble (opt-in via [[audio_as_voice]])
+          // Switch typing indicator to record_voice before sending.
+          await params.onVoiceRecording?.();
           await bot.api.sendVoice(chatId, file, {
             ...mediaParams,
           });
@@ -115,6 +135,27 @@ export async function deliverReplies(params: {
       }
       if (replyToId && !hasReplied) {
         hasReplied = true;
+      }
+      // Send deferred follow-up text right after the first media item.
+      // Chunk it in case it's extremely long (same logic as text-only replies).
+      if (pendingFollowUpText && isFirstMedia) {
+        const chunks = markdownToTelegramChunks(pendingFollowUpText, textLimit);
+        for (const chunk of chunks) {
+          const replyToMessageIdFollowup =
+            replyToId && (replyToMode === "all" || !hasReplied) ? replyToId : undefined;
+          await bot.api.sendMessage(
+            chatId,
+            chunk.text,
+            buildTelegramSendParams({
+              replyToMessageId: replyToMessageIdFollowup,
+              messageThreadId,
+            }),
+          );
+          if (replyToId && !hasReplied) {
+            hasReplied = true;
+          }
+        }
+        pendingFollowUpText = undefined;
       }
     }
   }
@@ -152,6 +193,21 @@ export async function resolveMedia(
   return { path: saved.path, contentType: saved.contentType, placeholder };
 }
 
+function buildTelegramSendParams(opts?: {
+  replyToMessageId?: number;
+  messageThreadId?: number;
+}): Record<string, unknown> {
+  const threadParams = buildTelegramThreadParams(opts?.messageThreadId);
+  const params: Record<string, unknown> = {};
+  if (opts?.replyToMessageId) {
+    params.reply_to_message_id = opts.replyToMessageId;
+  }
+  if (threadParams) {
+    params.message_thread_id = threadParams.message_thread_id;
+  }
+  return params;
+}
+
 async function sendTelegramText(
   bot: Bot,
   chatId: string,
@@ -164,13 +220,10 @@ async function sendTelegramText(
     plainText?: string;
   },
 ): Promise<number | undefined> {
-  const threadParams = buildTelegramThreadParams(opts?.messageThreadId);
-  const baseParams: Record<string, unknown> = {
-    reply_to_message_id: opts?.replyToMessageId,
-  };
-  if (threadParams) {
-    baseParams.message_thread_id = threadParams.message_thread_id;
-  }
+  const baseParams = buildTelegramSendParams({
+    replyToMessageId: opts?.replyToMessageId,
+    messageThreadId: opts?.messageThreadId,
+  });
   const textMode = opts?.textMode ?? "markdown";
   const htmlText = textMode === "html" ? text : markdownToTelegramHtml(text);
   try {

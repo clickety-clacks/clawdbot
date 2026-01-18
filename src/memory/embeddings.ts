@@ -1,6 +1,7 @@
 import type { Llama, LlamaEmbeddingContext, LlamaModel } from "node-llama-cpp";
 import { resolveApiKeyForProvider } from "../agents/model-auth.js";
 import type { ClawdbotConfig } from "../config/config.js";
+import { importNodeLlamaCpp } from "./node-llama.js";
 
 export type EmbeddingProvider = {
   id: string;
@@ -14,6 +15,13 @@ export type EmbeddingProviderResult = {
   requestedProvider: "openai" | "local";
   fallbackFrom?: "local";
   fallbackReason?: string;
+  openAi?: OpenAiEmbeddingClient;
+};
+
+export type OpenAiEmbeddingClient = {
+  baseUrl: string;
+  headers: Record<string, string>;
+  model: string;
 };
 
 export type EmbeddingProviderOptions = {
@@ -45,7 +53,45 @@ function normalizeOpenAiModel(model: string): string {
 
 async function createOpenAiEmbeddingProvider(
   options: EmbeddingProviderOptions,
-): Promise<EmbeddingProvider> {
+): Promise<{ provider: EmbeddingProvider; client: OpenAiEmbeddingClient }> {
+  const client = await resolveOpenAiEmbeddingClient(options);
+  const url = `${client.baseUrl.replace(/\/$/, "")}/embeddings`;
+
+  const embed = async (input: string[]): Promise<number[][]> => {
+    if (input.length === 0) return [];
+    const res = await fetch(url, {
+      method: "POST",
+      headers: client.headers,
+      body: JSON.stringify({ model: client.model, input }),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`openai embeddings failed: ${res.status} ${text}`);
+    }
+    const payload = (await res.json()) as {
+      data?: Array<{ embedding?: number[] }>;
+    };
+    const data = payload.data ?? [];
+    return data.map((entry) => entry.embedding ?? []);
+  };
+
+  return {
+    provider: {
+      id: "openai",
+      model: client.model,
+      embedQuery: async (text) => {
+        const [vec] = await embed([text]);
+        return vec ?? [];
+      },
+      embedBatch: embed,
+    },
+    client,
+  };
+}
+
+async function resolveOpenAiEmbeddingClient(
+  options: EmbeddingProviderOptions,
+): Promise<OpenAiEmbeddingClient> {
   const remote = options.remote;
   const remoteApiKey = remote?.apiKey?.trim();
   const remoteBaseUrl = remote?.baseUrl?.trim();
@@ -60,7 +106,6 @@ async function createOpenAiEmbeddingProvider(
 
   const providerConfig = options.config.models?.providers?.openai;
   const baseUrl = remoteBaseUrl || providerConfig?.baseUrl?.trim() || DEFAULT_OPENAI_BASE_URL;
-  const url = `${baseUrl.replace(/\/$/, "")}/embeddings`;
   const headerOverrides = Object.assign({}, providerConfig?.headers, remote?.headers);
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -68,34 +113,7 @@ async function createOpenAiEmbeddingProvider(
     ...headerOverrides,
   };
   const model = normalizeOpenAiModel(options.model);
-
-  const embed = async (input: string[]): Promise<number[][]> => {
-    if (input.length === 0) return [];
-    const res = await fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ model, input }),
-    });
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`openai embeddings failed: ${res.status} ${text}`);
-    }
-    const payload = (await res.json()) as {
-      data?: Array<{ embedding?: number[] }>;
-    };
-    const data = payload.data ?? [];
-    return data.map((entry) => entry.embedding ?? []);
-  };
-
-  return {
-    id: "openai",
-    model,
-    embedQuery: async (text) => {
-      const [vec] = await embed([text]);
-      return vec ?? [];
-    },
-    embedBatch: embed,
-  };
+  return { baseUrl, headers, model };
 }
 
 async function createLocalEmbeddingProvider(
@@ -105,7 +123,7 @@ async function createLocalEmbeddingProvider(
   const modelCacheDir = options.local?.modelCacheDir?.trim();
 
   // Lazy-load node-llama-cpp to keep startup light unless local is enabled.
-  const { getLlama, resolveModelFile, LlamaLogLevel } = await import("node-llama-cpp");
+  const { getLlama, resolveModelFile, LlamaLogLevel } = await importNodeLlamaCpp();
 
   let llama: Llama | null = null;
   let embeddingModel: LlamaModel | null = null;
@@ -158,12 +176,13 @@ export async function createEmbeddingProvider(
       const reason = formatLocalSetupError(err);
       if (options.fallback === "openai") {
         try {
-          const provider = await createOpenAiEmbeddingProvider(options);
+          const { provider, client } = await createOpenAiEmbeddingProvider(options);
           return {
             provider,
             requestedProvider,
             fallbackFrom: "local",
             fallbackReason: reason,
+            openAi: client,
           };
         } catch (fallbackErr) {
           throw new Error(`${reason}\n\nFallback to OpenAI failed: ${formatError(fallbackErr)}`);
@@ -172,8 +191,8 @@ export async function createEmbeddingProvider(
       throw new Error(reason);
     }
   }
-  const provider = await createOpenAiEmbeddingProvider(options);
-  return { provider, requestedProvider };
+  const { provider, client } = await createOpenAiEmbeddingProvider(options);
+  return { provider, requestedProvider, openAi: client };
 }
 
 function formatError(err: unknown): string {
@@ -181,15 +200,32 @@ function formatError(err: unknown): string {
   return String(err);
 }
 
+function isNodeLlamaCppMissing(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const code = (err as Error & { code?: unknown }).code;
+  if (code === "ERR_MODULE_NOT_FOUND") {
+    return err.message.includes("node-llama-cpp");
+  }
+  return false;
+}
+
 function formatLocalSetupError(err: unknown): string {
   const detail = formatError(err);
+  const missing = isNodeLlamaCppMissing(err);
   return [
     "Local embeddings unavailable.",
-    detail ? `Reason: ${detail}` : undefined,
+    missing
+      ? "Reason: optional dependency node-llama-cpp is missing (or failed to install)."
+      : detail
+        ? `Reason: ${detail}`
+        : undefined,
+    missing && detail ? `Detail: ${detail}` : null,
     "To enable local embeddings:",
-    "1) pnpm approve-builds",
-    "2) select node-llama-cpp",
-    "3) pnpm rebuild node-llama-cpp",
+    "1) Use Node 22 LTS (recommended for installs/updates)",
+    missing
+      ? "2) Reinstall Clawdbot (this should install node-llama-cpp): npm i -g clawdbot@latest"
+      : null,
+    "3) If you use pnpm: pnpm approve-builds (select node-llama-cpp), then pnpm rebuild node-llama-cpp",
     'Or set agents.defaults.memorySearch.provider = "openai" (remote).',
   ]
     .filter(Boolean)

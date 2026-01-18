@@ -181,6 +181,8 @@ export function createClawdbotCodingTools(options?: {
     cwd: options?.workspaceDir,
     allowBackground,
     scopeKey,
+    sessionKey: options?.sessionKey,
+    messageProvider: options?.messageProvider,
     sandbox: sandbox
       ? {
           containerName: sandbox.containerName,

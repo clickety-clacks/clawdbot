@@ -42,20 +42,33 @@ function isLoopbackAddress(ip: string | undefined): boolean {
   return false;
 }
 
+function getHostName(hostHeader?: string): string {
+  const host = (hostHeader ?? "").trim().toLowerCase();
+  if (!host) return "";
+  if (host.startsWith("[")) {
+    const end = host.indexOf("]");
+    if (end !== -1) return host.slice(1, end);
+  }
+  const [name] = host.split(":");
+  return name ?? "";
+}
+
 function isLocalDirectRequest(req?: IncomingMessage): boolean {
   if (!req) return false;
   const clientIp = req.socket?.remoteAddress ?? "";
   if (!isLoopbackAddress(clientIp)) return false;
 
-  const host = (req.headers.host ?? "").toLowerCase();
-  const hostIsLocal =
-    host.startsWith("localhost") || host.startsWith("127.0.0.1") || host.startsWith("[::1]");
+  const host = getHostName(req.headers?.host);
+  const hostIsLocal = host === "localhost" || host === "127.0.0.1" || host === "::1";
+  const hostIsTailscaleServe = host.endsWith(".ts.net");
 
   const hasForwarded = Boolean(
-    req.headers["x-forwarded-for"] || req.headers["x-real-ip"] || req.headers["x-forwarded-host"],
+    req.headers?.["x-forwarded-for"] ||
+    req.headers?.["x-real-ip"] ||
+    req.headers?.["x-forwarded-host"],
   );
 
-  return hostIsLocal && !hasForwarded;
+  return (hostIsLocal || hostIsTailscaleServe) && !hasForwarded;
 }
 
 function getTailscaleUser(req?: IncomingMessage): TailscaleUser | null {

@@ -7,9 +7,18 @@ import {
   extractShortModelName,
   type ResponsePrefixContext,
 } from "../../auto-reply/reply/response-prefix-template.js";
-import { formatAgentEnvelope } from "../../auto-reply/envelope.js";
+import { hasControlCommand } from "../../auto-reply/command-detection.js";
+import { formatInboundEnvelope, formatInboundFromLabel } from "../../auto-reply/envelope.js";
+import {
+  createInboundDebouncer,
+  resolveInboundDebounceMs,
+} from "../../auto-reply/inbound-debounce.js";
 import { dispatchReplyFromConfig } from "../../auto-reply/reply/dispatch-from-config.js";
-import { buildHistoryContextFromMap, clearHistoryEntries } from "../../auto-reply/reply/history.js";
+import {
+  buildPendingHistoryContextFromMap,
+  clearHistoryEntries,
+} from "../../auto-reply/reply/history.js";
+import { finalizeInboundContext } from "../../auto-reply/reply/inbound-context.js";
 import { createReplyDispatcher } from "../../auto-reply/reply/reply-dispatcher.js";
 import { resolveStorePath, updateLastRoute } from "../../config/sessions.js";
 import { danger, logVerbose, shouldLogVerbose } from "../../globals.js";
@@ -22,6 +31,7 @@ import {
 } from "../../pairing/pairing-store.js";
 import { resolveAgentRoute } from "../../routing/resolve-route.js";
 import { normalizeE164 } from "../../utils.js";
+import { resolveCommandAuthorizedFromAuthorizers } from "../../channels/command-gating.js";
 import {
   formatSignalPairingIdLine,
   formatSignalSenderDisplay,
@@ -36,6 +46,210 @@ import { sendMessageSignal } from "../send.js";
 import type { SignalEventHandlerDeps, SignalReceivePayload } from "./event-handler.types.js";
 
 export function createSignalEventHandler(deps: SignalEventHandlerDeps) {
+  const inboundDebounceMs = resolveInboundDebounceMs({ cfg: deps.cfg, channel: "signal" });
+
+  type SignalInboundEntry = {
+    senderName: string;
+    senderDisplay: string;
+    senderRecipient: string;
+    senderPeerId: string;
+    groupId?: string;
+    groupName?: string;
+    isGroup: boolean;
+    bodyText: string;
+    timestamp?: number;
+    messageId?: string;
+    mediaPath?: string;
+    mediaType?: string;
+    commandAuthorized: boolean;
+  };
+
+  async function handleSignalInboundMessage(entry: SignalInboundEntry) {
+    const fromLabel = formatInboundFromLabel({
+      isGroup: entry.isGroup,
+      groupLabel: entry.groupName ?? undefined,
+      groupId: entry.groupId ?? "unknown",
+      groupFallback: "Group",
+      directLabel: entry.senderName,
+      directId: entry.senderDisplay,
+    });
+    const body = formatInboundEnvelope({
+      channel: "Signal",
+      from: fromLabel,
+      timestamp: entry.timestamp ?? undefined,
+      body: entry.bodyText,
+      chatType: entry.isGroup ? "group" : "direct",
+      sender: { name: entry.senderName, id: entry.senderDisplay },
+    });
+    let combinedBody = body;
+    const historyKey = entry.isGroup ? String(entry.groupId ?? "unknown") : undefined;
+    if (entry.isGroup && historyKey && deps.historyLimit > 0) {
+      combinedBody = buildPendingHistoryContextFromMap({
+        historyMap: deps.groupHistories,
+        historyKey,
+        limit: deps.historyLimit,
+        currentMessage: combinedBody,
+        formatEntry: (historyEntry) =>
+          formatInboundEnvelope({
+            channel: "Signal",
+            from: fromLabel,
+            timestamp: historyEntry.timestamp,
+            body: `${historyEntry.body}${
+              historyEntry.messageId ? ` [id:${historyEntry.messageId}]` : ""
+            }`,
+            chatType: "group",
+            senderLabel: historyEntry.sender,
+          }),
+      });
+    }
+
+    const route = resolveAgentRoute({
+      cfg: deps.cfg,
+      channel: "signal",
+      accountId: deps.accountId,
+      peer: {
+        kind: entry.isGroup ? "group" : "dm",
+        id: entry.isGroup ? (entry.groupId ?? "unknown") : entry.senderPeerId,
+      },
+    });
+    const signalTo = entry.isGroup ? `group:${entry.groupId}` : `signal:${entry.senderRecipient}`;
+    const ctxPayload = finalizeInboundContext({
+      Body: combinedBody,
+      RawBody: entry.bodyText,
+      CommandBody: entry.bodyText,
+      From: entry.isGroup
+        ? `group:${entry.groupId ?? "unknown"}`
+        : `signal:${entry.senderRecipient}`,
+      To: signalTo,
+      SessionKey: route.sessionKey,
+      AccountId: route.accountId,
+      ChatType: entry.isGroup ? "group" : "direct",
+      ConversationLabel: fromLabel,
+      GroupSubject: entry.isGroup ? (entry.groupName ?? undefined) : undefined,
+      SenderName: entry.senderName,
+      SenderId: entry.senderDisplay,
+      Provider: "signal" as const,
+      Surface: "signal" as const,
+      MessageSid: entry.messageId,
+      Timestamp: entry.timestamp ?? undefined,
+      MediaPath: entry.mediaPath,
+      MediaType: entry.mediaType,
+      MediaUrl: entry.mediaPath,
+      CommandAuthorized: entry.commandAuthorized,
+      OriginatingChannel: "signal" as const,
+      OriginatingTo: signalTo,
+    });
+
+    if (!entry.isGroup) {
+      const sessionCfg = deps.cfg.session;
+      const storePath = resolveStorePath(sessionCfg?.store, {
+        agentId: route.agentId,
+      });
+      await updateLastRoute({
+        storePath,
+        sessionKey: route.mainSessionKey,
+        deliveryContext: {
+          channel: "signal",
+          to: entry.senderRecipient,
+          accountId: route.accountId,
+        },
+      });
+    }
+
+    if (shouldLogVerbose()) {
+      const preview = body.slice(0, 200).replace(/\\n/g, "\\\\n");
+      logVerbose(`signal inbound: from=${ctxPayload.From} len=${body.length} preview="${preview}"`);
+    }
+
+    // Create mutable context for response prefix template interpolation
+    let prefixContext: ResponsePrefixContext = {
+      identityName: resolveIdentityName(deps.cfg, route.agentId),
+    };
+
+    const dispatcher = createReplyDispatcher({
+      responsePrefix: resolveEffectiveMessagesConfig(deps.cfg, route.agentId).responsePrefix,
+      responsePrefixContextProvider: () => prefixContext,
+      humanDelay: resolveHumanDelayConfig(deps.cfg, route.agentId),
+      deliver: async (payload) => {
+        await deps.deliverReplies({
+          replies: [payload],
+          target: ctxPayload.To,
+          baseUrl: deps.baseUrl,
+          account: deps.account,
+          accountId: deps.accountId,
+          runtime: deps.runtime,
+          maxBytes: deps.mediaMaxBytes,
+          textLimit: deps.textLimit,
+        });
+      },
+      onError: (err, info) => {
+        deps.runtime.error?.(danger(`signal ${info.kind} reply failed: ${String(err)}`));
+      },
+    });
+
+    const { queuedFinal } = await dispatchReplyFromConfig({
+      ctx: ctxPayload,
+      cfg: deps.cfg,
+      dispatcher,
+      replyOptions: {
+        disableBlockStreaming:
+          typeof deps.blockStreaming === "boolean" ? !deps.blockStreaming : undefined,
+        onModelSelected: (ctx) => {
+          // Mutate the object directly instead of reassigning to ensure the closure sees updates
+          prefixContext.provider = ctx.provider;
+          prefixContext.model = extractShortModelName(ctx.model);
+          prefixContext.modelFull = `${ctx.provider}/${ctx.model}`;
+          prefixContext.thinkingLevel = ctx.thinkLevel ?? "off";
+        },
+      },
+    });
+    if (!queuedFinal) {
+      if (entry.isGroup && historyKey && deps.historyLimit > 0) {
+        clearHistoryEntries({ historyMap: deps.groupHistories, historyKey });
+      }
+      return;
+    }
+    if (entry.isGroup && historyKey && deps.historyLimit > 0) {
+      clearHistoryEntries({ historyMap: deps.groupHistories, historyKey });
+    }
+  }
+
+  const inboundDebouncer = createInboundDebouncer<SignalInboundEntry>({
+    debounceMs: inboundDebounceMs,
+    buildKey: (entry) => {
+      const conversationId = entry.isGroup ? (entry.groupId ?? "unknown") : entry.senderPeerId;
+      if (!conversationId || !entry.senderPeerId) return null;
+      return `signal:${deps.accountId}:${conversationId}:${entry.senderPeerId}`;
+    },
+    shouldDebounce: (entry) => {
+      if (!entry.bodyText.trim()) return false;
+      if (entry.mediaPath || entry.mediaType) return false;
+      return !hasControlCommand(entry.bodyText, deps.cfg);
+    },
+    onFlush: async (entries) => {
+      const last = entries.at(-1);
+      if (!last) return;
+      if (entries.length === 1) {
+        await handleSignalInboundMessage(last);
+        return;
+      }
+      const combinedText = entries
+        .map((entry) => entry.bodyText)
+        .filter(Boolean)
+        .join("\\n");
+      if (!combinedText.trim()) return;
+      await handleSignalInboundMessage({
+        ...last,
+        bodyText: combinedText,
+        mediaPath: undefined,
+        mediaType: undefined,
+      });
+    },
+    onError: (err) => {
+      deps.runtime.error?.(`signal debounce flush failed: ${String(err)}`);
+    },
+  });
+
   return async (event: { event?: string; data?: string }) => {
     if (event.event !== "receive" || !event.data) return;
 
@@ -194,11 +408,22 @@ export function createSignalEventHandler(deps: SignalEventHandlerDeps) {
       }
     }
 
+    const useAccessGroups = deps.cfg.commands?.useAccessGroups !== false;
+    const ownerAllowedForCommands = isSignalSenderAllowed(sender, effectiveDmAllow);
+    const groupAllowedForCommands = isSignalSenderAllowed(sender, effectiveGroupAllow);
     const commandAuthorized = isGroup
-      ? effectiveGroupAllow.length > 0
-        ? isSignalSenderAllowed(sender, effectiveGroupAllow)
-        : true
+      ? resolveCommandAuthorizedFromAuthorizers({
+          useAccessGroups,
+          authorizers: [
+            { configured: effectiveDmAllow.length > 0, allowed: ownerAllowedForCommands },
+            { configured: effectiveGroupAllow.length > 0, allowed: groupAllowedForCommands },
+          ],
+        })
       : dmAllowed;
+    if (isGroup && hasControlCommand(messageText, deps.cfg) && !commandAuthorized) {
+      logVerbose(`signal: drop control command from unauthorized sender ${senderDisplay}`);
+      return;
+    }
 
     let mediaPath: string | undefined;
     let mediaType: string | undefined;
@@ -230,146 +455,23 @@ export function createSignalEventHandler(deps: SignalEventHandlerDeps) {
     const bodyText = messageText || placeholder || dataMessage.quote?.text?.trim() || "";
     if (!bodyText) return;
 
-    const fromLabel = isGroup
-      ? `${groupName ?? "Signal Group"} id:${groupId}`
-      : `${envelope.sourceName ?? senderDisplay} id:${senderDisplay}`;
-    const body = formatAgentEnvelope({
-      channel: "Signal",
-      from: fromLabel,
+    const senderName = envelope.sourceName ?? senderDisplay;
+    const messageId =
+      typeof envelope.timestamp === "number" ? String(envelope.timestamp) : undefined;
+    await inboundDebouncer.enqueue({
+      senderName,
+      senderDisplay,
+      senderRecipient,
+      senderPeerId,
+      groupId,
+      groupName,
+      isGroup,
+      bodyText,
       timestamp: envelope.timestamp ?? undefined,
-      body: bodyText,
+      messageId,
+      mediaPath,
+      mediaType,
+      commandAuthorized,
     });
-    let combinedBody = body;
-    const historyKey = isGroup ? String(groupId ?? "unknown") : undefined;
-    if (isGroup && historyKey && deps.historyLimit > 0) {
-      combinedBody = buildHistoryContextFromMap({
-        historyMap: deps.groupHistories,
-        historyKey,
-        limit: deps.historyLimit,
-        entry: {
-          sender: envelope.sourceName ?? senderDisplay,
-          body: bodyText,
-          timestamp: envelope.timestamp ?? undefined,
-          messageId:
-            typeof envelope.timestamp === "number" ? String(envelope.timestamp) : undefined,
-        },
-        currentMessage: combinedBody,
-        formatEntry: (entry) =>
-          formatAgentEnvelope({
-            channel: "Signal",
-            from: fromLabel,
-            timestamp: entry.timestamp,
-            body: `${entry.sender}: ${entry.body}${entry.messageId ? ` [id:${entry.messageId}]` : ""}`,
-          }),
-      });
-    }
-
-    const route = resolveAgentRoute({
-      cfg: deps.cfg,
-      channel: "signal",
-      accountId: deps.accountId,
-      peer: {
-        kind: isGroup ? "group" : "dm",
-        id: isGroup ? (groupId ?? "unknown") : senderPeerId,
-      },
-    });
-    const signalTo = isGroup ? `group:${groupId}` : `signal:${senderRecipient}`;
-    const ctxPayload = {
-      Body: combinedBody,
-      RawBody: bodyText,
-      CommandBody: bodyText,
-      From: isGroup ? `group:${groupId ?? "unknown"}` : `signal:${senderRecipient}`,
-      To: signalTo,
-      SessionKey: route.sessionKey,
-      AccountId: route.accountId,
-      ChatType: isGroup ? "group" : "direct",
-      GroupSubject: isGroup ? (groupName ?? undefined) : undefined,
-      SenderName: envelope.sourceName ?? senderDisplay,
-      SenderId: senderDisplay,
-      Provider: "signal" as const,
-      Surface: "signal" as const,
-      MessageSid: envelope.timestamp ? String(envelope.timestamp) : undefined,
-      Timestamp: envelope.timestamp ?? undefined,
-      MediaPath: mediaPath,
-      MediaType: mediaType,
-      MediaUrl: mediaPath,
-      CommandAuthorized: commandAuthorized,
-      OriginatingChannel: "signal" as const,
-      OriginatingTo: signalTo,
-    };
-
-    if (!isGroup) {
-      const sessionCfg = deps.cfg.session;
-      const storePath = resolveStorePath(sessionCfg?.store, {
-        agentId: route.agentId,
-      });
-      await updateLastRoute({
-        storePath,
-        sessionKey: route.mainSessionKey,
-        channel: "signal",
-        to: senderRecipient,
-        accountId: route.accountId,
-      });
-    }
-
-    if (shouldLogVerbose()) {
-      const preview = body.slice(0, 200).replace(/\n/g, "\\n");
-      logVerbose(`signal inbound: from=${ctxPayload.From} len=${body.length} preview="${preview}"`);
-    }
-
-    let didSendReply = false;
-
-    // Create mutable context for response prefix template interpolation
-    let prefixContext: ResponsePrefixContext = {
-      identityName: resolveIdentityName(deps.cfg, route.agentId),
-    };
-
-    const dispatcher = createReplyDispatcher({
-      responsePrefix: resolveEffectiveMessagesConfig(deps.cfg, route.agentId).responsePrefix,
-      responsePrefixContextProvider: () => prefixContext,
-      humanDelay: resolveHumanDelayConfig(deps.cfg, route.agentId),
-      deliver: async (payload) => {
-        await deps.deliverReplies({
-          replies: [payload],
-          target: ctxPayload.To,
-          baseUrl: deps.baseUrl,
-          account: deps.account,
-          accountId: deps.accountId,
-          runtime: deps.runtime,
-          maxBytes: deps.mediaMaxBytes,
-          textLimit: deps.textLimit,
-        });
-        didSendReply = true;
-      },
-      onError: (err, info) => {
-        deps.runtime.error?.(danger(`signal ${info.kind} reply failed: ${String(err)}`));
-      },
-    });
-
-    const { queuedFinal } = await dispatchReplyFromConfig({
-      ctx: ctxPayload,
-      cfg: deps.cfg,
-      dispatcher,
-      replyOptions: {
-        disableBlockStreaming:
-          typeof deps.blockStreaming === "boolean" ? !deps.blockStreaming : undefined,
-        onModelSelected: (ctx) => {
-          // Mutate the object directly instead of reassigning to ensure the closure sees updates
-          prefixContext.provider = ctx.provider;
-          prefixContext.model = extractShortModelName(ctx.model);
-          prefixContext.modelFull = `${ctx.provider}/${ctx.model}`;
-          prefixContext.thinkingLevel = ctx.thinkLevel ?? "off";
-        },
-      },
-    });
-    if (!queuedFinal) {
-      if (isGroup && historyKey && deps.historyLimit > 0 && didSendReply) {
-        clearHistoryEntries({ historyMap: deps.groupHistories, historyKey });
-      }
-      return;
-    }
-    if (isGroup && historyKey && deps.historyLimit > 0 && didSendReply) {
-      clearHistoryEntries({ historyMap: deps.groupHistories, historyKey });
-    }
   };
 }

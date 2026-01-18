@@ -52,6 +52,30 @@ When the audit prints findings, treat this as a priority order:
 5. **Plugins/extensions**: only load what you explicitly trust.
 6. **Model choice**: prefer modern, instruction-hardened models for any bot with tools.
 
+## Local session logs live on disk
+
+Clawdbot stores session transcripts on disk under `~/.clawdbot/agents/<agentId>/sessions/*.jsonl`.
+This is required for session continuity and (optionally) session memory indexing, but it also means
+**any process/user with filesystem access can read those logs**. Treat disk access as the trust
+boundary and lock down permissions on `~/.clawdbot` (see the audit section below). If you need
+stronger isolation between agents, run them under separate OS users or separate hosts.
+
+## Node execution (system.run)
+
+If a macOS node is paired, the Gateway can invoke `system.run` on that node. This is **remote code execution** on the Mac:
+
+- Requires node pairing (approval + token).
+- Controlled on the Mac via **Settings → "Node Run Commands"**: "Always Ask" (default), "Always Allow", or "Never".
+- If you don’t want remote execution, set the policy to "Never" and remove node pairing for that Mac.
+
+## Dynamic skills (watcher / remote nodes)
+
+Clawdbot can refresh the skills list mid-session:
+- **Skills watcher**: changes to `SKILL.md` can update the skills snapshot on the next agent turn.
+- **Remote nodes**: connecting a macOS node can make macOS-only skills eligible (based on bin probing).
+
+Treat skill folders as **trusted code** and restrict who can modify them.
+
 ## The Threat Model
 
 Your AI assistant can:
@@ -107,6 +131,18 @@ clawdbot pairing approve <channel> <code>
 
 Details + files on disk: [Pairing](/start/pairing)
 
+## DM session isolation (multi-user mode)
+
+By default, Clawdbot routes **all DMs into the main session** so your assistant has continuity across devices and channels. If **multiple people** can DM the bot (open DMs or a multi-person allowlist), consider isolating DM sessions:
+
+```json5
+{
+  session: { dmScope: "per-channel-peer" }
+}
+```
+
+This prevents cross-user context leakage while keeping group chats isolated. If the same person contacts you on multiple channels, use `session.identityLinks` to collapse those DM sessions into one canonical identity. See [Session Management](/concepts/session) and [Configuration](/gateway/configuration).
+
 ## Allowlists (DM + groups) — terminology
 
 Clawdbot has two separate “who can trigger me?” layers:
@@ -132,6 +168,15 @@ Even with strong system prompts, **prompt injection is not solved**. What helps 
 - Treat links and pasted instructions as hostile by default.
 - Run sensitive tool execution in a sandbox; keep secrets out of the agent’s reachable filesystem.
 - **Model choice matters:** older/legacy models can be less robust against prompt injection and tool misuse. Prefer modern, instruction-hardened models for any bot with tools. We recommend Anthropic Opus 4.5 because it’s quite good at recognizing prompt injections (see [“A step forward on safety”](https://www.anthropic.com/news/claude-opus-4-5)).
+
+### Model strength (security note)
+
+Prompt injection resistance is **not** uniform across model tiers. Smaller/cheaper models are generally more susceptible to tool misuse and instruction hijacking, especially under adversarial prompts.
+
+Recommendations:
+- **Use the latest generation, best-tier model** for any bot that can run tools or touch files/networks.
+- **Avoid weaker tiers** (for example, Sonnet or Haiku) for tool-enabled agents or untrusted inboxes.
+- If you must use a smaller model, **reduce blast radius** (read-only tools, strong sandboxing, minimal filesystem access, strict allowlists).
 
 ## Reasoning & verbose output in groups
 

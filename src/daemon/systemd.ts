@@ -10,6 +10,7 @@ import {
 } from "./constants.js";
 import { parseKeyValueOutput } from "./runtime-parse.js";
 import type { GatewayServiceRuntime } from "./service-runtime.js";
+import { resolveHomeDir } from "./paths.js";
 import {
   enableSystemdUserLinger,
   readSystemdUserLingerStatus,
@@ -22,24 +23,19 @@ import {
 } from "./systemd-unit.js";
 
 const execFileAsync = promisify(execFile);
+const toPosixPath = (value: string) => value.replace(/\\/g, "/");
 
 const formatLine = (label: string, value: string) => {
   const rich = isRich();
   return `${colorize(rich, theme.muted, `${label}:`)} ${colorize(rich, theme.command, value)}`;
 };
 
-function resolveHomeDir(env: Record<string, string | undefined>): string {
-  const home = env.HOME?.trim() || env.USERPROFILE?.trim();
-  if (!home) throw new Error("Missing HOME");
-  return home;
-}
-
 function resolveSystemdUnitPathForName(
   env: Record<string, string | undefined>,
   name: string,
 ): string {
-  const home = resolveHomeDir(env);
-  return path.join(home, ".config", "systemd", "user", `${name}.service`);
+  const home = toPosixPath(resolveHomeDir(env));
+  return path.posix.join(home, ".config", "systemd", "user", `${name}.service`);
 }
 
 function resolveSystemdServiceName(env: Record<string, string | undefined>): string {
@@ -48,14 +44,6 @@ function resolveSystemdServiceName(env: Record<string, string | undefined>): str
     return override.endsWith(".service") ? override.slice(0, -".service".length) : override;
   }
   return resolveGatewaySystemdServiceName(env.CLAWDBOT_PROFILE);
-}
-
-function resolveSystemdServiceNameFromParams(params?: {
-  env?: Record<string, string | undefined>;
-  profile?: string;
-}): string {
-  if (params?.env) return resolveSystemdServiceName(params.env);
-  return resolveGatewaySystemdServiceName(params?.profile);
 }
 
 function resolveSystemdUnitPath(env: Record<string, string | undefined>): string {
@@ -268,14 +256,12 @@ export async function uninstallSystemdService({
 export async function stopSystemdService({
   stdout,
   env,
-  profile,
 }: {
   stdout: NodeJS.WritableStream;
   env?: Record<string, string | undefined>;
-  profile?: string;
 }): Promise<void> {
   await assertSystemdAvailable();
-  const serviceName = resolveSystemdServiceNameFromParams({ env, profile });
+  const serviceName = resolveSystemdServiceName(env ?? {});
   const unitName = `${serviceName}.service`;
   const res = await execSystemctl(["--user", "stop", unitName]);
   if (res.code !== 0) {
@@ -287,14 +273,12 @@ export async function stopSystemdService({
 export async function restartSystemdService({
   stdout,
   env,
-  profile,
 }: {
   stdout: NodeJS.WritableStream;
   env?: Record<string, string | undefined>;
-  profile?: string;
 }): Promise<void> {
   await assertSystemdAvailable();
-  const serviceName = resolveSystemdServiceNameFromParams({ env, profile });
+  const serviceName = resolveSystemdServiceName(env ?? {});
   const unitName = `${serviceName}.service`;
   const res = await execSystemctl(["--user", "restart", unitName]);
   if (res.code !== 0) {
@@ -303,12 +287,11 @@ export async function restartSystemdService({
   stdout.write(`${formatLine("Restarted systemd service", unitName)}\n`);
 }
 
-export async function isSystemdServiceEnabled(params?: {
+export async function isSystemdServiceEnabled(args: {
   env?: Record<string, string | undefined>;
-  profile?: string;
 }): Promise<boolean> {
   await assertSystemdAvailable();
-  const serviceName = resolveSystemdServiceNameFromParams(params);
+  const serviceName = resolveSystemdServiceName(args.env ?? {});
   const unitName = `${serviceName}.service`;
   const res = await execSystemctl(["--user", "is-enabled", unitName]);
   return res.code === 0;

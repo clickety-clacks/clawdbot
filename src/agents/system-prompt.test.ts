@@ -23,6 +23,30 @@ describe("buildAgentSystemPrompt", () => {
     expect(prompt).not.toContain("Owner numbers:");
   });
 
+  it("omits extended sections in minimal prompt mode", () => {
+    const prompt = buildAgentSystemPrompt({
+      workspaceDir: "/tmp/clawd",
+      promptMode: "minimal",
+      ownerNumbers: ["+123"],
+      skillsPrompt:
+        "<available_skills>\n  <skill>\n    <name>demo</name>\n  </skill>\n</available_skills>",
+      heartbeatPrompt: "ping",
+      toolNames: ["message", "memory_search"],
+      extraSystemPrompt: "Subagent details",
+    });
+
+    expect(prompt).not.toContain("## User Identity");
+    expect(prompt).not.toContain("## Skills");
+    expect(prompt).not.toContain("## Memory Recall");
+    expect(prompt).not.toContain("## Reply Tags");
+    expect(prompt).not.toContain("## Messaging");
+    expect(prompt).not.toContain("## Silent Replies");
+    expect(prompt).not.toContain("## Heartbeats");
+    expect(prompt).toContain("## Subagent Context");
+    expect(prompt).not.toContain("## Group Chat Context");
+    expect(prompt).toContain("Subagent details");
+  });
+
   it("adds reasoning tag hint when enabled", () => {
     const prompt = buildAgentSystemPrompt({
       workspaceDir: "/tmp/clawd",
@@ -71,15 +95,42 @@ describe("buildAgentSystemPrompt", () => {
     );
   });
 
-  it("includes user time when provided", () => {
+  it("includes user time when provided (12-hour)", () => {
     const prompt = buildAgentSystemPrompt({
       workspaceDir: "/tmp/clawd",
       userTimezone: "America/Chicago",
-      userTime: "Monday 2026-01-05 15:26",
+      userTime: "Monday, January 5th, 2026 — 3:26 PM",
+      userTimeFormat: "12",
     });
 
+    expect(prompt).toContain("## Current Date & Time");
+    expect(prompt).toContain("Monday, January 5th, 2026 — 3:26 PM (America/Chicago)");
+    expect(prompt).toContain("Time format: 12-hour");
+  });
+
+  it("includes user time when provided (24-hour)", () => {
+    const prompt = buildAgentSystemPrompt({
+      workspaceDir: "/tmp/clawd",
+      userTimezone: "America/Chicago",
+      userTime: "Monday, January 5th, 2026 — 15:26",
+      userTimeFormat: "24",
+    });
+
+    expect(prompt).toContain("## Current Date & Time");
+    expect(prompt).toContain("Monday, January 5th, 2026 — 15:26 (America/Chicago)");
+    expect(prompt).toContain("Time format: 24-hour");
+  });
+
+  it("shows UTC fallback when only timezone is provided", () => {
+    const prompt = buildAgentSystemPrompt({
+      workspaceDir: "/tmp/clawd",
+      userTimezone: "America/Chicago",
+      userTimeFormat: "24",
+    });
+
+    expect(prompt).toContain("## Current Date & Time");
     expect(prompt).toContain(
-      "Time: assume UTC unless stated. User time zone: America/Chicago. Current user time (local, 24-hour): Monday 2026-01-05 15:26 (America/Chicago).",
+      "Time zone: America/Chicago. Current time unknown; assume UTC for date/time references.",
     );
   });
 
@@ -165,6 +216,7 @@ describe("buildAgentSystemPrompt", () => {
 
     expect(prompt).toContain("message: Send messages and channel actions");
     expect(prompt).toContain("### message tool");
+    expect(prompt).toContain("respond with ONLY: NO_REPLY");
   });
 
   it("includes runtime provider capabilities when present", () => {

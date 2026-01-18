@@ -6,16 +6,6 @@ export const matrixOutbound: ChannelOutboundAdapter = {
   deliveryMode: "direct",
   chunker: chunkMarkdownText,
   textChunkLimit: 4000,
-  resolveTarget: ({ to }) => {
-    const trimmed = to?.trim();
-    if (!trimmed) {
-      return {
-        ok: false,
-        error: new Error("Delivering to Matrix requires --to <room|alias|user>"),
-      };
-    }
-    return { ok: true, to: trimmed };
-  },
   sendText: async ({ to, text, deps, replyToId, threadId }) => {
     const send = deps?.sendMatrix ?? sendMessageMatrix;
     const resolvedThreadId =

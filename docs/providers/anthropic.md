@@ -38,10 +38,32 @@ clawdbot onboard --anthropic-api-key "$ANTHROPIC_API_KEY"
 
 **Best for:** using your Claude subscription or existing Claude Code CLI login.
 
+### Where to get a setup-token
+
+Setup-tokens are created by the **Claude Code CLI**, not the Anthropic Console. You can run this on **any machine**:
+
+```bash
+claude setup-token
+```
+
+Paste the token into Clawdbot (wizard: **Anthropic token (paste setup-token)**), or let Clawdbot run the command locally:
+
+```bash
+clawdbot onboard --auth-choice setup-token
+# or
+clawdbot models auth setup-token --provider anthropic
+```
+
+If you generated the token on a different machine, paste it:
+
+```bash
+clawdbot models auth paste-token --provider anthropic
+```
+
 ### CLI setup
 
 ```bash
-# Run setup-token on the gateway host (wizard can run it for you)
+# Run setup-token locally (wizard can run it for you)
 clawdbot onboard --auth-choice setup-token
 
 # Reuse Claude Code CLI OAuth credentials if already logged in
@@ -58,7 +80,7 @@ clawdbot onboard --auth-choice claude-cli
 
 ## Notes
 
-- The wizard can run `claude setup-token` on the gateway host and store the token.
+- The wizard can run `claude setup-token` locally and store the token, or you can paste a token generated elsewhere.
 - Clawdbot writes `auth.profiles["anthropic:claude-cli"].mode` as `"oauth"` so the profile
   accepts both OAuth and setup-token credentials. Older configs using `"token"` are
   auto-migrated on load.

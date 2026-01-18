@@ -55,6 +55,8 @@ actor MacNodeRuntime {
                 return try await self.handleScreenRecordInvoke(req)
             case ClawdbotSystemCommand.run.rawValue:
                 return try await self.handleSystemRun(req)
+            case ClawdbotSystemCommand.which.rawValue:
+                return try await self.handleSystemWhich(req)
             case ClawdbotSystemCommand.notify.rawValue:
                 return try await self.handleSystemNotify(req)
             default:
@@ -181,10 +183,10 @@ actor MacNodeRuntime {
                 var height: Int
             }
             let payload = try Self.encodePayload(SnapPayload(
-                                                    format: (params.format ?? .jpg).rawValue,
-                                                    base64: res.data.base64EncodedString(),
-                                                    width: Int(res.size.width),
-                                                    height: Int(res.size.height)))
+                format: (params.format ?? .jpg).rawValue,
+                base64: res.data.base64EncodedString(),
+                width: Int(res.size.width),
+                height: Int(res.size.height)))
             return BridgeInvokeResponse(id: req.id, ok: true, payloadJSON: payload)
         case ClawdbotCameraCommand.clip.rawValue:
             let params = (try? Self.decodeParams(ClawdbotCameraClipParams.self, from: req.paramsJSON)) ??
@@ -204,10 +206,10 @@ actor MacNodeRuntime {
                 var hasAudio: Bool
             }
             let payload = try Self.encodePayload(ClipPayload(
-                                                    format: (params.format ?? .mp4).rawValue,
-                                                    base64: data.base64EncodedString(),
-                                                    durationMs: res.durationMs,
-                                                    hasAudio: res.hasAudio))
+                format: (params.format ?? .mp4).rawValue,
+                base64: data.base64EncodedString(),
+                durationMs: res.durationMs,
+                hasAudio: res.hasAudio))
             return BridgeInvokeResponse(id: req.id, ok: true, payloadJSON: payload)
         case ClawdbotCameraCommand.list.rawValue:
             let devices = await self.cameraCapture.listDevices()
@@ -312,12 +314,12 @@ actor MacNodeRuntime {
             var hasAudio: Bool
         }
         let payload = try Self.encodePayload(ScreenPayload(
-                                                format: "mp4",
-                                                base64: data.base64EncodedString(),
-                                                durationMs: params.durationMs,
-                                                fps: params.fps,
-                                                screenIndex: params.screenIndex,
-                                                hasAudio: res.hasAudio))
+            format: "mp4",
+            base64: data.base64EncodedString(),
+            durationMs: params.durationMs,
+            fps: params.fps,
+            screenIndex: params.screenIndex,
+            hasAudio: res.hasAudio))
         return BridgeInvokeResponse(id: req.id, ok: true, payloadJSON: payload)
     }
 
@@ -426,6 +428,77 @@ actor MacNodeRuntime {
             return Self.errorResponse(req, code: .invalidRequest, message: "INVALID_REQUEST: command required")
         }
 
+        let trimmedAgent = params.agentId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let agentId = trimmedAgent.isEmpty ? nil : trimmedAgent
+        let policy = SystemRunPolicy.load(agentId: agentId)
+        let allowlistEntries = SystemRunAllowlistStore.load(agentId: agentId)
+        let resolution = SystemRunCommandResolution.resolve(command: command, cwd: params.cwd)
+        let allowlistMatch = SystemRunAllowlistStore.match(
+            command: command,
+            resolution: resolution,
+            entries: allowlistEntries)
+        let autoAllowSkills = MacNodeConfigFile.systemRunAutoAllowSkills(agentId: agentId) ?? false
+        let skillAllow: Bool
+        if autoAllowSkills, let name = resolution?.executableName {
+            let bins = await SkillBinsCache.shared.currentBins()
+            skillAllow = bins.contains(name)
+        } else {
+            skillAllow = false
+        }
+
+        let shouldPrompt: Bool = {
+            if policy == .never { return false }
+            if allowlistMatch != nil { return false }
+            if skillAllow { return false }
+            return policy == .ask
+        }()
+
+        switch policy {
+        case .never:
+            return Self.errorResponse(
+                req,
+                code: .unavailable,
+                message: "SYSTEM_RUN_DISABLED: policy=never")
+        case .always:
+            break
+        case .ask:
+            if shouldPrompt {
+                let services = await self.mainActorServices()
+                let decision = await services.confirmSystemRun(context: SystemRunPromptContext(
+                    command: SystemRunAllowlist.displayString(for: command),
+                    cwd: params.cwd,
+                    agentId: agentId,
+                    executablePath: resolution?.resolvedPath))
+                switch decision {
+                case .allowOnce:
+                    break
+                case .allowAlways:
+                    if let resolvedPath = resolution?.resolvedPath, !resolvedPath.isEmpty {
+                        _ = SystemRunAllowlistStore.add(pattern: resolvedPath, agentId: agentId)
+                    } else if let raw = command.first?.trimmingCharacters(in: .whitespacesAndNewlines),
+                              !raw.isEmpty
+                    {
+                        _ = SystemRunAllowlistStore.add(pattern: raw, agentId: agentId)
+                    }
+                case .deny:
+                    return Self.errorResponse(
+                        req,
+                        code: .unavailable,
+                        message: "SYSTEM_RUN_DENIED: user denied")
+                }
+            }
+        }
+
+        if let match = allowlistMatch {
+            SystemRunAllowlistStore.markUsed(
+                entryId: match.id,
+                command: command,
+                resolvedPath: resolution?.resolvedPath,
+                agentId: agentId)
+        }
+
+        let env = Self.sanitizedEnv(params.env)
+
         if params.needsScreenRecording == true {
             let authorized = await PermissionManager
                 .status([.screenRecording])[.screenRecording] ?? false
@@ -441,7 +514,7 @@ actor MacNodeRuntime {
         let result = await ShellExecutor.runDetailed(
             command: command,
             cwd: params.cwd,
-            env: params.env,
+            env: env,
             timeout: timeoutSec)
 
         struct RunPayload: Encodable {
@@ -454,12 +527,39 @@ actor MacNodeRuntime {
         }
 
         let payload = try Self.encodePayload(RunPayload(
-                                                exitCode: result.exitCode,
-                                                timedOut: result.timedOut,
-                                                success: result.success,
-                                                stdout: result.stdout,
-                                                stderr: result.stderr,
-                                                error: result.errorMessage))
+            exitCode: result.exitCode,
+            timedOut: result.timedOut,
+            success: result.success,
+            stdout: result.stdout,
+            stderr: result.stderr,
+            error: result.errorMessage))
+        return BridgeInvokeResponse(id: req.id, ok: true, payloadJSON: payload)
+    }
+
+    private func handleSystemWhich(_ req: BridgeInvokeRequest) async throws -> BridgeInvokeResponse {
+        let params = try Self.decodeParams(ClawdbotSystemWhichParams.self, from: req.paramsJSON)
+        let bins = params.bins
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !bins.isEmpty else {
+            return Self.errorResponse(req, code: .invalidRequest, message: "INVALID_REQUEST: bins required")
+        }
+
+        let searchPaths = CommandResolver.preferredPaths()
+        var matches: [String] = []
+        var paths: [String: String] = [:]
+        for bin in bins {
+            if let path = CommandResolver.findExecutable(named: bin, searchPaths: searchPaths) {
+                matches.append(bin)
+                paths[bin] = path
+            }
+        }
+
+        struct WhichPayload: Encodable {
+            let bins: [String]
+            let paths: [String: String]
+        }
+        let payload = try Self.encodePayload(WhichPayload(bins: matches, paths: paths))
         return BridgeInvokeResponse(id: req.id, ok: true, payloadJSON: payload)
     }
 
@@ -529,6 +629,39 @@ actor MacNodeRuntime {
         UserDefaults.standard.object(forKey: cameraEnabledKey) as? Bool ?? false
     }
 
+    private nonisolated static func systemRunPolicy() -> SystemRunPolicy {
+        SystemRunPolicy.load()
+    }
+
+    private static let blockedEnvKeys: Set<String> = [
+        "PATH",
+        "NODE_OPTIONS",
+        "PYTHONHOME",
+        "PYTHONPATH",
+        "PERL5LIB",
+        "PERL5OPT",
+        "RUBYOPT",
+    ]
+
+    private static let blockedEnvPrefixes: [String] = [
+        "DYLD_",
+        "LD_",
+    ]
+
+    private static func sanitizedEnv(_ overrides: [String: String]?) -> [String: String]? {
+        guard let overrides else { return nil }
+        var merged = ProcessInfo.processInfo.environment
+        for (rawKey, value) in overrides {
+            let key = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !key.isEmpty else { continue }
+            let upper = key.uppercased()
+            if self.blockedEnvKeys.contains(upper) { continue }
+            if self.blockedEnvPrefixes.contains(where: { upper.hasPrefix($0) }) { continue }
+            merged[key] = value
+        }
+        return merged
+    }
+
     private nonisolated static func locationMode() -> ClawdbotLocationMode {
         let raw = UserDefaults.standard.string(forKey: locationModeKey) ?? "off"
         return ClawdbotLocationMode(rawValue: raw) ?? .off
@@ -576,8 +709,8 @@ actor MacNodeRuntime {
         case .jpeg:
             let clamped = min(1.0, max(0.05, quality))
             guard let data = rep.representation(
-                    using: .jpeg,
-                    properties: [.compressionFactor: clamped])
+                using: .jpeg,
+                properties: [.compressionFactor: clamped])
             else {
                 throw NSError(domain: "Canvas", code: 24, userInfo: [
                     NSLocalizedDescriptionKey: "jpeg encode failed",

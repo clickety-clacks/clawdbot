@@ -158,10 +158,10 @@ actor PortGuardian {
                 mode: mode,
                 listeners: listeners)
             reports.append(Self.buildReport(
-                            port: port,
-                            listeners: listeners,
-                            mode: mode,
-                            tunnelHealthy: tunnelHealthy))
+                port: port,
+                listeners: listeners,
+                mode: mode,
+                tunnelHealthy: tunnelHealthy))
         }
 
         return reports
@@ -203,15 +203,13 @@ actor PortGuardian {
         proc.standardOutput = pipe
         proc.standardError = Pipe()
         do {
-            try proc.run()
-            proc.waitUntilExit()
+            let data = try proc.runAndReadToEnd(from: pipe)
+            guard !data.isEmpty else { return nil }
+            return String(data: data, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
         } catch {
             return nil
         }
-        let data = pipe.fileHandleForReading.readToEndSafely()
-        guard !data.isEmpty else { return nil }
-        return String(data: data, encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func parseListeners(from text: String) -> [Listener] {
@@ -351,10 +349,11 @@ actor PortGuardian {
             if port == GatewayEnvironment.gatewayPort() { return cmd.contains("ssh") }
             return false
         case .local:
-            if !cmd.contains("clawdbot") { return false }
+            // The gateway daemon may listen as `clawdbot` or as its runtime (`node`, `bun`, etc).
             if full.contains("gateway-daemon") { return true }
             // If args are unavailable, treat a clawdbot listener as expected.
-            return full == cmd
+            if cmd.contains("clawdbot"), full == cmd { return true }
+            return false
         case .unconfigured:
             return false
         }

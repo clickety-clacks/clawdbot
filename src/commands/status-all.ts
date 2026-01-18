@@ -13,6 +13,7 @@ import { inspectPortUsage } from "../infra/ports.js";
 import { readRestartSentinel } from "../infra/restart-sentinel.js";
 import { readTailscaleStatusJson } from "../infra/tailscale.js";
 import { checkUpdateStatus, compareSemverStrings } from "../infra/update-check.js";
+import { getRemoteSkillEligibility } from "../infra/skills-remote.js";
 import { runExec } from "../process/exec.js";
 import type { RuntimeEnv } from "../runtime.js";
 import { VERSION } from "../version.js";
@@ -118,10 +119,11 @@ export async function statusAllCommand(
 
     const localFallbackAuth = resolveProbeAuth("local");
     const remoteAuth = resolveProbeAuth("remote");
+    const probeAuth = isRemoteMode && !remoteUrlMissing ? remoteAuth : localFallbackAuth;
 
     const gatewayProbe = await probeGateway({
       url: connection.url,
-      auth: remoteUrlMissing ? localFallbackAuth : remoteAuth,
+      auth: probeAuth,
       timeoutMs: Math.min(5000, opts?.timeoutMs ?? 10_000),
     }).catch(() => null);
     const gatewayReachable = gatewayProbe?.ok === true;
@@ -133,7 +135,7 @@ export async function statusAllCommand(
       try {
         const service = resolveGatewayService();
         const [loaded, runtimeInfo, command] = await Promise.all([
-          service.isLoaded({ profile: process.env.CLAWDBOT_PROFILE }).catch(() => false),
+          service.isLoaded({ env: process.env }).catch(() => false),
           service.readRuntime(process.env).catch(() => undefined),
           service.readCommand(process.env).catch(() => null),
         ]);
@@ -217,6 +219,7 @@ export async function statusAllCommand(
             try {
               return buildWorkspaceSkillStatus(defaultWorkspace, {
                 config: cfg,
+                eligibility: { remote: getRemoteSkillEligibility() },
               });
             } catch {
               return null;
@@ -288,9 +291,7 @@ export async function statusAllCommand(
       : gatewayProbe?.error
         ? `unreachable (${gatewayProbe.error})`
         : "unreachable";
-    const gatewayAuth = gatewayReachable
-      ? ` · auth ${formatGatewayAuthUsed(remoteUrlMissing ? localFallbackAuth : remoteAuth)}`
-      : "";
+    const gatewayAuth = gatewayReachable ? ` · auth ${formatGatewayAuthUsed(probeAuth)}` : "";
     const gatewaySelfLine =
       gatewaySelf?.host || gatewaySelf?.ip || gatewaySelf?.version || gatewaySelf?.platform
         ? [

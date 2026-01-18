@@ -54,6 +54,10 @@ vi.mock("./client.js", () => ({
   }),
 }));
 
+vi.mock("./probe.js", () => ({
+  probeIMessage: vi.fn(async () => ({ ok: true })),
+}));
+
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 async function waitForSubscribe() {
@@ -117,8 +121,10 @@ describe("monitorIMessageProvider", () => {
 
     expect(updateLastRouteMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        channel: "imessage",
-        to: "+15550004444",
+        deliveryContext: expect.objectContaining({
+          channel: "imessage",
+          to: "+15550004444",
+        }),
       }),
     );
   });

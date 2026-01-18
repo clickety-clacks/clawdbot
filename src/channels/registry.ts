@@ -1,4 +1,6 @@
 import type { ChannelMeta } from "./plugins/types.js";
+import type { ChannelId } from "./plugins/types.js";
+import { getActivePluginRegistry } from "../plugins/runtime.js";
 
 // Channel docking: add new channels here (order + meta + aliases), then
 // register the plugin in src/channels/plugins/index.ts and keep protocol IDs in sync.
@@ -9,7 +11,6 @@ export const CHAT_CHANNEL_ORDER = [
   "slack",
   "signal",
   "imessage",
-  "msteams",
 ] as const;
 
 export type ChatChannelId = (typeof CHAT_CHANNEL_ORDER)[number];
@@ -74,19 +75,10 @@ const CHAT_CHANNEL_META: Record<ChatChannelId, ChannelMeta> = {
     docsLabel: "imessage",
     blurb: "this is still a work in progress.",
   },
-  msteams: {
-    id: "msteams",
-    label: "MS Teams",
-    selectionLabel: "Microsoft Teams (Bot Framework)",
-    docsPath: "/channels/msteams",
-    docsLabel: "msteams",
-    blurb: "supported (Bot Framework).",
-  },
 };
 
 export const CHAT_CHANNEL_ALIASES: Record<string, ChatChannelId> = {
   imsg: "imessage",
-  teams: "msteams",
 };
 
 const normalizeChannelKey = (raw?: string | null): string | undefined => {
@@ -119,6 +111,31 @@ export function normalizeChatChannelId(raw?: string | null): ChatChannelId | nul
 // `src/channels/plugins/*` can eagerly load channel implementations.
 export function normalizeChannelId(raw?: string | null): ChatChannelId | null {
   return normalizeChatChannelId(raw);
+}
+
+// Normalizes core chat channels plus any *already-loaded* plugin channels.
+//
+// Keep this light: we do not import core channel plugins here (those are "heavy" and can pull in
+// monitors, web login, etc). If plugins are not loaded (e.g. in many tests), only core channel IDs
+// resolve.
+export function normalizeAnyChannelId(raw?: string | null): ChannelId | null {
+  const core = normalizeChatChannelId(raw);
+  if (core) return core;
+
+  const key = normalizeChannelKey(raw);
+  if (!key) return null;
+
+  const registry = getActivePluginRegistry();
+  if (!registry) return null;
+
+  const hit = registry.channels.find((entry) => {
+    const id = String(entry.plugin.id ?? "")
+      .trim()
+      .toLowerCase();
+    if (id && id === key) return true;
+    return (entry.plugin.meta.aliases ?? []).some((alias) => alias.trim().toLowerCase() === key);
+  });
+  return (hit?.plugin.id as ChannelId | undefined) ?? null;
 }
 
 export function formatChannelPrimerLine(meta: ChatChannelMeta): string {

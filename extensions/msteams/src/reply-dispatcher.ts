@@ -1,0 +1,84 @@
+import { resolveEffectiveMessagesConfig, resolveHumanDelayConfig } from "../../../src/agents/identity.js";
+import { createReplyDispatcherWithTyping } from "../../../src/auto-reply/reply/reply-dispatcher.js";
+import type { ClawdbotConfig, MSTeamsReplyStyle } from "../../../src/config/types.js";
+import { danger } from "../../../src/globals.js";
+import type { RuntimeEnv } from "../../../src/runtime.js";
+import type { StoredConversationReference } from "./conversation-store.js";
+import {
+  classifyMSTeamsSendError,
+  formatMSTeamsSendErrorHint,
+  formatUnknownError,
+} from "./errors.js";
+import {
+  type MSTeamsAdapter,
+  renderReplyPayloadsToMessages,
+  sendMSTeamsMessages,
+} from "./messenger.js";
+import type { MSTeamsMonitorLogger } from "./monitor-types.js";
+import type { MSTeamsTurnContext } from "./sdk-types.js";
+
+export function createMSTeamsReplyDispatcher(params: {
+  cfg: ClawdbotConfig;
+  agentId: string;
+  runtime: RuntimeEnv;
+  log: MSTeamsMonitorLogger;
+  adapter: MSTeamsAdapter;
+  appId: string;
+  conversationRef: StoredConversationReference;
+  context: MSTeamsTurnContext;
+  replyStyle: MSTeamsReplyStyle;
+  textLimit: number;
+  onSentMessageIds?: (ids: string[]) => void;
+}) {
+  const sendTypingIndicator = async () => {
+    try {
+      await params.context.sendActivities([{ type: "typing" }]);
+    } catch {
+      // Typing indicator is best-effort.
+    }
+  };
+
+  return createReplyDispatcherWithTyping({
+    responsePrefix: resolveEffectiveMessagesConfig(params.cfg, params.agentId).responsePrefix,
+    humanDelay: resolveHumanDelayConfig(params.cfg, params.agentId),
+    deliver: async (payload) => {
+      const messages = renderReplyPayloadsToMessages([payload], {
+        textChunkLimit: params.textLimit,
+        chunkText: true,
+        mediaMode: "split",
+      });
+      const ids = await sendMSTeamsMessages({
+        replyStyle: params.replyStyle,
+        adapter: params.adapter,
+        appId: params.appId,
+        conversationRef: params.conversationRef,
+        context: params.context,
+        messages,
+        // Enable default retry/backoff for throttling/transient failures.
+        retry: {},
+        onRetry: (event) => {
+          params.log.debug("retrying send", {
+            replyStyle: params.replyStyle,
+            ...event,
+          });
+        },
+      });
+      if (ids.length > 0) params.onSentMessageIds?.(ids);
+    },
+    onError: (err, info) => {
+      const errMsg = formatUnknownError(err);
+      const classification = classifyMSTeamsSendError(err);
+      const hint = formatMSTeamsSendErrorHint(classification);
+      params.runtime.error?.(
+        danger(`msteams ${info.kind} reply failed: ${errMsg}${hint ? ` (${hint})` : ""}`),
+      );
+      params.log.error("reply failed", {
+        kind: info.kind,
+        error: errMsg,
+        classification,
+        hint,
+      });
+    },
+    onReplyStart: sendTypingIndicator,
+  });
+}

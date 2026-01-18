@@ -34,7 +34,11 @@ export type GatewaySessionList = {
   ts: number;
   path: string;
   count: number;
-  defaults?: { model?: string | null; contextTokens?: number | null };
+  defaults?: {
+    model?: string | null;
+    modelProvider?: string | null;
+    contextTokens?: number | null;
+  };
   sessions: Array<{
     key: string;
     sessionId?: string;
@@ -53,7 +57,7 @@ export type GatewaySessionList = {
     label?: string;
     displayName?: string;
     provider?: string;
-    room?: string;
+    groupChannel?: string;
     space?: string;
     subject?: string;
     chatType?: string;

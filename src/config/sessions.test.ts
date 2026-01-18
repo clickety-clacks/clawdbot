@@ -12,6 +12,7 @@ import {
   resolveSessionTranscriptPath,
   resolveSessionTranscriptsDir,
   updateLastRoute,
+  updateSessionStore,
   updateSessionStoreEntry,
 } from "./sessions.js";
 
@@ -29,7 +30,9 @@ describe("sessions", () => {
   });
 
   it("keeps group chats distinct", () => {
-    expect(deriveSessionKey("per-sender", { From: "12345-678@g.us" })).toBe("group:12345-678@g.us");
+    expect(deriveSessionKey("per-sender", { From: "12345-678@g.us" })).toBe(
+      "whatsapp:group:12345-678@g.us",
+    );
   });
 
   it("prefixes group keys with provider when available", () => {
@@ -44,7 +47,7 @@ describe("sessions", () => {
 
   it("keeps explicit provider when provided in group key", () => {
     expect(
-      resolveSessionKey("per-sender", { From: "group:discord:12345", ChatType: "group" }, "main"),
+      resolveSessionKey("per-sender", { From: "discord:group:12345", ChatType: "group" }, "main"),
     ).toBe("agent:main:discord:group:12345");
   });
 
@@ -52,7 +55,7 @@ describe("sessions", () => {
     expect(
       buildGroupDisplayName({
         provider: "discord",
-        room: "#general",
+        groupChannel: "#general",
         space: "friends-of-clawd",
         id: "123",
         key: "discord:group:123",
@@ -86,7 +89,7 @@ describe("sessions", () => {
 
   it("leaves groups untouched even with main key", () => {
     expect(resolveSessionKey("per-sender", { From: "12345-678@g.us" }, "main")).toBe(
-      "agent:main:group:12345-678@g.us",
+      "agent:main:whatsapp:group:12345-678@g.us",
     );
   });
 
@@ -120,8 +123,10 @@ describe("sessions", () => {
     await updateLastRoute({
       storePath,
       sessionKey: mainSessionKey,
-      channel: "telegram",
-      to: "  12345  ",
+      deliveryContext: {
+        channel: "telegram",
+        to: "  12345  ",
+      },
     });
 
     const store = loadSessionStore(storePath);
@@ -129,12 +134,122 @@ describe("sessions", () => {
     expect(store[mainSessionKey]?.updatedAt).toBeGreaterThanOrEqual(123);
     expect(store[mainSessionKey]?.lastChannel).toBe("telegram");
     expect(store[mainSessionKey]?.lastTo).toBe("12345");
+    expect(store[mainSessionKey]?.deliveryContext).toEqual({
+      channel: "telegram",
+      to: "12345",
+    });
     expect(store[mainSessionKey]?.responseUsage).toBe("on");
     expect(store[mainSessionKey]?.queueDebounceMs).toBe(1234);
     expect(store[mainSessionKey]?.reasoningLevel).toBe("on");
     expect(store[mainSessionKey]?.elevatedLevel).toBe("on");
     expect(store[mainSessionKey]?.authProfileOverride).toBe("auth-1");
     expect(store[mainSessionKey]?.compactionCount).toBe(2);
+  });
+
+  it("updateLastRoute prefers explicit deliveryContext", async () => {
+    const mainSessionKey = "agent:main:main";
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-sessions-"));
+    const storePath = path.join(dir, "sessions.json");
+    await fs.writeFile(storePath, "{}", "utf-8");
+
+    await updateLastRoute({
+      storePath,
+      sessionKey: mainSessionKey,
+      channel: "whatsapp",
+      to: "111",
+      accountId: "legacy",
+      deliveryContext: {
+        channel: "telegram",
+        to: "222",
+        accountId: "primary",
+      },
+    });
+
+    const store = loadSessionStore(storePath);
+    expect(store[mainSessionKey]?.lastChannel).toBe("telegram");
+    expect(store[mainSessionKey]?.lastTo).toBe("222");
+    expect(store[mainSessionKey]?.lastAccountId).toBe("primary");
+    expect(store[mainSessionKey]?.deliveryContext).toEqual({
+      channel: "telegram",
+      to: "222",
+      accountId: "primary",
+    });
+  });
+
+  it("updateSessionStore preserves concurrent additions", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-sessions-"));
+    const storePath = path.join(dir, "sessions.json");
+    await fs.writeFile(storePath, "{}", "utf-8");
+
+    await Promise.all([
+      updateSessionStore(storePath, (store) => {
+        store["agent:main:one"] = { sessionId: "sess-1", updatedAt: 1 };
+      }),
+      updateSessionStore(storePath, (store) => {
+        store["agent:main:two"] = { sessionId: "sess-2", updatedAt: 2 };
+      }),
+    ]);
+
+    const store = loadSessionStore(storePath);
+    expect(store["agent:main:one"]?.sessionId).toBe("sess-1");
+    expect(store["agent:main:two"]?.sessionId).toBe("sess-2");
+  });
+
+  it("normalizes last route fields on write", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-sessions-"));
+    const storePath = path.join(dir, "sessions.json");
+    await fs.writeFile(storePath, "{}", "utf-8");
+
+    await updateSessionStore(storePath, (store) => {
+      store["agent:main:main"] = {
+        sessionId: "sess-normalized",
+        updatedAt: 1,
+        lastChannel: " WhatsApp ",
+        lastTo: " +1555 ",
+        lastAccountId: " acct-1 ",
+      };
+    });
+
+    const store = loadSessionStore(storePath);
+    expect(store["agent:main:main"]?.lastChannel).toBe("whatsapp");
+    expect(store["agent:main:main"]?.lastTo).toBe("+1555");
+    expect(store["agent:main:main"]?.lastAccountId).toBe("acct-1");
+    expect(store["agent:main:main"]?.deliveryContext).toEqual({
+      channel: "whatsapp",
+      to: "+1555",
+      accountId: "acct-1",
+    });
+  });
+
+  it("updateSessionStore keeps deletions when concurrent writes happen", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-sessions-"));
+    const storePath = path.join(dir, "sessions.json");
+    await fs.writeFile(
+      storePath,
+      JSON.stringify(
+        {
+          "agent:main:old": { sessionId: "sess-old", updatedAt: 1 },
+          "agent:main:keep": { sessionId: "sess-keep", updatedAt: 2 },
+        },
+        null,
+        2,
+      ),
+      "utf-8",
+    );
+
+    await Promise.all([
+      updateSessionStore(storePath, (store) => {
+        delete store["agent:main:old"];
+      }),
+      updateSessionStore(storePath, (store) => {
+        store["agent:main:new"] = { sessionId: "sess-new", updatedAt: 3 };
+      }),
+    ]);
+
+    const store = loadSessionStore(storePath);
+    expect(store["agent:main:old"]).toBeUndefined();
+    expect(store["agent:main:keep"]?.sessionId).toBe("sess-keep");
+    expect(store["agent:main:new"]?.sessionId).toBe("sess-new");
   });
 
   it("loadSessionStore auto-migrates legacy provider keys to channel keys", async () => {

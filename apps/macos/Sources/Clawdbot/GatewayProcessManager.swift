@@ -87,6 +87,14 @@ final class GatewayProcessManager {
             self.status = .stopped
             return
         }
+        // Many surfaces can call `setActive(true)` in quick succession (startup, Canvas, health checks).
+        // Avoid spawning multiple concurrent "start" tasks that can thrash launchd and flap the port.
+        switch self.status {
+        case .starting, .running, .attachedExisting:
+            return
+        case .stopped, .failed:
+            break
+        }
         self.status = .starting
         self.logger.debug("gateway start requested")
 
@@ -140,7 +148,7 @@ final class GatewayProcessManager {
 
     func refreshLog() {
         guard self.logRefreshTask == nil else { return }
-        let path = LogLocator.launchdGatewayLogPath
+        let path = GatewayLaunchAgentManager.launchdGatewayLogPath()
         let limit = self.logLimit
         self.logRefreshTask = Task { [weak self] in
             let log = await Task.detached(priority: .utility) {
@@ -354,7 +362,7 @@ final class GatewayProcessManager {
 
     func clearLog() {
         self.log = ""
-        try? FileManager.default.removeItem(atPath: LogLocator.launchdGatewayLogPath)
+        try? FileManager.default.removeItem(atPath: GatewayLaunchAgentManager.launchdGatewayLogPath())
         self.logger.debug("gateway log cleared")
     }
 

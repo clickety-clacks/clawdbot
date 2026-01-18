@@ -82,15 +82,13 @@ When the wizard asks for your personal WhatsApp number, enter the phone you will
     "selfChatMode": true,
     "dmPolicy": "allowlist",
     "allowFrom": ["+15551234567"]
-  },
-  "messages": {
-    "responsePrefix": "[clawdbot]"
   }
 }
 ```
 
-Tip: set `messages.responsePrefix` explicitly if you want a consistent bot prefix
-on outbound replies.
+Self-chat replies default to `[{identity.name}]` when set (otherwise `[clawdbot]`)
+if `messages.responsePrefix` is unset. Set it explicitly to customize or disable
+the prefix (use `""` to remove it).
 
 ### Number sourcing tips
 - **Local eSIM** from your country's mobile carrier (most reliable)
@@ -204,9 +202,9 @@ The wizard uses it to set your **allowlist/owner** so your own DMs are permitted
   - `always`: always triggers.
 - `/activation mention|always` is owner-only and must be sent as a standalone message.
 - Owner = `channels.whatsapp.allowFrom` (or self E.164 if unset).
-- **History injection**:
-  - Recent messages (default 50) inserted under:
-    `[Chat messages since your last reply - for context]`
+- **History injection** (pending-only):
+  - Recent *unprocessed* messages (default 50) inserted under:
+    `[Chat messages since your last reply - for context]` (messages already in the session are not re-injected)
   - Current message under:
     `[Current message - respond to this]`
   - Sender suffix appended: `[from: Name (+E164)]`
@@ -296,8 +294,9 @@ WhatsApp can automatically send emoji reactions to incoming messages immediately
 
 ## Heartbeats
 - **Gateway heartbeat** logs connection health (`web.heartbeatSeconds`, default 60s).
-- **Agent heartbeat** is global (`agents.defaults.heartbeat.*`) and runs in the main session.
-  - Uses the configured heartbeat prompt (default: `Read HEARTBEAT.md if exists. Consider outstanding tasks. Checkup sometimes on your human during (user local) day time.`) + `HEARTBEAT_OK` skip behavior.
+- **Agent heartbeat** can be configured per agent (`agents.list[].heartbeat`) or globally
+  via `agents.defaults.heartbeat` (fallback when no per-agent entries are set).
+  - Uses the configured heartbeat prompt (default: `Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.`) + `HEARTBEAT_OK` skip behavior.
   - Delivery defaults to the last used channel (or configured target).
 
 ## Reconnect behavior
@@ -330,6 +329,7 @@ WhatsApp can automatically send emoji reactions to incoming messages immediately
 - `agents.defaults.heartbeat.model` (optional override)
 - `agents.defaults.heartbeat.target`
 - `agents.defaults.heartbeat.to`
+- `agents.list[].heartbeat.*` (per-agent overrides)
 - `session.*` (scope, idle, store, mainKey)
 - `web.enabled` (disable channel startup when false)
 - `web.heartbeatSeconds`

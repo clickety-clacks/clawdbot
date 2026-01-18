@@ -141,11 +141,24 @@ Full setup walkthrough (28m) by VelvetShark.
 
   <img src="/assets/showcase/oura-health.png" alt="Oura ring health assistant" />
 </Card>
-<Card title="Multi-Agent Swarm (14+ Agents)" icon="robot" href="https://github.com/adam91holt/clawdspace">
-  **@adam91holt** • `multi-agent` `slack` `orchestration` `swarm`
+<Card title="Kev's Dream Team (14+ Agents)" icon="robot" href="https://github.com/adam91holt/orchestrated-ai-articles">
+  **@adam91holt** • `multi-agent` `orchestration` `architecture` `manifesto`
 
-  14+ Clawdbot agents under one gateway. Opus 4.5 orchestrator delegates to Codex workers. Self-maintaining agents that continuously improve. Open-sourced clawdspace for agent sandboxing.
+  14+ agents under one gateway with Opus 4.5 orchestrator delegating to Codex workers. Comprehensive [technical write-up](https://github.com/adam91holt/orchestrated-ai-articles) covering the Dream Team roster, model selection, sandboxing, webhooks, heartbeats, and delegation flows. [Clawdspace](https://github.com/adam91holt/clawdspace) for agent sandboxing. [Blog post](https://adams-ai-journey.ghost.io/2026-the-year-of-the-orchestrator/).
 </Card>
+
+<Card title="Linear CLI" icon="terminal" href="https://github.com/Finesssee/linear-cli">
+  **@NessZerra** • `devtools` `linear` `cli` `issues`
+
+  CLI for Linear that integrates with agentic workflows (Claude Code, Clawdbot). Manage issues, projects, and workflows from the terminal. First external PR merged!
+</Card>
+
+<Card title="Beeper CLI" icon="message" href="https://github.com/blqke/beepcli">
+  **@jules** • `messaging` `beeper` `cli` `automation`
+
+  Read, send, and archive messages via Beeper Desktop. Uses Beeper local MCP API so agents can manage all your chats (iMessage, WhatsApp, etc.) in one place.
+</Card>
+
 </CardGroup>
 
 ## 🤖 Automation & Workflows

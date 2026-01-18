@@ -32,7 +32,11 @@ export function createEmbeddedPiSessionEventHandler(ctx: EmbeddedPiSubscribeCont
         handleMessageEnd(ctx, evt as never);
         return;
       case "tool_execution_start":
-        handleToolExecutionStart(ctx, evt as never);
+        // Async handler - best-effort typing indicator, avoids blocking tool summaries.
+        // Catch rejections to avoid unhandled promise rejection crashes.
+        handleToolExecutionStart(ctx, evt as never).catch((err) => {
+          ctx.log.debug(`tool_execution_start handler failed: ${String(err)}`);
+        });
         return;
       case "tool_execution_update":
         handleToolExecutionUpdate(ctx, evt as never);

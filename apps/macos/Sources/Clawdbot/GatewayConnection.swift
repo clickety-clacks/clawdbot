@@ -56,6 +56,7 @@ actor GatewayConnection {
         case configGet = "config.get"
         case configSet = "config.set"
         case configPatch = "config.patch"
+        case configSchema = "config.schema"
         case wizardStart = "wizard.start"
         case wizardNext = "wizard.next"
         case wizardCancel = "wizard.cancel"
@@ -433,14 +434,14 @@ extension GatewayConnection {
         idempotencyKey: String = UUID().uuidString) async -> (ok: Bool, error: String?)
     {
         await self.sendAgent(GatewayAgentInvocation(
-                                message: message,
-                                sessionKey: sessionKey,
-                                thinking: thinking,
-                                deliver: deliver,
-                                to: to,
-                                channel: channel,
-                                timeoutSeconds: timeoutSeconds,
-                                idempotencyKey: idempotencyKey))
+            message: message,
+            sessionKey: sessionKey,
+            thinking: thinking,
+            deliver: deliver,
+            to: to,
+            channel: channel,
+            timeoutSeconds: timeoutSeconds,
+            idempotencyKey: idempotencyKey))
     }
 
     func sendSystemEvent(_ params: [String: AnyCodable]) async {

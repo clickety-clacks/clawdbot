@@ -1,15 +1,22 @@
 import { describe, expect, it, vi } from "vitest";
 
 const loadSessionStoreMock = vi.fn();
-const saveSessionStoreMock = vi.fn();
+const updateSessionStoreMock = vi.fn();
 
 vi.mock("../config/sessions.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../config/sessions.js")>();
   return {
     ...actual,
     loadSessionStore: (storePath: string) => loadSessionStoreMock(storePath),
-    saveSessionStore: (storePath: string, store: Record<string, unknown>) =>
-      saveSessionStoreMock(storePath, store),
+    updateSessionStore: async (
+      storePath: string,
+      mutator: (store: Record<string, unknown>) => Promise<void> | void,
+    ) => {
+      const store = loadSessionStoreMock(storePath) as Record<string, unknown>;
+      await mutator(store);
+      updateSessionStoreMock(storePath, store);
+      return store;
+    },
     resolveStorePath: () => "/tmp/sessions.json",
   };
 });
@@ -73,7 +80,7 @@ import { createClawdbotTools } from "./clawdbot-tools.js";
 describe("session_status tool", () => {
   it("returns a status card for the current session", async () => {
     loadSessionStoreMock.mockReset();
-    saveSessionStoreMock.mockReset();
+    updateSessionStoreMock.mockReset();
     loadSessionStoreMock.mockReturnValue({
       main: {
         sessionId: "s1",
@@ -92,11 +99,12 @@ describe("session_status tool", () => {
     expect(details.ok).toBe(true);
     expect(details.statusText).toContain("Clawdbot");
     expect(details.statusText).toContain("🧠 Model:");
+    expect(details.statusText).not.toContain("OAuth/token status");
   });
 
   it("errors for unknown session keys", async () => {
     loadSessionStoreMock.mockReset();
-    saveSessionStoreMock.mockReset();
+    updateSessionStoreMock.mockReset();
     loadSessionStoreMock.mockReturnValue({
       main: { sessionId: "s1", updatedAt: 10 },
     });
@@ -110,12 +118,12 @@ describe("session_status tool", () => {
     await expect(tool.execute("call2", { sessionKey: "nope" })).rejects.toThrow(
       "Unknown sessionKey",
     );
-    expect(saveSessionStoreMock).not.toHaveBeenCalled();
+    expect(updateSessionStoreMock).not.toHaveBeenCalled();
   });
 
   it("resets per-session model override via model=default", async () => {
     loadSessionStoreMock.mockReset();
-    saveSessionStoreMock.mockReset();
+    updateSessionStoreMock.mockReset();
     loadSessionStoreMock.mockReturnValue({
       main: {
         sessionId: "s1",
@@ -133,8 +141,8 @@ describe("session_status tool", () => {
     if (!tool) throw new Error("missing session_status tool");
 
     await tool.execute("call3", { model: "default" });
-    expect(saveSessionStoreMock).toHaveBeenCalled();
-    const [, savedStore] = saveSessionStoreMock.mock.calls.at(-1) as [
+    expect(updateSessionStoreMock).toHaveBeenCalled();
+    const [, savedStore] = updateSessionStoreMock.mock.calls.at(-1) as [
       string,
       Record<string, unknown>,
     ];

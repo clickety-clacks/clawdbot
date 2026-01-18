@@ -21,13 +21,35 @@ clawdbot plugins info <id>
 clawdbot plugins enable <id>
 clawdbot plugins disable <id>
 clawdbot plugins doctor
+clawdbot plugins update <id>
+clawdbot plugins update --all
 ```
+
+Bundled plugins ship with Clawdbot but start disabled. Use `plugins enable` to
+activate them.
 
 ### Install
 
 ```bash
-clawdbot plugins install <npm-spec>
+clawdbot plugins install <path-or-spec>
 ```
 
 Security note: treat plugin installs like running code. Prefer pinned versions.
 
+Supported archives: `.zip`, `.tgz`, `.tar.gz`, `.tar`.
+
+Use `--link` to avoid copying a local directory (adds to `plugins.load.paths`):
+
+```bash
+clawdbot plugins install -l ./my-plugin
+```
+
+### Update
+
+```bash
+clawdbot plugins update <id>
+clawdbot plugins update --all
+clawdbot plugins update <id> --dry-run
+```
+
+Updates only apply to plugins installed from npm (tracked in `plugins.installs`).

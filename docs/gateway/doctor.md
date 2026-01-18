@@ -111,7 +111,8 @@ Current migrations:
 - `routing.bindings` → top-level `bindings`
 - `routing.agents`/`routing.defaultAgentId` → `agents.list` + `agents.list[].default`
 - `routing.agentToAgent` → `tools.agentToAgent`
-- `routing.transcribeAudio` → `tools.audio.transcription`
+- `routing.transcribeAudio` → `tools.media.audio.models`
+- `bindings[].match.accountID` → `bindings[].match.accountId`
 - `identity` → `agents.list[].identity`
 - `agent.*` → `agents.defaults` + `tools.*` (tools/elevated/exec/sandbox/subagents)
 - `agent.model`/`allowedModels`/`modelAliases`/`modelFallbacks`/`imageModelFallbacks`
@@ -165,7 +166,7 @@ Doctor checks:
 ### 5) Model auth health (OAuth expiry)
 Doctor inspects OAuth profiles in the auth store, warns when tokens are
 expiring/expired, and can refresh them when safe. If the Anthropic Claude Code
-profile is stale, it suggests `claude setup-token` on the gateway host.
+profile is stale, it suggests running `claude setup-token` (or pasting a setup-token).
 Refresh prompts only appear when running interactively (TTY); `--non-interactive`
 skips refresh attempts.
 

@@ -65,7 +65,7 @@ describe("directive behavior", () => {
       vi.mocked(runEmbeddedPiAgent).mockReset();
 
       const res = await getReplyFromConfig(
-        { Body: "/verbose", From: "+1222", To: "+1222" },
+        { Body: "/verbose", From: "+1222", To: "+1222", CommandAuthorized: true },
         {},
         {
           agents: {
@@ -81,7 +81,7 @@ describe("directive behavior", () => {
 
       const text = Array.isArray(res) ? res[0]?.text : res?.text;
       expect(text).toContain("Current verbose level: on");
-      expect(text).toContain("Options: on, off.");
+      expect(text).toContain("Options: on, full, off.");
       expect(runEmbeddedPiAgent).not.toHaveBeenCalled();
     });
   });
@@ -90,7 +90,7 @@ describe("directive behavior", () => {
       vi.mocked(runEmbeddedPiAgent).mockReset();
 
       const res = await getReplyFromConfig(
-        { Body: "/reasoning", From: "+1222", To: "+1222" },
+        { Body: "/reasoning", From: "+1222", To: "+1222", CommandAuthorized: true },
         {},
         {
           agents: {
@@ -120,6 +120,7 @@ describe("directive behavior", () => {
           To: "+1222",
           Provider: "whatsapp",
           SenderE164: "+1222",
+          CommandAuthorized: true,
         },
         {},
         {
@@ -158,6 +159,7 @@ describe("directive behavior", () => {
           To: "+1222",
           Provider: "whatsapp",
           SenderE164: "+1222",
+          CommandAuthorized: true,
         },
         {},
         {

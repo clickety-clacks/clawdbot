@@ -9,6 +9,7 @@ import {
   normalizeDiscordSlug,
   registerDiscordListener,
   resolveDiscordChannelConfig,
+  resolveDiscordChannelConfigWithFallback,
   resolveDiscordGuildEntry,
   resolveDiscordReplyTarget,
   resolveDiscordShouldRequireMention,
@@ -160,6 +161,46 @@ describe("discord guild/channel resolution", () => {
     });
     expect(channel?.allowed).toBe(false);
   });
+
+  it("inherits parent config for thread channels", () => {
+    const guildInfo: DiscordGuildEntryResolved = {
+      channels: {
+        general: { allow: true },
+        random: { allow: false },
+      },
+    };
+    const thread = resolveDiscordChannelConfigWithFallback({
+      guildInfo,
+      channelId: "thread-123",
+      channelName: "topic",
+      channelSlug: "topic",
+      parentId: "999",
+      parentName: "random",
+      parentSlug: "random",
+      scope: "thread",
+    });
+    expect(thread?.allowed).toBe(false);
+  });
+
+  it("does not match thread name/slug when resolving allowlists", () => {
+    const guildInfo: DiscordGuildEntryResolved = {
+      channels: {
+        general: { allow: true },
+        random: { allow: false },
+      },
+    };
+    const thread = resolveDiscordChannelConfigWithFallback({
+      guildInfo,
+      channelId: "thread-999",
+      channelName: "general",
+      channelSlug: "general",
+      parentId: "999",
+      parentName: "random",
+      parentSlug: "random",
+      scope: "thread",
+    });
+    expect(thread?.allowed).toBe(false);
+  });
 });
 
 describe("discord mention gating", () => {
@@ -208,6 +249,35 @@ describe("discord mention gating", () => {
       }),
     ).toBe(false);
   });
+
+  it("inherits parent channel mention rules for threads", () => {
+    const guildInfo: DiscordGuildEntryResolved = {
+      requireMention: true,
+      channels: {
+        "parent-1": { allow: true, requireMention: false },
+      },
+    };
+    const channelConfig = resolveDiscordChannelConfigWithFallback({
+      guildInfo,
+      channelId: "thread-1",
+      channelName: "topic",
+      channelSlug: "topic",
+      parentId: "parent-1",
+      parentName: "Parent",
+      parentSlug: "parent",
+      scope: "thread",
+    });
+    expect(channelConfig?.matchSource).toBe("parent");
+    expect(channelConfig?.matchKey).toBe("parent-1");
+    expect(
+      resolveDiscordShouldRequireMention({
+        isGuildMessage: true,
+        isThread: true,
+        channelConfig,
+        guildInfo,
+      }),
+    ).toBe(false);
+  });
 });
 
 describe("discord groupPolicy gating", () => {
@@ -215,6 +285,7 @@ describe("discord groupPolicy gating", () => {
     expect(
       isDiscordGroupAllowedByPolicy({
         groupPolicy: "open",
+        guildAllowlisted: false,
         channelAllowlistConfigured: false,
         channelAllowed: false,
       }),
@@ -225,26 +296,40 @@ describe("discord groupPolicy gating", () => {
     expect(
       isDiscordGroupAllowedByPolicy({
         groupPolicy: "disabled",
+        guildAllowlisted: true,
         channelAllowlistConfigured: true,
         channelAllowed: true,
       }),
     ).toBe(false);
   });
 
-  it("blocks allowlist when no channel allowlist configured", () => {
+  it("blocks allowlist when guild is not allowlisted", () => {
     expect(
       isDiscordGroupAllowedByPolicy({
         groupPolicy: "allowlist",
+        guildAllowlisted: false,
         channelAllowlistConfigured: false,
         channelAllowed: true,
       }),
     ).toBe(false);
   });
 
+  it("allows allowlist when guild allowlisted but no channel allowlist", () => {
+    expect(
+      isDiscordGroupAllowedByPolicy({
+        groupPolicy: "allowlist",
+        guildAllowlisted: true,
+        channelAllowlistConfigured: false,
+        channelAllowed: true,
+      }),
+    ).toBe(true);
+  });
+
   it("allows allowlist when channel is allowed", () => {
     expect(
       isDiscordGroupAllowedByPolicy({
         groupPolicy: "allowlist",
+        guildAllowlisted: true,
         channelAllowlistConfigured: true,
         channelAllowed: true,
       }),
@@ -255,6 +340,7 @@ describe("discord groupPolicy gating", () => {
     expect(
       isDiscordGroupAllowedByPolicy({
         groupPolicy: "allowlist",
+        guildAllowlisted: true,
         channelAllowlistConfigured: true,
         channelAllowed: false,
       }),

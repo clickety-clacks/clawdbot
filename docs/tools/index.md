@@ -169,7 +169,7 @@ Core parameters:
 - `background` (immediate background)
 - `timeout` (seconds; kills the process if exceeded, default 1800)
 - `elevated` (bool; run on host if elevated mode is enabled/allowed; only changes behavior when the agent is sandboxed)
-- Need a real TTY? Use the tmux skill.
+- Need a real TTY? Set `pty: true`.
 
 Notes:
 - Returns `status: "running"` with a `sessionId` when backgrounded.
@@ -177,6 +177,7 @@ Notes:
 - If `process` is disallowed, `exec` runs synchronously and ignores `yieldMs`/`background`.
 - `elevated` is gated by `tools.elevated` plus any `agents.list[].tools.elevated` override (both must allow) and runs on the host.
 - `elevated` only changes behavior when the agent is sandboxed (otherwise it’s a no-op).
+- macOS app approvals/allowlists: [Exec approvals](/tools/exec-approvals).
 
 ### `process`
 Manage background exec sessions.
@@ -215,6 +216,7 @@ Notes:
 - Responses are cached (default 15 min).
 - For JS-heavy sites, prefer the browser tool.
 - See [Web tools](/tools/web) for setup.
+- See [Firecrawl](/tools/firecrawl) for the optional anti-bot fallback.
 
 ### `browser`
 Control the dedicated clawd browser.

@@ -5,6 +5,7 @@ import JSON5 from "json5";
 
 import type { ClawdbotConfig, ConfigFileSnapshot } from "../config/config.js";
 import { createConfigIO } from "../config/config.js";
+import { resolveNativeSkillsEnabled } from "../config/commands.js";
 import { resolveOAuthDir } from "../config/paths.js";
 import { resolveDefaultAgentId } from "../agents/agent-scope.js";
 import { INCLUDE_KEY, MAX_INCLUDE_DEPTH } from "../config/includes.js";
@@ -260,10 +261,56 @@ const LEGACY_MODEL_PATTERNS: Array<{ id: string; re: RegExp; label: string }> = 
   { id: "openai.gpt4_legacy", re: /\bgpt-4-(0314|0613)\b/i, label: "Legacy GPT-4 snapshots" },
 ];
 
+const WEAK_TIER_MODEL_PATTERNS: Array<{ id: string; re: RegExp; label: string }> = [
+  { id: "anthropic.haiku", re: /\bhaiku\b/i, label: "Haiku tier (smaller model)" },
+];
+
+function isGptModel(id: string): boolean {
+  return /\bgpt-/i.test(id);
+}
+
+function isGpt5OrHigher(id: string): boolean {
+  return /\bgpt-5(?:\b|[.-])/i.test(id);
+}
+
+function isClaudeModel(id: string): boolean {
+  return /\bclaude-/i.test(id);
+}
+
+function isClaude45OrHigher(id: string): boolean {
+  return /\bclaude-[^\s/]*?(?:-4-5\b|4\.5\b)/i.test(id);
+}
+
 export function collectModelHygieneFindings(cfg: ClawdbotConfig): SecurityAuditFinding[] {
   const findings: SecurityAuditFinding[] = [];
   const models = collectModels(cfg);
   if (models.length === 0) return findings;
+
+  const weakMatches = new Map<string, { model: string; source: string; reasons: string[] }>();
+  const addWeakMatch = (model: string, source: string, reason: string) => {
+    const key = `${model}@@${source}`;
+    const existing = weakMatches.get(key);
+    if (!existing) {
+      weakMatches.set(key, { model, source, reasons: [reason] });
+      return;
+    }
+    if (!existing.reasons.includes(reason)) existing.reasons.push(reason);
+  };
+
+  for (const entry of models) {
+    for (const pat of WEAK_TIER_MODEL_PATTERNS) {
+      if (pat.re.test(entry.id)) {
+        addWeakMatch(entry.id, entry.source, pat.label);
+        break;
+      }
+    }
+    if (isGptModel(entry.id) && !isGpt5OrHigher(entry.id)) {
+      addWeakMatch(entry.id, entry.source, "Below GPT-5 family");
+    }
+    if (isClaudeModel(entry.id) && !isClaude45OrHigher(entry.id)) {
+      addWeakMatch(entry.id, entry.source, "Below Claude 4.5");
+    }
+  }
 
   const matches: Array<{ model: string; source: string; reason: string }> = [];
   for (const entry of models) {
@@ -293,6 +340,25 @@ export function collectModelHygieneFindings(cfg: ClawdbotConfig): SecurityAuditF
     });
   }
 
+  if (weakMatches.size > 0) {
+    const lines = Array.from(weakMatches.values())
+      .slice(0, 12)
+      .map((m) => `- ${m.model} (${m.reasons.join("; ")}) @ ${m.source}`)
+      .join("\n");
+    const more = weakMatches.size > 12 ? `\n…${weakMatches.size - 12} more` : "";
+    findings.push({
+      checkId: "models.weak_tier",
+      severity: "warn",
+      title: "Some configured models are below recommended tiers",
+      detail:
+        "Smaller/older models are generally more susceptible to prompt injection and tool misuse.\n" +
+        lines +
+        more,
+      remediation:
+        "Use the latest, top-tier model for any bot with tools or untrusted inboxes. Avoid Haiku tiers; prefer GPT-5+ and Claude 4.5+.",
+    });
+  }
+
   return findings;
 }
 
@@ -315,11 +381,76 @@ export async function collectPluginsTrustFindings(params: {
   const allow = params.cfg.plugins?.allow;
   const allowConfigured = Array.isArray(allow) && allow.length > 0;
   if (!allowConfigured) {
+    const hasString = (value: unknown) => typeof value === "string" && value.trim().length > 0;
+    const hasAccountStringKey = (account: unknown, key: string) =>
+      Boolean(
+        account &&
+        typeof account === "object" &&
+        hasString((account as Record<string, unknown>)[key]),
+      );
+
+    const discordConfigured =
+      hasString(params.cfg.channels?.discord?.token) ||
+      Boolean(
+        params.cfg.channels?.discord?.accounts &&
+        Object.values(params.cfg.channels.discord.accounts).some((a) =>
+          hasAccountStringKey(a, "token"),
+        ),
+      ) ||
+      hasString(process.env.DISCORD_BOT_TOKEN);
+
+    const telegramConfigured =
+      hasString(params.cfg.channels?.telegram?.botToken) ||
+      hasString(params.cfg.channels?.telegram?.tokenFile) ||
+      Boolean(
+        params.cfg.channels?.telegram?.accounts &&
+        Object.values(params.cfg.channels.telegram.accounts).some(
+          (a) => hasAccountStringKey(a, "botToken") || hasAccountStringKey(a, "tokenFile"),
+        ),
+      ) ||
+      hasString(process.env.TELEGRAM_BOT_TOKEN);
+
+    const slackConfigured =
+      hasString(params.cfg.channels?.slack?.botToken) ||
+      hasString(params.cfg.channels?.slack?.appToken) ||
+      Boolean(
+        params.cfg.channels?.slack?.accounts &&
+        Object.values(params.cfg.channels.slack.accounts).some(
+          (a) => hasAccountStringKey(a, "botToken") || hasAccountStringKey(a, "appToken"),
+        ),
+      ) ||
+      hasString(process.env.SLACK_BOT_TOKEN) ||
+      hasString(process.env.SLACK_APP_TOKEN);
+
+    const skillCommandsLikelyExposed =
+      (discordConfigured &&
+        resolveNativeSkillsEnabled({
+          providerId: "discord",
+          providerSetting: params.cfg.channels?.discord?.commands?.nativeSkills,
+          globalSetting: params.cfg.commands?.nativeSkills,
+        })) ||
+      (telegramConfigured &&
+        resolveNativeSkillsEnabled({
+          providerId: "telegram",
+          providerSetting: params.cfg.channels?.telegram?.commands?.nativeSkills,
+          globalSetting: params.cfg.commands?.nativeSkills,
+        })) ||
+      (slackConfigured &&
+        resolveNativeSkillsEnabled({
+          providerId: "slack",
+          providerSetting: params.cfg.channels?.slack?.commands?.nativeSkills,
+          globalSetting: params.cfg.commands?.nativeSkills,
+        }));
+
     findings.push({
       checkId: "plugins.extensions_no_allowlist",
-      severity: "warn",
+      severity: skillCommandsLikelyExposed ? "critical" : "warn",
       title: "Extensions exist but plugins.allow is not set",
-      detail: `Found ${pluginDirs.length} extension(s) under ${extensionsDir}. Without plugins.allow, any discovered plugin id may load (depending on config and plugin behavior).`,
+      detail:
+        `Found ${pluginDirs.length} extension(s) under ${extensionsDir}. Without plugins.allow, any discovered plugin id may load (depending on config and plugin behavior).` +
+        (skillCommandsLikelyExposed
+          ? "\nNative skill commands are enabled on at least one configured chat surface; treat unpinned/unallowlisted extensions as high risk."
+          : ""),
       remediation: "Set plugins.allow to an explicit list of plugin ids you trust.",
     });
   }

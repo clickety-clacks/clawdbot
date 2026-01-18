@@ -80,6 +80,8 @@ Notes:
 - Use `{baseDir}` in instructions to reference the skill folder path.
 - Optional frontmatter keys:
   - `homepage` — URL surfaced as “Website” in the macOS Skills UI (also supported via `metadata.clawdbot.homepage`).
+  - `user-invocable` — `true|false` (default: `true`). When `true`, the skill is exposed as a user slash command.
+  - `disable-model-invocation` — `true|false` (default: `false`). When `true`, the skill is excluded from the model prompt (still available via user invocation).
 
 ## Gating (load-time filters)
 
@@ -180,6 +182,29 @@ This is **scoped to the agent run**, not a global shell environment.
 ## Session snapshot (performance)
 
 Clawdbot snapshots the eligible skills **when a session starts** and reuses that list for subsequent turns in the same session. Changes to skills or config take effect on the next new session.
+
+Skills can also refresh mid-session when the skills watcher is enabled or when a new eligible remote node appears (see below). Think of this as a **hot reload**: the refreshed list is picked up on the next agent turn.
+
+## Remote macOS nodes (Linux gateway)
+
+If the Gateway is running on Linux but a **macOS node** is connected **with `system.run` allowed** (Node Run Commands policy not set to "Never"), Clawdbot can treat macOS-only skills as eligible when the required binaries are present on that node. The agent should execute those skills via the `nodes` tool (typically `nodes.run`).
+
+This relies on the node reporting its command support and on a bin probe via `system.run`. If the macOS node goes offline later, the skills remain visible; invocations may fail until the node reconnects.
+
+## Skills watcher (auto-refresh)
+
+By default, Clawdbot watches skill folders and bumps the skills snapshot when `SKILL.md` files change. Configure this under `skills.load`:
+
+```json5
+{
+  skills: {
+    load: {
+      watch: true,
+      watchDebounceMs: 250
+    }
+  }
+}
+```
 
 ## Token impact (skills list)
 

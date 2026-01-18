@@ -17,9 +17,19 @@ Background sessions are scoped per agent; `process` only sees sessions from the 
 - `yieldMs` (default 10000): auto-background after delay
 - `background` (bool): background immediately
 - `timeout` (seconds, default 1800): kill on expiry
+- `pty` (bool): run in a pseudo-terminal when available (TTY-only CLIs, coding agents, terminal UIs)
 - `elevated` (bool): run on host if elevated mode is enabled/allowed (only changes behavior when the agent is sandboxed)
-- Need a real TTY? Use the tmux skill.
+- Need a fully interactive session? Use `pty: true` and the `process` tool for stdin/output.
 Note: `elevated` is ignored when sandboxing is off (exec already runs on the host).
+
+## Config
+
+- `tools.exec.notifyOnExit` (default: true): when true, backgrounded exec sessions enqueue a system event and request a heartbeat on exit.
+
+## Exec approvals (macOS app)
+
+Sandboxed agents can require per-request approval before `exec` runs on the host.
+See [Exec approvals](/tools/exec-approvals) for the policy, allowlist, and UI flow.
 
 ## Examples
 
@@ -32,6 +42,23 @@ Background + poll:
 ```json
 {"tool":"exec","command":"npm run build","yieldMs":1000}
 {"tool":"process","action":"poll","sessionId":"<id>"}
+```
+
+Send keys (tmux-style):
+```json
+{"tool":"process","action":"send-keys","sessionId":"<id>","keys":["Enter"]}
+{"tool":"process","action":"send-keys","sessionId":"<id>","keys":["C-c"]}
+{"tool":"process","action":"send-keys","sessionId":"<id>","keys":["Up","Up","Enter"]}
+```
+
+Submit (send CR only):
+```json
+{"tool":"process","action":"submit","sessionId":"<id>"}
+```
+
+Paste (bracketed by default):
+```json
+{"tool":"process","action":"paste","sessionId":"<id>","text":"line1\nline2\n"}
 ```
 
 ## apply_patch (experimental)
@@ -52,4 +79,4 @@ Enable it explicitly:
 Notes:
 - Only available for OpenAI/OpenAI Codex models.
 - Tool policy still applies; `allow: ["exec"]` implicitly allows `apply_patch`.
-- Config lives under `tools.exec.applyPatch` (no `tools.bash` alias).
+- Config lives under `tools.exec.applyPatch`.

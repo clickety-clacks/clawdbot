@@ -76,6 +76,7 @@ import { resetLogger, setLoggerOverride } from "../logging.js";
 import { monitorWebInbox, resetWebInboundDedupe } from "./inbound.js";
 
 const _ACCOUNT_ID = "default";
+const nowSeconds = (offsetMs = 0) => Math.floor((Date.now() + offsetMs) / 1000);
 let authDir: string;
 
 describe("web monitor inbox", () => {
@@ -114,7 +115,12 @@ describe("web monitor inbox", () => {
     });
 
     const onMessage = vi.fn();
-    const listener = await monitorWebInbox({ verbose: false, onMessage });
+    const listener = await monitorWebInbox({
+      verbose: false,
+      accountId: _ACCOUNT_ID,
+      authDir,
+      onMessage,
+    });
     const sock = await createWaSocket();
 
     // Message from unauthorized sender +999 (not in allowFrom)
@@ -128,7 +134,7 @@ describe("web monitor inbox", () => {
             remoteJid: "999@s.whatsapp.net",
           },
           message: { conversation: "unauthorized message" },
-          messageTimestamp: 1_700_000_000,
+          messageTimestamp: nowSeconds(),
         },
       ],
     };
@@ -175,7 +181,12 @@ describe("web monitor inbox", () => {
     });
 
     const onMessage = vi.fn();
-    const listener = await monitorWebInbox({ verbose: false, onMessage });
+    const listener = await monitorWebInbox({
+      verbose: false,
+      accountId: _ACCOUNT_ID,
+      authDir,
+      onMessage,
+    });
     const sock = await createWaSocket();
 
     const upsert = {
@@ -184,7 +195,7 @@ describe("web monitor inbox", () => {
         {
           key: { id: "self1", fromMe: false, remoteJid: "123@s.whatsapp.net" },
           message: { conversation: "self ping" },
-          messageTimestamp: 1_700_000_000,
+          messageTimestamp: nowSeconds(),
         },
       ],
     };
@@ -214,6 +225,8 @@ describe("web monitor inbox", () => {
     const onMessage = vi.fn();
     const listener = await monitorWebInbox({
       verbose: false,
+      accountId: _ACCOUNT_ID,
+      authDir,
       onMessage,
       sendReadReceipts: false,
     });
@@ -225,7 +238,7 @@ describe("web monitor inbox", () => {
         {
           key: { id: "rr-off-1", fromMe: false, remoteJid: "222@s.whatsapp.net" },
           message: { conversation: "read receipts off" },
-          messageTimestamp: 1_700_000_000,
+          messageTimestamp: nowSeconds(),
         },
       ],
     };
@@ -249,7 +262,12 @@ describe("web monitor inbox", () => {
     });
 
     const onMessage = vi.fn();
-    const listener = await monitorWebInbox({ verbose: false, onMessage });
+    const listener = await monitorWebInbox({
+      verbose: false,
+      accountId: _ACCOUNT_ID,
+      authDir,
+      onMessage,
+    });
     const sock = await createWaSocket();
 
     const upsert = {
@@ -263,6 +281,7 @@ describe("web monitor inbox", () => {
             participant: "999@s.whatsapp.net",
           },
           message: { conversation: "unauthorized group message" },
+          messageTimestamp: nowSeconds(),
         },
       ],
     };
@@ -289,7 +308,12 @@ describe("web monitor inbox", () => {
     });
 
     const onMessage = vi.fn();
-    const listener = await monitorWebInbox({ verbose: false, onMessage });
+    const listener = await monitorWebInbox({
+      verbose: false,
+      accountId: _ACCOUNT_ID,
+      authDir,
+      onMessage,
+    });
     const sock = await createWaSocket();
 
     const upsert = {
@@ -303,6 +327,7 @@ describe("web monitor inbox", () => {
             participant: "999@s.whatsapp.net",
           },
           message: { conversation: "group message should be blocked" },
+          messageTimestamp: nowSeconds(),
         },
       ],
     };
@@ -332,7 +357,12 @@ describe("web monitor inbox", () => {
     });
 
     const onMessage = vi.fn();
-    const listener = await monitorWebInbox({ verbose: false, onMessage });
+    const listener = await monitorWebInbox({
+      verbose: false,
+      accountId: _ACCOUNT_ID,
+      authDir,
+      onMessage,
+    });
     const sock = await createWaSocket();
 
     const upsert = {
@@ -346,6 +376,7 @@ describe("web monitor inbox", () => {
             participant: "999@s.whatsapp.net",
           },
           message: { conversation: "unauthorized group sender" },
+          messageTimestamp: nowSeconds(),
         },
       ],
     };
@@ -375,7 +406,12 @@ describe("web monitor inbox", () => {
     });
 
     const onMessage = vi.fn();
-    const listener = await monitorWebInbox({ verbose: false, onMessage });
+    const listener = await monitorWebInbox({
+      verbose: false,
+      accountId: _ACCOUNT_ID,
+      authDir,
+      onMessage,
+    });
     const sock = await createWaSocket();
 
     const upsert = {
@@ -389,6 +425,7 @@ describe("web monitor inbox", () => {
             participant: "15551234567@s.whatsapp.net",
           },
           message: { conversation: "authorized group sender" },
+          messageTimestamp: nowSeconds(),
         },
       ],
     };
@@ -421,7 +458,12 @@ describe("web monitor inbox", () => {
     });
 
     const onMessage = vi.fn();
-    const listener = await monitorWebInbox({ verbose: false, onMessage });
+    const listener = await monitorWebInbox({
+      verbose: false,
+      accountId: _ACCOUNT_ID,
+      authDir,
+      onMessage,
+    });
     const sock = await createWaSocket();
 
     const upsert = {
@@ -435,6 +477,7 @@ describe("web monitor inbox", () => {
             participant: "9999999999@s.whatsapp.net", // Random sender
           },
           message: { conversation: "wildcard group sender" },
+          messageTimestamp: nowSeconds(),
         },
       ],
     };
@@ -465,7 +508,12 @@ describe("web monitor inbox", () => {
     });
 
     const onMessage = vi.fn();
-    const listener = await monitorWebInbox({ verbose: false, onMessage });
+    const listener = await monitorWebInbox({
+      verbose: false,
+      accountId: _ACCOUNT_ID,
+      authDir,
+      onMessage,
+    });
     const sock = await createWaSocket();
 
     const upsert = {
@@ -479,6 +527,7 @@ describe("web monitor inbox", () => {
             participant: "999@s.whatsapp.net",
           },
           message: { conversation: "blocked by empty allowlist" },
+          messageTimestamp: nowSeconds(),
         },
       ],
     };

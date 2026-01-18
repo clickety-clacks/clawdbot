@@ -1,7 +1,6 @@
 import { CHAT_CHANNEL_ORDER, type ChatChannelId, normalizeChatChannelId } from "../registry.js";
 import { discordPlugin } from "./discord.js";
 import { imessagePlugin } from "./imessage.js";
-import { msteamsPlugin } from "./msteams.js";
 import { signalPlugin } from "./signal.js";
 import { slackPlugin } from "./slack.js";
 import { telegramPlugin } from "./telegram.js";
@@ -20,15 +19,7 @@ import { getActivePluginRegistry } from "../../plugins/runtime.js";
 // - add an entry to `src/channels/dock.ts` for shared behavior (capabilities, allowFrom, threading, …)
 // - add ids/aliases in `src/channels/registry.ts`
 function resolveCoreChannels(): ChannelPlugin[] {
-  return [
-    telegramPlugin,
-    whatsappPlugin,
-    discordPlugin,
-    slackPlugin,
-    signalPlugin,
-    imessagePlugin,
-    msteamsPlugin,
-  ];
+  return [telegramPlugin, whatsappPlugin, discordPlugin, slackPlugin, signalPlugin, imessagePlugin];
 }
 
 function listPluginChannels(): ChannelPlugin[] {
@@ -82,13 +73,29 @@ export function normalizeChannelId(raw?: string | null): ChannelId | null {
   return plugin?.id ?? null;
 }
 
+export { discordPlugin, imessagePlugin, signalPlugin, slackPlugin, telegramPlugin, whatsappPlugin };
 export {
-  discordPlugin,
-  imessagePlugin,
-  msteamsPlugin,
-  signalPlugin,
-  slackPlugin,
-  telegramPlugin,
-  whatsappPlugin,
-};
+  listDiscordDirectoryGroupsFromConfig,
+  listDiscordDirectoryPeersFromConfig,
+  listSlackDirectoryGroupsFromConfig,
+  listSlackDirectoryPeersFromConfig,
+  listTelegramDirectoryGroupsFromConfig,
+  listTelegramDirectoryPeersFromConfig,
+  listWhatsAppDirectoryGroupsFromConfig,
+  listWhatsAppDirectoryPeersFromConfig,
+} from "./directory-config.js";
+export {
+  buildChannelKeyCandidates,
+  normalizeChannelSlug,
+  resolveChannelEntryMatch,
+  resolveChannelEntryMatchWithFallback,
+  resolveNestedAllowlistDecision,
+  type ChannelEntryMatch,
+  type ChannelMatchSource,
+} from "./channel-config.js";
+export {
+  formatAllowlistMatchMeta,
+  type AllowlistMatch,
+  type AllowlistMatchSource,
+} from "./allowlist-match.js";
 export type { ChannelId, ChannelPlugin } from "./types.js";

@@ -37,6 +37,7 @@ export const dispatchTelegramMessage = async ({
     route,
     skillFilter,
     sendTyping,
+    sendRecordVoice,
     ackReactionPromise,
     reactionApi,
     removeAckAfterReply,
@@ -123,7 +124,6 @@ export const dispatchTelegramMessage = async ({
     identityName: resolveIdentityName(cfg, route.agentId),
   };
 
-  let didSendReply = false;
   const { queuedFinal } = await dispatchReplyWithBufferedBlockDispatcher({
     ctx: ctxPayload,
     cfg,
@@ -144,8 +144,8 @@ export const dispatchTelegramMessage = async ({
           replyToMode,
           textLimit,
           messageThreadId: resolvedThreadId,
+          onVoiceRecording: sendRecordVoice,
         });
-        didSendReply = true;
       },
       onError: (err, info) => {
         runtime.error?.(danger(`telegram ${info.kind} reply failed: ${String(err)}`));
@@ -172,7 +172,7 @@ export const dispatchTelegramMessage = async ({
   });
   draftStream?.stop();
   if (!queuedFinal) {
-    if (isGroup && historyKey && historyLimit > 0 && didSendReply) {
+    if (isGroup && historyKey && historyLimit > 0) {
       clearHistoryEntries({ historyMap: groupHistories, historyKey });
     }
     return;
@@ -187,7 +187,7 @@ export const dispatchTelegramMessage = async ({
       });
     });
   }
-  if (isGroup && historyKey && historyLimit > 0 && didSendReply) {
+  if (isGroup && historyKey && historyLimit > 0) {
     clearHistoryEntries({ historyMap: groupHistories, historyKey });
   }
 };

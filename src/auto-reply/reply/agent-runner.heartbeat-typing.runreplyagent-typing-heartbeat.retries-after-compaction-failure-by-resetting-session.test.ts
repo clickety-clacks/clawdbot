@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { SessionEntry } from "../../config/sessions.js";
+import * as sessions from "../../config/sessions.js";
 import type { TypingMode } from "../../config/types.js";
 import type { TemplateContext } from "../templating.js";
 import type { GetReplyOptions } from "../types.js";
@@ -127,11 +128,14 @@ describe("runReplyAgent typing (heartbeat)", () => {
     try {
       const sessionId = "session";
       const storePath = path.join(stateDir, "sessions", "sessions.json");
-      const sessionEntry = { sessionId, updatedAt: Date.now() };
+      const transcriptPath = sessions.resolveSessionTranscriptPath(sessionId);
+      const sessionEntry = { sessionId, updatedAt: Date.now(), sessionFile: transcriptPath };
       const sessionStore = { main: sessionEntry };
 
       await fs.mkdir(path.dirname(storePath), { recursive: true });
       await fs.writeFile(storePath, JSON.stringify(sessionStore), "utf-8");
+      await fs.mkdir(path.dirname(transcriptPath), { recursive: true });
+      await fs.writeFile(transcriptPath, "ok", "utf-8");
 
       runEmbeddedPiAgentMock
         .mockImplementationOnce(async () => {
@@ -175,11 +179,14 @@ describe("runReplyAgent typing (heartbeat)", () => {
     try {
       const sessionId = "session";
       const storePath = path.join(stateDir, "sessions", "sessions.json");
-      const sessionEntry = { sessionId, updatedAt: Date.now() };
+      const transcriptPath = sessions.resolveSessionTranscriptPath(sessionId);
+      const sessionEntry = { sessionId, updatedAt: Date.now(), sessionFile: transcriptPath };
       const sessionStore = { main: sessionEntry };
 
       await fs.mkdir(path.dirname(storePath), { recursive: true });
       await fs.writeFile(storePath, JSON.stringify(sessionStore), "utf-8");
+      await fs.mkdir(path.dirname(transcriptPath), { recursive: true });
+      await fs.writeFile(transcriptPath, "ok", "utf-8");
 
       runEmbeddedPiAgentMock
         .mockImplementationOnce(async () => ({
@@ -211,6 +218,59 @@ describe("runReplyAgent typing (heartbeat)", () => {
       const payload = Array.isArray(res) ? res[0] : res;
       expect(payload).toMatchObject({ text: "ok" });
       expect(sessionStore.main.sessionId).not.toBe(sessionId);
+
+      const persisted = JSON.parse(await fs.readFile(storePath, "utf-8"));
+      expect(persisted.main.sessionId).toBe(sessionStore.main.sessionId);
+    } finally {
+      if (prevStateDir) {
+        process.env.CLAWDBOT_STATE_DIR = prevStateDir;
+      } else {
+        delete process.env.CLAWDBOT_STATE_DIR;
+      }
+    }
+  });
+  it("resets the session after role ordering payloads", async () => {
+    const prevStateDir = process.env.CLAWDBOT_STATE_DIR;
+    const stateDir = await fs.mkdtemp(path.join(tmpdir(), "clawdbot-session-role-ordering-"));
+    process.env.CLAWDBOT_STATE_DIR = stateDir;
+    try {
+      const sessionId = "session";
+      const storePath = path.join(stateDir, "sessions", "sessions.json");
+      const transcriptPath = sessions.resolveSessionTranscriptPath(sessionId);
+      const sessionEntry = { sessionId, updatedAt: Date.now(), sessionFile: transcriptPath };
+      const sessionStore = { main: sessionEntry };
+
+      await fs.mkdir(path.dirname(storePath), { recursive: true });
+      await fs.writeFile(storePath, JSON.stringify(sessionStore), "utf-8");
+      await fs.mkdir(path.dirname(transcriptPath), { recursive: true });
+      await fs.writeFile(transcriptPath, "ok", "utf-8");
+
+      runEmbeddedPiAgentMock.mockImplementationOnce(async () => ({
+        payloads: [{ text: "Message ordering conflict - please try again.", isError: true }],
+        meta: {
+          durationMs: 1,
+          error: {
+            kind: "role_ordering",
+            message: 'messages: roles must alternate between "user" and "assistant"',
+          },
+        },
+      }));
+
+      const { run } = createMinimalRun({
+        sessionEntry,
+        sessionStore,
+        sessionKey: "main",
+        storePath,
+      });
+      const res = await run();
+
+      const payload = Array.isArray(res) ? res[0] : res;
+      expect(payload).toMatchObject({
+        text: expect.stringContaining("Message ordering conflict"),
+      });
+      expect(payload.text?.toLowerCase()).toContain("reset");
+      expect(sessionStore.main.sessionId).not.toBe(sessionId);
+      await expect(fs.access(transcriptPath)).rejects.toBeDefined();
 
       const persisted = JSON.parse(await fs.readFile(storePath, "utf-8"));
       expect(persisted.main.sessionId).toBe(sessionStore.main.sessionId);

@@ -124,10 +124,21 @@ Save to `~/.clawdbot/clawdbot.json` and you can DM the bot from that number.
 
   // Tooling
   tools: {
-    audio: {
-      transcription: {
-        args: ["--model", "base", "{{MediaPath}}"],
+    media: {
+      audio: {
+        enabled: true,
+        maxBytes: 20971520,
+        models: [
+          { provider: "openai", model: "whisper-1" },
+          // Optional CLI fallback (Whisper binary):
+          // { type: "cli", command: "whisper", args: ["--model", "base", "{{MediaPath}}"] }
+        ],
         timeoutSeconds: 120
+      },
+      video: {
+        enabled: true,
+        maxBytes: 52428800,
+        models: [{ provider: "google", model: "gemini-3-flash-preview" }]
       }
     }
   },
@@ -450,6 +461,44 @@ Save to `~/.clawdbot/clawdbot.json` and you can DM the bot from that number.
     model: {
       primary: "anthropic/claude-sonnet-4-5",
       fallbacks: ["anthropic/claude-opus-4-5"]
+    }
+  }
+}
+```
+
+### Anthropic subscription + API key, MiniMax fallback
+```json5
+{
+  auth: {
+    profiles: {
+      "anthropic:subscription": {
+        provider: "anthropic",
+        mode: "oauth",
+        email: "user@example.com"
+      },
+      "anthropic:api": {
+        provider: "anthropic",
+        mode: "api_key"
+      }
+    },
+    order: {
+      anthropic: ["anthropic:subscription", "anthropic:api"]
+    }
+  },
+  models: {
+    providers: {
+      minimax: {
+        baseUrl: "https://api.minimax.io/anthropic",
+        api: "anthropic-messages",
+        apiKey: "${MINIMAX_API_KEY}"
+      }
+    }
+  },
+  agent: {
+    workspace: "~/clawd",
+    model: {
+      primary: "anthropic/claude-opus-4-5",
+      fallbacks: ["minimax/MiniMax-M2.1"]
     }
   }
 }

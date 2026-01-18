@@ -1,10 +1,20 @@
-import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type { AgentTool, AgentToolResult } from "@mariozechner/pi-agent-core";
 import { Type } from "@sinclair/typebox";
 
+import { requestHeartbeatNow } from "../infra/heartbeat-wake.js";
+import { enqueueSystemEvent } from "../infra/system-events.js";
 import { logInfo } from "../logger.js";
-import { addSession, appendOutput, markBackgrounded, markExited } from "./bash-process-registry.js";
+import {
+  type ProcessSession,
+  type SessionStdin,
+  addSession,
+  appendOutput,
+  createSessionSlug,
+  markBackgrounded,
+  markExited,
+  tail,
+} from "./bash-process-registry.js";
 import type { BashSandboxConfig } from "./bash-tools.shared.js";
 import {
   buildDockerExecArgs,
@@ -19,6 +29,7 @@ import {
   truncateMiddle,
 } from "./bash-tools.shared.js";
 import { getShellConfig, sanitizeBinaryOutput } from "./shell-utils.js";
+import { buildCursorPositionResponse, stripDsrRequests } from "./pty-dsr.js";
 
 const DEFAULT_MAX_OUTPUT = clampNumber(
   readEnvInt("PI_BASH_MAX_OUTPUT_CHARS"),
@@ -26,8 +37,35 @@ const DEFAULT_MAX_OUTPUT = clampNumber(
   1_000,
   150_000,
 );
+const DEFAULT_PENDING_MAX_OUTPUT = clampNumber(
+  readEnvInt("CLAWDBOT_BASH_PENDING_MAX_OUTPUT_CHARS"),
+  30_000,
+  1_000,
+  150_000,
+);
 const DEFAULT_PATH =
   process.env.PATH ?? "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+const DEFAULT_NOTIFY_TAIL_CHARS = 400;
+
+type PtyExitEvent = { exitCode: number; signal?: number };
+type PtyListener<T> = (event: T) => void;
+type PtyHandle = {
+  pid: number;
+  write: (data: string | Buffer) => void;
+  onData: (listener: PtyListener<string>) => void;
+  onExit: (listener: PtyListener<PtyExitEvent>) => void;
+};
+type PtySpawn = (
+  file: string,
+  args: string[] | string,
+  options: {
+    name?: string;
+    cols?: number;
+    rows?: number;
+    cwd?: string;
+    env?: Record<string, string>;
+  },
+) => PtyHandle;
 
 export type ExecToolDefaults = {
   backgroundMs?: number;
@@ -36,6 +74,9 @@ export type ExecToolDefaults = {
   elevated?: ExecElevatedDefaults;
   allowBackground?: boolean;
   scopeKey?: string;
+  sessionKey?: string;
+  messageProvider?: string;
+  notifyOnExit?: boolean;
   cwd?: string;
 };
 
@@ -62,6 +103,12 @@ const execSchema = Type.Object({
       description: "Timeout in seconds (optional, kills process on expiry)",
     }),
   ),
+  pty: Type.Optional(
+    Type.Boolean({
+      description:
+        "Run in a pseudo-terminal (PTY) when available (TTY-required CLIs, coding agents)",
+    }),
+  ),
   elevated: Type.Optional(
     Type.Boolean({
       description: "Run on the host with elevated permissions (if allowed)",
@@ -86,6 +133,28 @@ export type ExecToolDetails =
       cwd?: string;
     };
 
+function normalizeNotifyOutput(value: string) {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function maybeNotifyOnExit(session: ProcessSession, status: "completed" | "failed") {
+  if (!session.backgrounded || !session.notifyOnExit || session.exitNotified) return;
+  const sessionKey = session.sessionKey?.trim();
+  if (!sessionKey) return;
+  session.exitNotified = true;
+  const exitLabel = session.exitSignal
+    ? `signal ${session.exitSignal}`
+    : `code ${session.exitCode ?? 0}`;
+  const output = normalizeNotifyOutput(
+    tail(session.tail || session.aggregated || "", DEFAULT_NOTIFY_TAIL_CHARS),
+  );
+  const summary = output
+    ? `Exec ${status} (${session.id.slice(0, 8)}, ${exitLabel}) :: ${output}`
+    : `Exec ${status} (${session.id.slice(0, 8)}, ${exitLabel})`;
+  enqueueSystemEvent(summary, { sessionKey });
+  requestHeartbeatNow({ reason: `exec:${session.id}:exit` });
+}
+
 export function createExecTool(
   defaults?: ExecToolDefaults,
   // biome-ignore lint/suspicious/noExplicitAny: TypeBox schema type from pi-agent-core uses a different module instance.
@@ -101,12 +170,14 @@ export function createExecTool(
     typeof defaults?.timeoutSec === "number" && defaults.timeoutSec > 0
       ? defaults.timeoutSec
       : 1800;
+  const notifyOnExit = defaults?.notifyOnExit !== false;
+  const notifySessionKey = defaults?.sessionKey?.trim() || undefined;
 
   return {
     name: "exec",
     label: "exec",
     description:
-      "Execute shell commands with background continuation. Use yieldMs/background to continue later via process tool. For real TTY mode, use the tmux skill.",
+      "Execute shell commands with background continuation. Use yieldMs/background to continue later via process tool. Use pty=true for TTY-required commands (terminal UIs, coding agents).",
     parameters: execSchema,
     execute: async (_toolCallId, args, signal, onUpdate) => {
       const params = args as {
@@ -116,6 +187,7 @@ export function createExecTool(
         yieldMs?: number;
         background?: boolean;
         timeout?: number;
+        pty?: boolean;
         elevated?: boolean;
       };
 
@@ -124,8 +196,9 @@ export function createExecTool(
       }
 
       const maxOutput = DEFAULT_MAX_OUTPUT;
+      const pendingMaxOutput = DEFAULT_PENDING_MAX_OUTPUT;
       const startedAt = Date.now();
-      const sessionId = randomUUID();
+      const sessionId = createSessionSlug();
       const warnings: string[] = [];
       const backgroundRequested = params.background === true;
       const yieldRequested = typeof params.yieldMs === "number";
@@ -148,6 +221,11 @@ export function createExecTool(
         if (!elevatedDefaults?.enabled || !elevatedDefaults.allowed) {
           const runtime = defaults?.sandbox ? "sandboxed" : "direct";
           const gates: string[] = [];
+          const contextParts: string[] = [];
+          const provider = defaults?.messageProvider?.trim();
+          const sessionKey = defaults?.sessionKey?.trim();
+          if (provider) contextParts.push(`provider=${provider}`);
+          if (sessionKey) contextParts.push(`session=${sessionKey}`);
           if (!elevatedDefaults?.enabled) {
             gates.push("enabled (tools.elevated.enabled / agents.list[].tools.elevated.enabled)");
           } else {
@@ -159,12 +237,15 @@ export function createExecTool(
             [
               `elevated is not available right now (runtime=${runtime}).`,
               `Failing gates: ${gates.join(", ")}`,
+              contextParts.length > 0 ? `Context: ${contextParts.join(" ")}` : undefined,
               "Fix-it keys:",
               "- tools.elevated.enabled",
               "- tools.elevated.allowFrom.<provider>",
               "- agents.list[].tools.elevated.enabled",
               "- agents.list[].tools.elevated.allowFrom.<provider>",
-            ].join("\n"),
+            ]
+              .filter(Boolean)
+              .join("\n"),
           );
         }
         logInfo(
@@ -202,44 +283,95 @@ export function createExecTool(
             containerWorkdir: containerWorkdir ?? sandbox.containerWorkdir,
           })
         : mergedEnv;
-      const child = sandbox
-        ? spawn(
-            "docker",
-            buildDockerExecArgs({
-              containerName: sandbox.containerName,
-              command: params.command,
-              workdir: containerWorkdir ?? sandbox.containerWorkdir,
-              env,
-              tty: false,
-            }),
-            {
-              cwd: workdir,
-              env: process.env,
-              detached: process.platform !== "win32",
-              stdio: ["pipe", "pipe", "pipe"],
-              windowsHide: true,
-            },
-          )
-        : spawn(shell, [...shellArgs, params.command], {
-            cwd: workdir,
+      const usePty = params.pty === true && !sandbox;
+      let child: ChildProcessWithoutNullStreams | null = null;
+      let pty: PtyHandle | null = null;
+      let stdin: SessionStdin | undefined;
+
+      if (sandbox) {
+        child = spawn(
+          "docker",
+          buildDockerExecArgs({
+            containerName: sandbox.containerName,
+            command: params.command,
+            workdir: containerWorkdir ?? sandbox.containerWorkdir,
             env,
+            tty: params.pty === true,
+          }),
+          {
+            cwd: workdir,
+            env: process.env,
             detached: process.platform !== "win32",
             stdio: ["pipe", "pipe", "pipe"],
             windowsHide: true,
-          });
+          },
+        ) as ChildProcessWithoutNullStreams;
+        stdin = child.stdin;
+      } else if (usePty) {
+        const ptyModule = (await import("@lydell/node-pty")) as unknown as {
+          spawn?: PtySpawn;
+          default?: { spawn?: PtySpawn };
+        };
+        const spawnPty = ptyModule.spawn ?? ptyModule.default?.spawn;
+        if (!spawnPty) {
+          throw new Error("PTY support is unavailable (node-pty spawn not found).");
+        }
+        pty = spawnPty(shell, [...shellArgs, params.command], {
+          cwd: workdir,
+          env,
+          name: process.env.TERM ?? "xterm-256color",
+          cols: 120,
+          rows: 30,
+        });
+        stdin = {
+          destroyed: false,
+          write: (data, cb) => {
+            try {
+              pty?.write(data);
+              cb?.(null);
+            } catch (err) {
+              cb?.(err as Error);
+            }
+          },
+          end: () => {
+            try {
+              const eof = process.platform === "win32" ? "\x1a" : "\x04";
+              pty?.write(eof);
+            } catch {
+              // ignore EOF errors
+            }
+          },
+        };
+      } else {
+        child = spawn(shell, [...shellArgs, params.command], {
+          cwd: workdir,
+          env,
+          detached: process.platform !== "win32",
+          stdio: ["pipe", "pipe", "pipe"],
+          windowsHide: true,
+        }) as ChildProcessWithoutNullStreams;
+        stdin = child.stdin;
+      }
 
       const session = {
         id: sessionId,
         command: params.command,
         scopeKey: defaults?.scopeKey,
-        child,
-        pid: child?.pid,
+        sessionKey: notifySessionKey,
+        notifyOnExit,
+        exitNotified: false,
+        child: child ?? undefined,
+        stdin,
+        pid: child?.pid ?? pty?.pid,
         startedAt,
         cwd: workdir,
         maxOutputChars: maxOutput,
+        pendingMaxOutputChars: pendingMaxOutput,
         totalOutputChars: 0,
         pendingStdout: [],
         pendingStderr: [],
+        pendingStdoutChars: 0,
+        pendingStderrChars: 0,
         aggregated: "",
         tail: "",
         exited: false,
@@ -254,7 +386,10 @@ export function createExecTool(
       let yielded = false;
       let yieldTimer: NodeJS.Timeout | null = null;
       let timeoutTimer: NodeJS.Timeout | null = null;
+      let timeoutFinalizeTimer: NodeJS.Timeout | null = null;
       let timedOut = false;
+      const timeoutFinalizeMs = 1000;
+      let rejectFn: ((err: Error) => void) | null = null;
 
       const settle = (fn: () => void) => {
         if (settled) return;
@@ -262,21 +397,43 @@ export function createExecTool(
         fn();
       };
 
-      const onAbort = () => {
+      const effectiveTimeout =
+        typeof params.timeout === "number" ? params.timeout : defaultTimeoutSec;
+      const finalizeTimeout = () => {
+        if (session.exited) return;
+        markExited(session, null, "SIGKILL", "failed");
+        maybeNotifyOnExit(session, "failed");
+        if (settled || !rejectFn) return;
+        const aggregated = session.aggregated.trim();
+        const reason = `Command timed out after ${effectiveTimeout} seconds`;
+        const message = aggregated ? `${aggregated}\n\n${reason}` : reason;
+        settle(() => rejectFn?.(new Error(message)));
+      };
+
+      // Tool-call abort should not kill backgrounded sessions; timeouts still must.
+      const onAbortSignal = () => {
+        if (yielded || session.backgrounded) return;
         killSession(session);
       };
 
-      if (signal?.aborted) onAbort();
-      else if (signal) {
-        signal.addEventListener("abort", onAbort, { once: true });
-      }
+      // Timeouts always terminate, even for backgrounded sessions.
+      const onTimeout = () => {
+        timedOut = true;
+        killSession(session);
+        if (!timeoutFinalizeTimer) {
+          timeoutFinalizeTimer = setTimeout(() => {
+            finalizeTimeout();
+          }, timeoutFinalizeMs);
+        }
+      };
 
-      const effectiveTimeout =
-        typeof params.timeout === "number" ? params.timeout : defaultTimeoutSec;
+      if (signal?.aborted) onAbortSignal();
+      else if (signal) {
+        signal.addEventListener("abort", onAbortSignal, { once: true });
+      }
       if (effectiveTimeout > 0) {
         timeoutTimer = setTimeout(() => {
-          timedOut = true;
-          onAbort();
+          onTimeout();
         }, effectiveTimeout * 1000);
       }
 
@@ -297,23 +454,41 @@ export function createExecTool(
         });
       };
 
-      child.stdout.on("data", (data) => {
+      const handleStdout = (data: string) => {
         const str = sanitizeBinaryOutput(data.toString());
         for (const chunk of chunkString(str)) {
           appendOutput(session, "stdout", chunk);
           emitUpdate();
         }
-      });
+      };
 
-      child.stderr.on("data", (data) => {
+      const handleStderr = (data: string) => {
         const str = sanitizeBinaryOutput(data.toString());
         for (const chunk of chunkString(str)) {
           appendOutput(session, "stderr", chunk);
           emitUpdate();
         }
-      });
+      };
+
+      if (pty) {
+        const cursorResponse = buildCursorPositionResponse();
+        pty.onData((data) => {
+          const raw = data.toString();
+          const { cleaned, requests } = stripDsrRequests(raw);
+          if (requests > 0) {
+            for (let i = 0; i < requests; i += 1) {
+              pty.write(cursorResponse);
+            }
+          }
+          handleStdout(cleaned);
+        });
+      } else if (child) {
+        child.stdout.on("data", handleStdout);
+        child.stderr.on("data", handleStderr);
+      }
 
       return new Promise<AgentToolResult<ExecToolDetails>>((resolve, reject) => {
+        rejectFn = reject;
         const resolveRunning = () => {
           settle(() =>
             resolve({
@@ -362,11 +537,16 @@ export function createExecTool(
         const handleExit = (code: number | null, exitSignal: NodeJS.Signals | number | null) => {
           if (yieldTimer) clearTimeout(yieldTimer);
           if (timeoutTimer) clearTimeout(timeoutTimer);
+          if (timeoutFinalizeTimer) clearTimeout(timeoutFinalizeTimer);
           const durationMs = Date.now() - startedAt;
           const wasSignal = exitSignal != null;
           const isSuccess = code === 0 && !wasSignal && !signal?.aborted && !timedOut;
           const status: "completed" | "failed" = isSuccess ? "completed" : "failed";
           markExited(session, code, exitSignal, status);
+          maybeNotifyOnExit(session, status);
+          if (!session.child && session.stdin) {
+            session.stdin.destroyed = true;
+          }
 
           if (yielded || session.backgrounded) return;
 
@@ -407,16 +587,26 @@ export function createExecTool(
 
         // `exit` can fire before stdio fully flushes (notably on Windows).
         // `close` waits for streams to close, so aggregated output is complete.
-        child.once("close", (code, exitSignal) => {
-          handleExit(code, exitSignal);
-        });
+        if (pty) {
+          pty.onExit((event) => {
+            const rawSignal = event.signal ?? null;
+            const normalizedSignal = rawSignal === 0 ? null : rawSignal;
+            handleExit(event.exitCode ?? null, normalizedSignal);
+          });
+        } else if (child) {
+          child.once("close", (code, exitSignal) => {
+            handleExit(code, exitSignal);
+          });
 
-        child.once("error", (err) => {
-          if (yieldTimer) clearTimeout(yieldTimer);
-          if (timeoutTimer) clearTimeout(timeoutTimer);
-          markExited(session, null, null, "failed");
-          settle(() => reject(err));
-        });
+          child.once("error", (err) => {
+            if (yieldTimer) clearTimeout(yieldTimer);
+            if (timeoutTimer) clearTimeout(timeoutTimer);
+            if (timeoutFinalizeTimer) clearTimeout(timeoutFinalizeTimer);
+            markExited(session, null, null, "failed");
+            maybeNotifyOnExit(session, "failed");
+            settle(() => reject(err));
+          });
+        }
       });
     },
   };

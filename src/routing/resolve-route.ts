@@ -1,5 +1,6 @@
 import { resolveDefaultAgentId } from "../agents/agent-scope.js";
 import type { ClawdbotConfig } from "../config/config.js";
+import { listBindings } from "./bindings.js";
 import {
   buildAgentMainSessionKey,
   buildAgentPeerSessionKey,
@@ -68,6 +69,9 @@ export function buildAgentSessionKey(params: {
   agentId: string;
   channel: string;
   peer?: RoutePeer | null;
+  /** DM session scope. */
+  dmScope?: "main" | "per-peer" | "per-channel-peer";
+  identityLinks?: Record<string, string[]>;
 }): string {
   const channel = normalizeToken(params.channel) || "unknown";
   const peer = params.peer;
@@ -77,12 +81,9 @@ export function buildAgentSessionKey(params: {
     channel,
     peerKind: peer?.kind ?? "dm",
     peerId: peer ? normalizeId(peer.id) || "unknown" : null,
+    dmScope: params.dmScope,
+    identityLinks: params.identityLinks,
   });
-}
-
-function listBindings(cfg: ClawdbotConfig) {
-  const bindings = cfg.bindings;
-  return Array.isArray(bindings) ? bindings : [];
 }
 
 function listAgents(cfg: ClawdbotConfig) {
@@ -149,6 +150,9 @@ export function resolveAgentRoute(input: ResolveAgentRouteInput): ResolvedAgentR
     return matchesAccountId(binding.match?.accountId, accountId);
   });
 
+  const dmScope = input.cfg.session?.dmScope ?? "main";
+  const identityLinks = input.cfg.session?.identityLinks;
+
   const choose = (agentId: string, matchedBy: ResolvedAgentRoute["matchedBy"]) => {
     const resolvedAgentId = pickFirstExistingAgentId(input.cfg, agentId);
     return {
@@ -159,6 +163,8 @@ export function resolveAgentRoute(input: ResolveAgentRouteInput): ResolvedAgentR
         agentId: resolvedAgentId,
         channel,
         peer,
+        dmScope,
+        identityLinks,
       }),
       mainSessionKey: buildAgentMainSessionKey({
         agentId: resolvedAgentId,

@@ -3,8 +3,10 @@ import type { CanvasHostHandler, CanvasHostServer } from "../canvas-host/server.
 import { startCanvasHost } from "../canvas-host/server.js";
 import type { CliDeps } from "../cli/deps.js";
 import type { HealthSummary } from "../commands/health.js";
+import type { ClawdbotConfig } from "../config/config.js";
 import { deriveDefaultBridgePort, deriveDefaultCanvasHostPort } from "../config/port-defaults.js";
 import type { NodeBridgeServer } from "../infra/bridge/server.js";
+import { loadBridgeTlsRuntime } from "../infra/bridge/server/tls.js";
 import { pickPrimaryTailnetIPv4, pickPrimaryTailnetIPv6 } from "../infra/tailnet.js";
 import type { RuntimeEnv } from "../runtime.js";
 import type { ChatAbortControllerEntry } from "./chat-abort.js";
@@ -33,15 +35,7 @@ export type GatewayBridgeRuntime = {
 };
 
 export async function startGatewayBridgeRuntime(params: {
-  cfg: {
-    bridge?: {
-      enabled?: boolean;
-      port?: number;
-      bind?: "loopback" | "lan" | "auto" | "custom";
-    };
-    canvasHost?: { port?: number; root?: string; liveReload?: boolean };
-    discovery?: { wideArea?: { enabled?: boolean } };
-  };
+  cfg: ClawdbotConfig;
   port: number;
   canvasHostEnabled: boolean;
   canvasHost: CanvasHostHandler | null;
@@ -78,7 +72,7 @@ export async function startGatewayBridgeRuntime(params: {
 }): Promise<GatewayBridgeRuntime> {
   const wideAreaDiscoveryEnabled = params.cfg.discovery?.wideArea?.enabled === true;
 
-  const bridgeEnabled = (() => {
+  let bridgeEnabled = (() => {
     if (params.cfg.bridge?.enabled !== undefined) return params.cfg.bridge.enabled === true;
     return process.env.CLAWDBOT_BRIDGE_ENABLED !== "0";
   })();
@@ -117,6 +111,14 @@ export async function startGatewayBridgeRuntime(params: {
     }
     return "0.0.0.0";
   })();
+
+  const bridgeTls = bridgeEnabled
+    ? await loadBridgeTlsRuntime(params.cfg.bridge?.tls, params.logBridge)
+    : { enabled: false, required: false };
+  if (bridgeTls.required && !bridgeTls.enabled) {
+    params.logBridge.warn(bridgeTls.error ?? "bridge tls: failed to enable; bridge disabled");
+    bridgeEnabled = false;
+  }
 
   const canvasHostPort = (() => {
     if (process.env.CLAWDBOT_CANVAS_HOST_PORT !== undefined) {
@@ -200,9 +202,11 @@ export async function startGatewayBridgeRuntime(params: {
       : undefined;
 
   const bridgeRuntime = await startGatewayNodeBridge({
+    cfg: params.cfg,
     bridgeEnabled,
     bridgePort,
     bridgeHost,
+    bridgeTls: bridgeTls.enabled ? bridgeTls : undefined,
     machineDisplayName: params.machineDisplayName,
     canvasHostPort: canvasHostPortForBridge,
     canvasHostHost: canvasHostHostForBridge,
@@ -218,6 +222,9 @@ export async function startGatewayBridgeRuntime(params: {
     machineDisplayName: params.machineDisplayName,
     port: params.port,
     bridgePort: bridge?.port,
+    bridgeTls: bridgeTls.enabled
+      ? { enabled: true, fingerprintSha256: bridgeTls.fingerprintSha256 }
+      : undefined,
     canvasPort: canvasHostPortForBridge,
     wideAreaDiscoveryEnabled,
     logDiscovery: params.logDiscovery,

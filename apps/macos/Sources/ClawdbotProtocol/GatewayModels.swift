@@ -347,6 +347,7 @@ public struct SendParams: Codable, Sendable {
     public let gifplayback: Bool?
     public let channel: String?
     public let accountid: String?
+    public let sessionkey: String?
     public let idempotencykey: String
 
     public init(
@@ -356,6 +357,7 @@ public struct SendParams: Codable, Sendable {
         gifplayback: Bool?,
         channel: String?,
         accountid: String?,
+        sessionkey: String?,
         idempotencykey: String
     ) {
         self.to = to
@@ -364,6 +366,7 @@ public struct SendParams: Codable, Sendable {
         self.gifplayback = gifplayback
         self.channel = channel
         self.accountid = accountid
+        self.sessionkey = sessionkey
         self.idempotencykey = idempotencykey
     }
     private enum CodingKeys: String, CodingKey {
@@ -373,6 +376,7 @@ public struct SendParams: Codable, Sendable {
         case gifplayback = "gifPlayback"
         case channel
         case accountid = "accountId"
+        case sessionkey = "sessionKey"
         case idempotencykey = "idempotencyKey"
     }
 }
@@ -427,6 +431,7 @@ public struct AgentParams: Codable, Sendable {
     public let deliver: Bool?
     public let attachments: [AnyCodable]?
     public let channel: String?
+    public let accountid: String?
     public let timeout: Int?
     public let lane: String?
     public let extrasystemprompt: String?
@@ -443,6 +448,7 @@ public struct AgentParams: Codable, Sendable {
         deliver: Bool?,
         attachments: [AnyCodable]?,
         channel: String?,
+        accountid: String?,
         timeout: Int?,
         lane: String?,
         extrasystemprompt: String?,
@@ -458,6 +464,7 @@ public struct AgentParams: Codable, Sendable {
         self.deliver = deliver
         self.attachments = attachments
         self.channel = channel
+        self.accountid = accountid
         self.timeout = timeout
         self.lane = lane
         self.extrasystemprompt = extrasystemprompt
@@ -474,6 +481,7 @@ public struct AgentParams: Codable, Sendable {
         case deliver
         case attachments
         case channel
+        case accountid = "accountId"
         case timeout
         case lane
         case extrasystemprompt = "extraSystemPrompt"
@@ -1676,6 +1684,27 @@ public struct ChatAbortParams: Codable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case sessionkey = "sessionKey"
         case runid = "runId"
+    }
+}
+
+public struct ChatInjectParams: Codable, Sendable {
+    public let sessionkey: String
+    public let message: String
+    public let label: String?
+
+    public init(
+        sessionkey: String,
+        message: String,
+        label: String?
+    ) {
+        self.sessionkey = sessionkey
+        self.message = message
+        self.label = label
+    }
+    private enum CodingKeys: String, CodingKey {
+        case sessionkey = "sessionKey"
+        case message
+        case label
     }
 }
 

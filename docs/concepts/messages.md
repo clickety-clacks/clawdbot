@@ -33,6 +33,32 @@ Channels can redeliver the same message after reconnects. Clawdbot keeps a
 short-lived cache keyed by channel/account/peer/session/message id so duplicate
 deliveries do not trigger another agent run.
 
+## Inbound debouncing
+
+Rapid consecutive messages from the **same sender** can be batched into a single
+agent turn via `messages.inbound`. Debouncing is scoped per channel + conversation
+and uses the most recent message for reply threading/IDs.
+
+Config (global default + per-channel overrides):
+```json5
+{
+  messages: {
+    inbound: {
+      debounceMs: 2000,
+      byChannel: {
+        whatsapp: 5000,
+        slack: 1500,
+        discord: 1500
+      }
+    }
+  }
+}
+```
+
+Notes:
+- Debounce applies to **text-only** messages; media/attachments flush immediately.
+- Control commands bypass debouncing so they remain standalone.
+
 ## Sessions and devices
 
 Sessions are owned by the gateway, not by clients.
@@ -58,6 +84,14 @@ Clawdbot separates the **prompt body** from the **command body**:
 When a channel supplies history, it uses a shared wrapper:
 - `[Chat messages since your last reply - for context]`
 - `[Current message - respond to this]`
+
+For **non-direct chats** (groups/channels/rooms), the **current message body** is prefixed with the
+sender label (same style used for history entries). This keeps real-time and queued/history
+messages consistent in the agent prompt.
+
+History buffers are **pending-only**: they include group messages that did *not*
+trigger a run (for example, mention-gated messages) and **exclude** messages
+already in the session transcript.
 
 Directive stripping only applies to the **current message** section so history
 remains intact. Channels that wrap history should set `CommandBody` (or

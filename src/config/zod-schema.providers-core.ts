@@ -13,6 +13,20 @@ import {
   RetryConfigSchema,
   requireOpenAllowFrom,
 } from "./zod-schema.core.js";
+import {
+  normalizeTelegramCommandDescription,
+  normalizeTelegramCommandName,
+  resolveTelegramCustomCommands,
+} from "./telegram-custom-commands.js";
+
+const TelegramInlineButtonsScopeSchema = z.enum(["off", "dm", "group", "all", "allowlist"]);
+
+const TelegramCapabilitiesSchema = z.union([
+  z.array(z.string()),
+  z.object({
+    inlineButtons: TelegramInlineButtonsScopeSchema.optional(),
+  }),
+]);
 
 export const TelegramTopicSchema = z.object({
   requireMention: z.boolean().optional(),
@@ -31,11 +45,36 @@ export const TelegramGroupSchema = z.object({
   topics: z.record(z.string(), TelegramTopicSchema.optional()).optional(),
 });
 
+const TelegramCustomCommandSchema = z.object({
+  command: z.string().transform(normalizeTelegramCommandName),
+  description: z.string().transform(normalizeTelegramCommandDescription),
+});
+
+const validateTelegramCustomCommands = (
+  value: { customCommands?: Array<{ command?: string; description?: string }> },
+  ctx: z.RefinementCtx,
+) => {
+  if (!value.customCommands || value.customCommands.length === 0) return;
+  const { issues } = resolveTelegramCustomCommands({
+    commands: value.customCommands,
+    checkReserved: false,
+    checkDuplicates: false,
+  });
+  for (const issue of issues) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["customCommands", issue.index, issue.field],
+      message: issue.message,
+    });
+  }
+};
+
 export const TelegramAccountSchemaBase = z.object({
   name: z.string().optional(),
-  capabilities: z.array(z.string()).optional(),
+  capabilities: TelegramCapabilitiesSchema.optional(),
   enabled: z.boolean().optional(),
   commands: ProviderCommandsSchema,
+  customCommands: z.array(TelegramCustomCommandSchema).optional(),
   configWrites: z.boolean().optional(),
   dmPolicy: DmPolicySchema.optional().default("pairing"),
   botToken: z.string().optional(),
@@ -80,6 +119,7 @@ export const TelegramAccountSchema = TelegramAccountSchemaBase.superRefine((valu
     message:
       'channels.telegram.dmPolicy="open" requires channels.telegram.allowFrom to include "*"',
   });
+  validateTelegramCustomCommands(value, ctx);
 });
 
 export const TelegramConfigSchema = TelegramAccountSchemaBase.extend({
@@ -93,6 +133,7 @@ export const TelegramConfigSchema = TelegramAccountSchemaBase.extend({
     message:
       'channels.telegram.dmPolicy="open" requires channels.telegram.allowFrom to include "*"',
   });
+  validateTelegramCustomCommands(value, ctx);
 });
 
 export const DiscordDmSchema = z
@@ -154,6 +195,8 @@ export const DiscordAccountSchema = z.object({
     .object({
       reactions: z.boolean().optional(),
       stickers: z.boolean().optional(),
+      emojiUploads: z.boolean().optional(),
+      stickerUploads: z.boolean().optional(),
       polls: z.boolean().optional(),
       permissions: z.boolean().optional(),
       messages: z.boolean().optional(),
@@ -167,6 +210,7 @@ export const DiscordAccountSchema = z.object({
       voiceStatus: z.boolean().optional(),
       events: z.boolean().optional(),
       moderation: z.boolean().optional(),
+      channels: z.boolean().optional(),
     })
     .optional(),
   replyToMode: ReplyToModeSchema.optional(),
@@ -220,6 +264,8 @@ export const SlackAccountSchema = z.object({
   configWrites: z.boolean().optional(),
   botToken: z.string().optional(),
   appToken: z.string().optional(),
+  userToken: z.string().optional(),
+  userTokenReadOnly: z.boolean().optional().default(true),
   allowBots: z.boolean().optional(),
   requireMention: z.boolean().optional(),
   groupPolicy: GroupPolicySchema.optional().default("allowlist"),
@@ -321,6 +367,7 @@ export const IMessageAccountSchemaBase = z.object({
   configWrites: z.boolean().optional(),
   cliPath: ExecutableTokenSchema.optional(),
   dbPath: z.string().optional(),
+  remoteHost: z.string().optional(),
   service: z.union([z.literal("imessage"), z.literal("sms"), z.literal("auto")]).optional(),
   region: z.string().optional(),
   dmPolicy: DmPolicySchema.optional().default("pairing"),

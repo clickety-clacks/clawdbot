@@ -8,6 +8,7 @@ import type {
 } from "playwright-core";
 import { chromium } from "playwright-core";
 import { formatErrorMessage } from "../infra/errors.js";
+import { getHeadersWithAuth } from "./cdp.helpers.js";
 import { getChromeWebSocketUrl } from "./chrome.js";
 
 export type BrowserConsoleMessage = {
@@ -268,7 +269,8 @@ async function connectBrowser(cdpUrl: string): Promise<ConnectedBrowser> {
         const timeout = 5000 + attempt * 2000;
         const wsUrl = await getChromeWebSocketUrl(normalized, timeout).catch(() => null);
         const endpoint = wsUrl ?? normalized;
-        const browser = await chromium.connectOverCDP(endpoint, { timeout });
+        const headers = getHeadersWithAuth(endpoint);
+        const browser = await chromium.connectOverCDP(endpoint, { timeout, headers });
         const connected: ConnectedBrowser = { browser, cdpUrl: normalized };
         cached = connected;
         observeBrowser(browser);
@@ -386,4 +388,123 @@ export async function closePlaywrightBrowserConnection(): Promise<void> {
   cached = null;
   if (!cur) return;
   await cur.browser.close().catch(() => {});
+}
+
+/**
+ * List all pages/tabs from the persistent Playwright connection.
+ * Used for remote profiles where HTTP-based /json/list is ephemeral.
+ */
+export async function listPagesViaPlaywright(opts: { cdpUrl: string }): Promise<
+  Array<{
+    targetId: string;
+    title: string;
+    url: string;
+    type: string;
+  }>
+> {
+  const { browser } = await connectBrowser(opts.cdpUrl);
+  const pages = await getAllPages(browser);
+  const results: Array<{
+    targetId: string;
+    title: string;
+    url: string;
+    type: string;
+  }> = [];
+
+  for (const page of pages) {
+    const tid = await pageTargetId(page).catch(() => null);
+    if (tid) {
+      results.push({
+        targetId: tid,
+        title: await page.title().catch(() => ""),
+        url: page.url(),
+        type: "page",
+      });
+    }
+  }
+  return results;
+}
+
+/**
+ * Create a new page/tab using the persistent Playwright connection.
+ * Used for remote profiles where HTTP-based /json/new is ephemeral.
+ * Returns the new page's targetId and metadata.
+ */
+export async function createPageViaPlaywright(opts: { cdpUrl: string; url: string }): Promise<{
+  targetId: string;
+  title: string;
+  url: string;
+  type: string;
+}> {
+  const { browser } = await connectBrowser(opts.cdpUrl);
+  const context = browser.contexts()[0] ?? (await browser.newContext());
+  ensureContextState(context);
+
+  const page = await context.newPage();
+  ensurePageState(page);
+
+  // Navigate to the URL
+  const targetUrl = opts.url.trim() || "about:blank";
+  if (targetUrl !== "about:blank") {
+    await page.goto(targetUrl, { timeout: 30_000 }).catch(() => {
+      // Navigation might fail for some URLs, but page is still created
+    });
+  }
+
+  // Get the targetId for this page
+  const tid = await pageTargetId(page).catch(() => null);
+  if (!tid) {
+    throw new Error("Failed to get targetId for new page");
+  }
+
+  return {
+    targetId: tid,
+    title: await page.title().catch(() => ""),
+    url: page.url(),
+    type: "page",
+  };
+}
+
+/**
+ * Close a page/tab by targetId using the persistent Playwright connection.
+ * Used for remote profiles where HTTP-based /json/close is ephemeral.
+ */
+export async function closePageByTargetIdViaPlaywright(opts: {
+  cdpUrl: string;
+  targetId: string;
+}): Promise<void> {
+  const { browser } = await connectBrowser(opts.cdpUrl);
+  const page = await findPageByTargetId(browser, opts.targetId);
+  if (!page) {
+    throw new Error("tab not found");
+  }
+  await page.close();
+}
+
+/**
+ * Focus a page/tab by targetId using the persistent Playwright connection.
+ * Used for remote profiles where HTTP-based /json/activate can be ephemeral.
+ */
+export async function focusPageByTargetIdViaPlaywright(opts: {
+  cdpUrl: string;
+  targetId: string;
+}): Promise<void> {
+  const { browser } = await connectBrowser(opts.cdpUrl);
+  const page = await findPageByTargetId(browser, opts.targetId);
+  if (!page) {
+    throw new Error("tab not found");
+  }
+  try {
+    await page.bringToFront();
+  } catch (err) {
+    const session = await page.context().newCDPSession(page);
+    try {
+      await session.send("Page.bringToFront");
+      return;
+    } catch {
+      throw err;
+    } finally {
+      await session.detach().catch(() => {});
+    }
+  }
 }

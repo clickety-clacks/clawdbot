@@ -2,7 +2,8 @@ import { withProgress } from "../cli/progress.js";
 import { loadConfig, resolveGatewayPort } from "../config/config.js";
 import { probeGateway } from "../gateway/probe.js";
 import { discoverGatewayBeacons } from "../infra/bonjour-discovery.js";
-import { startSshPortForward } from "../infra/ssh-tunnel.js";
+import { resolveSshConfig } from "../infra/ssh-config.js";
+import { parseSshTarget, startSshPortForward } from "../infra/ssh-tunnel.js";
 import type { RuntimeEnv } from "../runtime.js";
 import { colorize, isRich, theme } from "../terminal/theme.js";
 
@@ -47,12 +48,24 @@ export async function gatewayStatusCommand(
   });
 
   let sshTarget = sanitizeSshTarget(opts.ssh) ?? sanitizeSshTarget(cfg.gateway?.remote?.sshTarget);
-  const sshIdentity =
+  let sshIdentity =
     sanitizeSshTarget(opts.sshIdentity) ?? sanitizeSshTarget(cfg.gateway?.remote?.sshIdentity);
   const remotePort = resolveGatewayPort(cfg);
 
   let sshTunnelError: string | null = null;
   let sshTunnelStarted = false;
+
+  if (!sshTarget) {
+    sshTarget = inferSshTargetFromRemoteUrl(cfg.gateway?.remote?.url);
+  }
+
+  if (sshTarget) {
+    const resolved = await resolveSshTarget(sshTarget, sshIdentity, overallTimeoutMs);
+    if (resolved) {
+      sshTarget = resolved.target;
+      if (!sshIdentity && resolved.identity) sshIdentity = resolved.identity;
+    }
+  }
 
   const { discovery, probed } = await withProgress(
     {
@@ -183,7 +196,7 @@ export async function gatewayStatusCommand(
     warnings.push({
       code: "multiple_gateways",
       message:
-        "Unconventional setup: multiple reachable gateways detected. Usually only one gateway should exist on a network.",
+        "Unconventional setup: multiple reachable gateways detected. Usually one gateway per network is recommended unless you intentionally run isolated profiles, like a rescue bot (see docs: /gateway#multiple-gateways-same-host).",
       targetIds: reachable.map((p) => p.target.id),
     });
   }
@@ -313,4 +326,52 @@ export async function gatewayStatusCommand(
   }
 
   if (!ok) runtime.exit(1);
+}
+
+function inferSshTargetFromRemoteUrl(rawUrl?: string | null): string | null {
+  if (typeof rawUrl !== "string") return null;
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return null;
+  let host: string | null = null;
+  try {
+    host = new URL(trimmed).hostname || null;
+  } catch {
+    return null;
+  }
+  if (!host) return null;
+  const user = process.env.USER?.trim() || "";
+  return user ? `${user}@${host}` : host;
+}
+
+function buildSshTarget(input: { user?: string; host?: string; port?: number }): string | null {
+  const host = input.host?.trim() ?? "";
+  if (!host) return null;
+  const user = input.user?.trim() ?? "";
+  const base = user ? `${user}@${host}` : host;
+  const port = input.port ?? 22;
+  if (port && port !== 22) return `${base}:${port}`;
+  return base;
+}
+
+async function resolveSshTarget(
+  rawTarget: string,
+  identity: string | null,
+  overallTimeoutMs: number,
+): Promise<{ target: string; identity?: string } | null> {
+  const parsed = parseSshTarget(rawTarget);
+  if (!parsed) return null;
+  const config = await resolveSshConfig(parsed, {
+    identity: identity ?? undefined,
+    timeoutMs: Math.min(800, overallTimeoutMs),
+  });
+  if (!config) return { target: rawTarget, identity: identity ?? undefined };
+  const target = buildSshTarget({
+    user: config.user ?? parsed.user,
+    host: config.host ?? parsed.host,
+    port: config.port ?? parsed.port,
+  });
+  if (!target) return { target: rawTarget, identity: identity ?? undefined };
+  const identityFile =
+    identity ?? config.identityFiles.find((entry) => entry.trim().length > 0)?.trim() ?? undefined;
+  return { target, identity: identityFile };
 }

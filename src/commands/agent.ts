@@ -19,6 +19,7 @@ import {
 } from "../agents/model-selection.js";
 import { runEmbeddedPiAgent } from "../agents/pi-embedded.js";
 import { buildWorkspaceSkillSnapshot } from "../agents/skills.js";
+import { getSkillsSnapshotVersion } from "../agents/skills/refresh.js";
 import { resolveAgentTimeoutMs } from "../agents/timeout.js";
 import { ensureAgentWorkspace } from "../agents/workspace.js";
 import {
@@ -36,13 +37,14 @@ import {
   resolveAgentIdFromSessionKey,
   resolveSessionFilePath,
   type SessionEntry,
-  saveSessionStore,
+  updateSessionStore,
 } from "../config/sessions.js";
 import {
   clearAgentRunContext,
   emitAgentEvent,
   registerAgentRunContext,
 } from "../infra/agent-events.js";
+import { getRemoteSkillEligibility } from "../infra/skills-remote.js";
 import { defaultRuntime, type RuntimeEnv } from "../runtime.js";
 import { applyVerboseOverride } from "../sessions/level-overrides.js";
 import { resolveSendPolicy } from "../sessions/send-policy.js";
@@ -91,7 +93,7 @@ export async function agentCommand(
 
   const verboseOverride = normalizeVerboseLevel(opts.verbose);
   if (opts.verbose && !verboseOverride) {
-    throw new Error('Invalid verbose level. Use "on" or "off".');
+    throw new Error('Invalid verbose level. Use "on", "full", or "off".');
   }
 
   const timeoutSecondsRaw =
@@ -157,8 +159,13 @@ export async function agentCommand(
     }
 
     const needsSkillsSnapshot = isNewSession || !sessionEntry?.skillsSnapshot;
+    const skillsSnapshotVersion = getSkillsSnapshotVersion(workspaceDir);
     const skillsSnapshot = needsSkillsSnapshot
-      ? buildWorkspaceSkillSnapshot(workspaceDir, { config: cfg })
+      ? buildWorkspaceSkillSnapshot(workspaceDir, {
+          config: cfg,
+          eligibility: { remote: getRemoteSkillEligibility() },
+          snapshotVersion: skillsSnapshotVersion,
+        })
       : sessionEntry?.skillsSnapshot;
 
     if (skillsSnapshot && sessionStore && sessionKey && needsSkillsSnapshot) {
@@ -173,7 +180,9 @@ export async function agentCommand(
         skillsSnapshot,
       };
       sessionStore[sessionKey] = next;
-      await saveSessionStore(storePath, sessionStore);
+      await updateSessionStore(storePath, (store) => {
+        store[sessionKey] = next;
+      });
       sessionEntry = next;
     }
 
@@ -188,7 +197,9 @@ export async function agentCommand(
       }
       applyVerboseOverride(next, verboseOverride);
       sessionStore[sessionKey] = next;
-      await saveSessionStore(storePath, sessionStore);
+      await updateSessionStore(storePath, (store) => {
+        store[sessionKey] = next;
+      });
     }
 
     const agentModelPrimary = resolveAgentModelPrimary(cfg, sessionAgentId);
@@ -239,6 +250,7 @@ export async function agentCommand(
     }
 
     if (sessionEntry && sessionStore && sessionKey && hasStoredOverride) {
+      const entry = sessionEntry;
       const overrideProvider = sessionEntry.providerOverride?.trim() || defaultProvider;
       const overrideModel = sessionEntry.modelOverride?.trim();
       if (overrideModel) {
@@ -248,11 +260,13 @@ export async function agentCommand(
           allowedModelKeys.size > 0 &&
           !allowedModelKeys.has(key)
         ) {
-          delete sessionEntry.providerOverride;
-          delete sessionEntry.modelOverride;
-          sessionEntry.updatedAt = Date.now();
-          sessionStore[sessionKey] = sessionEntry;
-          await saveSessionStore(storePath, sessionStore);
+          delete entry.providerOverride;
+          delete entry.modelOverride;
+          entry.updatedAt = Date.now();
+          sessionStore[sessionKey] = entry;
+          await updateSessionStore(storePath, (store) => {
+            store[sessionKey] = entry;
+          });
         }
       }
     }
@@ -271,15 +285,23 @@ export async function agentCommand(
         model = storedModelOverride;
       }
     }
-    if (sessionEntry?.authProfileOverride) {
-      const store = ensureAuthProfileStore();
-      const profile = store.profiles[sessionEntry.authProfileOverride];
-      if (!profile || profile.provider !== provider) {
-        delete sessionEntry.authProfileOverride;
-        sessionEntry.updatedAt = Date.now();
-        if (sessionStore && sessionKey) {
-          sessionStore[sessionKey] = sessionEntry;
-          await saveSessionStore(storePath, sessionStore);
+    if (sessionEntry) {
+      const authProfileId = sessionEntry.authProfileOverride;
+      if (authProfileId) {
+        const entry = sessionEntry;
+        const store = ensureAuthProfileStore();
+        const profile = store.profiles[authProfileId];
+        if (!profile || profile.provider !== provider) {
+          delete entry.authProfileOverride;
+          delete entry.authProfileOverrideSource;
+          delete entry.authProfileOverrideCompactionCount;
+          entry.updatedAt = Date.now();
+          if (sessionStore && sessionKey) {
+            sessionStore[sessionKey] = entry;
+            await updateSessionStore(storePath, (store) => {
+              store[sessionKey] = entry;
+            });
+          }
         }
       }
     }
@@ -304,10 +326,13 @@ export async function agentCommand(
       }
       resolvedThinkLevel = "high";
       if (sessionEntry && sessionStore && sessionKey && sessionEntry.thinkingLevel === "xhigh") {
-        sessionEntry.thinkingLevel = "high";
-        sessionEntry.updatedAt = Date.now();
-        sessionStore[sessionKey] = sessionEntry;
-        await saveSessionStore(storePath, sessionStore);
+        const entry = sessionEntry;
+        entry.thinkingLevel = "high";
+        entry.updatedAt = Date.now();
+        sessionStore[sessionKey] = entry;
+        await updateSessionStore(storePath, (store) => {
+          store[sessionKey] = entry;
+        });
       }
     }
     const sessionFile = resolveSessionFilePath(sessionId, sessionEntry, {

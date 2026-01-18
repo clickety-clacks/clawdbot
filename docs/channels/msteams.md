@@ -3,20 +3,43 @@ summary: "Microsoft Teams bot support status, capabilities, and configuration"
 read_when:
   - Working on MS Teams channel features
 ---
-# Microsoft Teams (Bot Framework)
+# Microsoft Teams (plugin)
 
 > "Abandon all hope, ye who enter here."
 
 
-Updated: 2026-01-08
+Updated: 2026-01-16
 
 Status: text + DM attachments are supported; channel/group attachments require Microsoft Graph permissions. Polls are sent via Adaptive Cards.
 
+## Plugin required
+Microsoft Teams ships as a plugin and is not bundled with the core install.
+
+**Breaking change (2026.1.15):** MS Teams moved out of core. If you use it, you must install the plugin.
+
+Explainable: keeps core installs lighter and lets MS Teams dependencies update independently.
+
+Install via CLI (npm registry):
+```bash
+clawdbot plugins install @clawdbot/msteams
+```
+
+Local checkout (when running from a git repo):
+```bash
+clawdbot plugins install ./extensions/msteams
+```
+
+If you choose Teams during configure/onboarding and a git checkout is detected,
+Clawdbot will offer the local install path automatically.
+
+Details: [Plugins](/plugin)
+
 ## Quick setup (beginner)
-1) Create an **Azure Bot** (App ID + client secret + tenant ID).
-2) Configure Clawdbot with those credentials.
-3) Expose `/api/messages` (port 3978 by default) via a public URL or tunnel.
-4) Install the Teams app package and start the gateway.
+1) Install the Microsoft Teams plugin.
+2) Create an **Azure Bot** (App ID + client secret + tenant ID).
+3) Configure Clawdbot with those credentials.
+4) Expose `/api/messages` (port 3978 by default) via a public URL or tunnel.
+5) Install the Teams app package and start the gateway.
 
 Minimal config:
 ```json5
@@ -53,12 +76,13 @@ Disable with:
 
 **DM access**
 - Default: `channels.msteams.dmPolicy = "pairing"`. Unknown senders are ignored until approved.
-- `channels.msteams.allowFrom` accepts AAD object IDs or UPNs.
+- `channels.msteams.allowFrom` accepts AAD object IDs, UPNs, or display names (resolved at startup when Graph allows).
 
 **Group access**
-- Default: `channels.msteams.groupPolicy = "allowlist"` (blocked unless you add `groupAllowFrom`).
+- Default: `channels.msteams.groupPolicy = "allowlist"` (blocked unless you add `groupAllowFrom`). Use `channels.defaults.groupPolicy` to override the default when unset.
 - `channels.msteams.groupAllowFrom` controls which senders can trigger in group chats/channels (falls back to `channels.msteams.allowFrom`).
 - Set `groupPolicy: "open"` to allow any member (still mention‑gated by default).
+- To allow **no channels**, set `channels.msteams.groupPolicy: "disabled"`.
 
 Example:
 ```json5
@@ -72,12 +96,39 @@ Example:
 }
 ```
 
+**Teams + channel allowlist**
+- Scope group/channel replies by listing teams and channels under `channels.msteams.teams`.
+- Keys can be team IDs or names; channel keys can be conversation IDs or names.
+- When `groupPolicy="allowlist"` and a teams allowlist is present, only listed teams/channels are accepted (mention‑gated).
+- The configure wizard accepts `Team/Channel` entries and stores them for you.
+- On startup, Clawdbot resolves team/channel and user allowlist names to IDs (when Graph permissions allow)
+  and logs the mapping; unresolved entries are kept as typed.
+
+Example:
+```json5
+{
+  channels: {
+    msteams: {
+      groupPolicy: "allowlist",
+      teams: {
+        "My Team": {
+          channels: {
+            "General": { requireMention: true }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
 ## How it works
-1. Create an **Azure Bot** (App ID + secret + tenant ID).
-2. Build a **Teams app package** that references the bot and includes the RSC permissions below.
-3. Upload/install the Teams app into a team (or personal scope for DMs).
-4. Configure `msteams` in `~/.clawdbot/clawdbot.json` (or env vars) and start the gateway.
-5. The gateway listens for Bot Framework webhook traffic on `/api/messages` by default.
+1. Install the Microsoft Teams plugin.
+2. Create an **Azure Bot** (App ID + secret + tenant ID).
+3. Build a **Teams app package** that references the bot and includes the RSC permissions below.
+4. Upload/install the Teams app into a team (or personal scope for DMs).
+5. Configure `msteams` in `~/.clawdbot/clawdbot.json` (or env vars) and start the gateway.
+6. The gateway listens for Bot Framework webhook traffic on `/api/messages` by default.
 
 ## Azure Bot Setup (Prerequisites)
 
@@ -166,13 +217,17 @@ This is often easier than hand-editing JSON manifests.
 3. Check gateway logs for incoming activity
 
 ## Setup (minimal text-only)
-1. **Bot registration**
+1. **Install the Microsoft Teams plugin**
+   - From npm: `clawdbot plugins install @clawdbot/msteams`
+   - From a local checkout: `clawdbot plugins install ./extensions/msteams`
+
+2. **Bot registration**
    - Create an Azure Bot (see above) and note:
      - App ID
      - Client secret (App password)
      - Tenant ID (single-tenant)
 
-2. **Teams app manifest**
+3. **Teams app manifest**
    - Include a `bot` entry with `botId = <App ID>`.
    - Scopes: `personal`, `team`, `groupChat`.
    - `supportsFiles: true` (required for personal scope file handling).
@@ -180,7 +235,7 @@ This is often easier than hand-editing JSON manifests.
    - Create icons: `outline.png` (32x32) and `color.png` (192x192).
    - Zip all three files together: `manifest.json`, `outline.png`, `color.png`.
 
-3. **Configure Clawdbot**
+4. **Configure Clawdbot**
    ```json
    {
      "msteams": {
@@ -198,12 +253,12 @@ This is often easier than hand-editing JSON manifests.
    - `MSTEAMS_APP_PASSWORD`
    - `MSTEAMS_TENANT_ID`
 
-4. **Bot endpoint**
+5. **Bot endpoint**
    - Set the Azure Bot Messaging Endpoint to:
      - `https://<host>:3978/api/messages` (or your chosen path/port).
 
-5. **Run the gateway**
-   - The Teams channel starts automatically when `msteams` config exists and credentials are set.
+6. **Run the gateway**
+   - The Teams channel starts automatically when the plugin is installed and `msteams` config exists with credentials.
 
 ## History context
 - `channels.msteams.historyLimit` controls how many recent channel/group messages are wrapped into the prompt.
@@ -419,7 +474,7 @@ By default, Clawdbot only downloads media from Microsoft/Teams hostnames. Overri
 ## Polls (Adaptive Cards)
 Clawdbot sends Teams polls as Adaptive Cards (there is no native Teams poll API).
 
-- CLI: `clawdbot message poll --channel msteams --to conversation:<id> ...`
+- CLI: `clawdbot message poll --channel msteams --target conversation:<id> ...`
 - Votes are recorded by the gateway in `~/.clawdbot/msteams-polls.json`.
 - The gateway must stay online to record votes.
 - Polls do not auto-post result summaries yet (inspect the store file if needed).

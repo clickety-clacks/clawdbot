@@ -54,6 +54,38 @@ The macOS app presents itself as a node. Common commands:
 
 The node reports a `permissions` map so agents can decide what’s allowed.
 
+## Node run policy + allowlist
+
+`system.run` is controlled by the macOS app **Node Run Commands** policy:
+
+- `Always Ask`: prompt per command (default).
+- `Always Allow`: run without prompts.
+- `Never`: disable `system.run` (tool not advertised).
+
+The policy + allowlist live on the Mac in:
+
+```
+~/.clawdbot/macos-node.json
+```
+
+Schema:
+
+```json
+{
+  "systemRun": {
+    "policy": "ask",
+    "allowlist": [
+      "[\"/bin/echo\",\"hello\"]"
+    ]
+  }
+}
+```
+
+Notes:
+- `allowlist` entries are JSON-encoded argv arrays.
+- Choosing “Always Allow” in the prompt adds that command to the allowlist.
+- `system.run` environment overrides are filtered (drops `PATH`, `DYLD_*`, `LD_*`, `NODE_OPTIONS`, `PYTHON*`, `PERL*`, `RUBYOPT`) and then merged with the app’s environment.
+
 ## Deep links
 
 The app registers the `clawdbot://` URL scheme for local actions.
@@ -109,6 +141,32 @@ Options:
 Tip: compare against `pnpm clawdbot gateway discover --json` to see whether the
 macOS app’s discovery pipeline (NWBrowser + tailnet DNS‑SD fallback) differs from
 the Node CLI’s `dns-sd` based discovery.
+
+## Remote connection plumbing (SSH tunnels)
+
+When the macOS app runs in **Remote** mode, it opens SSH tunnels so local UI
+components can talk to a remote Gateway as if it were on localhost. There are
+two independent tunnels:
+
+### Control tunnel (Gateway control/WebSocket port)
+- **Purpose:** health checks, status, Web Chat, config, and other control-plane calls.
+- **Local port:** the Gateway port (default `18789`), always stable.
+- **Remote port:** the same Gateway port on the remote host.
+- **Behavior:** no random local port; the app reuses an existing healthy tunnel
+  or restarts it if needed.
+- **SSH shape:** `ssh -N -L <local>:127.0.0.1:<remote>` with BatchMode +
+  ExitOnForwardFailure + keepalive options.
+
+### Node bridge tunnel (macOS node mode)
+- **Purpose:** connect the macOS node to the Gateway **Bridge** protocol (TCP JSONL).
+- **Remote port:** `gatewayPort + 1` (default `18790`), derived from the Gateway port.
+- **Local port preference:** `CLAWDBOT_BRIDGE_PORT` or the default `18790`.
+- **Behavior:** prefer the default bridge port for consistency; fall back to a
+  random local port if the preferred one is busy. The node then connects to the
+  resolved local port.
+
+For setup steps, see [macOS remote access](/platforms/mac/remote). For protocol
+details, see [Bridge protocol](/gateway/bridge-protocol).
 
 ## Related docs
 

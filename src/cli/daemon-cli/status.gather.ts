@@ -112,9 +112,9 @@ export async function gatherDaemonStatus(
 ): Promise<DaemonStatus> {
   const service = resolveGatewayService();
   const [loaded, command, runtime] = await Promise.all([
-    service.isLoaded({ profile: process.env.CLAWDBOT_PROFILE }).catch(() => false),
+    service.isLoaded({ env: process.env }).catch(() => false),
     service.readCommand(process.env).catch(() => null),
-    service.readRuntime(process.env).catch(() => undefined),
+    service.readRuntime(process.env).catch((err) => ({ status: "unknown", detail: String(err) })),
   ]);
   const configAudit = await auditGatewayServiceConfig({
     env: process.env,

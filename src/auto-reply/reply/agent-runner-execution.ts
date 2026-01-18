@@ -9,23 +9,28 @@ import { runEmbeddedPiAgent } from "../../agents/pi-embedded.js";
 import {
   isCompactionFailureError,
   isContextOverflowError,
+  sanitizeUserFacingText,
 } from "../../agents/pi-embedded-helpers.js";
 import {
   resolveAgentIdFromSessionKey,
   resolveSessionTranscriptPath,
   type SessionEntry,
-  saveSessionStore,
+  updateSessionStore,
 } from "../../config/sessions.js";
 import { logVerbose } from "../../globals.js";
 import { emitAgentEvent, registerAgentRunContext } from "../../infra/agent-events.js";
 import { defaultRuntime } from "../../runtime.js";
+import {
+  isMarkdownCapableMessageChannel,
+  resolveMessageChannel,
+} from "../../utils/message-channel.js";
 import { stripHeartbeatToken } from "../heartbeat.js";
 import type { TemplateContext } from "../templating.js";
 import type { VerboseLevel } from "../thinking.js";
 import { isSilentReplyText, SILENT_REPLY_TOKEN } from "../tokens.js";
 import type { GetReplyOptions, ReplyPayload } from "../types.js";
 import { buildThreadingToolContext, resolveEnforceFinalTag } from "./agent-runner-utils.js";
-import type { BlockReplyPipeline } from "./block-reply-pipeline.js";
+import { createBlockReplyPayloadKey, type BlockReplyPipeline } from "./block-reply-pipeline.js";
 import type { FollowupRun } from "./queue.js";
 import { parseReplyDirectives } from "./reply-directives.js";
 import { applyReplyTagsToPayload, isRenderablePayload } from "./reply-payloads.js";
@@ -39,6 +44,8 @@ export type AgentRunLoopResult =
       fallbackModel?: string;
       didLogHeartbeatStrip: boolean;
       autoCompactionCompleted: boolean;
+      /** Payload keys sent directly (not via pipeline) during tool flush. */
+      directlySentBlockKeys?: Set<string>;
     }
   | { kind: "final"; payload: ReplyPayload };
 
@@ -58,8 +65,10 @@ export async function runAgentTurnWithFallback(params: {
   resolvedBlockStreamingBreak: "text_end" | "message_end";
   applyReplyToMode: (payload: ReplyPayload) => ReplyPayload;
   shouldEmitToolResult: () => boolean;
+  shouldEmitToolOutput: () => boolean;
   pendingToolTasks: Set<Promise<void>>;
   resetSessionAfterCompactionFailure: (reason: string) => Promise<boolean>;
+  resetSessionAfterRoleOrderingConflict: (reason: string) => Promise<boolean>;
   isHeartbeat: boolean;
   sessionKey?: string;
   getActiveSessionEntry: () => SessionEntry | undefined;
@@ -69,6 +78,8 @@ export async function runAgentTurnWithFallback(params: {
 }): Promise<AgentRunLoopResult> {
   let didLogHeartbeatStrip = false;
   let autoCompactionCompleted = false;
+  // Track payloads sent directly (not via pipeline) during tool flush to avoid duplicates.
+  const directlySentBlockKeys = new Set<string>();
 
   const runId = crypto.randomUUID();
   if (params.sessionKey) {
@@ -106,7 +117,10 @@ export async function runAgentTurnWithFallback(params: {
         if (isSilentReplyText(text, SILENT_REPLY_TOKEN)) {
           return { skip: true };
         }
-        return { text, skip: false };
+        if (!text) return { skip: true };
+        const sanitized = sanitizeUserFacingText(text);
+        if (!sanitized.trim()) return { skip: true };
+        return { text: sanitized, skip: false };
       };
       const handlePartialForTyping = async (payload: ReplyPayload): Promise<string | undefined> => {
         const { text, skip } = normalizeStreamingText(payload);
@@ -212,6 +226,14 @@ export async function runAgentTurnWithFallback(params: {
             thinkLevel: params.followupRun.run.thinkLevel,
             verboseLevel: params.followupRun.run.verboseLevel,
             reasoningLevel: params.followupRun.run.reasoningLevel,
+            toolResultFormat: (() => {
+              const channel = resolveMessageChannel(
+                params.sessionCtx.Surface,
+                params.sessionCtx.Provider,
+              );
+              if (!channel) return "markdown";
+              return isMarkdownCapableMessageChannel(channel) ? "markdown" : "plain";
+            })(),
             bashElevated: params.followupRun.run.bashElevated,
             timeoutMs: params.followupRun.run.timeoutMs,
             runId,
@@ -240,12 +262,13 @@ export async function runAgentTurnWithFallback(params: {
                     });
                   }
                 : undefined,
-            onAgentEvent: (evt) => {
-              // Trigger typing when tools start executing
+            onAgentEvent: async (evt) => {
+              // Trigger typing when tools start executing.
+              // Must await to ensure typing indicator starts before tool summaries are emitted.
               if (evt.stream === "tool") {
                 const phase = typeof evt.data.phase === "string" ? evt.data.phase : "";
                 if (phase === "start" || phase === "update") {
-                  void params.typingSignals.signalToolStart();
+                  await params.typingSignals.signalToolStart();
                 }
               }
               // Track auto-compaction completion
@@ -257,57 +280,67 @@ export async function runAgentTurnWithFallback(params: {
                 }
               }
             },
-            onBlockReply:
-              params.blockStreamingEnabled && params.opts?.onBlockReply
-                ? async (payload) => {
-                    const { text, skip } = normalizeStreamingText(payload);
-                    const hasPayloadMedia = (payload.mediaUrls?.length ?? 0) > 0;
-                    if (skip && !hasPayloadMedia) return;
-                    const taggedPayload = applyReplyTagsToPayload(
-                      {
-                        text,
-                        mediaUrls: payload.mediaUrls,
-                        mediaUrl: payload.mediaUrls?.[0],
-                      },
-                      params.sessionCtx.MessageSid,
-                    );
-                    // Let through payloads with audioAsVoice flag even if empty (need to track it)
-                    if (!isRenderablePayload(taggedPayload) && !payload.audioAsVoice) return;
-                    const parsed = parseReplyDirectives(taggedPayload.text ?? "", {
-                      currentMessageId: params.sessionCtx.MessageSid,
-                      silentToken: SILENT_REPLY_TOKEN,
+            // Always pass onBlockReply so flushBlockReplyBuffer works before tool execution,
+            // even when regular block streaming is disabled. The handler sends directly
+            // via opts.onBlockReply when the pipeline isn't available.
+            onBlockReply: params.opts?.onBlockReply
+              ? async (payload) => {
+                  const { text, skip } = normalizeStreamingText(payload);
+                  const hasPayloadMedia = (payload.mediaUrls?.length ?? 0) > 0;
+                  if (skip && !hasPayloadMedia) return;
+                  const taggedPayload = applyReplyTagsToPayload(
+                    {
+                      text,
+                      mediaUrls: payload.mediaUrls,
+                      mediaUrl: payload.mediaUrls?.[0],
+                    },
+                    params.sessionCtx.MessageSid,
+                  );
+                  // Let through payloads with audioAsVoice flag even if empty (need to track it)
+                  if (!isRenderablePayload(taggedPayload) && !payload.audioAsVoice) return;
+                  const parsed = parseReplyDirectives(taggedPayload.text ?? "", {
+                    currentMessageId: params.sessionCtx.MessageSid,
+                    silentToken: SILENT_REPLY_TOKEN,
+                  });
+                  const cleaned = parsed.text || undefined;
+                  const hasRenderableMedia =
+                    Boolean(taggedPayload.mediaUrl) || (taggedPayload.mediaUrls?.length ?? 0) > 0;
+                  // Skip empty payloads unless they have audioAsVoice flag (need to track it)
+                  if (
+                    !cleaned &&
+                    !hasRenderableMedia &&
+                    !payload.audioAsVoice &&
+                    !parsed.audioAsVoice
+                  )
+                    return;
+                  if (parsed.isSilent && !hasRenderableMedia) return;
+
+                  const blockPayload: ReplyPayload = params.applyReplyToMode({
+                    ...taggedPayload,
+                    text: cleaned,
+                    audioAsVoice: Boolean(parsed.audioAsVoice || payload.audioAsVoice),
+                    replyToId: taggedPayload.replyToId ?? parsed.replyToId,
+                    replyToTag: taggedPayload.replyToTag || parsed.replyToTag,
+                    replyToCurrent: taggedPayload.replyToCurrent || parsed.replyToCurrent,
+                  });
+
+                  void params.typingSignals
+                    .signalTextDelta(cleaned ?? taggedPayload.text)
+                    .catch((err) => {
+                      logVerbose(`block reply typing signal failed: ${String(err)}`);
                     });
-                    const cleaned = parsed.text || undefined;
-                    const hasRenderableMedia =
-                      Boolean(taggedPayload.mediaUrl) || (taggedPayload.mediaUrls?.length ?? 0) > 0;
-                    // Skip empty payloads unless they have audioAsVoice flag (need to track it)
-                    if (
-                      !cleaned &&
-                      !hasRenderableMedia &&
-                      !payload.audioAsVoice &&
-                      !parsed.audioAsVoice
-                    )
-                      return;
-                    if (parsed.isSilent && !hasRenderableMedia) return;
 
-                    const blockPayload: ReplyPayload = params.applyReplyToMode({
-                      ...taggedPayload,
-                      text: cleaned,
-                      audioAsVoice: Boolean(parsed.audioAsVoice || payload.audioAsVoice),
-                      replyToId: taggedPayload.replyToId ?? parsed.replyToId,
-                      replyToTag: taggedPayload.replyToTag || parsed.replyToTag,
-                      replyToCurrent: taggedPayload.replyToCurrent || parsed.replyToCurrent,
-                    });
-
-                    void params.typingSignals
-                      .signalTextDelta(cleaned ?? taggedPayload.text)
-                      .catch((err) => {
-                        logVerbose(`block reply typing signal failed: ${String(err)}`);
-                      });
-
-                    params.blockReplyPipeline?.enqueue(blockPayload);
+                  // Use pipeline if available (block streaming enabled), otherwise send directly
+                  if (params.blockStreamingEnabled && params.blockReplyPipeline) {
+                    params.blockReplyPipeline.enqueue(blockPayload);
+                  } else {
+                    // Send directly when flushing before tool execution (no streaming).
+                    // Track sent key to avoid duplicate in final payloads.
+                    directlySentBlockKeys.add(createBlockReplyPayloadKey(blockPayload));
+                    await params.opts?.onBlockReply?.(blockPayload);
                   }
-                : undefined,
+                }
+              : undefined,
             onBlockReplyFlush:
               params.blockStreamingEnabled && blockReplyPipeline
                 ? async () => {
@@ -315,6 +348,7 @@ export async function runAgentTurnWithFallback(params: {
                   }
                 : undefined,
             shouldEmitToolResult: params.shouldEmitToolResult,
+            shouldEmitToolOutput: params.shouldEmitToolOutput,
             onToolResult: onToolResult
               ? (payload) => {
                   // `subscribeEmbeddedPiSession` may invoke tool callbacks without awaiting them.
@@ -357,6 +391,17 @@ export async function runAgentTurnWithFallback(params: {
         didResetAfterCompactionFailure = true;
         continue;
       }
+      if (embeddedError?.kind === "role_ordering") {
+        const didReset = await params.resetSessionAfterRoleOrderingConflict(embeddedError.message);
+        if (didReset) {
+          return {
+            kind: "final",
+            payload: {
+              text: "⚠️ Message ordering conflict. I've reset the conversation - please try again.",
+            },
+          };
+        }
+      }
 
       break;
     } catch (err) {
@@ -366,6 +411,7 @@ export async function runAgentTurnWithFallback(params: {
         /context.*overflow|too large|context window/i.test(message);
       const isCompactionFailure = isCompactionFailureError(message);
       const isSessionCorruption = /function call turn comes immediately after/i.test(message);
+      const isRoleOrderingError = /incorrect role information|roles must alternate/i.test(message);
 
       if (
         isCompactionFailure &&
@@ -375,6 +421,17 @@ export async function runAgentTurnWithFallback(params: {
         didResetAfterCompactionFailure = true;
         continue;
       }
+      if (isRoleOrderingError) {
+        const didReset = await params.resetSessionAfterRoleOrderingConflict(message);
+        if (didReset) {
+          return {
+            kind: "final",
+            payload: {
+              text: "⚠️ Message ordering conflict. I've reset the conversation - please try again.",
+            },
+          };
+        }
+      }
 
       // Auto-recover from Gemini session corruption by resetting the session
       if (
@@ -383,6 +440,7 @@ export async function runAgentTurnWithFallback(params: {
         params.activeSessionStore &&
         params.storePath
       ) {
+        const sessionKey = params.sessionKey;
         const corruptedSessionId = params.getActiveSessionEntry()?.sessionId;
         defaultRuntime.error(
           `Session history corrupted (Gemini function call ordering). Resetting session: ${params.sessionKey}`,
@@ -399,9 +457,13 @@ export async function runAgentTurnWithFallback(params: {
             }
           }
 
-          // Remove session entry from store
-          delete params.activeSessionStore[params.sessionKey];
-          await saveSessionStore(params.storePath, params.activeSessionStore);
+          // Keep the in-memory snapshot consistent with the on-disk store reset.
+          delete params.activeSessionStore[sessionKey];
+
+          // Remove session entry from store using a fresh, locked snapshot.
+          await updateSessionStore(params.storePath, (store) => {
+            delete store[sessionKey];
+          });
         } catch (cleanupErr) {
           defaultRuntime.error(
             `Failed to reset corrupted session ${params.sessionKey}: ${String(cleanupErr)}`,
@@ -422,7 +484,9 @@ export async function runAgentTurnWithFallback(params: {
         payload: {
           text: isContextOverflow
             ? "⚠️ Context overflow — prompt too large for this model. Try a shorter message or a larger-context model."
-            : `⚠️ Agent failed before reply: ${message}. Check gateway logs for details.`,
+            : isRoleOrderingError
+              ? "⚠️ Message ordering conflict - please try again. If this persists, use /new to start a fresh session."
+              : `⚠️ Agent failed before reply: ${message}. Check gateway logs for details.`,
         },
       };
     }
@@ -435,5 +499,6 @@ export async function runAgentTurnWithFallback(params: {
     fallbackModel,
     didLogHeartbeatStrip,
     autoCompactionCompleted,
+    directlySentBlockKeys: directlySentBlockKeys.size > 0 ? directlySentBlockKeys : undefined,
   };
 }

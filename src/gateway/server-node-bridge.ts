@@ -1,5 +1,9 @@
 import type { NodeBridgeServer } from "../infra/bridge/server.js";
 import { startNodeBridgeServer } from "../infra/bridge/server.js";
+import type { BridgeTlsRuntime } from "../infra/bridge/server/tls.js";
+import type { ClawdbotConfig } from "../config/config.js";
+import { bumpSkillsSnapshotVersion } from "../agents/skills/refresh.js";
+import { recordRemoteNodeInfo, refreshRemoteNodeBins } from "../infra/skills-remote.js";
 import { listSystemPresence, upsertPresence } from "../infra/system-presence.js";
 import { loadVoiceWakeConfig } from "../infra/voicewake.js";
 import { isLoopbackAddress } from "./net.js";
@@ -16,9 +20,11 @@ export type GatewayNodeBridgeRuntime = {
 };
 
 export async function startGatewayNodeBridge(params: {
+  cfg: ClawdbotConfig;
   bridgeEnabled: boolean;
   bridgePort: number;
   bridgeHost: string | null;
+  bridgeTls?: BridgeTlsRuntime;
   machineDisplayName: string;
   canvasHostPort?: number;
   canvasHostHost?: string;
@@ -107,6 +113,7 @@ export async function startGatewayNodeBridge(params: {
       const started = await startNodeBridgeServer({
         host: params.bridgeHost,
         port: params.bridgePort,
+        tls: params.bridgeTls?.tlsOptions,
         serverName: params.machineDisplayName,
         canvasHostPort: params.canvasHostPort,
         canvasHostHost: params.canvasHostHost,
@@ -114,6 +121,21 @@ export async function startGatewayNodeBridge(params: {
         onAuthenticated: async (node) => {
           beaconNodePresence(node, "node-connected");
           startNodePresenceTimer(node);
+          recordRemoteNodeInfo({
+            nodeId: node.nodeId,
+            displayName: node.displayName,
+            platform: node.platform,
+            deviceFamily: node.deviceFamily,
+            commands: node.commands,
+          });
+          bumpSkillsSnapshotVersion({ reason: "remote-node" });
+          await refreshRemoteNodeBins({
+            nodeId: node.nodeId,
+            platform: node.platform,
+            deviceFamily: node.deviceFamily,
+            commands: node.commands,
+            cfg: params.cfg,
+          });
 
           try {
             const cfg = await loadVoiceWakeConfig();
@@ -139,7 +161,10 @@ export async function startGatewayNodeBridge(params: {
         },
       });
       if (started.port > 0) {
-        params.logBridge.info(`listening on tcp://${params.bridgeHost}:${started.port} (node)`);
+        const scheme = params.bridgeTls?.enabled ? "tls" : "tcp";
+        params.logBridge.info(
+          `listening on ${scheme}://${params.bridgeHost}:${started.port} (node)`,
+        );
         return { bridge: started, nodePresenceTimers };
       }
     } catch (err) {

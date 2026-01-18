@@ -1,5 +1,5 @@
 ---
-summary: "Fix Chrome/Chromium CDP startup issues for Clawdbot browser control on Linux"
+summary: "Fix Chrome/Brave/Edge/Chromium CDP startup issues for Clawdbot browser control on Linux"
 read_when: "Browser control fails on Linux, especially with snap Chromium"
 ---
 
@@ -7,7 +7,7 @@ read_when: "Browser control fails on Linux, especially with snap Chromium"
 
 ## Problem: "Failed to start Chrome CDP on port 18800"
 
-Clawdbot's browser control server fails to launch Chrome/Chromium with the error:
+Clawdbot's browser control server fails to launch Chrome/Brave/Edge/Chromium with the error:
 ```
 {"error":"Error: Failed to start Chrome CDP on port 18800 for profile \"clawd\"."}
 ```
@@ -107,8 +107,23 @@ curl -s http://127.0.0.1:18791/tabs
 | Option | Description | Default |
 |--------|-------------|---------|
 | `browser.enabled` | Enable browser control | `true` |
-| `browser.executablePath` | Path to Chrome/Chromium binary | auto-detected |
+| `browser.executablePath` | Path to a Chromium-based browser binary (Chrome/Brave/Edge/Chromium) | auto-detected (prefers default browser when Chromium-based) |
 | `browser.headless` | Run without GUI | `false` |
 | `browser.noSandbox` | Add `--no-sandbox` flag (needed for some Linux setups) | `false` |
 | `browser.attachOnly` | Don't launch browser, only attach to existing | `false` |
 | `browser.cdpPort` | Chrome DevTools Protocol port | `18800` |
+
+### Problem: "Chrome extension relay is running, but no tab is connected"
+
+You’re using the `chrome` profile (extension relay). It expects the Clawdbot
+browser extension to be attached to a live tab.
+
+Fix options:
+1. **Use the managed browser:** `clawdbot browser start --browser-profile clawd`
+   (or set `browser.defaultProfile: "clawd"`).
+2. **Use the extension relay:** install the extension, open a tab, and click the
+   Clawdbot extension icon to attach it.
+
+Notes:
+- The `chrome` profile uses your **system default Chromium browser** when possible.
+- Local `clawd` profiles auto-assign `cdpPort`/`cdpUrl`; only set those for remote CDP.

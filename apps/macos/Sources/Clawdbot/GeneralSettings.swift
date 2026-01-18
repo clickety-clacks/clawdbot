@@ -83,6 +83,8 @@ struct GeneralSettings: View {
                         subtitle: "Allow the agent to capture a photo or short video via the built-in camera.",
                         binding: self.$cameraEnabled)
 
+                    SystemRunSettingsView()
+
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Location Access")
                             .font(.body)
@@ -92,7 +94,8 @@ struct GeneralSettings: View {
                             Text("While Using").tag(ClawdbotLocationMode.whileUsing.rawValue)
                             Text("Always").tag(ClawdbotLocationMode.always.rawValue)
                         }
-                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .pickerStyle(.menu)
 
                         Toggle("Precise Location", isOn: self.$locationPreciseEnabled)
                             .disabled(self.locationMode == .off)
@@ -238,7 +241,7 @@ struct GeneralSettings: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(self.remoteStatus == .checking || self.state.remoteTarget
-                            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
 
             GatewayDiscoveryInlineList(
@@ -627,8 +630,8 @@ extension GeneralSettings {
         let originalMode = AppStateStore.shared.connectionMode
         do {
             try await ControlChannel.shared.configure(mode: .remote(
-                                                        target: settings.target,
-                                                        identity: settings.identity))
+                target: settings.target,
+                identity: settings.identity))
             let data = try await ControlChannel.shared.health(timeout: 10)
             if decodeHealthSnapshot(from: data) != nil {
                 self.remoteStatus = .ok

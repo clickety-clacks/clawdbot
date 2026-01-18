@@ -30,6 +30,7 @@ export type NodePairingPairedNode = {
   modelIdentifier?: string;
   caps?: string[];
   commands?: string[];
+  bins?: string[];
   permissions?: Record<string, boolean>;
   remoteIp?: string;
   createdAtMs: number;
@@ -72,7 +73,17 @@ async function writeJSONAtomic(filePath: string, value: unknown) {
   await fs.mkdir(dir, { recursive: true });
   const tmp = `${filePath}.${randomUUID()}.tmp`;
   await fs.writeFile(tmp, JSON.stringify(value, null, 2), "utf8");
+  try {
+    await fs.chmod(tmp, 0o600);
+  } catch {
+    // best-effort; ignore on platforms without chmod
+  }
   await fs.rename(tmp, filePath);
+  try {
+    await fs.chmod(filePath, 0o600);
+  } catch {
+    // best-effort; ignore on platforms without chmod
+  }
 }
 
 function pruneExpiredPending(
@@ -272,6 +283,7 @@ export async function updatePairedNodeMetadata(
       remoteIp: patch.remoteIp ?? existing.remoteIp,
       caps: patch.caps ?? existing.caps,
       commands: patch.commands ?? existing.commands,
+      bins: patch.bins ?? existing.bins,
       permissions: patch.permissions ?? existing.permissions,
     };
 

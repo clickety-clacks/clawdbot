@@ -1,6 +1,9 @@
+import type { NormalizedChatType } from "../channels/chat-type.js";
+
 export type ReplyMode = "text" | "command";
 export type TypingMode = "never" | "instant" | "thinking" | "message";
 export type SessionScope = "per-sender" | "global";
+export type DmScope = "main" | "per-peer" | "per-channel-peer";
 export type ReplyToMode = "off" | "first" | "all";
 export type GroupPolicy = "open" | "disabled" | "allowlist";
 export type DmPolicy = "pairing" | "allowlist" | "open" | "disabled";
@@ -40,7 +43,7 @@ export type HumanDelayConfig = {
 export type SessionSendPolicyAction = "allow" | "deny";
 export type SessionSendPolicyMatch = {
   channel?: string;
-  chatType?: "direct" | "group" | "room";
+  chatType?: NormalizedChatType;
   keyPrefix?: string;
 };
 export type SessionSendPolicyRule = {
@@ -54,6 +57,10 @@ export type SessionSendPolicyConfig = {
 
 export type SessionConfig = {
   scope?: SessionScope;
+  /** DM session scoping (default: "main"). */
+  dmScope?: DmScope;
+  /** Map platform-prefixed identities (e.g. "telegram:123") to canonical DM peers. */
+  identityLinks?: Record<string, string[]>;
   resetTriggers?: string[];
   idleMinutes?: number;
   heartbeatIdleMinutes?: number;

@@ -25,10 +25,10 @@ import {
   loadSessionStore,
   resolveStorePath,
   type SessionEntry,
-  saveSessionStore,
+  updateSessionStore,
 } from "../../config/sessions.js";
 import {
-  formatUsageSummaryLine,
+  formatUsageWindowSummary,
   loadProviderUsageSummary,
   resolveUsageProviderId,
 } from "../../infra/provider-usage.js";
@@ -257,13 +257,19 @@ export function createSessionStatusTool(opts?: {
           delete nextEntry.providerOverride;
           delete nextEntry.modelOverride;
           delete nextEntry.authProfileOverride;
+          delete nextEntry.authProfileOverrideSource;
+          delete nextEntry.authProfileOverrideCompactionCount;
         } else {
           nextEntry.providerOverride = selection.provider;
           nextEntry.modelOverride = selection.model;
           delete nextEntry.authProfileOverride;
+          delete nextEntry.authProfileOverrideSource;
+          delete nextEntry.authProfileOverrideCompactionCount;
         }
         store[resolved.key] = nextEntry;
-        await saveSessionStore(storePath, store);
+        await updateSessionStore(storePath, (nextStore) => {
+          nextStore[resolved.key] = nextEntry;
+        });
         resolved.entry = nextEntry;
         changedModel = true;
       }
@@ -284,10 +290,17 @@ export function createSessionStatusTool(opts?: {
             providers: [usageProvider],
             agentDir,
           });
-          const formatted = formatUsageSummaryLine(usageSummary, {
-            now: Date.now(),
-          });
-          if (formatted) usageLine = formatted;
+          const snapshot = usageSummary.providers.find((entry) => entry.provider === usageProvider);
+          if (snapshot) {
+            const formatted = formatUsageWindowSummary(snapshot, {
+              now: Date.now(),
+              maxWindows: 2,
+              includeResets: true,
+            });
+            if (formatted && !formatted.startsWith("error:")) {
+              usageLine = `📊 Usage: ${formatted}`;
+            }
+          }
         } catch {
           // ignore
         }
@@ -295,8 +308,7 @@ export function createSessionStatusTool(opts?: {
 
       const isGroup =
         resolved.entry.chatType === "group" ||
-        resolved.entry.chatType === "room" ||
-        resolved.key.startsWith("group:") ||
+        resolved.entry.chatType === "channel" ||
         resolved.key.includes(":group:") ||
         resolved.key.includes(":channel:");
       const groupActivation = isGroup

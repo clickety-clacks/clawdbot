@@ -1,8 +1,10 @@
-import type { ChannelDock, ChannelPlugin } from "../../src/channels/plugins/types.js";
-import type { ChannelAccountSnapshot } from "../../src/channels/plugins/types.js";
+import type { ChannelAccountSnapshot } from "../../../src/channels/plugins/types.js";
+import type { ChannelDock, ChannelPlugin } from "../../../src/channels/plugins/types.js";
+import { buildChannelConfigSchema } from "../../../src/channels/plugins/config-schema.js";
 
 import { listZaloAccountIds, resolveDefaultZaloAccountId, resolveZaloAccount, type ResolvedZaloAccount } from "./accounts.js";
 import { zaloMessageActions } from "./actions.js";
+import { ZaloConfigSchema } from "./config-schema.js";
 import {
   deleteAccountFromConfigSection,
   setAccountEnabledInConfigSection,
@@ -81,6 +83,7 @@ export const zaloPlugin: ChannelPlugin<ResolvedZaloAccount> = {
     blockStreaming: true,
   },
   reload: { configPrefixes: ["channels.zalo"] },
+  configSchema: buildChannelConfigSchema(ZaloConfigSchema),
   config: {
     listAccountIds: (cfg) => listZaloAccountIds(cfg as CoreConfig),
     resolveAccount: (cfg, accountId) => resolveZaloAccount({ cfg: cfg as CoreConfig, accountId }),
@@ -147,6 +150,34 @@ export const zaloPlugin: ChannelPlugin<ResolvedZaloAccount> = {
   actions: zaloMessageActions,
   messaging: {
     normalizeTarget: normalizeZaloMessagingTarget,
+    targetResolver: {
+      looksLikeId: (raw) => {
+        const trimmed = raw.trim();
+        if (!trimmed) return false;
+        return /^\d{3,}$/.test(trimmed);
+      },
+      hint: "<chatId>",
+    },
+  },
+  directory: {
+    self: async () => null,
+    listPeers: async ({ cfg, accountId, query, limit }) => {
+      const account = resolveZaloAccount({ cfg: cfg as CoreConfig, accountId });
+      const q = query?.trim().toLowerCase() || "";
+      const peers = Array.from(
+        new Set(
+          (account.config.allowFrom ?? [])
+            .map((entry) => String(entry).trim())
+            .filter((entry) => Boolean(entry) && entry !== "*")
+            .map((entry) => entry.replace(/^(zalo|zl):/i, "")),
+        ),
+      )
+        .filter((id) => (q ? id.toLowerCase().includes(q) : true))
+        .slice(0, limit && limit > 0 ? limit : undefined)
+        .map((id) => ({ kind: "user", id }) as const);
+      return peers;
+    },
+    listGroups: async () => [],
   },
   setup: {
     resolveAccountId: ({ accountId }) => normalizeAccountId(accountId),
@@ -162,7 +193,7 @@ export const zaloPlugin: ChannelPlugin<ResolvedZaloAccount> = {
         return "ZALO_BOT_TOKEN can only be used for the default account.";
       }
       if (!input.useEnv && !input.token && !input.tokenFile) {
-        return "Zalo requires --token or --token-file (or --use-env).";
+        return "Zalo requires token or --token-file (or --use-env).";
       }
       return null;
     },
@@ -256,16 +287,6 @@ export const zaloPlugin: ChannelPlugin<ResolvedZaloAccount> = {
       return chunks;
     },
     textChunkLimit: 2000,
-    resolveTarget: ({ to }) => {
-      const trimmed = to?.trim();
-      if (!trimmed) {
-        return {
-          ok: false,
-          error: new Error("Delivering to Zalo requires --to <chatId>"),
-        };
-      }
-      return { ok: true, to: trimmed };
-    },
     sendText: async ({ to, text, accountId, cfg }) => {
       const result = await sendMessageZalo(to, text, {
         accountId: accountId ?? undefined,

@@ -12,6 +12,7 @@ import {
   rpcReq,
   startServerWithClient,
   testState,
+  writeSessionStore,
 } from "./test-helpers.js";
 
 installGatewayTestHooks();
@@ -106,22 +107,16 @@ describe("gateway server chat", () => {
       },
     };
 
-    await fs.writeFile(
-      testState.sessionStorePath,
-      JSON.stringify(
-        {
-          "discord:group:dev": {
-            sessionId: "sess-discord",
-            updatedAt: Date.now(),
-            chatType: "group",
-            channel: "discord",
-          },
+    await writeSessionStore({
+      entries: {
+        "discord:group:dev": {
+          sessionId: "sess-discord",
+          updatedAt: Date.now(),
+          chatType: "group",
+          channel: "discord",
         },
-        null,
-        2,
-      ),
-      "utf-8",
-    );
+      },
+    });
 
     const { server, ws } = await startServerWithClient();
     await connectOk(ws);
@@ -148,20 +143,14 @@ describe("gateway server chat", () => {
       },
     };
 
-    await fs.writeFile(
-      testState.sessionStorePath,
-      JSON.stringify(
-        {
-          "cron:job-1": {
-            sessionId: "sess-cron",
-            updatedAt: Date.now(),
-          },
+    await writeSessionStore({
+      entries: {
+        "cron:job-1": {
+          sessionId: "sess-cron",
+          updatedAt: Date.now(),
         },
-        null,
-        2,
-      ),
-      "utf-8",
-    );
+      },
+    });
 
     const { server, ws } = await startServerWithClient();
     await connectOk(ws);
@@ -236,20 +225,14 @@ describe("gateway server chat", () => {
 
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-gw-"));
     testState.sessionStorePath = path.join(dir, "sessions.json");
-    await fs.writeFile(
-      testState.sessionStorePath,
-      JSON.stringify(
-        {
-          main: {
-            sessionId: "sess-main",
-            updatedAt: Date.now(),
-          },
+    await writeSessionStore({
+      entries: {
+        main: {
+          sessionId: "sess-main",
+          updatedAt: Date.now(),
         },
-        null,
-        2,
-      ),
-      "utf-8",
-    );
+      },
+    });
 
     const lines: string[] = [];
     for (let i = 0; i < 300; i += 1) {
@@ -349,21 +332,15 @@ describe("gateway server chat", () => {
       "utf-8",
     );
 
-    await fs.writeFile(
-      testState.sessionStorePath,
-      JSON.stringify(
-        {
-          main: {
-            sessionId: "sess-main",
-            sessionFile: forkedPath,
-            updatedAt: Date.now(),
-          },
+    await writeSessionStore({
+      entries: {
+        main: {
+          sessionId: "sess-main",
+          sessionFile: forkedPath,
+          updatedAt: Date.now(),
         },
-        null,
-        2,
-      ),
-      "utf-8",
-    );
+      },
+    });
 
     const { server, ws } = await startServerWithClient();
     await connectOk(ws);
@@ -381,6 +358,54 @@ describe("gateway server chat", () => {
     await server.close();
   });
 
+  test("chat.inject appends to the session transcript", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-gw-"));
+    testState.sessionStorePath = path.join(dir, "sessions.json");
+    const transcriptPath = path.join(dir, "sess-main.jsonl");
+
+    await fs.writeFile(
+      transcriptPath,
+      `${JSON.stringify({
+        type: "message",
+        id: "m1",
+        timestamp: new Date().toISOString(),
+        message: { role: "user", content: [{ type: "text", text: "seed" }], timestamp: Date.now() },
+      })}\n`,
+      "utf-8",
+    );
+
+    await writeSessionStore({
+      entries: {
+        main: {
+          sessionId: "sess-main",
+          updatedAt: Date.now(),
+        },
+      },
+    });
+
+    const { server, ws } = await startServerWithClient();
+    await connectOk(ws);
+
+    const res = await rpcReq<{ messageId?: string }>(ws, "chat.inject", {
+      sessionKey: "main",
+      message: "injected text",
+      label: "note",
+    });
+    expect(res.ok).toBe(true);
+
+    const raw = await fs.readFile(transcriptPath, "utf-8");
+    const lines = raw.split(/\r?\n/).filter(Boolean);
+    expect(lines.length).toBe(2);
+    const last = JSON.parse(lines[1]) as {
+      message?: { role?: string; content?: Array<{ text?: string }> };
+    };
+    expect(last.message?.role).toBe("assistant");
+    expect(last.message?.content?.[0]?.text).toContain("injected text");
+
+    ws.close();
+    await server.close();
+  });
+
   test("chat.history defaults thinking to low for reasoning-capable models", async () => {
     piSdkMock.enabled = true;
     piSdkMock.models = [
@@ -393,20 +418,14 @@ describe("gateway server chat", () => {
     ];
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-gw-"));
     testState.sessionStorePath = path.join(dir, "sessions.json");
-    await fs.writeFile(
-      testState.sessionStorePath,
-      JSON.stringify(
-        {
-          main: {
-            sessionId: "sess-main",
-            updatedAt: Date.now(),
-          },
+    await writeSessionStore({
+      entries: {
+        main: {
+          sessionId: "sess-main",
+          updatedAt: Date.now(),
         },
-        null,
-        2,
-      ),
-      "utf-8",
-    );
+      },
+    });
     await fs.writeFile(
       path.join(dir, "sess-main.jsonl"),
       JSON.stringify({

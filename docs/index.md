@@ -66,7 +66,7 @@ Most operations flow through the **Gateway** (`clawdbot gateway`), a single long
 
 ## Network model
 
-- **One Gateway per host**: it is the only process allowed to own the WhatsApp Web session.
+- **One Gateway per host (recommended)**: it is the only process allowed to own the WhatsApp Web session. If you need a rescue bot or strict isolation, run multiple gateways with isolated profiles and ports; see [Multiple gateways](/gateway/multiple-gateways).
 - **Loopback-first**: Gateway WS defaults to `ws://127.0.0.1:18789`.
   - The wizard now generates a gateway token by default (even for loopback).
   - For Tailnet access, run `clawdbot gateway --bind tailnet --token ...` (token is required for non-loopback binds).
@@ -137,7 +137,7 @@ clawdbot gateway --port 19001
 Send a test message (requires a running Gateway):
 
 ```bash
-clawdbot message send --to +15555550123 --message "Hello from Clawdbot"
+clawdbot message send --target +15555550123 --message "Hello from Clawdbot"
 ```
 
 ## Configuration (optional)
@@ -165,7 +165,7 @@ Example:
 
 - Start here:
   - [Docs hubs (all pages linked)](/start/hubs)
-  - [FAQ](/start/faq) ← *common questions answered*
+  - [Help](/help) ← *common fixes + troubleshooting*
   - [Configuration](/gateway/configuration)
   - [Configuration examples](/gateway/configuration-examples)
   - [Slash commands](/tools/slash-commands)

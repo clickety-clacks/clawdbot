@@ -103,6 +103,8 @@ export type AgentDefaultsConfig = {
   bootstrapMaxChars?: number;
   /** Optional IANA timezone for the user (used in system prompt; defaults to host timezone). */
   userTimezone?: string;
+  /** Time format in system prompt: auto (OS preference), 12-hour, or 24-hour. */
+  timeFormat?: "auto" | "12" | "24";
   /** Optional display-only context window override (used for % in status UIs). */
   contextTokens?: number;
   /** Optional CLI backends for text-only fallback (claude-cli, etc.). */
@@ -116,7 +118,7 @@ export type AgentDefaultsConfig = {
   /** Default thinking level when no /think directive is present. */
   thinkingDefault?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
   /** Default verbose level when no /verbose directive is present. */
-  verboseDefault?: "off" | "on";
+  verboseDefault?: "off" | "on" | "full";
   /** Default elevated level when no /elevated directive is present. */
   elevatedDefault?: "off" | "on";
   /** Default block streaming level when no override is present. */
@@ -161,7 +163,7 @@ export type AgentDefaultsConfig = {
       | "none";
     /** Optional delivery override (E.164 for WhatsApp, chat id for Telegram). */
     to?: string;
-    /** Override the heartbeat prompt body (default: "Read HEARTBEAT.md if exists. Consider outstanding tasks. Checkup sometimes on your human during (user local) day time."). */
+    /** Override the heartbeat prompt body (default: "Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK."). */
     prompt?: string;
     /** Max chars allowed after HEARTBEAT_OK before delivery (default: 30). */
     ackMaxChars?: number;

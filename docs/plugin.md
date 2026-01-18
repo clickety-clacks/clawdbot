@@ -35,9 +35,17 @@ See [Voice Call](/plugins/voice-call) for a concrete example plugin.
 
 ## Available plugins (official)
 
+- Microsoft Teams is plugin-only as of 2026.1.15; install `@clawdbot/msteams` if you use Teams.
+- Memory (Core) — bundled memory search plugin (enabled by default via `plugins.slots.memory`)
 - [Voice Call](/plugins/voice-call) — `@clawdbot/voice-call`
+- [Zalo Personal](/plugins/zalouser) — `@clawdbot/zalouser`
 - [Matrix](/channels/matrix) — `@clawdbot/matrix`
 - [Zalo](/channels/zalo) — `@clawdbot/zalo`
+- [Microsoft Teams](/channels/msteams) — `@clawdbot/msteams`
+- Google Antigravity OAuth (provider auth) — bundled as `google-antigravity-auth` (disabled by default)
+- Gemini CLI OAuth (provider auth) — bundled as `google-gemini-cli-auth` (disabled by default)
+- Qwen OAuth (provider auth) — bundled as `qwen-portal-auth` (disabled by default)
+- Copilot Proxy (provider auth) — bundled as `copilot-proxy` (disabled by default)
 
 Clawdbot plugins are **TypeScript modules** loaded at runtime via jiti. They can
 register:
@@ -55,16 +63,26 @@ Plugins run **in‑process** with the Gateway, so treat them as trusted code.
 
 Clawdbot scans, in order:
 
-1) Global extensions
-- `~/.clawdbot/extensions/*.ts`
-- `~/.clawdbot/extensions/*/index.ts`
+1) Config paths
+- `plugins.load.paths` (file or directory)
 
 2) Workspace extensions
 - `<workspace>/.clawdbot/extensions/*.ts`
 - `<workspace>/.clawdbot/extensions/*/index.ts`
 
-3) Config paths
-- `plugins.load.paths` (file or directory)
+3) Global extensions
+- `~/.clawdbot/extensions/*.ts`
+- `~/.clawdbot/extensions/*/index.ts`
+
+4) Bundled extensions (shipped with Clawdbot, **disabled by default**)
+- `<clawdbot>/extensions/*`
+
+Bundled plugins must be enabled explicitly via `plugins.entries.<id>.enabled`
+or `clawdbot plugins enable <id>`. Installed plugins are enabled by default,
+but can be disabled the same way.
+
+If multiple plugins resolve to the same id, the first match in the order above
+wins and lower-precedence copies are ignored.
 
 ### Package packs
 
@@ -120,6 +138,24 @@ Fields:
 
 Config changes **require a gateway restart**.
 
+## Plugin slots (exclusive categories)
+
+Some plugin categories are **exclusive** (only one active at a time). Use
+`plugins.slots` to select which plugin owns the slot:
+
+```json5
+{
+  plugins: {
+    slots: {
+      memory: "memory-core" // or "none" to disable memory plugins
+    }
+  }
+}
+```
+
+If multiple plugins declare `kind: "memory"`, only the selected one loads. Others
+are disabled with diagnostics.
+
 ## Control UI (schema + labels)
 
 The Control UI uses `config.schema` (JSON Schema + `uiHints`) to render better forms.
@@ -154,14 +190,20 @@ export default {
 ```bash
 clawdbot plugins list
 clawdbot plugins info <id>
-clawdbot plugins install <path>              # add a local file/dir to plugins.load.paths
+clawdbot plugins install <path>                 # copy a local file/dir into ~/.clawdbot/extensions/<id>
 clawdbot plugins install ./extensions/voice-call # relative path ok
-clawdbot plugins install ./plugin.tgz        # install from a local tarball
+clawdbot plugins install ./plugin.tgz           # install from a local tarball
+clawdbot plugins install ./plugin.zip           # install from a local zip
+clawdbot plugins install -l ./extensions/voice-call # link (no copy) for dev
 clawdbot plugins install @clawdbot/voice-call # install from npm
+clawdbot plugins update <id>
+clawdbot plugins update --all
 clawdbot plugins enable <id>
 clawdbot plugins disable <id>
 clawdbot plugins doctor
 ```
+
+`plugins update` only works for npm installs tracked under `plugins.installs`.
 
 Plugins may also register their own top‑level commands (example: `clawdbot voicecall`).
 
@@ -171,6 +213,56 @@ Plugins export either:
 
 - A function: `(api) => { ... }`
 - An object: `{ id, name, configSchema, register(api) { ... } }`
+
+## Provider plugins (model auth)
+
+Plugins can register **model provider auth** flows so users can run OAuth or
+API-key setup inside Clawdbot (no external scripts needed).
+
+Register a provider via `api.registerProvider(...)`. Each provider exposes one
+or more auth methods (OAuth, API key, device code, etc.). These methods power:
+
+- `clawdbot models auth login --provider <id> [--method <id>]`
+
+Example:
+
+```ts
+api.registerProvider({
+  id: "acme",
+  label: "AcmeAI",
+  auth: [
+    {
+      id: "oauth",
+      label: "OAuth",
+      kind: "oauth",
+      run: async (ctx) => {
+        // Run OAuth flow and return auth profiles.
+        return {
+          profiles: [
+            {
+              profileId: "acme:default",
+              credential: {
+                type: "oauth",
+                provider: "acme",
+                access: "...",
+                refresh: "...",
+                expires: Date.now() + 3600 * 1000,
+              },
+            },
+          ],
+          defaultModel: "acme/opus-1",
+        };
+      },
+    },
+  ],
+});
+```
+
+Notes:
+- `run` receives a `ProviderAuthContext` with `prompter`, `runtime`,
+  `openUrl`, and `oauth.createVpsAwareHandlers` helpers.
+- Return `configPatch` when you need to add default models or provider config.
+- Return `defaultModel` so `--set-default` can update agent defaults.
 
 ### Register a messaging channel
 

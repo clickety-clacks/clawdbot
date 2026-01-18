@@ -16,9 +16,7 @@ enum Launchctl {
             process.standardOutput = pipe
             process.standardError = pipe
             do {
-                try process.run()
-                process.waitUntilExit()
-                let data = pipe.fileHandleForReading.readToEndSafely()
+                let data = try process.runAndReadToEnd(from: pipe)
                 let output = String(data: data, encoding: .utf8) ?? ""
                 return Result(status: process.terminationStatus, output: output)
             } catch {
@@ -31,6 +29,8 @@ enum Launchctl {
 struct LaunchAgentPlistSnapshot: Equatable, Sendable {
     let programArguments: [String]
     let environment: [String: String]
+    let stdoutPath: String?
+    let stderrPath: String?
 
     let port: Int?
     let bind: String?
@@ -53,6 +53,10 @@ enum LaunchAgentPlist {
         guard let root = rootAny as? [String: Any] else { return nil }
         let programArguments = root["ProgramArguments"] as? [String] ?? []
         let env = root["EnvironmentVariables"] as? [String: String] ?? [:]
+        let stdoutPath = (root["StandardOutPath"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
+        let stderrPath = (root["StandardErrorPath"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
         let port = Self.extractFlagInt(programArguments, flag: "--port")
         let bind = Self.extractFlagString(programArguments, flag: "--bind")?.lowercased()
         let token = env["CLAWDBOT_GATEWAY_TOKEN"]?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
@@ -60,6 +64,8 @@ enum LaunchAgentPlist {
         return LaunchAgentPlistSnapshot(
             programArguments: programArguments,
             environment: env,
+            stdoutPath: stdoutPath,
+            stderrPath: stderrPath,
             port: port,
             bind: bind,
             token: token,

@@ -18,6 +18,68 @@ describe("resolveAgentRoute", () => {
     expect(route.matchedBy).toBe("default");
   });
 
+  test("dmScope=per-peer isolates DM sessions by sender id", () => {
+    const cfg: ClawdbotConfig = {
+      session: { dmScope: "per-peer" },
+    };
+    const route = resolveAgentRoute({
+      cfg,
+      channel: "whatsapp",
+      accountId: null,
+      peer: { kind: "dm", id: "+15551234567" },
+    });
+    expect(route.sessionKey).toBe("agent:main:dm:+15551234567");
+  });
+
+  test("dmScope=per-channel-peer isolates DM sessions per channel and sender", () => {
+    const cfg: ClawdbotConfig = {
+      session: { dmScope: "per-channel-peer" },
+    };
+    const route = resolveAgentRoute({
+      cfg,
+      channel: "whatsapp",
+      accountId: null,
+      peer: { kind: "dm", id: "+15551234567" },
+    });
+    expect(route.sessionKey).toBe("agent:main:whatsapp:dm:+15551234567");
+  });
+
+  test("identityLinks collapses per-peer DM sessions across providers", () => {
+    const cfg: ClawdbotConfig = {
+      session: {
+        dmScope: "per-peer",
+        identityLinks: {
+          alice: ["telegram:111111111", "discord:222222222222222222"],
+        },
+      },
+    };
+    const route = resolveAgentRoute({
+      cfg,
+      channel: "telegram",
+      accountId: null,
+      peer: { kind: "dm", id: "111111111" },
+    });
+    expect(route.sessionKey).toBe("agent:main:dm:alice");
+  });
+
+  test("identityLinks applies to per-channel-peer DM sessions", () => {
+    const cfg: ClawdbotConfig = {
+      session: {
+        dmScope: "per-channel-peer",
+        identityLinks: {
+          alice: ["telegram:111111111", "discord:222222222222222222"],
+        },
+      },
+    };
+    const route = resolveAgentRoute({
+      cfg,
+      channel: "discord",
+      accountId: null,
+      peer: { kind: "dm", id: "222222222222222222" },
+    });
+    expect(route.sessionKey).toBe("agent:main:discord:dm:alice");
+  });
+
   test("peer binding wins over account binding", () => {
     const cfg: ClawdbotConfig = {
       bindings: [

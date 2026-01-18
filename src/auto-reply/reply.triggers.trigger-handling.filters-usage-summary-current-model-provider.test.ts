@@ -19,6 +19,7 @@ const usageMocks = vi.hoisted(() => ({
     providers: [],
   }),
   formatUsageSummaryLine: vi.fn().mockReturnValue("📊 Usage: Claude 80% left"),
+  formatUsageWindowSummary: vi.fn().mockReturnValue("Claude 80% left"),
   resolveUsageProviderId: vi.fn((provider: string) => provider.split("/")[0]),
 }));
 
@@ -97,6 +98,21 @@ describe("trigger handling", () => {
   it("filters usage summary to the current model provider", async () => {
     await withTempHome(async (home) => {
       usageMocks.loadProviderUsageSummary.mockClear();
+      usageMocks.loadProviderUsageSummary.mockResolvedValue({
+        updatedAt: 0,
+        providers: [
+          {
+            provider: "anthropic",
+            displayName: "Anthropic",
+            windows: [
+              {
+                label: "5h",
+                usedPercent: 20,
+              },
+            ],
+          },
+        ],
+      });
 
       const res = await getReplyFromConfig(
         {
@@ -105,6 +121,7 @@ describe("trigger handling", () => {
           To: "+2000",
           Provider: "whatsapp",
           SenderE164: "+1000",
+          CommandAuthorized: true,
         },
         {},
         makeCfg(home),
@@ -127,6 +144,7 @@ describe("trigger handling", () => {
           To: "+2000",
           Provider: "whatsapp",
           SenderE164: "+1000",
+          CommandAuthorized: true,
         },
         {
           onBlockReply: async (payload) => {
@@ -151,6 +169,7 @@ describe("trigger handling", () => {
           To: "+2000",
           Provider: "whatsapp",
           SenderE164: "+1000",
+          CommandAuthorized: true,
         },
         {
           onBlockReply: async (payload) => {
@@ -182,6 +201,7 @@ describe("trigger handling", () => {
           To: "+2000",
           Provider: "whatsapp",
           SenderE164: "+1002",
+          CommandAuthorized: true,
         },
         {
           onBlockReply: async (payload) => {
@@ -206,6 +226,7 @@ describe("trigger handling", () => {
           Body: "[Dec 5 10:00] stop",
           From: "+1000",
           To: "+2000",
+          CommandAuthorized: true,
         },
         {},
         makeCfg(home),
@@ -222,6 +243,7 @@ describe("trigger handling", () => {
           Body: "/stop",
           From: "+1003",
           To: "+2000",
+          CommandAuthorized: true,
         },
         {},
         makeCfg(home),

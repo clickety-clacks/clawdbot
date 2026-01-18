@@ -2,7 +2,7 @@ import { z } from "zod";
 import { ToolsSchema } from "./zod-schema.agent-runtime.js";
 import { AgentsSchema, AudioSchema, BindingsSchema, BroadcastSchema } from "./zod-schema.agents.js";
 import { HexColorSchema, ModelsConfigSchema } from "./zod-schema.core.js";
-import { HookMappingSchema, HooksGmailSchema } from "./zod-schema.hooks.js";
+import { HookMappingSchema, HooksGmailSchema, InternalHooksSchema } from "./zod-schema.hooks.js";
 import { ChannelsSchema } from "./zod-schema.providers.js";
 import { CommandsSchema, MessagesSchema, SessionSchema } from "./zod-schema.session.js";
 
@@ -133,12 +133,20 @@ export const ClawdbotSchema = z
         redactPatterns: z.array(z.string()).optional(),
       })
       .optional(),
+    update: z
+      .object({
+        channel: z.union([z.literal("stable"), z.literal("beta")]).optional(),
+        checkOnStart: z.boolean().optional(),
+      })
+      .optional(),
     browser: z
       .object({
         enabled: z.boolean().optional(),
         controlUrl: z.string().optional(),
         controlToken: z.string().optional(),
         cdpUrl: z.string().optional(),
+        remoteCdpTimeoutMs: z.number().int().nonnegative().optional(),
+        remoteCdpHandshakeTimeoutMs: z.number().int().nonnegative().optional(),
         color: z.string().optional(),
         executablePath: z.string().optional(),
         headless: z.boolean().optional(),
@@ -218,6 +226,7 @@ export const ClawdbotSchema = z
         transformsDir: z.string().optional(),
         mappings: z.array(HookMappingSchema).optional(),
         gmail: HooksGmailSchema,
+        internal: InternalHooksSchema,
       })
       .optional(),
     web: z
@@ -243,6 +252,15 @@ export const ClawdbotSchema = z
         port: z.number().int().positive().optional(),
         bind: z
           .union([z.literal("auto"), z.literal("lan"), z.literal("tailnet"), z.literal("loopback")])
+          .optional(),
+        tls: z
+          .object({
+            enabled: z.boolean().optional(),
+            autoGenerate: z.boolean().optional(),
+            certPath: z.string().optional(),
+            keyPath: z.string().optional(),
+            caPath: z.string().optional(),
+          })
           .optional(),
       })
       .optional(),
@@ -343,6 +361,8 @@ export const ClawdbotSchema = z
         load: z
           .object({
             extraDirs: z.array(z.string()).optional(),
+            watch: z.boolean().optional(),
+            watchDebounceMs: z.number().int().min(0).optional(),
           })
           .optional(),
         install: z
@@ -377,6 +397,11 @@ export const ClawdbotSchema = z
             paths: z.array(z.string()).optional(),
           })
           .optional(),
+        slots: z
+          .object({
+            memory: z.string().optional(),
+          })
+          .optional(),
         entries: z
           .record(
             z.string(),
@@ -384,6 +409,21 @@ export const ClawdbotSchema = z
               .object({
                 enabled: z.boolean().optional(),
                 config: z.record(z.string(), z.unknown()).optional(),
+              })
+              .passthrough(),
+          )
+          .optional(),
+        installs: z
+          .record(
+            z.string(),
+            z
+              .object({
+                source: z.union([z.literal("npm"), z.literal("archive"), z.literal("path")]),
+                spec: z.string().optional(),
+                sourcePath: z.string().optional(),
+                installPath: z.string().optional(),
+                version: z.string().optional(),
+                installedAt: z.string().optional(),
               })
               .passthrough(),
           )

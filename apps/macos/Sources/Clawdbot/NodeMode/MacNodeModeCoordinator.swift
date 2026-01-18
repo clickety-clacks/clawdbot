@@ -4,6 +4,12 @@ import Foundation
 import Network
 import OSLog
 
+private struct BridgeTarget {
+    let endpoint: NWEndpoint
+    let stableID: String
+    let tls: MacNodeBridgeTLSParams?
+}
+
 @MainActor
 final class MacNodeModeCoordinator {
     static let shared = MacNodeModeCoordinator()
@@ -37,6 +43,7 @@ final class MacNodeModeCoordinator {
     private func run() async {
         var retryDelay: UInt64 = 1_000_000_000
         var lastCameraEnabled: Bool?
+        var lastSystemRunPolicy: SystemRunPolicy?
         let defaults = UserDefaults.standard
         while !Task.isCancelled {
             if await MainActor.run(body: { AppStateStore.shared.isPaused }) {
@@ -53,7 +60,16 @@ final class MacNodeModeCoordinator {
                 try? await Task.sleep(nanoseconds: 200_000_000)
             }
 
-            guard let endpoint = await self.resolveBridgeEndpoint(timeoutSeconds: 5) else {
+            let systemRunPolicy = SystemRunPolicy.load()
+            if lastSystemRunPolicy == nil {
+                lastSystemRunPolicy = systemRunPolicy
+            } else if lastSystemRunPolicy != systemRunPolicy {
+                lastSystemRunPolicy = systemRunPolicy
+                await self.session.disconnect()
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
+
+            guard let target = await self.resolveBridgeEndpoint(timeoutSeconds: 5) else {
                 try? await Task.sleep(nanoseconds: min(retryDelay, 5_000_000_000))
                 retryDelay = min(retryDelay * 2, 10_000_000_000)
                 continue
@@ -63,10 +79,11 @@ final class MacNodeModeCoordinator {
             do {
                 let hello = await self.makeHello()
                 self.logger.info(
-                    "mac node bridge connecting endpoint=\(endpoint, privacy: .public)")
+                    "mac node bridge connecting endpoint=\(target.endpoint, privacy: .public)")
                 try await self.session.connect(
-                    endpoint: endpoint,
+                    endpoint: target.endpoint,
                     hello: hello,
+                    tls: target.tls,
                     onConnected: { [weak self] serverName, mainSessionKey in
                         self?.logger.info("mac node connected to \(serverName, privacy: .public)")
                         if let mainSessionKey {
@@ -86,7 +103,7 @@ final class MacNodeModeCoordinator {
                         return await self.runtime.handleInvoke(req)
                     })
             } catch {
-                if await self.tryPair(endpoint: endpoint, error: error) {
+                if await self.tryPair(target: target, error: error) {
                     continue
                 }
                 self.logger.error(
@@ -143,9 +160,13 @@ final class MacNodeModeCoordinator {
             ClawdbotCanvasA2UICommand.pushJSONL.rawValue,
             ClawdbotCanvasA2UICommand.reset.rawValue,
             MacNodeScreenCommand.record.rawValue,
-            ClawdbotSystemCommand.run.rawValue,
             ClawdbotSystemCommand.notify.rawValue,
         ]
+
+        if SystemRunPolicy.load() != .never {
+            commands.append(ClawdbotSystemCommand.which.rawValue)
+            commands.append(ClawdbotSystemCommand.run.rawValue)
+        }
 
         let capsSet = Set(caps)
         if capsSet.contains(ClawdbotCapability.camera.rawValue) {
@@ -160,7 +181,7 @@ final class MacNodeModeCoordinator {
         return commands
     }
 
-    private func tryPair(endpoint: NWEndpoint, error: Error) async -> Bool {
+    private func tryPair(target: BridgeTarget, error: Error) async -> Bool {
         let text = error.localizedDescription.uppercased()
         guard text.contains("NOT_PAIRED") || text.contains("UNAUTHORIZED") else { return false }
 
@@ -170,9 +191,10 @@ final class MacNodeModeCoordinator {
             }
             let hello = await self.makeHello()
             let token = try await MacNodeBridgePairingClient().pairAndHello(
-                endpoint: endpoint,
+                endpoint: target.endpoint,
                 hello: hello,
                 silent: shouldSilent,
+                tls: target.tls,
                 onStatus: { [weak self] status in
                     self?.logger.info("mac node pairing: \(status, privacy: .public)")
                 })
@@ -190,7 +212,7 @@ final class MacNodeModeCoordinator {
         "mac-\(InstanceIdentity.instanceId)"
     }
 
-    private func resolveLoopbackBridgeEndpoint(timeoutSeconds: Double) async -> NWEndpoint? {
+    private func resolveLoopbackBridgeEndpoint(timeoutSeconds: Double) async -> BridgeTarget? {
         guard let port = Self.loopbackBridgePort(),
               let endpointPort = NWEndpoint.Port(rawValue: port)
         else {
@@ -198,7 +220,10 @@ final class MacNodeModeCoordinator {
         }
         let endpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: endpointPort)
         let reachable = await Self.probeEndpoint(endpoint, timeoutSeconds: timeoutSeconds)
-        return reachable ? endpoint : nil
+        guard reachable else { return nil }
+        let stableID = BridgeEndpointID.stableID(endpoint)
+        let tlsParams = Self.resolveManualTLSParams(stableID: stableID)
+        return BridgeTarget(endpoint: endpoint, stableID: stableID, tls: tlsParams)
     }
 
     static func loopbackBridgePort() -> UInt16? {
@@ -291,7 +316,7 @@ final class MacNodeModeCoordinator {
             })
     }
 
-    private func resolveBridgeEndpoint(timeoutSeconds: Double) async -> NWEndpoint? {
+    private func resolveBridgeEndpoint(timeoutSeconds: Double) async -> BridgeTarget? {
         let mode = await MainActor.run(body: { AppStateStore.shared.connectionMode })
         if mode == .remote {
             do {
@@ -303,7 +328,10 @@ final class MacNodeModeCoordinator {
                     if healthy, let port = NWEndpoint.Port(rawValue: localPort) {
                         self.logger.info(
                             "reusing mac node bridge tunnel localPort=\(localPort, privacy: .public)")
-                        return .hostPort(host: "127.0.0.1", port: port)
+                        let endpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: port)
+                        let stableID = BridgeEndpointID.stableID(endpoint)
+                        let tlsParams = Self.resolveManualTLSParams(stableID: stableID)
+                        return BridgeTarget(endpoint: endpoint, stableID: stableID, tls: tlsParams)
                     }
                     self.logger.error(
                         "mac node bridge tunnel unhealthy localPort=\(localPort, privacy: .public); restarting")
@@ -312,9 +340,23 @@ final class MacNodeModeCoordinator {
                 }
 
                 let remotePort = Self.remoteBridgePort()
+                let preferredLocalPort = Self.loopbackBridgePort()
+                if let preferredLocalPort {
+                    self.logger.info(
+                        "mac node bridge tunnel starting " +
+                            "preferredLocalPort=\(preferredLocalPort, privacy: .public) " +
+                            "remotePort=\(remotePort, privacy: .public)")
+                } else {
+                    self.logger.info(
+                        "mac node bridge tunnel starting " +
+                            "preferredLocalPort=none " +
+                            "remotePort=\(remotePort, privacy: .public)")
+                }
                 self.tunnel = try await RemotePortTunnel.create(
                     remotePort: remotePort,
-                    allowRemoteUrlOverride: false)
+                    preferredLocalPort: preferredLocalPort,
+                    allowRemoteUrlOverride: false,
+                    allowRandomLocalPort: true)
                 if let localPort = self.tunnel?.localPort,
                    let port = NWEndpoint.Port(rawValue: localPort)
                 {
@@ -322,7 +364,10 @@ final class MacNodeModeCoordinator {
                         "mac node bridge tunnel ready " +
                             "localPort=\(localPort, privacy: .public) " +
                             "remotePort=\(remotePort, privacy: .public)")
-                    return .hostPort(host: "127.0.0.1", port: port)
+                    let endpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: port)
+                    let stableID = BridgeEndpointID.stableID(endpoint)
+                    let tlsParams = Self.resolveManualTLSParams(stableID: stableID)
+                    return BridgeTarget(endpoint: endpoint, stableID: stableID, tls: tlsParams)
                 }
             } catch {
                 self.logger.error("mac node bridge tunnel failed: \(error.localizedDescription, privacy: .public)")
@@ -333,8 +378,8 @@ final class MacNodeModeCoordinator {
             tunnel.terminate()
             self.tunnel = nil
         }
-        if mode == .local, let endpoint = await self.resolveLoopbackBridgeEndpoint(timeoutSeconds: 0.4) {
-            return endpoint
+        if mode == .local, let target = await self.resolveLoopbackBridgeEndpoint(timeoutSeconds: 0.4) {
+            return target
         }
         return await Self.discoverBridgeEndpoint(timeoutSeconds: timeoutSeconds)
     }
@@ -354,14 +399,14 @@ final class MacNodeModeCoordinator {
         return await Self.probeEndpoint(.hostPort(host: "127.0.0.1", port: port), timeoutSeconds: timeoutSeconds)
     }
 
-    private static func discoverBridgeEndpoint(timeoutSeconds: Double) async -> NWEndpoint? {
+    private static func discoverBridgeEndpoint(timeoutSeconds: Double) async -> BridgeTarget? {
         final class DiscoveryState: @unchecked Sendable {
             let lock = NSLock()
             var resolved = false
             var browsers: [NWBrowser] = []
-            var continuation: CheckedContinuation<NWEndpoint?, Never>?
+            var continuation: CheckedContinuation<BridgeTarget?, Never>?
 
-            func finish(_ endpoint: NWEndpoint?) {
+            func finish(_ target: BridgeTarget?) {
                 self.lock.lock()
                 defer { lock.unlock() }
                 if self.resolved { return }
@@ -369,7 +414,7 @@ final class MacNodeModeCoordinator {
                 for browser in self.browsers {
                     browser.cancel()
                 }
-                self.continuation?.resume(returning: endpoint)
+                self.continuation?.resume(returning: target)
                 self.continuation = nil
             }
         }
@@ -389,18 +434,18 @@ final class MacNodeModeCoordinator {
                     let preferred = BridgeDiscoveryPreferences.preferredStableID()
                     if let preferred,
                        let match = results.first(where: {
-                        if case .service = $0.endpoint {
-                            return BridgeEndpointID.stableID($0.endpoint) == preferred
-                        }
-                        return false
+                           if case .service = $0.endpoint {
+                               return BridgeEndpointID.stableID($0.endpoint) == preferred
+                           }
+                           return false
                        })
                     {
-                        state.finish(match.endpoint)
+                        state.finish(Self.targetFromResult(match))
                         return
                     }
 
                     if let result = results.first(where: { if case .service = $0.endpoint { true } else { false } }) {
-                        state.finish(result.endpoint)
+                        state.finish(Self.targetFromResult(result))
                     }
                 }
                 browser.stateUpdateHandler = { browserState in
@@ -417,6 +462,72 @@ final class MacNodeModeCoordinator {
                 state.finish(nil)
             }
         }
+    }
+
+    private nonisolated static func targetFromResult(_ result: NWBrowser.Result) -> BridgeTarget? {
+        let endpoint = result.endpoint
+        guard case .service = endpoint else { return nil }
+        let stableID = BridgeEndpointID.stableID(endpoint)
+        let txt = result.endpoint.txtRecord?.dictionary ?? [:]
+        let tlsEnabled = Self.txtBoolValue(txt, key: "bridgeTls")
+        let tlsFingerprint = Self.txtValue(txt, key: "bridgeTlsSha256")
+        let tlsParams = Self.resolveDiscoveredTLSParams(
+            stableID: stableID,
+            tlsEnabled: tlsEnabled,
+            tlsFingerprintSha256: tlsFingerprint)
+        return BridgeTarget(endpoint: endpoint, stableID: stableID, tls: tlsParams)
+    }
+
+    private nonisolated static func resolveDiscoveredTLSParams(
+        stableID: String,
+        tlsEnabled: Bool,
+        tlsFingerprintSha256: String?) -> MacNodeBridgeTLSParams?
+    {
+        let stored = MacNodeBridgeTLSStore.loadFingerprint(stableID: stableID)
+
+        if tlsEnabled || tlsFingerprintSha256 != nil {
+            return MacNodeBridgeTLSParams(
+                required: true,
+                expectedFingerprint: tlsFingerprintSha256 ?? stored,
+                allowTOFU: stored == nil,
+                storeKey: stableID)
+        }
+
+        if let stored {
+            return MacNodeBridgeTLSParams(
+                required: true,
+                expectedFingerprint: stored,
+                allowTOFU: false,
+                storeKey: stableID)
+        }
+
+        return nil
+    }
+
+    private nonisolated static func resolveManualTLSParams(stableID: String) -> MacNodeBridgeTLSParams? {
+        if let stored = MacNodeBridgeTLSStore.loadFingerprint(stableID: stableID) {
+            return MacNodeBridgeTLSParams(
+                required: true,
+                expectedFingerprint: stored,
+                allowTOFU: false,
+                storeKey: stableID)
+        }
+
+        return MacNodeBridgeTLSParams(
+            required: false,
+            expectedFingerprint: nil,
+            allowTOFU: true,
+            storeKey: stableID)
+    }
+
+    private nonisolated static func txtValue(_ dict: [String: String], key: String) -> String? {
+        let raw = dict[key]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return raw.isEmpty ? nil : raw
+    }
+
+    private nonisolated static func txtBoolValue(_ dict: [String: String], key: String) -> Bool {
+        guard let raw = self.txtValue(dict, key: key)?.lowercased() else { return false }
+        return raw == "1" || raw == "true" || raw == "yes"
     }
 }
 

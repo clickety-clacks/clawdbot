@@ -5,6 +5,11 @@ import {
 } from "../../daemon/constants.js";
 import { renderGatewayServiceCleanupHints } from "../../daemon/inspect.js";
 import { resolveGatewayLogPaths } from "../../daemon/launchd.js";
+import {
+  isSystemdUnavailableDetail,
+  renderSystemdUnavailableHints,
+} from "../../daemon/systemd-hints.js";
+import { isWSLEnv } from "../../infra/wsl.js";
 import { getResolvedLoggerSettings } from "../../logging.js";
 import { defaultRuntime } from "../../runtime.js";
 import { colorize, isRich, theme } from "../../terminal/theme.js";
@@ -164,6 +169,16 @@ export function printDaemonStatus(status: DaemonStatus, opts: { json: boolean })
     spacer();
   }
 
+  const systemdUnavailable =
+    process.platform === "linux" && isSystemdUnavailableDetail(service.runtime?.detail);
+  if (systemdUnavailable) {
+    defaultRuntime.error(errorText("systemd user services unavailable."));
+    for (const hint of renderSystemdUnavailableHints({ wsl: isWSLEnv() })) {
+      defaultRuntime.error(errorText(hint));
+    }
+    spacer();
+  }
+
   if (service.runtime?.missingUnit) {
     defaultRuntime.error(errorText("Service unit not found."));
     for (const hint of renderRuntimeHints(service.runtime)) {
@@ -262,12 +277,12 @@ export function printDaemonStatus(status: DaemonStatus, opts: { json: boolean })
   if (legacyServices.length > 0 || extraServices.length > 0) {
     defaultRuntime.error(
       errorText(
-        "Recommendation: run a single gateway per machine. One gateway supports multiple agents.",
+        "Recommendation: run a single gateway per machine for most setups. One gateway supports multiple agents (see docs: /gateway#multiple-gateways-same-host).",
       ),
     );
     defaultRuntime.error(
       errorText(
-        "If you need multiple gateways, isolate ports + config/state (see docs: /gateway#multiple-gateways-same-host).",
+        "If you need multiple gateways (e.g., a rescue bot on the same host), isolate ports + config/state (see docs: /gateway#multiple-gateways-same-host).",
       ),
     );
     spacer();

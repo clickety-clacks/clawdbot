@@ -42,11 +42,11 @@ struct RuntimeResolution {
 enum RuntimeResolutionError: Error {
     case notFound(searchPaths: [String])
     case unsupported(
-            kind: RuntimeKind,
-            found: RuntimeVersion,
-            required: RuntimeVersion,
-            path: String,
-            searchPaths: [String])
+        kind: RuntimeKind,
+        found: RuntimeVersion,
+        required: RuntimeVersion,
+        path: String,
+        searchPaths: [String])
     case versionParse(kind: RuntimeKind, raw: String, path: String, searchPaths: [String])
 }
 
@@ -65,21 +65,21 @@ enum RuntimeLocator {
         }
         guard let rawVersion = readVersion(of: binary, pathEnv: pathEnv) else {
             return .failure(.versionParse(
-                                kind: runtime,
-                                raw: "(unreadable)",
-                                path: binary,
-                                searchPaths: searchPaths))
+                kind: runtime,
+                raw: "(unreadable)",
+                path: binary,
+                searchPaths: searchPaths))
         }
         guard let parsed = RuntimeVersion.from(string: rawVersion) else {
             return .failure(.versionParse(kind: runtime, raw: rawVersion, path: binary, searchPaths: searchPaths))
         }
         guard parsed >= self.minNode else {
             return .failure(.unsupported(
-                                kind: runtime,
-                                found: parsed,
-                                required: self.minNode,
-                                path: binary,
-                                searchPaths: searchPaths))
+                kind: runtime,
+                found: parsed,
+                required: self.minNode,
+                path: binary,
+                searchPaths: searchPaths))
         }
 
         return .success(RuntimeResolution(kind: runtime, path: binary, version: parsed))
@@ -133,8 +133,7 @@ enum RuntimeLocator {
         process.standardError = pipe
 
         do {
-            try process.run()
-            process.waitUntilExit()
+            let data = try process.runAndReadToEnd(from: pipe)
             let elapsedMs = Int(Date().timeIntervalSince(start) * 1000)
             if elapsedMs > 500 {
                 self.logger.warning(
@@ -149,7 +148,6 @@ enum RuntimeLocator {
                     bin=\(binary, privacy: .public)
                     """)
             }
-            let data = pipe.fileHandleForReading.readToEndSafely()
             return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
         } catch {
             let elapsedMs = Int(Date().timeIntervalSince(start) * 1000)

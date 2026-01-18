@@ -269,7 +269,7 @@ describe("createTelegramBot", () => {
     expect(replySpy).toHaveBeenCalledTimes(1);
     const payload = replySpy.mock.calls[0][0];
     expect(payload.SessionKey).toContain("telegram:group:-1001234567890:topic:99");
-    expect(payload.From).toBe("group:-1001234567890:topic:99");
+    expect(payload.From).toBe("telegram:group:-1001234567890:topic:99");
     expect(payload.MessageThreadId).toBe(99);
     expect(payload.IsForum).toBe(true);
     expect(sendChatActionSpy).toHaveBeenCalledWith(-1001234567890, "typing", {
@@ -352,10 +352,8 @@ describe("createTelegramBot", () => {
       getFile: async () => ({ download: async () => new Uint8Array() }),
     });
 
-    expect(sendMessageSpy).toHaveBeenCalledWith(
-      "-1001234567890",
-      expect.any(String),
-      expect.objectContaining({ message_thread_id: 1 }),
-    );
+    expect(sendMessageSpy).toHaveBeenCalledTimes(1);
+    const sendParams = sendMessageSpy.mock.calls[0]?.[2] as { message_thread_id?: number };
+    expect(sendParams?.message_thread_id).toBeUndefined();
   });
 });

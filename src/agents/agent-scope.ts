@@ -22,6 +22,7 @@ type ResolvedAgentConfig = {
   model?: AgentEntry["model"];
   memorySearch?: AgentEntry["memorySearch"];
   humanDelay?: AgentEntry["humanDelay"];
+  heartbeat?: AgentEntry["heartbeat"];
   identity?: AgentEntry["identity"];
   groupChat?: AgentEntry["groupChat"];
   subagents?: AgentEntry["subagents"];
@@ -35,6 +36,20 @@ function listAgents(cfg: ClawdbotConfig): AgentEntry[] {
   const list = cfg.agents?.list;
   if (!Array.isArray(list)) return [];
   return list.filter((entry): entry is AgentEntry => Boolean(entry && typeof entry === "object"));
+}
+
+export function listAgentIds(cfg: ClawdbotConfig): string[] {
+  const agents = listAgents(cfg);
+  if (agents.length === 0) return [DEFAULT_AGENT_ID];
+  const seen = new Set<string>();
+  const ids: string[] = [];
+  for (const entry of agents) {
+    const id = normalizeAgentId(entry?.id);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
+  }
+  return ids.length > 0 ? ids : [DEFAULT_AGENT_ID];
 }
 
 export function resolveDefaultAgentId(cfg: ClawdbotConfig): string {
@@ -89,6 +104,7 @@ export function resolveAgentConfig(
         : undefined,
     memorySearch: entry.memorySearch,
     humanDelay: entry.humanDelay,
+    heartbeat: entry.heartbeat,
     identity: entry.identity,
     groupChat: entry.groupChat,
     subagents: typeof entry.subagents === "object" && entry.subagents ? entry.subagents : undefined,

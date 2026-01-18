@@ -21,9 +21,13 @@ export type BrowserConfig = {
   controlToken?: string;
   /** Base URL of the CDP endpoint. Default: controlUrl with port + 1. */
   cdpUrl?: string;
+  /** Remote CDP HTTP timeout (ms). Default: 1500. */
+  remoteCdpTimeoutMs?: number;
+  /** Remote CDP WebSocket handshake timeout (ms). Default: max(remoteCdpTimeoutMs * 2, 2000). */
+  remoteCdpHandshakeTimeoutMs?: number;
   /** Accent color for the clawd browser profile (hex). Default: #FF4500 */
   color?: string;
-  /** Override the browser executable path (macOS/Linux). */
+  /** Override the browser executable path (all platforms). */
   executablePath?: string;
   /** Start Chrome headless (best-effort). Default: false */
   headless?: boolean;

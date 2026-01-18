@@ -66,7 +66,7 @@ describe("directive behavior", () => {
       const storePath = path.join(home, "sessions.json");
 
       const res = await getReplyFromConfig(
-        { Body: "/model list", From: "+1222", To: "+1222" },
+        { Body: "/model list", From: "+1222", To: "+1222", CommandAuthorized: true },
         {},
         {
           agents: {
@@ -85,8 +85,8 @@ describe("directive behavior", () => {
 
       const text = Array.isArray(res) ? res[0]?.text : res?.text;
       expect(text).toContain("Pick: /model <#> or /model <provider/model>");
-      expect(text).toContain("claude-opus-4-5 — anthropic");
-      expect(text).toContain("gpt-4.1-mini — openai");
+      expect(text).toContain("anthropic/claude-opus-4-5");
+      expect(text).toContain("openai/gpt-4.1-mini");
       expect(runEmbeddedPiAgent).not.toHaveBeenCalled();
     });
   });
@@ -97,7 +97,7 @@ describe("directive behavior", () => {
       const storePath = path.join(home, "sessions.json");
 
       const res = await getReplyFromConfig(
-        { Body: "/model", From: "+1222", To: "+1222" },
+        { Body: "/model", From: "+1222", To: "+1222", CommandAuthorized: true },
         {},
         {
           agents: {
@@ -116,8 +116,8 @@ describe("directive behavior", () => {
 
       const text = Array.isArray(res) ? res[0]?.text : res?.text;
       expect(text).toContain("Pick: /model <#> or /model <provider/model>");
-      expect(text).toContain("claude-opus-4-5 — anthropic");
-      expect(text).toContain("gpt-4.1-mini — openai");
+      expect(text).toContain("anthropic/claude-opus-4-5");
+      expect(text).toContain("openai/gpt-4.1-mini");
       expect(runEmbeddedPiAgent).not.toHaveBeenCalled();
     });
   });
@@ -137,7 +137,7 @@ describe("directive behavior", () => {
       const storePath = path.join(home, "sessions.json");
 
       const res = await getReplyFromConfig(
-        { Body: "/model list", From: "+1222", To: "+1222" },
+        { Body: "/model list", From: "+1222", To: "+1222", CommandAuthorized: true },
         {},
         {
           agents: {
@@ -166,9 +166,9 @@ describe("directive behavior", () => {
       );
 
       const text = Array.isArray(res) ? res[0]?.text : res?.text;
-      expect(text).toContain("claude-opus-4-5 — anthropic");
-      expect(text).toContain("gpt-4.1-mini — openai");
-      expect(text).toContain("MiniMax-M2.1 — minimax");
+      expect(text).toContain("anthropic/claude-opus-4-5");
+      expect(text).toContain("openai/gpt-4.1-mini");
+      expect(text).toContain("minimax/MiniMax-M2.1");
       expect(runEmbeddedPiAgent).not.toHaveBeenCalled();
     });
   });
@@ -178,7 +178,7 @@ describe("directive behavior", () => {
       const storePath = path.join(home, "sessions.json");
 
       const res = await getReplyFromConfig(
-        { Body: "/model list", From: "+1222", To: "+1222" },
+        { Body: "/model list", From: "+1222", To: "+1222", CommandAuthorized: true },
         {},
         {
           agents: {
@@ -205,7 +205,7 @@ describe("directive behavior", () => {
       const storePath = path.join(home, "sessions.json");
 
       await getReplyFromConfig(
-        { Body: "/model openai/gpt-4.1-mini", From: "+1222", To: "+1222" },
+        { Body: "/model openai/gpt-4.1-mini", From: "+1222", To: "+1222", CommandAuthorized: true },
         {},
         {
           agents: {
@@ -235,7 +235,7 @@ describe("directive behavior", () => {
       const storePath = path.join(home, "sessions.json");
 
       await getReplyFromConfig(
-        { Body: "/model Opus", From: "+1222", To: "+1222" },
+        { Body: "/model Opus", From: "+1222", To: "+1222", CommandAuthorized: true },
         {},
         {
           agents: {

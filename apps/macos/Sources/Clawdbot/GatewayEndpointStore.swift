@@ -1,3 +1,4 @@
+import ConcurrencyExtras
 import Foundation
 import OSLog
 
@@ -16,6 +17,13 @@ actor GatewayEndpointStore {
     static let shared = GatewayEndpointStore()
     private static let supportedBindModes: Set<String> = ["loopback", "tailnet", "lan", "auto"]
     private static let remoteConnectingDetail = "Connecting to remote gateway…"
+    private static let staticLogger = Logger(subsystem: "com.clawdbot", category: "gateway-endpoint")
+    private enum EnvOverrideWarningKind: Sendable {
+        case token
+        case password
+    }
+
+    private static let envOverrideWarnings = LockIsolated((token: false, password: false))
 
     struct Deps: Sendable {
         let mode: @Sendable () async -> AppState.ConnectionMode
@@ -30,16 +38,18 @@ actor GatewayEndpointStore {
             mode: { await MainActor.run { AppStateStore.shared.connectionMode } },
             token: {
                 let root = ClawdbotConfigFile.loadDict()
+                let isRemote = ConnectionModeResolver.resolve(root: root).mode == .remote
                 return GatewayEndpointStore.resolveGatewayToken(
-                    isRemote: CommandResolver.connectionModeIsRemote(),
+                    isRemote: isRemote,
                     root: root,
                     env: ProcessInfo.processInfo.environment,
                     launchdSnapshot: GatewayLaunchAgentManager.launchdConfigSnapshot())
             },
             password: {
                 let root = ClawdbotConfigFile.loadDict()
+                let isRemote = ConnectionModeResolver.resolve(root: root).mode == .remote
                 return GatewayEndpointStore.resolveGatewayPassword(
-                    isRemote: CommandResolver.connectionModeIsRemote(),
+                    isRemote: isRemote,
                     root: root,
                     env: ProcessInfo.processInfo.environment,
                     launchdSnapshot: GatewayLaunchAgentManager.launchdConfigSnapshot())
@@ -68,6 +78,14 @@ actor GatewayEndpointStore {
         let raw = env["CLAWDBOT_GATEWAY_PASSWORD"] ?? ""
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty {
+            if let configPassword = self.resolveConfigPassword(isRemote: isRemote, root: root),
+               !configPassword.isEmpty
+            {
+                self.warnEnvOverrideOnce(
+                    kind: .password,
+                    envVar: "CLAWDBOT_GATEWAY_PASSWORD",
+                    configKey: isRemote ? "gateway.remote.password" : "gateway.auth.password")
+            }
             return trimmed
         }
         if isRemote {
@@ -99,6 +117,26 @@ actor GatewayEndpointStore {
         return nil
     }
 
+    private static func resolveConfigPassword(isRemote: Bool, root: [String: Any]) -> String? {
+        if isRemote {
+            if let gateway = root["gateway"] as? [String: Any],
+               let remote = gateway["remote"] as? [String: Any],
+               let password = remote["password"] as? String
+            {
+                return password.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            return nil
+        }
+
+        if let gateway = root["gateway"] as? [String: Any],
+           let auth = gateway["auth"] as? [String: Any],
+           let password = auth["password"] as? String
+        {
+            return password.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return nil
+    }
+
     private static func resolveGatewayToken(
         isRemote: Bool,
         root: [String: Any],
@@ -108,6 +146,14 @@ actor GatewayEndpointStore {
         let raw = env["CLAWDBOT_GATEWAY_TOKEN"] ?? ""
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty {
+            if let configToken = self.resolveConfigToken(isRemote: isRemote, root: root),
+               !configToken.isEmpty
+            {
+                self.warnEnvOverrideOnce(
+                    kind: .token,
+                    envVar: "CLAWDBOT_GATEWAY_TOKEN",
+                    configKey: isRemote ? "gateway.remote.token" : "gateway.auth.token")
+            }
             return trimmed
         }
         if isRemote {
@@ -137,6 +183,49 @@ actor GatewayEndpointStore {
             return token
         }
         return nil
+    }
+
+    private static func resolveConfigToken(isRemote: Bool, root: [String: Any]) -> String? {
+        if isRemote {
+            if let gateway = root["gateway"] as? [String: Any],
+               let remote = gateway["remote"] as? [String: Any],
+               let token = remote["token"] as? String
+            {
+                return token.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            return nil
+        }
+
+        if let gateway = root["gateway"] as? [String: Any],
+           let auth = gateway["auth"] as? [String: Any],
+           let token = auth["token"] as? String
+        {
+            return token.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return nil
+    }
+
+    private static func warnEnvOverrideOnce(
+        kind: EnvOverrideWarningKind,
+        envVar: String,
+        configKey: String)
+    {
+        let shouldWarn = Self.envOverrideWarnings.withValue { state in
+            switch kind {
+            case .token:
+                guard !state.token else { return false }
+                state.token = true
+                return true
+            case .password:
+                guard !state.password else { return false }
+                state.password = true
+                return true
+            }
+        }
+        guard shouldWarn else { return }
+        Self.staticLogger.warning(
+            "\(envVar, privacy: .public) is set and overrides \(configKey, privacy: .public). " +
+                "If this is unintentional, clear it with: launchctl unsetenv \(envVar, privacy: .public)")
     }
 
     private let deps: Deps
@@ -206,10 +295,10 @@ actor GatewayEndpointStore {
             let port = self.deps.localPort()
             let host = await self.deps.localHost()
             self.setState(.ready(
-                            mode: .local,
-                            url: URL(string: "ws://\(host):\(port)")!,
-                            token: token,
-                            password: password))
+                mode: .local,
+                url: URL(string: "ws://\(host):\(port)")!,
+                token: token,
+                password: password))
         case .remote:
             let port = await self.deps.remotePortIfRunning()
             guard let port else {
@@ -219,10 +308,10 @@ actor GatewayEndpointStore {
             }
             self.cancelRemoteEnsure()
             self.setState(.ready(
-                            mode: .remote,
-                            url: URL(string: "ws://127.0.0.1:\(Int(port))")!,
-                            token: token,
-                            password: password))
+                mode: .remote,
+                url: URL(string: "ws://127.0.0.1:\(Int(port))")!,
+                token: token,
+                password: password))
         case .unconfigured:
             self.cancelRemoteEnsure()
             self.setState(.unavailable(mode: .unconfigured, reason: "Gateway not configured"))

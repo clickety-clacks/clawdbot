@@ -48,6 +48,20 @@ describe("handleSlackAction", () => {
     expect(reactSlackMessage).toHaveBeenCalledWith("C1", "123.456", "✅");
   });
 
+  it("strips channel: prefix for channelId params", async () => {
+    const cfg = { channels: { slack: { botToken: "tok" } } } as ClawdbotConfig;
+    await handleSlackAction(
+      {
+        action: "react",
+        channelId: "channel:C1",
+        messageId: "123.456",
+        emoji: "✅",
+      },
+      cfg,
+    );
+    expect(reactSlackMessage).toHaveBeenCalledWith("C1", "123.456", "✅");
+  });
+
   it("removes reactions on empty emoji", async () => {
     const cfg = { channels: { slack: { botToken: "tok" } } } as ClawdbotConfig;
     await handleSlackAction(
@@ -324,5 +338,85 @@ describe("handleSlackAction", () => {
       mediaUrl: undefined,
       threadTs: "1111111111.111111",
     });
+  });
+
+  it("adds normalized timestamps to readMessages payloads", async () => {
+    const cfg = { channels: { slack: { botToken: "tok" } } } as ClawdbotConfig;
+    readSlackMessages.mockResolvedValueOnce({
+      messages: [{ ts: "1735689600.456", text: "hi" }],
+      hasMore: false,
+    });
+
+    const result = await handleSlackAction({ action: "readMessages", channelId: "C1" }, cfg);
+    const payload = result.details as {
+      messages: Array<{ timestampMs?: number; timestampUtc?: string }>;
+    };
+
+    const expectedMs = Math.round(1735689600.456 * 1000);
+    expect(payload.messages[0].timestampMs).toBe(expectedMs);
+    expect(payload.messages[0].timestampUtc).toBe(new Date(expectedMs).toISOString());
+  });
+
+  it("adds normalized timestamps to pin payloads", async () => {
+    const cfg = { channels: { slack: { botToken: "tok" } } } as ClawdbotConfig;
+    listSlackPins.mockResolvedValueOnce([
+      {
+        type: "message",
+        message: { ts: "1735689600.789", text: "pinned" },
+      },
+    ]);
+
+    const result = await handleSlackAction({ action: "listPins", channelId: "C1" }, cfg);
+    const payload = result.details as {
+      pins: Array<{ message?: { timestampMs?: number; timestampUtc?: string } }>;
+    };
+
+    const expectedMs = Math.round(1735689600.789 * 1000);
+    expect(payload.pins[0].message?.timestampMs).toBe(expectedMs);
+    expect(payload.pins[0].message?.timestampUtc).toBe(new Date(expectedMs).toISOString());
+  });
+
+  it("uses user token for reads when available", async () => {
+    const cfg = {
+      channels: { slack: { botToken: "xoxb-1", userToken: "xoxp-1" } },
+    } as ClawdbotConfig;
+    readSlackMessages.mockClear();
+    readSlackMessages.mockResolvedValueOnce({ messages: [], hasMore: false });
+    await handleSlackAction({ action: "readMessages", channelId: "C1" }, cfg);
+    const [, opts] = readSlackMessages.mock.calls[0] ?? [];
+    expect(opts?.token).toBe("xoxp-1");
+  });
+
+  it("falls back to bot token for reads when user token missing", async () => {
+    const cfg = {
+      channels: { slack: { botToken: "xoxb-1" } },
+    } as ClawdbotConfig;
+    readSlackMessages.mockClear();
+    readSlackMessages.mockResolvedValueOnce({ messages: [], hasMore: false });
+    await handleSlackAction({ action: "readMessages", channelId: "C1" }, cfg);
+    const [, opts] = readSlackMessages.mock.calls[0] ?? [];
+    expect(opts?.token).toBeUndefined();
+  });
+
+  it("uses bot token for writes when userTokenReadOnly is true", async () => {
+    const cfg = {
+      channels: { slack: { botToken: "xoxb-1", userToken: "xoxp-1" } },
+    } as ClawdbotConfig;
+    sendSlackMessage.mockClear();
+    await handleSlackAction({ action: "sendMessage", to: "channel:C1", content: "Hello" }, cfg);
+    const [, , opts] = sendSlackMessage.mock.calls[0] ?? [];
+    expect(opts?.token).toBeUndefined();
+  });
+
+  it("allows user token writes when bot token is missing", async () => {
+    const cfg = {
+      channels: {
+        slack: { userToken: "xoxp-1", userTokenReadOnly: false },
+      },
+    } as ClawdbotConfig;
+    sendSlackMessage.mockClear();
+    await handleSlackAction({ action: "sendMessage", to: "channel:C1", content: "Hello" }, cfg);
+    const [, , opts] = sendSlackMessage.mock.calls[0] ?? [];
+    expect(opts?.token).toBe("xoxp-1");
   });
 });

@@ -153,7 +153,7 @@ describe("directive behavior", () => {
       });
 
       await getReplyFromConfig(
-        { Body: "/verbose on", From: ctx.From, To: ctx.To },
+        { Body: "/verbose on", From: ctx.From, To: ctx.To, CommandAuthorized: true },
         {},
         {
           agents: {
@@ -193,7 +193,7 @@ describe("directive behavior", () => {
       const storePath = path.join(home, "sessions.json");
 
       const res = await getReplyFromConfig(
-        { Body: "/model", From: "+1222", To: "+1222" },
+        { Body: "/model", From: "+1222", To: "+1222", CommandAuthorized: true },
         {},
         {
           agents: {
@@ -213,7 +213,7 @@ describe("directive behavior", () => {
       const text = Array.isArray(res) ? res[0]?.text : res?.text;
       expect(text).toContain("anthropic/claude-opus-4-5");
       expect(text).toContain("Pick: /model <#> or /model <provider/model>");
-      expect(text).toContain("gpt-4.1-mini — openai");
+      expect(text).toContain("openai/gpt-4.1-mini");
       expect(text).not.toContain("claude-sonnet-4-1");
       expect(runEmbeddedPiAgent).not.toHaveBeenCalled();
     });
@@ -224,7 +224,7 @@ describe("directive behavior", () => {
       const storePath = path.join(home, "sessions.json");
 
       const res = await getReplyFromConfig(
-        { Body: "/model status", From: "+1222", To: "+1222" },
+        { Body: "/model status", From: "+1222", To: "+1222", CommandAuthorized: true },
         {},
         {
           agents: {

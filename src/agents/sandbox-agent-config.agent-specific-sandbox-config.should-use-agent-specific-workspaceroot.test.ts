@@ -46,9 +46,17 @@ vi.mock("node:child_process", async (importOriginal) => {
   };
 });
 
+vi.mock("../skills.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../skills.js")>();
+  return {
+    ...actual,
+    syncSkillsToWorkspace: vi.fn(async () => undefined),
+  };
+});
 describe("Agent-specific sandbox config", () => {
   beforeEach(() => {
     spawnCalls.length = 0;
+    vi.resetModules();
   });
 
   it("should use agent-specific workspaceRoot", async () => {

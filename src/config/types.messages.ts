@@ -17,6 +17,22 @@ export type QueueConfig = {
   drop?: QueueDropPolicy;
 };
 
+export type InboundDebounceByProvider = {
+  whatsapp?: number;
+  telegram?: number;
+  discord?: number;
+  slack?: number;
+  signal?: number;
+  imessage?: number;
+  msteams?: number;
+  webchat?: number;
+};
+
+export type InboundDebounceConfig = {
+  debounceMs?: number;
+  byChannel?: InboundDebounceByProvider;
+};
+
 export type BroadcastStrategy = "parallel" | "sequential";
 
 export type BroadcastConfig = {
@@ -31,7 +47,7 @@ export type BroadcastConfig = {
 };
 
 export type AudioConfig = {
-  /** @deprecated Use tools.audio.transcription instead. */
+  /** @deprecated Use tools.media.audio.models instead. */
   transcription?: {
     // Optional CLI to turn inbound audio into text; templated args, must output transcript to stdout.
     command: string[];
@@ -64,6 +80,8 @@ export type MessagesConfig = {
   responsePrefix?: string;
   groupChat?: GroupChatConfig;
   queue?: QueueConfig;
+  /** Debounce rapid inbound messages per sender (global + per-channel overrides). */
+  inbound?: InboundDebounceConfig;
   /** Emoji reaction used to acknowledge inbound messages (empty disables). */
   ackReaction?: string;
   /** When to send ack reactions. Default: "group-mentions". */
@@ -77,6 +95,8 @@ export type NativeCommandsSetting = boolean | "auto";
 export type CommandsConfig = {
   /** Enable native command registration when supported (default: "auto"). */
   native?: NativeCommandsSetting;
+  /** Enable native skill command registration when supported (default: "auto"). */
+  nativeSkills?: NativeCommandsSetting;
   /** Enable text command parsing (default: true). */
   text?: boolean;
   /** Allow bash chat command (`!`; `/bash` alias) (default: false). */
@@ -96,4 +116,6 @@ export type CommandsConfig = {
 export type ProviderCommandsConfig = {
   /** Override native command registration for this provider (bool or "auto"). */
   native?: NativeCommandsSetting;
+  /** Override native skill command registration for this provider (bool or "auto"). */
+  nativeSkills?: NativeCommandsSetting;
 };
