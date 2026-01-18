@@ -22,9 +22,19 @@ All paths live under `~/.clawdbot/clawline/` (configurable via `clawline.statePa
 | `allowlist.json` | Approved devices (`deviceId`, `userId`, admin flag, metadata) |
 | `pending.json` | Waiting devices (claimed name, platform, requested timestamp) |
 | `denylist.json` | Hot-reload kill switch; immediately terminates matching sessions |
+| `alert-instructions.md` | Markdown block appended to every Clawline alert before it pages Flynn |
 
 The provider now watches **allowlist** and **pending** for changes, so edits take effect without restarting.
 Updates propagate immediately (the watcher reacts as soon as the file write completes), so you can approve/deny and tell the user to retry right away.
+
+## Alert Instructions Overlay
+
+- File path: `~/.clawdbot/clawline/alert-instructions.md` (overridable via `clawline.alertInstructionsPath`).
+- Format: free-form Markdown/plain text; the provider reads it fresh on each alert and appends it to the alert body separated by a blank line.
+- Default text (auto-created if the file is missing):  
+  `After handling this alert, evaluate: would Flynn want to know what happened? If yes, report to him. Don't just process silently.`
+- Operators (or CLU) can edit the file at runtime—no restart needed. Empty/whitespace-only contents disable the overlay temporarily.
+- Keep the text short enough to stay under `sessions.maxMessageBytes` (~64 KB). If it’s too long, the provider logs `alert_instructions_skipped` and sends the alert without the overlay.
 
 ## Inspect Pending & Allowlist
 

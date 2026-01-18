@@ -41,6 +41,7 @@ export type AlertTargetConfig = {
 export interface ProviderConfig {
   port: number;
   statePath: string;
+  alertInstructionsPath?: string | null;
   network: {
     bindAddress: string;
     allowInsecurePublic: boolean;

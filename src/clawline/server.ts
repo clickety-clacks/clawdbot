@@ -330,9 +330,12 @@ enum MessageStreamingState {
   Failed = 2
 }
 
+export const DEFAULT_ALERT_INSTRUCTIONS_TEXT = `After handling this alert, evaluate: would Flynn want to know what happened? If yes, report to him. Don't just process silently.`;
+
 const DEFAULT_CONFIG: ProviderConfig = {
   port: 18800,
   statePath: path.join(os.homedir(), ".clawdbot", "clawline"),
+  alertInstructionsPath: path.join(os.homedir(), ".clawdbot", "clawline", "alert-instructions.md"),
   network: {
     bindAddress: "127.0.0.1",
     allowInsecurePublic: false,
@@ -506,7 +509,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const sessionStorePath = options.sessionStorePath;
   const mainSessionKey = options.mainSessionKey?.trim() || "agent:main:main";
   const mainSessionAgentId = resolveAgentIdFromSessionKey(mainSessionKey);
-  
+  const alertInstructionsPath =
+    typeof config.alertInstructionsPath === "string" && config.alertInstructionsPath.trim().length > 0
+      ? path.resolve(config.alertInstructionsPath.trim())
+      : null;
+
   if (!config.network.allowInsecurePublic && !isLocalhost(config.network.bindAddress)) {
     throw new Error("allowInsecurePublic must be true to bind non-localhost");
   }
@@ -525,6 +532,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   await ensureDir(assetsDir);
   await ensureDir(tmpDir);
   await ensureDir(sessionTranscriptsDir);
+  if (alertInstructionsPath) {
+    await ensureAlertInstructionsFileIfMissing();
+  }
 
   const allowlistPath = path.join(config.statePath, ALLOWLIST_FILENAME);
   const pendingPath = path.join(config.statePath, PENDING_FILENAME);
@@ -997,7 +1007,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     logHttpRequest("alert_request_start");
     try {
       const payload = await parseAlertPayload(req);
-      const text = buildAlertText(payload.message, payload.source);
+      let text = buildAlertText(payload.message, payload.source);
+      text = await applyAlertInstructions(text);
       await wakeGatewayForAlert(text);
       await deliverAlertTarget(text);
       res.setHeader("Content-Type", "application/json");
@@ -1096,6 +1107,60 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   function resolveAlertSource(source?: string): string | undefined {
     const cleaned = source ? sanitizeLabel(source) : undefined;
     return cleaned ?? DEFAULT_ALERT_SOURCE;
+  }
+
+  async function applyAlertInstructions(text: string): Promise<string> {
+    const instructions = await readAlertInstructionsFromDisk();
+    if (!instructions) {
+      return text;
+    }
+    const combined = `${text}\n\n${instructions}`;
+    if (Buffer.byteLength(combined, "utf8") > config.sessions.maxMessageBytes) {
+      logger.warn?.("alert_instructions_skipped", {
+        reason: "message_too_large",
+        textBytes: Buffer.byteLength(text, "utf8"),
+        instructionsBytes: Buffer.byteLength(instructions, "utf8"),
+      });
+      return text;
+    }
+    return combined;
+  }
+
+  async function readAlertInstructionsFromDisk(): Promise<string | null> {
+    if (!alertInstructionsPath) {
+      return null;
+    }
+    try {
+      const raw = await fs.readFile(alertInstructionsPath, "utf8");
+      const trimmed = raw.trim();
+      return trimmed.length > 0 ? trimmed : null;
+    } catch (err: any) {
+      if (err && err.code !== "ENOENT") {
+        logger.warn?.("alert_instructions_read_failed", err);
+      }
+      return null;
+    }
+  }
+
+  async function ensureAlertInstructionsFileIfMissing() {
+    if (!alertInstructionsPath) {
+      return;
+    }
+    try {
+      await fs.access(alertInstructionsPath);
+    } catch (err: any) {
+      if (err && err.code !== "ENOENT") {
+        logger.warn?.("alert_instructions_access_failed", err);
+        return;
+      }
+      try {
+        await ensureDir(path.dirname(alertInstructionsPath));
+        await fs.writeFile(`${alertInstructionsPath}`, `${DEFAULT_ALERT_INSTRUCTIONS_TEXT}\n`, "utf8");
+        logger.info?.("alert_instructions_initialized", { alertInstructionsPath });
+      } catch (writeErr) {
+        logger.warn?.("alert_instructions_write_failed", writeErr);
+      }
+    }
   }
 
   async function wakeGatewayForAlert(text: string) {
