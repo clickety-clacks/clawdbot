@@ -1424,18 +1424,19 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   ): Promise<{ event: ServerMessage; sequence: number }> {
     const timestamp = nowMs();
     try {
-      return await enqueueWriteTask(() =>
-        insertUserMessageTx(
-          session,
-          targetUserId,
-          messageId,
-          content,
-          timestamp,
-          attachments,
-          attachmentsHash,
-          assetIds,
-          channelType
-        )
+      return await enqueueWriteTask(
+        () =>
+          insertUserMessageTx(
+            session,
+            targetUserId,
+            messageId,
+            content,
+            timestamp,
+            attachments,
+            attachmentsHash,
+            assetIds,
+            channelType
+          ) as { event: ServerMessage; sequence: number }
       );
     } catch (err: any) {
       if (err && typeof err.message === "string" && err.message.includes("FOREIGN KEY")) {
