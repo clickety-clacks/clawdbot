@@ -4,13 +4,24 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import { FormData, fetch } from "undici";
 
 import type { getReplyFromConfig } from "../auto-reply/reply.js";
 import type { ClawdbotConfig } from "../config/config.js";
 import type { AllowlistEntry, Logger, ProviderServer } from "./domain.js";
+
+const gatewayCallMock = vi.fn();
+vi.mock("../gateway/call.js", () => ({
+  callGateway: (...args: unknown[]) => gatewayCallMock(...args),
+}));
+
+const sendMessageMock = vi.fn();
+vi.mock("../infra/outbound/message.js", () => ({
+  sendMessage: (...args: unknown[]) => sendMessageMock(...args),
+}));
+
 import { createProviderServer, PROTOCOL_VERSION } from "./server.js";
 
 const silentLogger: Logger = {
@@ -25,6 +36,18 @@ const testClawdbotConfig = {
   agents: { default: "main", list: [{ id: "main" }] },
   bindings: [],
 } as ClawdbotConfig;
+
+beforeEach(() => {
+  gatewayCallMock.mockReset();
+  gatewayCallMock.mockResolvedValue({ ok: true });
+  sendMessageMock.mockReset();
+  sendMessageMock.mockResolvedValue({
+    channel: "clawline",
+    to: "flynn",
+    via: "direct",
+    mediaUrl: null,
+  });
+});
 
 type TestServerContext = {
   server: ProviderServer;
@@ -234,6 +257,55 @@ describe.sequential("clawline provider server", () => {
       const assetPath = path.join(ctx.mediaPath, "assets", upload.assetId);
       const stored = await fs.readFile(assetPath);
       expect(stored.equals(bytes)).toBe(true);
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("handles alert endpoint by waking gateway and sending message", async () => {
+    const ctx = await setupTestServer();
+    try {
+      const response = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: "Check on Flynn", source: "codex" }),
+      });
+      expect(response.status).toBe(200);
+      const payload = await response.json();
+      expect(payload).toEqual({ ok: true });
+      expect(gatewayCallMock).toHaveBeenCalledTimes(1);
+      const wakeCall = gatewayCallMock.mock.calls[0]?.[0] as {
+        params?: { text?: string; mode?: string };
+      };
+      expect(wakeCall?.params?.text).toBe("[codex] Check on Flynn");
+      expect(wakeCall?.params?.mode).toBe("now");
+      expect(sendMessageMock).toHaveBeenCalledTimes(1);
+      const sendCall = sendMessageMock.mock.calls[0]?.[0] as {
+        channel?: string;
+        to?: string;
+        content?: string;
+      };
+      expect(sendCall?.channel).toBe("clawline");
+      expect(sendCall?.to).toBe("flynn");
+      expect(sendCall?.content).toBe("[codex] Check on Flynn");
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("returns 400 when alert payload is missing message", async () => {
+    const ctx = await setupTestServer();
+    try {
+      const response = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source: "codex" }),
+      });
+      expect(response.status).toBe(400);
+      const data = (await response.json()) as { code?: string };
+      expect(data.code).toBe("invalid_message");
+      expect(gatewayCallMock).not.toHaveBeenCalled();
+      expect(sendMessageMock).not.toHaveBeenCalled();
     } finally {
       await ctx.cleanup();
     }

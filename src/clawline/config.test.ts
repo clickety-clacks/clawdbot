@@ -18,6 +18,7 @@ describe("resolveClawlineConfig", () => {
     );
     expect(cfg.network.bindAddress).toBe("127.0.0.1");
     expect(cfg.network.allowInsecurePublic).toBe(false);
+    expect(cfg.alertTarget).toEqual({ channel: "clawline", to: "flynn" });
   });
 
   it("merges overrides from config", () => {
@@ -74,5 +75,18 @@ describe("resolveClawlineConfig", () => {
     expect(cfg.media.storagePath).toBe(
       path.resolve("relative/media"),
     );
+  });
+
+  it("merges alert target overrides", () => {
+    const cfg = resolveClawlineConfig({
+      clawline: {
+        alertTarget: {
+          to: "river",
+        },
+      },
+    } as ClawdbotConfig);
+
+    expect(cfg.alertTarget.channel).toBe("clawline");
+    expect(cfg.alertTarget.to).toBe("river");
   });
 });
