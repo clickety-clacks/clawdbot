@@ -3,7 +3,7 @@ import { sendClawlineOutboundMessage } from "../../../clawline/outbound.js";
 import type { ChannelOutboundAdapter } from "../types.js";
 
 export const clawlineOutbound: ChannelOutboundAdapter = {
-  deliveryMode: "gateway",
+  deliveryMode: "direct",
   chunker: chunkText,
   textChunkLimit: 4000,
   resolveTarget: ({ to }) => {
