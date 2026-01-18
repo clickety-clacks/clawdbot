@@ -154,6 +154,16 @@ This mirrors what the mobile app and adapter do. Either approach yields the same
 
 ## When Things Go Wrong
 
+### Changing a Device's userId
+
+The JWT issued during pairing is bound to the `userId` recorded in `allowlist.json`, so editing only the allowlist entry leaves existing tokens untouched and they keep presenting the old `userId`. To truly migrate a device to a new `userId`:
+
+1. Remove the device from `allowlist.json` (delete the whole entry).
+2. Ask the user to re-pair from the app (wipe app data/Keychain if the old credentials keep auto-connecting).
+3. Approve the new pending request with the updated `userId`.
+
+This invalidates the stored token because the device must obtain a fresh JWT during the new pairing flow.
+
 - **“Rate limited” during pairing** → inspect `clawdbot.json` overrides and ensure the watchdog on tars was updated (run `ssh … cat ~/.clawdbot/clawdbot.json | jq .clawline`).
 - **Stuck pending entry** → remove it from `pending.json` (the socket will get `pair_denied`) and ask the user to retry.
 - **Tokens not delivered** → confirm the device appears in `allowlist.json` with `"tokenDelivered": false`; the next `pair_request` will resend automatically.
