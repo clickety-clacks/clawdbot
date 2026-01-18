@@ -8,7 +8,7 @@ import { telegramPlugin } from "./telegram.js";
 import { clawlinePlugin } from "./clawline.js";
 import type { ChannelId, ChannelPlugin } from "./types.js";
 import { requireActivePluginRegistry } from "../../plugins/runtime.js";
-import { CHAT_CHANNEL_ORDER, type ChatChannelId, normalizeAnyChannelId } from "../registry.js";
+import { clawlinePlugin } from "./clawline.js";
 
 // Channel plugins registry (runtime).
 //
@@ -16,26 +16,13 @@ import { CHAT_CHANNEL_ORDER, type ChatChannelId, normalizeAnyChannelId } from ".
 // Shared code paths (reply flow, command auth, sandbox explain) should depend on `src/channels/dock.ts`
 // instead, and only call `getChannelPlugin()` at execution boundaries.
 //
-// Adding a channel:
-// - add `<id>Plugin` import + entry in `resolveChannels()`
-// - add an entry to `src/channels/dock.ts` for shared behavior (capabilities, allowFrom, threading, …)
-// - add ids/aliases in `src/channels/registry.ts`
-function resolveCoreChannels(): ChannelPlugin[] {
-  return [
-    telegramPlugin,
-    whatsappPlugin,
-    discordPlugin,
-    slackPlugin,
-    signalPlugin,
-    imessagePlugin,
-    msteamsPlugin,
-    clawlinePlugin,
-  ];
-}
+const CORE_CHANNEL_PLUGINS: ChannelPlugin[] = [clawlinePlugin];
 
+// Channel plugins are registered by the plugin loader (extensions/ or configured paths).
 function listPluginChannels(): ChannelPlugin[] {
   const registry = requireActivePluginRegistry();
-  return registry.channels.map((entry) => entry.plugin);
+  const dynamicPlugins = registry.channels.map((entry) => entry.plugin);
+  return [...CORE_CHANNEL_PLUGINS, ...dynamicPlugins];
 }
 
 function dedupeChannels(channels: ChannelPlugin[]): ChannelPlugin[] {
