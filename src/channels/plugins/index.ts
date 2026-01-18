@@ -5,6 +5,7 @@ import { msteamsPlugin } from "./msteams.js";
 import { signalPlugin } from "./signal.js";
 import { slackPlugin } from "./slack.js";
 import { telegramPlugin } from "./telegram.js";
+import { clawlinePlugin } from "./clawline.js";
 import type { ChannelId, ChannelPlugin } from "./types.js";
 import { whatsappPlugin } from "./whatsapp.js";
 import { getActivePluginRegistry } from "../../plugins/runtime.js";
@@ -28,6 +29,7 @@ function resolveCoreChannels(): ChannelPlugin[] {
     signalPlugin,
     imessagePlugin,
     msteamsPlugin,
+    clawlinePlugin,
   ];
 }
 
@@ -90,5 +92,6 @@ export {
   slackPlugin,
   telegramPlugin,
   whatsappPlugin,
+  clawlinePlugin,
 };
 export type { ChannelId, ChannelPlugin } from "./types.js";

@@ -91,6 +91,19 @@ export interface ProviderServer {
   start(): Promise<void>;
   stop(): Promise<void>;
   getPort(): number;
+  sendMessage(params: ClawlineOutboundSendParams): Promise<ClawlineOutboundSendResult>;
 }
 
 export type Logger = Pick<typeof console, "info" | "warn" | "error">;
+
+export type ClawlineOutboundSendParams = {
+  target: string;
+  text: string;
+  mediaUrl?: string;
+};
+
+export type ClawlineOutboundSendResult = {
+  messageId: string;
+  userId: string;
+  deviceId?: string;
+};

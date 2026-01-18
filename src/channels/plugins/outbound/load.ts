@@ -17,6 +17,7 @@ const LOADERS: Record<ChatChannelId, OutboundLoader> = {
   signal: async () => (await import("./signal.js")).signalOutbound,
   imessage: async () => (await import("./imessage.js")).imessageOutbound,
   msteams: async () => (await import("./msteams.js")).msteamsOutbound,
+  clawline: async () => (await import("./clawline.js")).clawlineOutbound,
 };
 
 const cache = new Map<ChannelId, ChannelOutboundAdapter>();
