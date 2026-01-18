@@ -7,6 +7,17 @@ import { getActivePluginRegistry } from "../../../plugins/runtime.js";
 // The full channel plugins (src/channels/plugins/*.ts) pull in status,
 // onboarding, gateway monitors, etc. Outbound delivery only needs chunking +
 // send primitives, so we keep a dedicated, lightweight loader here.
+const LOADERS: Record<ChatChannelId, OutboundLoader> = {
+  telegram: async () => (await import("./telegram.js")).telegramOutbound,
+  whatsapp: async () => (await import("./whatsapp.js")).whatsappOutbound,
+  discord: async () => (await import("./discord.js")).discordOutbound,
+  slack: async () => (await import("./slack.js")).slackOutbound,
+  signal: async () => (await import("./signal.js")).signalOutbound,
+  imessage: async () => (await import("./imessage.js")).imessageOutbound,
+  msteams: async () => (await import("./msteams.js")).msteamsOutbound,
+  clawline: async () => (await import("./clawline.js")).clawlineOutbound,
+};
+
 const cache = new Map<ChannelId, ChannelOutboundAdapter>();
 let lastRegistry: PluginRegistry | null = null;
 

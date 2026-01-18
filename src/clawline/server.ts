@@ -42,6 +42,8 @@ import type {
   ProviderOptions,
   ProviderServer,
   Logger,
+  ClawlineOutboundSendParams,
+  ClawlineOutboundSendResult,
 } from "./domain.js";
 import { ClientMessageError, HttpError } from "./errors.js";
 import { SlidingWindowRateLimiter } from "./rate-limiter.js";
@@ -1396,6 +1398,19 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
   }
 
+  function deliverToDevice(deviceId: string, payload: ServerMessage): boolean {
+    const session = sessionsByDevice.get(deviceId);
+    if (!session || session.socket.readyState !== WebSocket.OPEN) {
+      return false;
+    }
+    session.socket.send(JSON.stringify(payload), (err) => {
+      if (err) {
+        session.socket.close();
+      }
+    });
+    return true;
+  }
+
   function broadcastToChannelSessions(channelType: ChannelType, session: Session, payload: ServerMessage) {
     if (channelType === ADMIN_CHANNEL_TYPE) {
       broadcastToAdmins(payload);
@@ -1464,6 +1479,49 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     };
     await appendEvent(event, targetUserId);
     return event;
+  }
+
+  async function sendOutboundMessage(
+    params: ClawlineOutboundSendParams,
+  ): Promise<ClawlineOutboundSendResult> {
+    const targetInput = typeof params.target === "string" ? params.target : "";
+    if (!targetInput.trim()) {
+      throw new Error("Delivering to clawline requires --to <userId|deviceId>");
+    }
+    const text = typeof params.text === "string" ? params.text : "";
+    if (!text.trim()) {
+      throw new Error("Delivering to clawline requires --message <text>");
+    }
+    if (params.mediaUrl) {
+      throw new Error("Clawline outbound media delivery is not supported yet");
+    }
+    const bytes = Buffer.byteLength(text, "utf8");
+    if (bytes > config.sessions.maxMessageBytes) {
+      throw new Error("Clawline message exceeds max size");
+    }
+    const target = resolveSendTarget(targetInput);
+    const event: ServerMessage = {
+      type: "message",
+      id: generateServerMessageId(),
+      role: "assistant",
+      content: text,
+      timestamp: nowMs(),
+      streaming: false,
+      channelType: DEFAULT_CHANNEL_TYPE,
+    };
+    await runPerUserTask(target.userId, async () => {
+      await appendEvent(event, target.userId);
+    });
+    if (target.kind === "device") {
+      deliverToDevice(target.deviceId, event);
+    } else {
+      broadcastToUser(target.userId, event);
+    }
+    return {
+      messageId: event.id,
+      userId: target.userId,
+      deviceId: target.kind === "device" ? target.deviceId : undefined,
+    };
   }
 
   function removeSession(session: Session) {
@@ -1793,6 +1851,52 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
   function validateDeviceId(value: unknown): value is string {
     return typeof value === "string" && UUID_V4_REGEX.test(value);
+  }
+
+  type ResolvedSendTarget =
+    | { kind: "user"; userId: string }
+    | { kind: "device"; userId: string; deviceId: string };
+
+  function resolveSendTarget(raw: string): ResolvedSendTarget {
+    const trimmed = raw.trim();
+    if (!trimmed) {
+      throw new Error("Delivering to clawline requires --to <userId|deviceId>");
+    }
+    const lower = trimmed.toLowerCase();
+    if (lower.startsWith("user:")) {
+      const userId = trimmed.slice("user:".length).trim();
+      if (!userId) {
+        throw new Error("Delivering to clawline requires user:ID or device:ID target");
+      }
+      return resolveUserTarget(userId);
+    }
+    if (lower.startsWith("device:")) {
+      const deviceId = trimmed.slice("device:".length).trim();
+      if (!deviceId) {
+        throw new Error("Delivering to clawline requires user:ID or device:ID target");
+      }
+      return resolveDeviceTarget(deviceId);
+    }
+    if (validateDeviceId(trimmed)) {
+      return resolveDeviceTarget(trimmed);
+    }
+    return resolveUserTarget(trimmed);
+  }
+
+  function resolveDeviceTarget(deviceId: string): ResolvedSendTarget {
+    const entry = findAllowlistEntry(deviceId);
+    if (!entry) {
+      throw new Error(`Unknown clawline device: ${deviceId}`);
+    }
+    return { kind: "device", deviceId: entry.deviceId, userId: entry.userId };
+  }
+
+  function resolveUserTarget(userId: string): ResolvedSendTarget {
+    const entries = allowlist.entries.filter((entry) => entry.userId === userId);
+    if (entries.length === 0) {
+      throw new Error(`Unknown clawline user: ${userId}`);
+    }
+    return { kind: "user", userId };
   }
 
   wss.on("connection", (ws, req) => {
@@ -2190,6 +2294,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     },
     getPort() {
       return readBoundPort();
-    }
+    },
+    sendMessage: sendOutboundMessage,
   };
 }

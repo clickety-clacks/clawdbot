@@ -1,3 +1,11 @@
+import { CHAT_CHANNEL_ORDER, type ChatChannelId, normalizeChatChannelId } from "../registry.js";
+import { discordPlugin } from "./discord.js";
+import { imessagePlugin } from "./imessage.js";
+import { msteamsPlugin } from "./msteams.js";
+import { signalPlugin } from "./signal.js";
+import { slackPlugin } from "./slack.js";
+import { telegramPlugin } from "./telegram.js";
+import { clawlinePlugin } from "./clawline.js";
 import type { ChannelId, ChannelPlugin } from "./types.js";
 import { requireActivePluginRegistry } from "../../plugins/runtime.js";
 import { CHAT_CHANNEL_ORDER, type ChatChannelId, normalizeAnyChannelId } from "../registry.js";
@@ -8,7 +16,23 @@ import { CHAT_CHANNEL_ORDER, type ChatChannelId, normalizeAnyChannelId } from ".
 // Shared code paths (reply flow, command auth, sandbox explain) should depend on `src/channels/dock.ts`
 // instead, and only call `getChannelPlugin()` at execution boundaries.
 //
-// Channel plugins are registered by the plugin loader (extensions/ or configured paths).
+// Adding a channel:
+// - add `<id>Plugin` import + entry in `resolveChannels()`
+// - add an entry to `src/channels/dock.ts` for shared behavior (capabilities, allowFrom, threading, …)
+// - add ids/aliases in `src/channels/registry.ts`
+function resolveCoreChannels(): ChannelPlugin[] {
+  return [
+    telegramPlugin,
+    whatsappPlugin,
+    discordPlugin,
+    slackPlugin,
+    signalPlugin,
+    imessagePlugin,
+    msteamsPlugin,
+    clawlinePlugin,
+  ];
+}
+
 function listPluginChannels(): ChannelPlugin[] {
   const registry = requireActivePluginRegistry();
   return registry.channels.map((entry) => entry.plugin);
@@ -56,29 +80,13 @@ export function normalizeChannelId(raw?: string | null): ChannelId | null {
   return normalizeAnyChannelId(raw);
 }
 export {
-  listDiscordDirectoryGroupsFromConfig,
-  listDiscordDirectoryPeersFromConfig,
-  listSlackDirectoryGroupsFromConfig,
-  listSlackDirectoryPeersFromConfig,
-  listTelegramDirectoryGroupsFromConfig,
-  listTelegramDirectoryPeersFromConfig,
-  listWhatsAppDirectoryGroupsFromConfig,
-  listWhatsAppDirectoryPeersFromConfig,
-} from "./directory-config.js";
-export {
-  applyChannelMatchMeta,
-  buildChannelKeyCandidates,
-  normalizeChannelSlug,
-  resolveChannelEntryMatch,
-  resolveChannelEntryMatchWithFallback,
-  resolveChannelMatchConfig,
-  resolveNestedAllowlistDecision,
-  type ChannelEntryMatch,
-  type ChannelMatchSource,
-} from "./channel-config.js";
-export {
-  formatAllowlistMatchMeta,
-  type AllowlistMatch,
-  type AllowlistMatchSource,
-} from "./allowlist-match.js";
+  discordPlugin,
+  imessagePlugin,
+  msteamsPlugin,
+  signalPlugin,
+  slackPlugin,
+  telegramPlugin,
+  whatsappPlugin,
+  clawlinePlugin,
+};
 export type { ChannelId, ChannelPlugin } from "./types.js";

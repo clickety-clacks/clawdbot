@@ -442,6 +442,13 @@ const DOCKS: Record<ChatChannelId, ChannelDock> = {
       },
     },
   },
+  clawline: {
+    id: "clawline",
+    capabilities: {
+      chatTypes: ["direct"],
+    },
+    outbound: { textChunkLimit: 4000 },
+  },
 };
 
 function buildDockFromPlugin(plugin: ChannelPlugin): ChannelDock {
