@@ -41,6 +41,6 @@ describe("channel plugin registry", () => {
     );
     setActivePluginRegistry(registry);
     const pluginIds = listChannelPlugins().map((plugin) => plugin.id);
-    expect(pluginIds).toEqual(["telegram", "slack", "signal"]);
+    expect(pluginIds).toEqual(["telegram", "slack", "signal", "clawline"]);
   });
 });

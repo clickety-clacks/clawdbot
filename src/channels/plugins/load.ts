@@ -2,6 +2,12 @@ import type { ChannelId, ChannelPlugin } from "./types.js";
 import type { PluginRegistry } from "../../plugins/registry.js";
 import { getActivePluginRegistry } from "../../plugins/runtime.js";
 
+type CorePluginLoader = () => Promise<ChannelPlugin>;
+
+const CORE_LOADERS: Record<string, CorePluginLoader> = {
+  clawline: async () => (await import("./clawline.js")).clawlinePlugin,
+};
+
 const cache = new Map<ChannelId, ChannelPlugin>();
 let lastRegistry: PluginRegistry | null = null;
 
@@ -20,6 +26,12 @@ export async function loadChannelPlugin(id: ChannelId): Promise<ChannelPlugin | 
   if (pluginEntry) {
     cache.set(id, pluginEntry.plugin);
     return pluginEntry.plugin;
+  }
+  const loader = CORE_LOADERS[id];
+  if (loader) {
+    const plugin = await loader();
+    cache.set(id, plugin);
+    return plugin;
   }
   return undefined;
 }
