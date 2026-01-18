@@ -32,6 +32,7 @@ export function createClawdbotTools(options?: {
   workspaceDir?: string;
   sandboxed?: boolean;
   config?: ClawdbotConfig;
+  pluginToolAllowlist?: string[];
   /** Current channel ID for auto-threading (Slack). */
   currentChannelId?: string;
   /** Current thread timestamp for auto-threading (Slack). */
@@ -40,12 +41,15 @@ export function createClawdbotTools(options?: {
   replyToMode?: "off" | "first" | "all";
   /** Mutable ref to track if a reply was sent (for "first" mode). */
   hasRepliedRef?: { value: boolean };
+  /** If true, the model has native vision capability */
+  modelHasVision?: boolean;
 }): AnyAgentTool[] {
   const imageTool = options?.agentDir?.trim()
     ? createImageTool({
         config: options?.config,
         agentDir: options.agentDir,
         sandboxRoot: options?.sandboxRoot,
+        modelHasVision: options?.modelHasVision,
       })
     : null;
   const webSearchTool = createWebSearchTool({
@@ -130,6 +134,7 @@ export function createClawdbotTools(options?: {
       sandboxed: options?.sandboxed,
     },
     existingToolNames: new Set(tools.map((tool) => tool.name)),
+    toolAllowlist: options?.pluginToolAllowlist,
   });
 
   return [...tools, ...pluginTools];

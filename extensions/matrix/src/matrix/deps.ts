@@ -3,8 +3,8 @@ import path from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 
-import { runCommandWithTimeout } from "../../../../src/process/exec.js";
-import type { RuntimeEnv } from "../../../../src/runtime.js";
+import type { RuntimeEnv } from "clawdbot/plugin-sdk";
+import { getMatrixRuntime } from "../runtime.js";
 
 const MATRIX_SDK_PACKAGE = "matrix-js-sdk";
 
@@ -41,7 +41,7 @@ export async function ensureMatrixSdkInstalled(params: {
     ? ["pnpm", "install"]
     : ["npm", "install", "--omit=dev", "--silent"];
   params.runtime.log?.(`matrix: installing dependencies via ${command[0]} (${root})…`);
-  const result = await runCommandWithTimeout(command, {
+  const result = await getMatrixRuntime().system.runCommandWithTimeout(command, {
     cwd: root,
     timeoutMs: 300_000,
     env: { COREPACK_ENABLE_DOWNLOAD_PROMPT: "0" },

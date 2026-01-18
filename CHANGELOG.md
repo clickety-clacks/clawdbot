@@ -2,19 +2,69 @@
 
 Docs: https://docs.clawd.bot
 
+## 2026.1.18-5
+
+### Changes
+- Dependencies: update core + plugin deps (grammy, vitest, openai, Microsoft agents hosting, etc.).
+
+## 2026.1.18-4
+
+### Changes
+- macOS: switch PeekabooBridge integration to the tagged Swift Package Manager release (no submodule).
+- macOS: stop syncing Peekaboo as a git submodule in postinstall.
+- Swabble: use the tagged Commander Swift package release.
+- CLI: add `clawdbot acp client` interactive ACP harness for debugging.
+- Plugins: route command detection/text chunking helpers through the plugin runtime and drop runtime exports from the SDK.
+- Plugins: auto-enable bundled channel/provider plugins when configuration is present.
+- Config: stamp last-touched metadata on write and warn if the config is newer than the running build.
+- macOS: hide usage section when usage is unavailable instead of showing provider errors.
+- Memory: add native Gemini embeddings provider for memory search. (#1151)
+- Agents: add local docs path resolution and include docs/mirror/source/community pointers in the system prompt.
+- Slack: add HTTP webhook mode via Bolt HTTP receiver for Events API deployments. (#1143) — thanks @jdrhyne.
+
+### Fixes
+- Auth profiles: keep auto-pinned preference while allowing rotation on failover; user pins stay locked. (#1138) — thanks @cheeeee.
+- Agents: sanitize oversized image payloads before send and surface image-dimension errors.
+- macOS: Doctor repairs LaunchAgent bootstrap issues for Gateway + Node when listed but not loaded. (#1166) — thanks @AlexMikhalev.
+- macOS: avoid touching launchd in Remote over SSH so quitting the app no longer disables the remote gateway. (#1105)
+- Memory: index atomically so failed reindex preserves the previous memory database. (#1151)
+- Memory: avoid sqlite-vec unique constraint failures when reindexing duplicate chunk ids. (#1151)
+
 ## 2026.1.18-3
 
 ### Changes
-- Plugins: add exclusive plugin slots with a dedicated memory slot selector.
-- Memory: ship core memory tools + CLI as the bundled `memory-core` plugin.
-- Docs: document plugin slots and memory plugin behavior.
+- Exec: add host/security/ask routing for gateway + node exec.
+- Exec: add `/exec` directive for per-session exec defaults (host/security/ask/node).
+- macOS: migrate exec approvals to `~/.clawdbot/exec-approvals.json` with per-agent allowlists and skill auto-allow toggle.
+- macOS: add approvals socket UI server + node exec lifecycle events.
+- Nodes: add headless node host (`clawdbot node start`) for `system.run`/`system.which`.
+- Nodes: add node daemon service install/status/start/stop/restart.
+- Bridge: add `skills.bins` RPC to support node host auto-allow skill bins.
+- Slash commands: replace `/cost` with `/usage off|tokens|full` to control per-response usage footer; `/usage` no longer aliases `/status`. (Supersedes #1140) — thanks @Nachx639.
+- Sessions: add daily reset policy with per-type overrides and idle windows (default 4am local), preserving legacy idle-only configs. (#1146) — thanks @austinm911.
+- Agents: auto-inject local image references for vision models and avoid reloading history images. (#1098) — thanks @tyler6204.
+- Docs: refresh exec/elevated/exec-approvals docs for the new flow. https://docs.clawd.bot/tools/exec-approvals
+- Docs: add node host CLI + update exec approvals/bridge protocol docs. https://docs.clawd.bot/cli/node
+- ACP: add experimental ACP support for IDE integrations (`clawdbot acp`). Thanks @visionik.
+- Tools: allow `sessions_spawn` to override thinking level for sub-agent runs.
+- Channels: unify thread/topic allowlist matching + command/mention gating helpers across core providers.
+- Models: add Qwen Portal OAuth provider support. (#1120) — thanks @mukhtharcm.
+- Memory: add `--verbose` logging for memory status + batch indexing details.
+- Memory: allow parallel OpenAI batch indexing jobs (default concurrency: 2).
+- macOS: add per-agent exec approvals with allowlists, skill CLI auto-allow, and settings UI.
+- Docs: add exec approvals guide and link from tools index. https://docs.clawd.bot/tools/exec-approvals
+- macOS: add exec-host IPC for node service `system.run` with HMAC + peer UID checks.
+
+### Fixes
+- Exec approvals: enforce allowlist when ask is off; prefer raw command for node approvals/events.
+- Tools: return a companion-app-required message when node exec is requested with no paired node.
+- Streaming: emit assistant deltas for OpenAI-compatible SSE chunks. (#1147) — thanks @alauppe.
+- Model fallback: treat timeout aborts as failover while preserving user aborts. (#1137) — thanks @cheeeee.
 
 ## 2026.1.18-2
 
-### Changes
-- Memory: add hybrid BM25 + vector search (FTS5) with weighted merging and fallback.
-- Memory: add SQLite embedding cache to speed up reindexing and frequent updates.
-- CLI: surface memory search state in `clawdbot status` and detailed FTS + embedding cache state in `clawdbot memory status`.
+### Fixes
+- Tests: stabilize plugin SDK resolution and embedded agent timeouts.
 
 ## 2026.1.18-1
 
@@ -33,6 +83,48 @@ Docs: https://docs.clawd.bot
 - Tools: return a companion-app-required message when `system.run` is requested without a supporting node.
 - Discord: only emit slow listener warnings after 30s.
 
+## 2026.1.17-6
+
+### Changes
+- Plugins: add exclusive plugin slots with a dedicated memory slot selector.
+- Memory: ship core memory tools + CLI as the bundled `memory-core` plugin.
+- Docs: document plugin slots and memory plugin behavior.
+- Plugins: add the bundled BlueBubbles channel plugin (disabled by default).
+- Plugins: migrate bundled messaging extensions to the plugin SDK; resolve plugin-sdk imports in loader.
+- Plugins: migrate the Zalo plugin to the shared plugin SDK runtime.
+- Plugins: migrate the Zalo Personal plugin to the shared plugin SDK runtime.
+
+## 2026.1.17-5
+
+### Changes
+- Memory: add hybrid BM25 + vector search (FTS5) with weighted merging and fallback.
+- Memory: add SQLite embedding cache to speed up reindexing and frequent updates.
+- CLI: surface FTS + embedding cache state in `clawdbot memory status`.
+- Memory: render progress immediately, color batch statuses in verbose logs, and poll OpenAI batch status every 2s by default.
+- Plugins: allow optional agent tools with explicit allowlists and add plugin tool authoring guide. https://docs.clawd.bot/plugins/agent-tools
+- Tools: centralize plugin tool policy helpers.
+- Commands: add `/subagents info` and show sub-agent counts in `/status`.
+- Docs: clarify plugin agent tool configuration. https://docs.clawd.bot/plugins/agent-tools
+
+### Fixes
+- Voice call: include request query in Twilio webhook verification when publicUrl is set. (#864)
+
+## 2026.1.18-1
+
+### Changes
+- Tools: allow `sessions_spawn` to override thinking level for sub-agent runs.
+- Channels: unify thread/topic allowlist matching + command/mention gating helpers across core providers.
+- Models: add Qwen Portal OAuth provider support. (#1120) — thanks @mukhtharcm.
+- Memory: add `--verbose` logging for memory status + batch indexing details.
+- Memory: allow parallel OpenAI batch indexing jobs (default concurrency: 2).
+- macOS: add per-agent exec approvals with allowlists, skill CLI auto-allow, and settings UI.
+- Docs: add exec approvals guide and link from tools index. https://docs.clawd.bot/tools/exec-approvals
+
+### Fixes
+- Memory: apply OpenAI batch defaults even without explicit remote config.
+- macOS: bundle Textual resources in packaged app builds to avoid code block crashes. (#1006)
+- Tools: return a companion-app-required message when `system.run` is requested without a supporting node.
+- Discord: only emit slow listener warnings after 30s.
 ## 2026.1.17-3
 
 ### Changes

@@ -1,28 +1,12 @@
-import { hasControlCommand } from "../../../../src/auto-reply/command-detection.js";
-import { formatAgentEnvelope } from "../../../../src/auto-reply/envelope.js";
-import {
-  createInboundDebouncer,
-  resolveInboundDebounceMs,
-} from "../../../../src/auto-reply/inbound-debounce.js";
-import { dispatchReplyFromConfig } from "../../../../src/auto-reply/reply/dispatch-from-config.js";
-import { finalizeInboundContext } from "../../../../src/auto-reply/reply/inbound-context.js";
 import {
   buildPendingHistoryContextFromMap,
   clearHistoryEntries,
   DEFAULT_GROUP_HISTORY_LIMIT,
   recordPendingHistoryEntry,
+  resolveMentionGating,
+  formatAllowlistMatchMeta,
   type HistoryEntry,
-} from "../../../../src/auto-reply/reply/history.js";
-import { resolveMentionGating } from "../../../../src/channels/mention-gating.js";
-import { resolveCommandAuthorizedFromAuthorizers } from "../../../../src/channels/command-gating.js";
-import { formatAllowlistMatchMeta } from "../../../../src/channels/plugins/allowlist-match.js";
-import { danger, logVerbose, shouldLogVerbose } from "../../../../src/globals.js";
-import { enqueueSystemEvent } from "../../../../src/infra/system-events.js";
-import {
-  readChannelAllowFromStore,
-  upsertChannelPairingRequest,
-} from "../../../../src/pairing/pairing-store.js";
-import { resolveAgentRoute } from "../../../../src/routing/resolve-route.js";
+} from "clawdbot/plugin-sdk";
 
 import {
   buildMSTeamsAttachmentPlaceholder,
@@ -51,6 +35,7 @@ import { createMSTeamsReplyDispatcher } from "../reply-dispatcher.js";
 import { recordMSTeamsSentMessage, wasMSTeamsMessageSent } from "../sent-message-cache.js";
 import type { MSTeamsTurnContext } from "../sdk-types.js";
 import { resolveMSTeamsInboundMedia } from "./inbound-media.js";
+import { getMSTeamsRuntime } from "../runtime.js";
 
 export function createMSTeamsMessageHandler(deps: MSTeamsMessageHandlerDeps) {
   const {
@@ -65,6 +50,12 @@ export function createMSTeamsMessageHandler(deps: MSTeamsMessageHandlerDeps) {
     pollStore,
     log,
   } = deps;
+  const core = getMSTeamsRuntime();
+  const logVerboseMessage = (message: string) => {
+    if (core.logging.shouldLogVerbose()) {
+      log.debug(message);
+    }
+  };
   const msteamsCfg = cfg.channels?.msteams;
   const historyLimit = Math.max(
     0,
@@ -73,7 +64,10 @@ export function createMSTeamsMessageHandler(deps: MSTeamsMessageHandlerDeps) {
       DEFAULT_GROUP_HISTORY_LIMIT,
   );
   const conversationHistories = new Map<string, HistoryEntry[]>();
-  const inboundDebounceMs = resolveInboundDebounceMs({ cfg, channel: "msteams" });
+  const inboundDebounceMs = core.channel.debounce.resolveInboundDebounceMs({
+    cfg,
+    channel: "msteams",
+  });
 
   type MSTeamsDebounceEntry = {
     context: MSTeamsTurnContext;
@@ -127,7 +121,9 @@ export function createMSTeamsMessageHandler(deps: MSTeamsMessageHandlerDeps) {
 
     const senderName = from.name ?? from.id;
     const senderId = from.aadObjectId ?? from.id;
-    const storedAllowFrom = await readChannelAllowFromStore("msteams").catch(() => []);
+    const storedAllowFrom = await core.channel.pairing
+      .readAllowFromStore("msteams")
+      .catch(() => []);
     const useAccessGroups = cfg.commands?.useAccessGroups !== false;
 
     // Check DM policy for direct messages.
@@ -152,7 +148,7 @@ export function createMSTeamsMessageHandler(deps: MSTeamsMessageHandlerDeps) {
 
         if (!allowMatch.allowed) {
           if (dmPolicy === "pairing") {
-            const request = await upsertChannelPairingRequest({
+            const request = await core.channel.pairing.upsertPairingRequest({
               channel: "msteams",
               id: senderId,
               meta: { name: senderName },
@@ -255,15 +251,15 @@ export function createMSTeamsMessageHandler(deps: MSTeamsMessageHandlerDeps) {
       senderId,
       senderName,
     });
-    const commandAuthorized = resolveCommandAuthorizedFromAuthorizers({
+    const commandAuthorized = core.channel.commands.resolveCommandAuthorizedFromAuthorizers({
       useAccessGroups,
       authorizers: [
         { configured: effectiveDmAllowFrom.length > 0, allowed: ownerAllowedForCommands },
         { configured: effectiveGroupAllowFrom.length > 0, allowed: groupAllowedForCommands },
       ],
     });
-    if (hasControlCommand(text, cfg) && !commandAuthorized) {
-      logVerbose(`msteams: drop control command from unauthorized sender ${senderId}`);
+    if (core.channel.text.hasControlCommand(text, cfg) && !commandAuthorized) {
+      logVerboseMessage(`msteams: drop control command from unauthorized sender ${senderId}`);
       return;
     }
 
@@ -330,7 +326,7 @@ export function createMSTeamsMessageHandler(deps: MSTeamsMessageHandlerDeps) {
         : `msteams:group:${conversationId}`;
     const teamsTo = isDirectMessage ? `user:${senderId}` : `conversation:${conversationId}`;
 
-    const route = resolveAgentRoute({
+    const route = core.channel.routing.resolveAgentRoute({
       cfg,
       channel: "msteams",
       peer: {
@@ -344,7 +340,7 @@ export function createMSTeamsMessageHandler(deps: MSTeamsMessageHandlerDeps) {
       ? `Teams DM from ${senderName}`
       : `Teams message in ${conversationType} from ${senderName}`;
 
-    enqueueSystemEvent(`${inboundLabel}: ${preview}`, {
+    core.system.enqueueSystemEvent(`${inboundLabel}: ${preview}`, {
       sessionKey: route.sessionKey,
       contextKey: `msteams:message:${conversationId}:${activity.id ?? "unknown"}`,
     });
@@ -410,7 +406,7 @@ export function createMSTeamsMessageHandler(deps: MSTeamsMessageHandlerDeps) {
 
 	    const mediaPayload = buildMSTeamsMediaPayload(mediaList);
 	    const envelopeFrom = isDirectMessage ? senderName : conversationType;
-	    const body = formatAgentEnvelope({
+	    const body = core.channel.reply.formatAgentEnvelope({
 	      channel: "Teams",
 	      from: envelopeFrom,
 	      timestamp,
@@ -426,7 +422,7 @@ export function createMSTeamsMessageHandler(deps: MSTeamsMessageHandlerDeps) {
         limit: historyLimit,
         currentMessage: combinedBody,
         formatEntry: (entry) =>
-          formatAgentEnvelope({
+          core.channel.reply.formatAgentEnvelope({
             channel: "Teams",
             from: conversationType,
             timestamp: entry.timestamp,
@@ -435,7 +431,7 @@ export function createMSTeamsMessageHandler(deps: MSTeamsMessageHandlerDeps) {
       });
     }
 
-	    const ctxPayload = finalizeInboundContext({
+	    const ctxPayload = core.channel.reply.finalizeInboundContext({
 	      Body: combinedBody,
 	      RawBody: rawBody,
 	      CommandBody: rawBody,
@@ -459,9 +455,18 @@ export function createMSTeamsMessageHandler(deps: MSTeamsMessageHandlerDeps) {
 	      ...mediaPayload,
 	    });
 
-    if (shouldLogVerbose()) {
-      logVerbose(`msteams inbound: from=${ctxPayload.From} preview="${preview}"`);
-    }
+    const storePath = core.channel.session.resolveStorePath(cfg.session?.store, {
+      agentId: route.agentId,
+    });
+    void core.channel.session.recordSessionMetaFromInbound({
+      storePath,
+      sessionKey: ctxPayload.SessionKey ?? route.sessionKey,
+      ctx: ctxPayload,
+    }).catch((err) => {
+      logVerboseMessage(`msteams: failed updating session meta: ${String(err)}`);
+    });
+
+    logVerboseMessage(`msteams inbound: from=${ctxPayload.From} preview="${preview}"`);
 
     const { dispatcher, replyOptions, markDispatchIdle } = createMSTeamsReplyDispatcher({
       cfg,
@@ -483,7 +488,7 @@ export function createMSTeamsMessageHandler(deps: MSTeamsMessageHandlerDeps) {
 
     log.info("dispatching to agent", { sessionKey: route.sessionKey });
     try {
-      const { queuedFinal, counts } = await dispatchReplyFromConfig({
+      const { queuedFinal, counts } = await core.channel.reply.dispatchReplyFromConfig({
         ctx: ctxPayload,
         cfg,
         dispatcher,
@@ -503,18 +508,16 @@ export function createMSTeamsMessageHandler(deps: MSTeamsMessageHandlerDeps) {
         }
         return;
       }
-      if (shouldLogVerbose()) {
-        const finalCount = counts.final;
-        logVerbose(
-          `msteams: delivered ${finalCount} reply${finalCount === 1 ? "" : "ies"} to ${teamsTo}`,
-        );
-      }
+      const finalCount = counts.final;
+      logVerboseMessage(
+        `msteams: delivered ${finalCount} reply${finalCount === 1 ? "" : "ies"} to ${teamsTo}`,
+      );
       if (isRoomish && historyKey && historyLimit > 0) {
         clearHistoryEntries({ historyMap: conversationHistories, historyKey });
       }
     } catch (err) {
       log.error("dispatch failed", { error: String(err) });
-      runtime.error?.(danger(`msteams dispatch failed: ${String(err)}`));
+      runtime.error?.(`msteams dispatch failed: ${String(err)}`);
       try {
         await context.sendActivity(
           `⚠️ Agent failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -525,7 +528,7 @@ export function createMSTeamsMessageHandler(deps: MSTeamsMessageHandlerDeps) {
     }
   };
 
-  const inboundDebouncer = createInboundDebouncer<MSTeamsDebounceEntry>({
+  const inboundDebouncer = core.channel.debounce.createInboundDebouncer<MSTeamsDebounceEntry>({
     debounceMs: inboundDebounceMs,
     buildKey: (entry) => {
       const conversationId = normalizeMSTeamsConversationId(
@@ -539,7 +542,7 @@ export function createMSTeamsMessageHandler(deps: MSTeamsMessageHandlerDeps) {
     shouldDebounce: (entry) => {
       if (!entry.text.trim()) return false;
       if (entry.attachments.length > 0) return false;
-      return !hasControlCommand(entry.text, cfg);
+      return !core.channel.text.hasControlCommand(entry.text, cfg);
     },
     onFlush: async (entries) => {
       const last = entries.at(-1);
@@ -569,7 +572,7 @@ export function createMSTeamsMessageHandler(deps: MSTeamsMessageHandlerDeps) {
       });
     },
     onError: (err) => {
-      runtime.error?.(danger(`msteams debounce flush failed: ${String(err)}`));
+      runtime.error?.(`msteams debounce flush failed: ${String(err)}`);
     },
   });
 

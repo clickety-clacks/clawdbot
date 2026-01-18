@@ -2,10 +2,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { HealthSummary } from "./health.js";
 import { getHealthSnapshot } from "./health.js";
+import { setActivePluginRegistry } from "../plugins/runtime.js";
+import { createTestRegistry } from "../test-utils/channel-plugins.js";
+import { telegramPlugin } from "../../extensions/telegram/src/channel.js";
 
 let testConfig: Record<string, unknown> = {};
 let testStore: Record<string, { updatedAt?: number }> = {};
@@ -21,6 +24,8 @@ vi.mock("../config/config.js", async (importOriginal) => {
 vi.mock("../config/sessions.js", () => ({
   resolveStorePath: () => "/tmp/sessions.json",
   loadSessionStore: () => testStore,
+  recordSessionMetaFromInbound: vi.fn().mockResolvedValue(undefined),
+  updateLastRoute: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("../web/auth-store.js", () => ({
@@ -28,9 +33,19 @@ vi.mock("../web/auth-store.js", () => ({
   getWebAuthAgeMs: vi.fn(() => 1234),
   readWebSelfId: vi.fn(() => ({ e164: null, jid: null })),
   logWebSelfId: vi.fn(),
+  logoutWeb: vi.fn(),
 }));
 
 describe("getHealthSnapshot", () => {
+  beforeEach(async () => {
+    setActivePluginRegistry(
+      createTestRegistry([{ pluginId: "telegram", plugin: telegramPlugin, source: "test" }]),
+    );
+    const { createPluginRuntime } = await import("../plugins/runtime/index.js");
+    const { setTelegramRuntime } = await import("../../extensions/telegram/src/runtime.js");
+    setTelegramRuntime(createPluginRuntime());
+  });
+
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.unstubAllEnvs();

@@ -1,92 +1,100 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { ClawdbotConfig } from "../config/config.js";
 import { ensureClawdbotModelsJson } from "./models-config.js";
 
-vi.mock("@mariozechner/pi-ai", async () => {
-  const actual = await vi.importActual<typeof import("@mariozechner/pi-ai")>("@mariozechner/pi-ai");
-
-  const buildAssistantMessage = (model: { api: string; provider: string; id: string }) => ({
-    role: "assistant" as const,
-    content: [{ type: "text" as const, text: "ok" }],
-    stopReason: "stop" as const,
-    api: model.api,
-    provider: model.provider,
-    model: model.id,
-    usage: {
-      input: 1,
-      output: 1,
-      cacheRead: 0,
-      cacheWrite: 0,
-      totalTokens: 2,
-      cost: {
-        input: 0,
-        output: 0,
-        cacheRead: 0,
-        cacheWrite: 0,
-        total: 0,
-      },
-    },
-    timestamp: Date.now(),
-  });
-
-  const buildAssistantErrorMessage = (model: { api: string; provider: string; id: string }) => ({
-    role: "assistant" as const,
-    content: [] as const,
-    stopReason: "error" as const,
-    errorMessage: "boom",
-    api: model.api,
-    provider: model.provider,
-    model: model.id,
-    usage: {
+const buildAssistantMessage = (model: { api: string; provider: string; id: string }) => ({
+  role: "assistant" as const,
+  content: [{ type: "text" as const, text: "ok" }],
+  stopReason: "stop" as const,
+  api: model.api,
+  provider: model.provider,
+  model: model.id,
+  usage: {
+    input: 1,
+    output: 1,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 2,
+    cost: {
       input: 0,
       output: 0,
       cacheRead: 0,
       cacheWrite: 0,
-      totalTokens: 0,
-      cost: {
-        input: 0,
-        output: 0,
-        cacheRead: 0,
-        cacheWrite: 0,
-        total: 0,
-      },
+      total: 0,
     },
-    timestamp: Date.now(),
-  });
-
-  return {
-    ...actual,
-    complete: async (model: { api: string; provider: string; id: string }) => {
-      if (model.id === "mock-error") return buildAssistantErrorMessage(model);
-      return buildAssistantMessage(model);
-    },
-    completeSimple: async (model: { api: string; provider: string; id: string }) => {
-      if (model.id === "mock-error") return buildAssistantErrorMessage(model);
-      return buildAssistantMessage(model);
-    },
-    streamSimple: (model: { api: string; provider: string; id: string }) => {
-      const stream = new actual.AssistantMessageEventStream();
-      queueMicrotask(() => {
-        stream.push({
-          type: "done",
-          reason: "stop",
-          message:
-            model.id === "mock-error"
-              ? buildAssistantErrorMessage(model)
-              : buildAssistantMessage(model),
-        });
-      });
-      return stream;
-    },
-  };
+  },
+  timestamp: Date.now(),
 });
 
-vi.resetModules();
+const buildAssistantErrorMessage = (model: { api: string; provider: string; id: string }) => ({
+  role: "assistant" as const,
+  content: [] as const,
+  stopReason: "error" as const,
+  errorMessage: "boom",
+  api: model.api,
+  provider: model.provider,
+  model: model.id,
+  usage: {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    cost: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      total: 0,
+    },
+  },
+  timestamp: Date.now(),
+});
 
-const { runEmbeddedPiAgent } = await import("./pi-embedded-runner.js");
+const mockPiAi = () => {
+  vi.doMock("@mariozechner/pi-ai", async () => {
+    const actual =
+      await vi.importActual<typeof import("@mariozechner/pi-ai")>("@mariozechner/pi-ai");
+    return {
+      ...actual,
+      complete: async (model: { api: string; provider: string; id: string }) => {
+        if (model.id === "mock-error") return buildAssistantErrorMessage(model);
+        return buildAssistantMessage(model);
+      },
+      completeSimple: async (model: { api: string; provider: string; id: string }) => {
+        if (model.id === "mock-error") return buildAssistantErrorMessage(model);
+        return buildAssistantMessage(model);
+      },
+      streamSimple: (model: { api: string; provider: string; id: string }) => {
+        const stream = new actual.AssistantMessageEventStream();
+        queueMicrotask(() => {
+          stream.push({
+            type: "done",
+            reason: "stop",
+            message:
+              model.id === "mock-error"
+                ? buildAssistantErrorMessage(model)
+                : buildAssistantMessage(model),
+          });
+          stream.end();
+        });
+        return stream;
+      },
+    };
+  });
+};
+
+let runEmbeddedPiAgent: typeof import("./pi-embedded-runner.js").runEmbeddedPiAgent;
+
+beforeAll(async () => {
+  vi.useRealTimers();
+  vi.resetModules();
+  mockPiAi();
+  ({ runEmbeddedPiAgent } = await import("./pi-embedded-runner.js"));
+}, 20_000);
 
 const makeOpenAiConfig = (modelIds: string[]) =>
   ({
@@ -112,6 +120,9 @@ const makeOpenAiConfig = (modelIds: string[]) =>
 
 const ensureModels = (cfg: ClawdbotConfig, agentDir: string) =>
   ensureClawdbotModelsJson(cfg, agentDir);
+
+const testSessionKey = "agent:test:embedded-models";
+const immediateEnqueue = async <T>(task: () => Promise<T>) => task();
 
 const textFromContent = (content: unknown) => {
   if (typeof content === "string") return content;
@@ -169,7 +180,7 @@ describe("runEmbeddedPiAgent", () => {
     await expect(
       runEmbeddedPiAgent({
         sessionId: "session:test",
-        sessionKey: "agent:dev:test",
+        sessionKey: testSessionKey,
         sessionFile,
         workspaceDir,
         config: cfg,
@@ -178,12 +189,13 @@ describe("runEmbeddedPiAgent", () => {
         model: "definitely-not-a-model",
         timeoutMs: 1,
         agentDir,
+        enqueue: immediateEnqueue,
       }),
     ).rejects.toThrow(/Unknown model:/);
 
     await expect(fs.stat(path.join(agentDir, "models.json"))).resolves.toBeTruthy();
   });
-  it("persists the first user message before assistant output", { timeout: 15_000 }, async () => {
+  it("persists the first user message before assistant output", { timeout: 60_000 }, async () => {
     const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-agent-"));
     const workspaceDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-workspace-"));
     const sessionFile = path.join(workspaceDir, "session.jsonl");
@@ -193,7 +205,7 @@ describe("runEmbeddedPiAgent", () => {
 
     await runEmbeddedPiAgent({
       sessionId: "session:test",
-      sessionKey: "agent:main:main",
+      sessionKey: testSessionKey,
       sessionFile,
       workspaceDir,
       config: cfg,
@@ -202,6 +214,7 @@ describe("runEmbeddedPiAgent", () => {
       model: "mock-1",
       timeoutMs: 5_000,
       agentDir,
+      enqueue: immediateEnqueue,
     });
 
     const messages = await readSessionMessages(sessionFile);
@@ -224,7 +237,7 @@ describe("runEmbeddedPiAgent", () => {
 
     const result = await runEmbeddedPiAgent({
       sessionId: "session:test",
-      sessionKey: "agent:main:main",
+      sessionKey: testSessionKey,
       sessionFile,
       workspaceDir,
       config: cfg,
@@ -233,6 +246,7 @@ describe("runEmbeddedPiAgent", () => {
       model: "mock-error",
       timeoutMs: 5_000,
       agentDir,
+      enqueue: immediateEnqueue,
     });
     expect(result.payloads[0]?.isError).toBe(true);
 

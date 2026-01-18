@@ -52,10 +52,11 @@ export function resolveGatewayLogPaths(env: Record<string, string | undefined>):
 } {
   const stateDir = resolveGatewayStateDir(env);
   const logDir = path.join(stateDir, "logs");
+  const prefix = env.CLAWDBOT_LOG_PREFIX?.trim() || "gateway";
   return {
     logDir,
-    stdoutPath: path.join(logDir, "gateway.log"),
-    stderrPath: path.join(logDir, "gateway.err.log"),
+    stdoutPath: path.join(logDir, `${prefix}.log`),
+    stderrPath: path.join(logDir, `${prefix}.err.log`),
   };
 }
 
@@ -169,9 +170,22 @@ export async function isLaunchAgentLoaded(args: {
   return res.code === 0;
 }
 
-async function hasLaunchAgentPlist(env: Record<string, string | undefined>): Promise<boolean> {
-  const plistPath = resolveLaunchAgentPlistPath(env);
+export async function isLaunchAgentListed(args: {
+  env?: Record<string, string | undefined>;
+}): Promise<boolean> {
+  const label = resolveLaunchAgentLabel({ env: args.env });
+  const res = await execLaunchctl(["list"]);
+  if (res.code !== 0) return false;
+  return res.stdout
+    .split(/\r?\n/)
+    .some((line) => line.trim().split(/\s+/).at(-1) === label);
+}
+
+export async function launchAgentPlistExists(
+  env: Record<string, string | undefined>,
+): Promise<boolean> {
   try {
+    const plistPath = resolveLaunchAgentPlistPath(env);
     await fs.access(plistPath);
     return true;
   } catch {
@@ -193,7 +207,7 @@ export async function readLaunchAgentRuntime(
     };
   }
   const parsed = parseLaunchctlPrint(res.stdout || res.stderr || "");
-  const plistExists = await hasLaunchAgentPlist(env);
+  const plistExists = await launchAgentPlistExists(env);
   const state = parsed.state?.toLowerCase();
   const status = state === "running" || parsed.pid ? "running" : state ? "stopped" : "unknown";
   return {
@@ -204,6 +218,24 @@ export async function readLaunchAgentRuntime(
     lastExitReason: parsed.lastExitReason,
     cachedLabel: !plistExists,
   };
+}
+
+export async function repairLaunchAgentBootstrap(args: {
+  env?: Record<string, string | undefined>;
+}): Promise<{ ok: boolean; detail?: string }> {
+  const env = args.env ?? (process.env as Record<string, string | undefined>);
+  const domain = resolveGuiDomain();
+  const label = resolveLaunchAgentLabel({ env });
+  const plistPath = resolveLaunchAgentPlistPath(env);
+  const boot = await execLaunchctl(["bootstrap", domain, plistPath]);
+  if (boot.code !== 0) {
+    return { ok: false, detail: (boot.stderr || boot.stdout).trim() || undefined };
+  }
+  const kick = await execLaunchctl(["kickstart", "-k", `${domain}/${label}`]);
+  if (kick.code !== 0) {
+    return { ok: false, detail: (kick.stderr || kick.stdout).trim() || undefined };
+  }
+  return { ok: true };
 }
 
 export type LegacyLaunchAgent = {
@@ -340,12 +372,14 @@ export async function installLaunchAgent({
   programArguments,
   workingDirectory,
   environment,
+  description,
 }: {
   env: Record<string, string | undefined>;
   stdout: NodeJS.WritableStream;
   programArguments: string[];
   workingDirectory?: string;
   environment?: Record<string, string | undefined>;
+  description?: string;
 }): Promise<{ plistPath: string }> {
   const { logDir, stdoutPath, stderrPath } = resolveGatewayLogPaths(env);
   await fs.mkdir(logDir, { recursive: true });
@@ -366,13 +400,15 @@ export async function installLaunchAgent({
   const plistPath = resolveLaunchAgentPlistPathForLabel(env, label);
   await fs.mkdir(path.dirname(plistPath), { recursive: true });
 
-  const description = formatGatewayServiceDescription({
-    profile: env.CLAWDBOT_PROFILE,
-    version: environment?.CLAWDBOT_SERVICE_VERSION ?? env.CLAWDBOT_SERVICE_VERSION,
-  });
+  const serviceDescription =
+    description ??
+    formatGatewayServiceDescription({
+      profile: env.CLAWDBOT_PROFILE,
+      version: environment?.CLAWDBOT_SERVICE_VERSION ?? env.CLAWDBOT_SERVICE_VERSION,
+    });
   const plist = buildLaunchAgentPlist({
     label,
-    comment: description,
+    comment: serviceDescription,
     programArguments,
     workingDirectory,
     stdoutPath,

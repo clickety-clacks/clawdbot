@@ -6,7 +6,9 @@ import { shouldLogVerbose } from "../globals.js";
 import { createSubsystemLogger } from "../logging.js";
 import { runCommandWithTimeout } from "../process/exec.js";
 import { resolveUserPath } from "../utils.js";
+import { resolveClawdbotDocsPath } from "./docs-path.js";
 import { resolveSessionAgentIds } from "./agent-scope.js";
+import { makeBootstrapWarn, resolveBootstrapContextForRun } from "./bootstrap-files.js";
 import { resolveCliBackendConfig } from "./cli-backends.js";
 import {
   appendImagePathsToPrompt,
@@ -24,14 +26,8 @@ import {
   writeCliImages,
 } from "./cli-runner/helpers.js";
 import { FailoverError, resolveFailoverStatus } from "./failover-error.js";
-import {
-  buildBootstrapContextFiles,
-  classifyFailoverReason,
-  isFailoverErrorMessage,
-  resolveBootstrapMaxChars,
-} from "./pi-embedded-helpers.js";
+import { classifyFailoverReason, isFailoverErrorMessage } from "./pi-embedded-helpers.js";
 import type { EmbeddedPiRunResult } from "./pi-embedded-runner.js";
-import { filterBootstrapFilesForSession, loadWorkspaceBootstrapFiles } from "./workspace.js";
 
 const log = createSubsystemLogger("agent/claude-cli");
 
@@ -72,14 +68,13 @@ export async function runCliAgent(params: {
     .filter(Boolean)
     .join("\n");
 
-  const bootstrapFiles = filterBootstrapFilesForSession(
-    await loadWorkspaceBootstrapFiles(workspaceDir),
-    params.sessionKey ?? params.sessionId,
-  );
   const sessionLabel = params.sessionKey ?? params.sessionId;
-  const contextFiles = buildBootstrapContextFiles(bootstrapFiles, {
-    maxChars: resolveBootstrapMaxChars(params.config),
-    warn: (message) => log.warn(`${message} (sessionKey=${sessionLabel})`),
+  const { contextFiles } = await resolveBootstrapContextForRun({
+    workspaceDir,
+    config: params.config,
+    sessionKey: params.sessionKey,
+    sessionId: params.sessionId,
+    warn: makeBootstrapWarn({ sessionLabel, warn: (message) => log.warn(message) }),
   });
   const { defaultAgentId, sessionAgentId } = resolveSessionAgentIds({
     sessionKey: params.sessionKey,
@@ -89,6 +84,12 @@ export async function runCliAgent(params: {
     sessionAgentId === defaultAgentId
       ? resolveHeartbeatPrompt(params.config?.agents?.defaults?.heartbeat?.prompt)
       : undefined;
+  const docsPath = await resolveClawdbotDocsPath({
+    workspaceDir,
+    argv1: process.argv[1],
+    cwd: process.cwd(),
+    moduleUrl: import.meta.url,
+  });
   const systemPrompt = buildSystemPrompt({
     workspaceDir,
     config: params.config,
@@ -96,6 +97,7 @@ export async function runCliAgent(params: {
     extraSystemPrompt,
     ownerNumbers: params.ownerNumbers,
     heartbeatPrompt,
+    docsPath: docsPath ?? undefined,
     tools: [],
     contextFiles,
     modelDisplay,

@@ -1,9 +1,10 @@
 import type { Request, Response } from "express";
-import { resolveTextChunkLimit } from "../../../src/auto-reply/chunk.js";
-import { mergeAllowlist, summarizeMapping } from "../../../src/channels/allowlists/resolve-utils.js";
-import type { ClawdbotConfig } from "../../../src/config/types.js";
-import { getChildLogger } from "../../../src/logging.js";
-import type { RuntimeEnv } from "../../../src/runtime.js";
+import {
+  mergeAllowlist,
+  summarizeMapping,
+  type ClawdbotConfig,
+  type RuntimeEnv,
+} from "clawdbot/plugin-sdk";
 import type { MSTeamsConversationStore } from "./conversation-store.js";
 import { createMSTeamsConversationStoreFs } from "./conversation-store-fs.js";
 import { formatUnknownError } from "./errors.js";
@@ -16,8 +17,7 @@ import {
 } from "./resolve-allowlist.js";
 import { createMSTeamsAdapter, loadMSTeamsSdkWithAuth } from "./sdk.js";
 import { resolveMSTeamsCredentials } from "./token.js";
-
-const log = getChildLogger({ name: "msteams" });
+import { getMSTeamsRuntime } from "./runtime.js";
 
 export type MonitorMSTeamsOpts = {
   cfg: ClawdbotConfig;
@@ -35,6 +35,8 @@ export type MonitorMSTeamsResult = {
 export async function monitorMSTeamsProvider(
   opts: MonitorMSTeamsOpts,
 ): Promise<MonitorMSTeamsResult> {
+  const core = getMSTeamsRuntime();
+  const log = core.logging.getChildLogger({ name: "msteams" });
   let cfg = opts.cfg;
   let msteamsCfg = cfg.channels?.msteams;
   if (!msteamsCfg?.enabled) {
@@ -194,7 +196,7 @@ export async function monitorMSTeamsProvider(
   };
 
   const port = msteamsCfg.webhook?.port ?? 3978;
-  const textLimit = resolveTextChunkLimit(cfg, "msteams");
+  const textLimit = core.channel.text.resolveTextChunkLimit(cfg, "msteams");
   const MB = 1024 * 1024;
   const agentDefaults = cfg.agents?.defaults;
   const mediaMaxBytes =

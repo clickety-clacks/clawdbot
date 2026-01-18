@@ -43,7 +43,6 @@ final class MacNodeModeCoordinator {
     private func run() async {
         var retryDelay: UInt64 = 1_000_000_000
         var lastCameraEnabled: Bool?
-        var lastSystemRunPolicy: SystemRunPolicy?
         let defaults = UserDefaults.standard
         while !Task.isCancelled {
             if await MainActor.run(body: { AppStateStore.shared.isPaused }) {
@@ -56,15 +55,6 @@ final class MacNodeModeCoordinator {
                 lastCameraEnabled = cameraEnabled
             } else if lastCameraEnabled != cameraEnabled {
                 lastCameraEnabled = cameraEnabled
-                await self.session.disconnect()
-                try? await Task.sleep(nanoseconds: 200_000_000)
-            }
-
-            let systemRunPolicy = SystemRunPolicy.load()
-            if lastSystemRunPolicy == nil {
-                lastSystemRunPolicy = systemRunPolicy
-            } else if lastSystemRunPolicy != systemRunPolicy {
-                lastSystemRunPolicy = systemRunPolicy
                 await self.session.disconnect()
                 try? await Task.sleep(nanoseconds: 200_000_000)
             }
@@ -89,8 +79,13 @@ final class MacNodeModeCoordinator {
                         if let mainSessionKey {
                             await self?.runtime.updateMainSessionKey(mainSessionKey)
                         }
+                        await self?.runtime.setEventSender { [weak self] event, payload in
+                            guard let self else { return }
+                            try? await self.session.sendEvent(event: event, payloadJSON: payload)
+                        }
                     },
-                    onDisconnected: { reason in
+                    onDisconnected: { [weak self] reason in
+                        await self?.runtime.setEventSender(nil)
                         await MacNodeModeCoordinator.handleBridgeDisconnect(reason: reason)
                     },
                     onInvoke: { [weak self] req in
@@ -119,12 +114,19 @@ final class MacNodeModeCoordinator {
         let caps = self.currentCaps()
         let commands = self.currentCommands(caps: caps)
         let permissions = await self.currentPermissions()
+        let uiVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        let liveGatewayVersion = await GatewayConnection.shared.cachedGatewayVersion()
+        let fallbackGatewayVersion = GatewayProcessManager.shared.environmentStatus.gatewayVersion
+        let coreVersion = (liveGatewayVersion ?? fallbackGatewayVersion)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         return BridgeHello(
             nodeId: Self.nodeId(),
             displayName: InstanceIdentity.displayName,
             token: token,
             platform: "macos",
-            version: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+            version: uiVersion,
+            coreVersion: coreVersion?.isEmpty == false ? coreVersion : nil,
+            uiVersion: uiVersion,
             deviceFamily: "Mac",
             modelIdentifier: InstanceIdentity.modelIdentifier,
             caps: caps,
@@ -161,12 +163,11 @@ final class MacNodeModeCoordinator {
             ClawdbotCanvasA2UICommand.reset.rawValue,
             MacNodeScreenCommand.record.rawValue,
             ClawdbotSystemCommand.notify.rawValue,
+            ClawdbotSystemCommand.which.rawValue,
+            ClawdbotSystemCommand.run.rawValue,
+            ClawdbotSystemCommand.execApprovalsGet.rawValue,
+            ClawdbotSystemCommand.execApprovalsSet.rawValue,
         ]
-
-        if SystemRunPolicy.load() != .never {
-            commands.append(ClawdbotSystemCommand.which.rawValue)
-            commands.append(ClawdbotSystemCommand.run.rawValue)
-        }
 
         let capsSet = Set(caps)
         if capsSet.contains(ClawdbotCapability.camera.rawValue) {

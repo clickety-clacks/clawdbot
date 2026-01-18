@@ -1,6 +1,4 @@
-import type { ClawdbotConfig } from "../../../src/config/types.js";
-import { danger } from "../../../src/globals.js";
-import type { RuntimeEnv } from "../../../src/runtime.js";
+import type { ClawdbotConfig, RuntimeEnv } from "clawdbot/plugin-sdk";
 import type { MSTeamsConversationStore } from "./conversation-store.js";
 import type { MSTeamsAdapter } from "./messenger.js";
 import { createMSTeamsMessageHandler } from "./monitor-handler/message-handler.js";
@@ -43,7 +41,7 @@ export function registerMSTeamsHandlers<T extends MSTeamsActivityHandler>(
     try {
       await handleTeamsMessage(context as MSTeamsTurnContext);
     } catch (err) {
-      deps.runtime.error?.(danger(`msteams handler failed: ${String(err)}`));
+      deps.runtime.error?.(`msteams handler failed: ${String(err)}`);
     }
     await next();
   });

@@ -23,15 +23,19 @@ This page describes the current CLI behavior. If commands change, update this do
 - [`message`](/cli/message)
 - [`agent`](/cli/agent)
 - [`agents`](/cli/agents)
+- [`acp`](/cli/acp)
 - [`status`](/cli/status)
 - [`health`](/cli/health)
 - [`sessions`](/cli/sessions)
 - [`gateway`](/cli/gateway)
 - [`daemon`](/cli/daemon)
+- [`service`](/cli/service)
 - [`logs`](/cli/logs)
 - [`models`](/cli/models)
 - [`memory`](/cli/memory)
 - [`nodes`](/cli/nodes)
+- [`node`](/cli/node)
+- [`approvals`](/cli/approvals)
 - [`sandbox`](/cli/sandbox)
 - [`tui`](/cli/tui)
 - [`browser`](/cli/browser)
@@ -125,6 +129,7 @@ clawdbot [--dev] [--profile <name>] <command>
     list
     add
     delete
+  acp
   status
   health
   sessions
@@ -140,6 +145,21 @@ clawdbot [--dev] [--profile <name>] <command>
     start
     stop
     restart
+  service
+    gateway
+      status
+      install
+      uninstall
+      start
+      stop
+      restart
+    node
+      status
+      install
+      uninstall
+      start
+      stop
+      restart
   logs
   models
     list
@@ -168,21 +188,19 @@ clawdbot [--dev] [--profile <name>] <command>
     runs
     run
   nodes
-    status
-    describe
-    list
-    pending
-    approve
-    reject
-    rename
-    invoke
-    run
-    notify
-    camera list|snap|clip
-    canvas snapshot|present|hide|navigate|eval
-    canvas a2ui push|reset
-    screen record
-    location get
+  node
+    start
+    daemon
+      status
+      install
+      uninstall
+      start
+      stop
+      restart
+  approvals
+    get
+    set
+    allowlist add|remove
   browser
     status
     start
@@ -506,6 +524,11 @@ Options:
 - `--force`
 - `--json`
 
+### `acp`
+Run the ACP bridge that connects IDEs to the Gateway.
+
+See [`acp`](/cli/acp) for full options and examples.
+
 ### `status`
 Show linked session health and recent recipients.
 
@@ -518,11 +541,14 @@ Options:
 - `--verbose`
 - `--debug` (alias for `--verbose`)
 
+Notes:
+- Overview includes Gateway + Node service status when available.
+
 ### Usage tracking
 Clawdbot can surface provider usage/quota when OAuth/API creds are available.
 
 Surfaces:
-- `/status` (alias: `/usage`; adds a short usage line when available)
+- `/status` (adds a short provider usage line when available)
 - `clawdbot status --usage` (prints full provider breakdown)
 - macOS menu bar (Usage section under Context)
 
@@ -772,6 +798,23 @@ Subcommands:
 
 All `cron` commands accept `--url`, `--token`, `--timeout`, `--expect-final`.
 
+## Node host
+
+`node` runs a **headless node host** or manages it as a background service. See
+[`clawdbot node`](/cli/node).
+
+Subcommands:
+- `node start --host <gateway-host> --port 18790`
+- `node service status`
+- `node service install [--host <gateway-host>] [--port <port>] [--tls] [--tls-fingerprint <sha256>] [--node-id <id>] [--display-name <name>] [--runtime <node|bun>] [--force]`
+- `node service uninstall`
+- `node service start`
+- `node service stop`
+- `node service restart`
+
+Legacy alias:
+- `node daemon …` (same as `node service …`)
+
 ## Nodes
 
 `nodes` talks to the Gateway and targets paired nodes. See [/nodes](/nodes).
@@ -788,7 +831,7 @@ Subcommands:
 - `nodes reject <requestId>`
 - `nodes rename --node <id|name|ip> --name <displayName>`
 - `nodes invoke --node <id|name|ip> --command <command> [--params <json>] [--invoke-timeout <ms>] [--idempotency-key <key>]`
-- `nodes run --node <id|name|ip> [--cwd <path>] [--env KEY=VAL] [--command-timeout <ms>] [--needs-screen-recording] [--invoke-timeout <ms>] <command...>` (mac only)
+- `nodes run --node <id|name|ip> [--cwd <path>] [--env KEY=VAL] [--command-timeout <ms>] [--needs-screen-recording] [--invoke-timeout <ms>] <command...>` (mac node or headless node host)
 - `nodes notify --node <id|name|ip> [--title <text>] [--body <text>] [--sound <name>] [--priority <passive|active|timeSensitive>] [--delivery <system|overlay|auto>] [--invoke-timeout <ms>]` (mac only)
 
 Camera:

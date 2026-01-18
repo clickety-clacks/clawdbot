@@ -7,8 +7,8 @@ read_when:
 # Clawdbot macOS Companion (menu bar + gateway broker)
 
 The macOS app is the **menu‑bar companion** for Clawdbot. It owns permissions,
-manages the Gateway locally, and exposes macOS capabilities to the agent as a
-node.
+manages/attaches to the Gateway locally (launchd or manual), and exposes macOS
+capabilities to the agent as a node.
 
 ## What it does
 
@@ -20,13 +20,17 @@ node.
 - Optionally hosts **PeekabooBridge** for UI automation.
 - Installs the global CLI (`clawdbot`) via npm/pnpm on request (bun not recommended for the Gateway runtime).
 
+Planned:
+- Run a headless **node service** locally (launchd).
+- Keep `system.run` in the app (UI/TCC context), with the node service forwarding via IPC.
+
 ## Local vs remote mode
 
-- **Local** (default): the app ensures a local Gateway is running via launchd.
+- **Local** (default): the app attaches to a running local Gateway if present;
+  otherwise it enables the launchd service via `clawdbot daemon`.
 - **Remote**: the app connects to a Gateway over SSH/Tailscale and never starts
   a local process.
-- **Attach‑only** (debug): the app connects to an already‑running local Gateway
-  and never spawns its own.
+The app does not spawn the Gateway as a child process.
 
 ## Launchd control
 
@@ -54,29 +58,44 @@ The macOS app presents itself as a node. Common commands:
 
 The node reports a `permissions` map so agents can decide what’s allowed.
 
-## Node run policy + allowlist
+Planned split:
+- Node service advertises the node surface to the Gateway.
+- macOS app performs `system.run` in UI context over IPC.
 
-`system.run` is controlled by the macOS app **Node Run Commands** policy:
-
-- `Always Ask`: prompt per command (default).
-- `Always Allow`: run without prompts.
-- `Never`: disable `system.run` (tool not advertised).
-
-The policy + allowlist live on the Mac in:
-
+Diagram (SCI):
 ```
-~/.clawdbot/macos-node.json
+Gateway -> Bridge -> Node Service (TS)
+                 |  IPC (UDS + token + HMAC + TTL)
+                 v
+             Mac App (UI + TCC + system.run)
 ```
 
-Schema:
+## Exec approvals (system.run)
+
+`system.run` is controlled by **Exec approvals** in the macOS app (Settings → Exec approvals).
+Security + ask + allowlist are stored locally on the Mac in:
+
+```
+~/.clawdbot/exec-approvals.json
+```
+
+Example:
 
 ```json
 {
-  "systemRun": {
-    "policy": "ask",
-    "allowlist": [
-      "[\"/bin/echo\",\"hello\"]"
-    ]
+  "version": 1,
+  "defaults": {
+    "security": "deny",
+    "ask": "on-miss"
+  },
+  "agents": {
+    "main": {
+      "security": "allowlist",
+      "ask": "on-miss",
+      "allowlist": [
+        { "pattern": "/opt/homebrew/bin/rg" }
+      ]
+    }
   }
 }
 ```

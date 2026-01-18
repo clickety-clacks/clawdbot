@@ -18,6 +18,7 @@ The prompt is intentionally compact and uses fixed sections:
 - **Skills** (when available): tells the model how to load skill instructions on demand.
 - **Clawdbot Self-Update**: how to run `config.apply` and `update.run`.
 - **Workspace**: working directory (`agents.defaults.workspace`).
+- **Documentation**: local path to Clawdbot docs (repo or npm package) and when to read them.
 - **Workspace Files (injected)**: indicates bootstrap files are included below.
 - **Sandbox** (when enabled): indicates sandboxed runtime, sandbox paths, and whether elevated exec is available.
 - **Current Date & Time**: user-local time, timezone, and time format.
@@ -58,6 +59,9 @@ Large files are truncated with a marker. The max per-file size is controlled by
 `agents.defaults.bootstrapMaxChars` (default: 20000). Missing files inject a
 short missing-file marker.
 
+Internal hooks can intercept this step via `agent:bootstrap` to mutate or replace
+the injected bootstrap files (for example swapping `SOUL.md` for an alternate persona).
+
 To inspect how much each injected file contributes (raw vs injected, truncation, plus tool schema overhead), use `/context list` or `/context detail`. See [Context](/concepts/context).
 
 ## Time handling
@@ -95,3 +99,12 @@ Skills section is omitted.
 ```
 
 This keeps the base prompt small while still enabling targeted skill usage.
+
+## Documentation
+
+When available, the system prompt includes a **Documentation** section that points to the
+local Clawdbot docs directory (either `docs/` in the repo workspace or the bundled npm
+package docs) and also notes the public mirror, source repo, community Discord, and
+ClawdHub (https://clawdhub.com) for skills discovery. The prompt instructs the model to consult local docs first
+for Clawdbot behavior, commands, configuration, or architecture, and to run
+`clawdbot status` itself when possible (asking the user only when it lacks access).

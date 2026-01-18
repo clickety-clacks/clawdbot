@@ -1,9 +1,9 @@
 import type { MatrixClient, MatrixEvent, RoomMember } from "matrix-js-sdk";
 import { RoomMemberEvent } from "matrix-js-sdk";
 
-import { danger, logVerbose } from "../../../../../src/globals.js";
-import type { RuntimeEnv } from "../../../../../src/runtime.js";
+import type { RuntimeEnv } from "clawdbot/plugin-sdk";
 import type { CoreConfig } from "../../types.js";
+import { getMatrixRuntime } from "../../runtime.js";
 
 export function registerMatrixAutoJoin(params: {
   client: MatrixClient;
@@ -11,6 +11,11 @@ export function registerMatrixAutoJoin(params: {
   runtime: RuntimeEnv;
 }) {
   const { client, cfg, runtime } = params;
+  const core = getMatrixRuntime();
+  const logVerbose = (message: string) => {
+    if (!core.logging.shouldLogVerbose()) return;
+    runtime.log?.(message);
+  };
   const autoJoin = cfg.channels?.matrix?.autoJoin ?? "always";
   const autoJoinAllowlist = cfg.channels?.matrix?.autoJoinAllowlist ?? [];
 
@@ -37,7 +42,7 @@ export function registerMatrixAutoJoin(params: {
       await client.joinRoom(roomId);
       logVerbose(`matrix: joined room ${roomId}`);
     } catch (err) {
-      runtime.error?.(danger(`matrix: failed to join room ${roomId}: ${String(err)}`));
+      runtime.error?.(`matrix: failed to join room ${roomId}: ${String(err)}`);
     }
   });
 }

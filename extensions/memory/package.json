@@ -1,0 +1,16 @@
+{
+  "name": "@clawdbot/memory-lancedb",
+  "version": "0.0.1",
+  "type": "module",
+  "description": "Clawdbot LanceDB-backed long-term memory plugin with auto-recall/capture",
+  "dependencies": {
+    "@lancedb/lancedb": "^0.15.0",
+    "@sinclair/typebox": "0.34.47",
+    "openai": "^4.104.0"
+  },
+  "clawdbot": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}

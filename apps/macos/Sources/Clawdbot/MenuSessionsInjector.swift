@@ -280,9 +280,7 @@ extension MenuSessionsInjector {
 
     private func insertUsageSection(into menu: NSMenu, at cursor: Int, width: CGFloat) -> Int {
         let rows = self.usageRows
-        let errorText = self.cachedUsageErrorText
-
-        if rows.isEmpty, errorText == nil {
+        if rows.isEmpty {
             return cursor
         }
 
@@ -305,25 +303,6 @@ extension MenuSessionsInjector {
             highlighted: false)
         menu.insertItem(headerItem, at: cursor)
         cursor += 1
-
-        if let errorText = errorText?.nonEmpty, !rows.isEmpty {
-            menu.insertItem(
-                self.makeMessageItem(
-                    text: errorText,
-                    symbolName: "exclamationmark.triangle",
-                    width: width,
-                    maxLines: 2),
-                at: cursor)
-            cursor += 1
-        }
-
-        if rows.isEmpty {
-            menu.insertItem(
-                self.makeMessageItem(text: errorText ?? "No usage available", symbolName: "minus", width: width),
-                at: cursor)
-            cursor += 1
-            return cursor
-        }
 
         if let selectedProvider = self.selectedUsageProviderId,
            let primary = rows.first(where: { $0.providerId.lowercased() == selectedProvider }),
@@ -440,6 +419,8 @@ extension MenuSessionsInjector {
             displayName: "Gateway",
             platform: platform,
             version: nil,
+            coreVersion: nil,
+            uiVersion: nil,
             deviceFamily: nil,
             modelIdentifier: nil,
             remoteIp: host,
@@ -559,14 +540,11 @@ extension MenuSessionsInjector {
 
         do {
             self.cachedUsageSummary = try await UsageLoader.loadSummary()
-            self.cachedUsageErrorText = nil
-            self.usageCacheUpdatedAt = Date()
         } catch {
-            if self.cachedUsageSummary == nil {
-                self.cachedUsageErrorText = self.compactUsageError(error)
-            }
-            self.usageCacheUpdatedAt = Date()
+            self.cachedUsageSummary = nil
+            self.cachedUsageErrorText = nil
         }
+        self.usageCacheUpdatedAt = Date()
     }
 
     private func compactUsageError(_ error: Error) -> String {
@@ -747,8 +725,8 @@ extension MenuSessionsInjector {
             menu.addItem(self.makeNodeCopyItem(label: "Platform", value: platform))
         }
 
-        if let version = entry.version?.nonEmpty {
-            menu.addItem(self.makeNodeCopyItem(label: "Version", value: self.formatVersionLabel(version)))
+        if let version = NodeMenuEntryFormatter.detailRightVersion(entry)?.nonEmpty {
+            menu.addItem(self.makeNodeCopyItem(label: "Version", value: version))
         }
 
         menu.addItem(self.makeNodeDetailItem(label: "Connected", value: entry.isConnected ? "Yes" : "No"))

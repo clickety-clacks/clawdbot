@@ -7,10 +7,11 @@ read_when:
 
 # `clawdbot hooks`
 
-Manage agent hooks (event-driven automations for commands like `/new`, `/reset`, etc.).
+Manage agent hooks (event-driven automations for commands like `/new`, `/reset`, and gateway startup).
 
 Related:
 - Hooks: [Hooks](/hooks)
+- Plugin hooks: [Plugins](/plugin#plugin-hooks)
 
 ## List All Hooks
 
@@ -28,11 +29,13 @@ List all discovered hooks from workspace, managed, and bundled directories.
 **Example output:**
 
 ```
-Hooks (2/2 ready)
+Hooks (4/4 ready)
 
 Ready:
+  🚀 boot-md ✓ - Run BOOT.md on gateway startup
   📝 command-logger ✓ - Log all command events to a centralized audit file
   💾 session-memory ✓ - Save session context to memory when /new command is issued
+  😈 soul-evil ✓ - Swap injected SOUL content during a purge window or by random chance
 ```
 
 **Example (verbose):**
@@ -105,8 +108,8 @@ Show summary of hook eligibility status (how many are ready vs. not ready).
 ```
 Hooks Status
 
-Total hooks: 2
-Ready: 2
+Total hooks: 4
+Ready: 4
 Not ready: 0
 ```
 
@@ -117,6 +120,9 @@ clawdbot hooks enable <name>
 ```
 
 Enable a specific hook by adding it to your config (`~/.clawdbot/config.json`).
+
+**Note:** Hooks managed by plugins show `plugin:<id>` in `clawdbot hooks list` and
+can’t be enabled/disabled here. Enable/disable the plugin instead.
 
 **Arguments:**
 - `<name>`: Hook name (e.g., `session-memory`)
@@ -256,3 +262,29 @@ grep '"action":"new"' ~/.clawdbot/logs/commands.log | jq .
 ```
 
 **See:** [command-logger documentation](/hooks#command-logger)
+
+### soul-evil
+
+Swaps injected `SOUL.md` content with `SOUL_EVIL.md` during a purge window or by random chance.
+
+**Enable:**
+
+```bash
+clawdbot hooks enable soul-evil
+```
+
+**See:** [SOUL Evil Hook](/hooks/soul-evil)
+
+### boot-md
+
+Runs `BOOT.md` when the gateway starts (after channels start).
+
+**Events**: `gateway:startup`
+
+**Enable**:
+
+```bash
+clawdbot hooks enable boot-md
+```
+
+**See:** [boot-md documentation](/hooks#boot-md)

@@ -1,5 +1,4 @@
-import { detectMime } from "../../../../src/media/mime.js";
-import { saveMediaBuffer } from "../../../../src/media/store.js";
+import { getMSTeamsRuntime } from "../runtime.js";
 import {
   extractInlineImageCandidates,
   inferPlaceholder,
@@ -142,7 +141,7 @@ export async function downloadMSTeamsImageAttachments(params: {
     if (inline.kind !== "data") continue;
     if (inline.data.byteLength > params.maxBytes) continue;
     try {
-      const saved = await saveMediaBuffer(
+      const saved = await getMSTeamsRuntime().channel.media.saveMediaBuffer(
         inline.data,
         inline.contentType,
         "inbound",
@@ -168,12 +167,12 @@ export async function downloadMSTeamsImageAttachments(params: {
       if (!res.ok) continue;
       const buffer = Buffer.from(await res.arrayBuffer());
       if (buffer.byteLength > params.maxBytes) continue;
-      const mime = await detectMime({
+      const mime = await getMSTeamsRuntime().media.detectMime({
         buffer,
         headerMime: res.headers.get("content-type"),
         filePath: candidate.fileHint ?? candidate.url,
       });
-      const saved = await saveMediaBuffer(
+      const saved = await getMSTeamsRuntime().channel.media.saveMediaBuffer(
         buffer,
         mime ?? candidate.contentTypeHint,
         "inbound",

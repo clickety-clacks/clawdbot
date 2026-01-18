@@ -1,7 +1,4 @@
-import type { ClawdbotPluginApi } from "../../src/plugins/types.js";
-
-import { createMemoryGetTool, createMemorySearchTool } from "../../src/agents/tools/memory-tool.js";
-import { registerMemoryCli } from "../../src/cli/memory-cli.js";
+import type { ClawdbotPluginApi } from "clawdbot/plugin-sdk";
 
 const memoryCorePlugin = {
   id: "memory-core",
@@ -11,11 +8,11 @@ const memoryCorePlugin = {
   register(api: ClawdbotPluginApi) {
     api.registerTool(
       (ctx) => {
-        const memorySearchTool = createMemorySearchTool({
+        const memorySearchTool = api.runtime.tools.createMemorySearchTool({
           config: ctx.config,
           agentSessionKey: ctx.sessionKey,
         });
-        const memoryGetTool = createMemoryGetTool({
+        const memoryGetTool = api.runtime.tools.createMemoryGetTool({
           config: ctx.config,
           agentSessionKey: ctx.sessionKey,
         });
@@ -27,7 +24,7 @@ const memoryCorePlugin = {
 
     api.registerCli(
       ({ program }) => {
-        registerMemoryCli(program);
+        api.runtime.tools.registerMemoryCli(program);
       },
       { commands: ["memory"] },
     );

@@ -200,7 +200,7 @@ export const MemorySearchSchema = z
         sessionMemory: z.boolean().optional(),
       })
       .optional(),
-    provider: z.union([z.literal("openai"), z.literal("local")]).optional(),
+    provider: z.union([z.literal("openai"), z.literal("local"), z.literal("gemini")]).optional(),
     remote: z
       .object({
         baseUrl: z.string().optional(),
@@ -217,7 +217,9 @@ export const MemorySearchSchema = z
           .optional(),
       })
       .optional(),
-    fallback: z.union([z.literal("openai"), z.literal("none")]).optional(),
+    fallback: z
+      .union([z.literal("openai"), z.literal("gemini"), z.literal("local"), z.literal("none")])
+      .optional(),
     model: z.string().optional(),
     local: z
       .object({
@@ -356,6 +358,10 @@ export const ToolsSchema = z
       .optional(),
     exec: z
       .object({
+        host: z.enum(["sandbox", "gateway", "node"]).optional(),
+        security: z.enum(["deny", "allowlist", "full"]).optional(),
+        ask: z.enum(["off", "on-miss", "always"]).optional(),
+        node: z.string().optional(),
         backgroundMs: z.number().int().positive().optional(),
         timeoutSec: z.number().int().positive().optional(),
         cleanupMs: z.number().int().positive().optional(),

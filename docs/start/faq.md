@@ -501,14 +501,23 @@ is writable (read-only sandboxes skip it). See [Memory](/concepts/memory).
 
 ### Does semantic memory search require an OpenAI API key?
 
-Only if you use **remote embeddings** (OpenAI). Codex OAuth covers
-chat/completions and does **not** grant embeddings access, so **signing in with
-Codex (OAuth or the Codex CLI login)** does not help for semantic memory search.
-Remote memory search still needs a real OpenAI API key (`OPENAI_API_KEY` or
-`models.providers.openai.apiKey`). If you’d rather stay local, set
-`memorySearch.provider = "local"` (and optionally `memorySearch.fallback =
-"none"`). We support **remote or local embedding models** — see [Memory](/concepts/memory)
-for the setup details.
+Only if you use **OpenAI embeddings**. Codex OAuth covers chat/completions and
+does **not** grant embeddings access, so **signing in with Codex (OAuth or the
+Codex CLI login)** does not help for semantic memory search. OpenAI embeddings
+still need a real API key (`OPENAI_API_KEY` or `models.providers.openai.apiKey`).
+
+If you don’t set a provider explicitly, Clawdbot auto-selects a provider when it
+can resolve an API key (auth profiles, `models.providers.*.apiKey`, or env vars).
+It prefers OpenAI if an OpenAI key resolves, otherwise Gemini if a Gemini key
+resolves. If neither key is available, memory search stays disabled until you
+configure it. If you have a local model path configured and present, Clawdbot
+prefers `local`.
+
+If you’d rather stay local, set `memorySearch.provider = "local"` (and optionally
+`memorySearch.fallback = "none"`). If you want Gemini embeddings, set
+`memorySearch.provider = "gemini"` and provide `GEMINI_API_KEY` (or
+`memorySearch.remote.apiKey`). We support **OpenAI, Gemini, or local** embedding
+models — see [Memory](/concepts/memory) for the setup details.
 
 ## Where things live on disk
 

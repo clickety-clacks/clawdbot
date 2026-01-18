@@ -1,5 +1,8 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { PluginRuntime } from "clawdbot/plugin-sdk";
+import { setMatrixRuntime } from "../runtime.js";
+
 vi.mock("matrix-js-sdk", () => ({
   EventType: {
     Direct: "m.direct",
@@ -18,23 +21,33 @@ vi.mock("matrix-js-sdk", () => ({
   },
 }));
 
-vi.mock("../../../../src/config/config.js", () => ({
-  loadConfig: () => ({}),
-}));
+const loadWebMediaMock = vi.fn().mockResolvedValue({
+  buffer: Buffer.from("media"),
+  fileName: "photo.png",
+  contentType: "image/png",
+  kind: "image",
+});
+const getImageMetadataMock = vi.fn().mockResolvedValue(null);
+const resizeToJpegMock = vi.fn();
 
-vi.mock("../../../../src/web/media.js", () => ({
-  loadWebMedia: vi.fn().mockResolvedValue({
-    buffer: Buffer.from("media"),
-    fileName: "photo.png",
-    contentType: "image/png",
-    kind: "image",
-  }),
-}));
-
-vi.mock("../../../../src/media/image-ops.js", () => ({
-  getImageMetadata: vi.fn().mockResolvedValue(null),
-  resizeToJpeg: vi.fn(),
-}));
+const runtimeStub = {
+  config: {
+    loadConfig: () => ({}),
+  },
+  media: {
+    loadWebMedia: (...args: unknown[]) => loadWebMediaMock(...args),
+    mediaKindFromMime: () => "image",
+    isVoiceCompatibleAudio: () => false,
+    getImageMetadata: (...args: unknown[]) => getImageMetadataMock(...args),
+    resizeToJpeg: (...args: unknown[]) => resizeToJpegMock(...args),
+  },
+  channel: {
+    text: {
+      resolveTextChunkLimit: () => 4000,
+      chunkMarkdownText: (text: string) => (text ? [text] : []),
+    },
+  },
+} as unknown as PluginRuntime;
 
 let sendMessageMatrix: typeof import("./send.js").sendMessageMatrix;
 
@@ -52,11 +65,13 @@ const makeClient = () => {
 
 describe("sendMessageMatrix media", () => {
   beforeAll(async () => {
+    setMatrixRuntime(runtimeStub);
     ({ sendMessageMatrix } = await import("./send.js"));
   });
 
   beforeEach(() => {
     vi.clearAllMocks();
+    setMatrixRuntime(runtimeStub);
   });
 
   it("uploads media with url payloads", async () => {

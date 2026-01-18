@@ -1,5 +1,4 @@
-import { detectMime } from "../../../../src/media/mime.js";
-import { saveMediaBuffer } from "../../../../src/media/store.js";
+import { getMSTeamsRuntime } from "../runtime.js";
 import { downloadMSTeamsImageAttachments } from "./download.js";
 import { GRAPH_ROOT, isRecord, normalizeContentType, resolveAllowedHosts } from "./shared.js";
 import type {
@@ -155,13 +154,13 @@ async function downloadGraphHostedImages(params: {
       continue;
     }
     if (buffer.byteLength > params.maxBytes) continue;
-    const mime = await detectMime({
+    const mime = await getMSTeamsRuntime().media.detectMime({
       buffer,
       headerMime: item.contentType ?? undefined,
     });
     if (mime && !mime.startsWith("image/")) continue;
     try {
-      const saved = await saveMediaBuffer(
+      const saved = await getMSTeamsRuntime().channel.media.saveMediaBuffer(
         buffer,
         mime ?? item.contentType ?? undefined,
         "inbound",

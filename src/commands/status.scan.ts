@@ -6,7 +6,7 @@ import { probeGateway } from "../gateway/probe.js";
 import { collectChannelStatusIssues } from "../infra/channels-status-issues.js";
 import { resolveOsSummary } from "../infra/os-summary.js";
 import { getTailnetHostname } from "../infra/tailscale.js";
-import { MemoryIndexManager } from "../memory/manager.js";
+import type { MemoryIndexManager } from "../memory/manager.js";
 import { runExec } from "../process/exec.js";
 import type { RuntimeEnv } from "../runtime.js";
 import { getAgentLocalStatuses } from "./status.agent-local.js";
@@ -15,9 +15,25 @@ import { getStatusSummary } from "./status.summary.js";
 import { getUpdateCheckResult } from "./status.update.js";
 import { buildChannelsTable } from "./status-all/channels.js";
 
-type MemoryStatusSnapshot = ReturnType<(typeof MemoryIndexManager)["prototype"]["status"]> & {
+type MemoryStatusSnapshot = ReturnType<MemoryIndexManager["status"]> & {
   agentId: string;
 };
+
+type MemoryPluginStatus = {
+  enabled: boolean;
+  slot: string | null;
+  reason?: string;
+};
+
+function resolveMemoryPluginStatus(cfg: ReturnType<typeof loadConfig>): MemoryPluginStatus {
+  const pluginsEnabled = cfg.plugins?.enabled !== false;
+  if (!pluginsEnabled) return { enabled: false, slot: null, reason: "plugins disabled" };
+  const raw = typeof cfg.plugins?.slots?.memory === "string" ? cfg.plugins.slots.memory.trim() : "";
+  if (raw && raw.toLowerCase() === "none") {
+    return { enabled: false, slot: null, reason: 'plugins.slots.memory="none"' };
+  }
+  return { enabled: true, slot: raw || "memory-core" };
+}
 
 export type StatusScanResult = {
   cfg: ReturnType<typeof loadConfig>;
@@ -37,6 +53,7 @@ export type StatusScanResult = {
   channels: Awaited<ReturnType<typeof buildChannelsTable>>;
   summary: Awaited<ReturnType<typeof getStatusSummary>>;
   memory: MemoryStatusSnapshot | null;
+  memoryPlugin: MemoryPluginStatus;
 };
 
 export async function scanStatus(
@@ -129,8 +146,12 @@ export async function scanStatus(
       progress.tick();
 
       progress.setLabel("Checking memory…");
+      const memoryPlugin = resolveMemoryPluginStatus(cfg);
       const memory = await (async (): Promise<MemoryStatusSnapshot | null> => {
+        if (!memoryPlugin.enabled) return null;
+        if (memoryPlugin.slot !== "memory-core") return null;
         const agentId = agentStatus.defaultId ?? "main";
+        const { MemoryIndexManager } = await import("../memory/manager.js");
         const manager = await MemoryIndexManager.get({ cfg, agentId }).catch(() => null);
         if (!manager) return null;
         try {
@@ -167,6 +188,7 @@ export async function scanStatus(
         channels,
         summary,
         memory,
+        memoryPlugin,
       };
     },
   );

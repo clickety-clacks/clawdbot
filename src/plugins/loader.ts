@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { createJiti } from "jiti";
 
 import type { ClawdbotConfig } from "../config/config.js";
@@ -5,7 +8,9 @@ import type { GatewayRequestHandler } from "../gateway/server-methods/types.js";
 import { createSubsystemLogger } from "../logging.js";
 import { resolveUserPath } from "../utils.js";
 import { discoverClawdbotPlugins } from "./discovery.js";
+import { initializeGlobalHookRunner } from "./hook-runner-global.js";
 import { createPluginRegistry, type PluginRecord, type PluginRegistry } from "./registry.js";
+import { createPluginRuntime } from "./runtime/index.js";
 import { setActivePluginRegistry } from "./runtime.js";
 import type {
   ClawdbotPluginConfigSchema,
@@ -40,6 +45,8 @@ type NormalizedPluginsConfig = {
 const registryCache = new Map<string, PluginRegistry>();
 
 const defaultLogger = () => createSubsystemLogger("plugins");
+
+const BUNDLED_ENABLED_BY_DEFAULT = new Set<string>();
 
 const normalizeList = (value: unknown): string[] => {
   if (!Array.isArray(value)) return [];
@@ -89,6 +96,24 @@ const normalizePluginsConfig = (config?: ClawdbotConfig["plugins"]): NormalizedP
     },
     entries: normalizePluginEntries(config?.entries),
   };
+};
+
+const resolvePluginSdkAlias = (): string | null => {
+  try {
+    let cursor = path.dirname(fileURLToPath(import.meta.url));
+    for (let i = 0; i < 6; i += 1) {
+      const distCandidate = path.join(cursor, "dist", "plugin-sdk", "index.js");
+      if (fs.existsSync(distCandidate)) return distCandidate;
+      const srcCandidate = path.join(cursor, "src", "plugin-sdk", "index.ts");
+      if (fs.existsSync(srcCandidate)) return srcCandidate;
+      const parent = path.dirname(cursor);
+      if (parent === cursor) break;
+      cursor = parent;
+    }
+  } catch {
+    // ignore
+  }
+  return null;
 };
 
 function buildCacheKey(params: {
@@ -150,6 +175,9 @@ function resolveEnableState(
   }
   if (entry?.enabled === false) {
     return { enabled: false, reason: "disabled in config" };
+  }
+  if (origin === "bundled" && BUNDLED_ENABLED_BY_DEFAULT.has(id)) {
+    return { enabled: true };
   }
   if (origin === "bundled") {
     return { enabled: false, reason: "bundled (disabled by default)" };
@@ -242,12 +270,14 @@ function createPluginRecord(params: {
     enabled: params.enabled,
     status: params.enabled ? "loaded" : "disabled",
     toolNames: [],
+    hookNames: [],
     channelIds: [],
     providerIds: [],
     gatewayMethods: [],
     cliCommands: [],
     services: [],
     httpHandlers: 0,
+    hookCount: 0,
     configSchema: params.configSchema,
     configUiHints: undefined,
     configJsonSchema: undefined,
@@ -275,8 +305,10 @@ export function loadClawdbotPlugins(options: PluginLoadOptions = {}): PluginRegi
     }
   }
 
+  const runtime = createPluginRuntime();
   const { registry, createApi } = createPluginRegistry({
     logger,
+    runtime,
     coreGatewayHandlers: options.coreGatewayHandlers as Record<string, GatewayRequestHandler>,
   });
 
@@ -286,8 +318,10 @@ export function loadClawdbotPlugins(options: PluginLoadOptions = {}): PluginRegi
   });
   pushDiagnostics(registry.diagnostics, discovery.diagnostics);
 
+  const pluginSdkAlias = resolvePluginSdkAlias();
   const jiti = createJiti(import.meta.url, {
     interopDefault: true,
+    ...(pluginSdkAlias ? { alias: { "clawdbot/plugin-sdk": pluginSdkAlias } } : {}),
   });
 
   const seenIds = new Map<string, PluginRecord["origin"]>();
@@ -494,5 +528,6 @@ export function loadClawdbotPlugins(options: PluginLoadOptions = {}): PluginRegi
     registryCache.set(cacheKey, registry);
   }
   setActivePluginRegistry(registry, cacheKey);
+  initializeGlobalHookRunner(registry);
   return registry;
 }
