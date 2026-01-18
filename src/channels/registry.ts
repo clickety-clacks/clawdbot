@@ -11,6 +11,7 @@ export const CHAT_CHANNEL_ORDER = [
   "slack",
   "signal",
   "imessage",
+  "clawline",
 ] as const;
 
 export type ChatChannelId = (typeof CHAT_CHANNEL_ORDER)[number];
@@ -74,6 +75,15 @@ const CHAT_CHANNEL_META: Record<ChatChannelId, ChannelMeta> = {
     docsPath: "/channels/imessage",
     docsLabel: "imessage",
     blurb: "this is still a work in progress.",
+  },
+  clawline: {
+    id: "clawline",
+    label: "Clawline",
+    selectionLabel: "Clawline (local devices)",
+    docsPath: "/providers/clawline",
+    docsLabel: "clawline",
+    blurb: "first-party channel for Clawline iOS/Android clients.",
+    selectionExtras: [WEBSITE_URL],
   },
 };
 

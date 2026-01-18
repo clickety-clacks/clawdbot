@@ -7,6 +7,7 @@ import {
 import { resolveClawlineConfig } from "./config.js";
 import { createProviderServer } from "./server.js";
 import type { Logger, ProviderServer } from "./domain.js";
+import { setClawlineOutboundSender } from "./outbound.js";
 
 export type ClawlineServiceHandle = {
   stop: () => Promise<void>;
@@ -35,11 +36,13 @@ export async function startClawlineService(params: {
     mainSessionKey,
   });
   await server.start();
+  setClawlineOutboundSender((payload) => server.sendMessage(payload));
   logger.info?.(
     `[clawline] listening on ${resolved.network.bindAddress}:${server.getPort()}`,
   );
   return {
     stop: async () => {
+      setClawlineOutboundSender(null);
       await server.stop();
     },
   };

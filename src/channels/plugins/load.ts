@@ -15,6 +15,7 @@ const LOADERS: Record<ChatChannelId, PluginLoader> = {
   slack: async () => (await import("./slack.js")).slackPlugin,
   signal: async () => (await import("./signal.js")).signalPlugin,
   imessage: async () => (await import("./imessage.js")).imessagePlugin,
+  clawline: async () => (await import("./clawline.js")).clawlinePlugin,
 };
 
 const cache = new Map<ChannelId, ChannelPlugin>();
