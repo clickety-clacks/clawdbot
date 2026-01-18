@@ -6,10 +6,10 @@ import path from "node:path";
 import type { OAuthCredentials, OAuthProvider } from "@mariozechner/pi-ai";
 
 import { loadJsonFile, saveJsonFile } from "../infra/json-file.js";
-import { createSubsystemLogger } from "../logging.js";
 import { resolveUserPath } from "../utils.js";
+import { getAuthProfilesLogger } from "./auth-profiles/constants.js";
 
-const log = createSubsystemLogger("agents/auth-profiles");
+const log = getAuthProfilesLogger();
 
 const CLAUDE_CLI_CREDENTIALS_RELATIVE_PATH = ".claude/.credentials.json";
 const CODEX_CLI_AUTH_FILENAME = "auth.json";

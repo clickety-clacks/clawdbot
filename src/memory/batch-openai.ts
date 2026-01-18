@@ -1,3 +1,4 @@
+import { retryAsync } from "../infra/retry.js";
 import type { OpenAiEmbeddingClient } from "./embeddings-openai.js";
 import { hashText } from "./internal.js";
 
@@ -92,24 +93,41 @@ async function submitOpenAiBatch(params: {
     throw new Error("openai batch file upload failed: missing file id");
   }
 
-  const batchRes = await fetch(`${baseUrl}/batches`, {
-    method: "POST",
-    headers: getOpenAiHeaders(params.openAi, { json: true }),
-    body: JSON.stringify({
-      input_file_id: filePayload.id,
-      endpoint: OPENAI_BATCH_ENDPOINT,
-      completion_window: OPENAI_BATCH_COMPLETION_WINDOW,
-      metadata: {
-        source: "clawdbot-memory",
-        agent: params.agentId,
-      },
-    }),
+  const createBatch = async () => {
+    const batchRes = await fetch(`${baseUrl}/batches`, {
+      method: "POST",
+      headers: getOpenAiHeaders(params.openAi, { json: true }),
+      body: JSON.stringify({
+        input_file_id: filePayload.id,
+        endpoint: OPENAI_BATCH_ENDPOINT,
+        completion_window: OPENAI_BATCH_COMPLETION_WINDOW,
+        metadata: {
+          source: "clawdbot-memory",
+          agent: params.agentId,
+        },
+      }),
+    });
+    if (!batchRes.ok) {
+      const text = await batchRes.text();
+      const err = new Error(`openai batch create failed: ${batchRes.status} ${text}`) as Error & {
+        status?: number;
+      };
+      err.status = batchRes.status;
+      throw err;
+    }
+    return (await batchRes.json()) as OpenAiBatchStatus;
+  };
+
+  return await retryAsync(createBatch, {
+    attempts: 3,
+    minDelayMs: 200,
+    maxDelayMs: 2000,
+    jitter: 0.2,
+    shouldRetry: (err) => {
+      const status = (err as { status?: number }).status;
+      return status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+    },
   });
-  if (!batchRes.ok) {
-    const text = await batchRes.text();
-    throw new Error(`openai batch create failed: ${batchRes.status} ${text}`);
-  }
-  return (await batchRes.json()) as OpenAiBatchStatus;
 }
 
 async function fetchOpenAiBatchStatus(params: {
