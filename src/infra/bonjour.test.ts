@@ -8,7 +8,6 @@ const registerUnhandledRejectionHandler = vi.fn();
 
 const logWarn = vi.fn();
 const logDebug = vi.fn();
-const getLoggerInfo = vi.fn();
 
 const asString = (value: unknown, fallback: string) =>
   typeof value === "string" && value.trim() ? value : fallback;
@@ -20,12 +19,6 @@ vi.mock("../logger.js", () => {
     logInfo: vi.fn(),
     logError: vi.fn(),
     logSuccess: vi.fn(),
-  };
-});
-
-vi.mock("../logging.js", () => {
-  return {
-    getLogger: () => ({ info: (...args: unknown[]) => getLoggerInfo(...args) }),
   };
 });
 
@@ -71,7 +64,6 @@ describe("gateway bonjour advertiser", () => {
     registerUnhandledRejectionHandler.mockReset();
     logWarn.mockReset();
     logDebug.mockReset();
-    getLoggerInfo.mockReset();
     vi.useRealTimers();
     vi.restoreAllMocks();
   });

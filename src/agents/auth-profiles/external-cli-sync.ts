@@ -9,7 +9,7 @@ import {
   EXTERNAL_CLI_NEAR_EXPIRY_MS,
   EXTERNAL_CLI_SYNC_TTL_MS,
   QWEN_CLI_PROFILE_ID,
-  log,
+  getAuthProfilesLogger,
 } from "./constants.js";
 import type {
   AuthProfileCredential,
@@ -70,6 +70,7 @@ export function syncExternalCliCredentials(
   options?: { allowKeychainPrompt?: boolean },
 ): boolean {
   let mutated = false;
+  const log = getAuthProfilesLogger();
   const now = Date.now();
 
   // Sync from Claude Code CLI (supports both OAuth and Token credentials)

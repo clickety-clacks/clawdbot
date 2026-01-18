@@ -13,6 +13,7 @@ vi.mock("node:child_process", () => ({
 describe("cli credentials", () => {
   beforeEach(() => {
     vi.useFakeTimers();
+    vi.resetModules();
   });
 
   afterEach(() => {

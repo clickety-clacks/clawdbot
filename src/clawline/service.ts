@@ -23,13 +23,16 @@ export async function startClawlineService(params: {
     logger.info?.("[clawline] service disabled in config");
     return null;
   }
+  const randomizePort =
+    Boolean(process.env.VITEST_WORKER_ID) && params.config.clawline?.port === undefined;
+  const providerConfig = randomizePort ? { ...resolved, port: 0 } : resolved;
   const mainSessionKey = resolveMainSessionKey(params.config);
   const mainSessionAgentId = resolveAgentIdFromSessionKey(mainSessionKey);
   const sessionStorePath = resolveStorePath(params.config.session?.store, {
     agentId: mainSessionAgentId,
   });
   const server: ProviderServer = await createProviderServer({
-    config: resolved,
+    config: providerConfig,
     clawdbotConfig: params.config,
     logger,
     sessionStorePath,
@@ -38,7 +41,7 @@ export async function startClawlineService(params: {
   await server.start();
   setClawlineOutboundSender((payload) => server.sendMessage(payload));
   logger.info?.(
-    `[clawline] listening on ${resolved.network.bindAddress}:${server.getPort()}`,
+    `[clawline] listening on ${providerConfig.network.bindAddress}:${server.getPort()}`,
   );
   return {
     stop: async () => {

@@ -6667,7 +6667,7 @@ snapshots:
 
   '@types/better-sqlite3@7.6.13':
     dependencies:
-      '@types/node': 25.0.7
+      '@types/node': 25.0.9
 
   '@types/body-parser@1.19.6':
     dependencies:
@@ -6681,7 +6681,7 @@ snapshots:
 
   '@types/busboy@1.5.4':
     dependencies:
-      '@types/node': 25.0.7
+      '@types/node': 25.0.9
 
   '@types/chai@5.2.3':
     dependencies:
@@ -6739,7 +6739,7 @@ snapshots:
 
   '@types/node-fetch@2.6.13':
     dependencies:
-      '@types/node': 18.19.130
+      '@types/node': 25.0.9
       form-data: 4.0.5
 
   '@types/node@10.17.60': {}

@@ -26,7 +26,10 @@ function resolveClawlineAccount(params: {
 
 export const clawlinePlugin: ChannelPlugin<ResolvedClawlineAccount> = {
   id: "clawline",
-  meta,
+  meta: {
+    ...meta,
+    showConfigured: false,
+  },
   capabilities: {
     chatTypes: ["direct"],
     media: false,
