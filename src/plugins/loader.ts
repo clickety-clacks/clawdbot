@@ -43,7 +43,19 @@ const registryCache = new Map<string, PluginRegistry>();
 
 const defaultLogger = () => createSubsystemLogger("plugins");
 
-const BUNDLED_ENABLED_BY_DEFAULT = new Set<string>(["clawline"]);
+const BUNDLED_ENABLED_BY_DEFAULT = new Set<string>([
+  "whatsapp",
+  "telegram",
+  "discord",
+  "slack",
+  "signal",
+  "imessage",
+  "msteams",
+  "matrix",
+  "zalo",
+  "zalouser",
+  "bluebubbles",
+]);
 
 const normalizeList = (value: unknown): string[] => {
   if (!Array.isArray(value)) return [];

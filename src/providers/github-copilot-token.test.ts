@@ -1,13 +1,28 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  deriveCopilotApiBaseUrlFromToken,
-  resolveCopilotApiToken,
-} from "./github-copilot-token.js";
+
+const loadJsonFile = vi.fn();
+const saveJsonFile = vi.fn();
+const resolveStateDir = vi.fn().mockReturnValue("/tmp/clawdbot-state");
+
+vi.mock("../infra/json-file.js", () => ({
+  loadJsonFile,
+  saveJsonFile,
+}));
+
+vi.mock("../config/paths.js", () => ({
+  resolveStateDir,
+}));
 
 describe("github-copilot token", () => {
-  const loadJsonFile = vi.fn();
-  const saveJsonFile = vi.fn();
-  const cachePath = "/tmp/openclaw-state/credentials/github-copilot.token.json";
+  beforeEach(() => {
+    vi.resetModules();
+    loadJsonFile.mockReset();
+    saveJsonFile.mockReset();
+    resolveStateDir.mockReset().mockReturnValue("/tmp/clawdbot-state");
+  });
+
+  it("derives baseUrl from token", async () => {
+    const { deriveCopilotApiBaseUrlFromToken } = await import("./github-copilot-token.js");
 
   beforeEach(() => {
     loadJsonFile.mockReset();

@@ -4,10 +4,10 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { loadJsonFile, saveJsonFile } from "../infra/json-file.js";
-import { createSubsystemLogger } from "../logging/subsystem.js";
 import { resolveUserPath } from "../utils.js";
+import { getAuthProfilesLogger } from "./auth-profiles/constants.js";
 
-const log = createSubsystemLogger("agents/auth-profiles");
+const log = getAuthProfilesLogger();
 
 const CLAUDE_CLI_CREDENTIALS_RELATIVE_PATH = ".claude/.credentials.json";
 const CODEX_CLI_AUTH_FILENAME = "auth.json";

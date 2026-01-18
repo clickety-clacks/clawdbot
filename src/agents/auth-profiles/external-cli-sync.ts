@@ -7,8 +7,7 @@ import {
   EXTERNAL_CLI_NEAR_EXPIRY_MS,
   EXTERNAL_CLI_SYNC_TTL_MS,
   QWEN_CLI_PROFILE_ID,
-  MINIMAX_CLI_PROFILE_ID,
-  log,
+  getAuthProfilesLogger,
 } from "./constants.js";
 
 function shallowEqualOAuthCredentials(a: OAuthCredential | undefined, b: OAuthCredential): boolean {
@@ -88,6 +87,7 @@ function syncExternalCliCredentialsForProvider(
  */
 export function syncExternalCliCredentials(store: AuthProfileStore): boolean {
   let mutated = false;
+  const log = getAuthProfilesLogger();
   const now = Date.now();
 
   // Sync from Qwen Code CLI

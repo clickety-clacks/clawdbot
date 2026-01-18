@@ -4,7 +4,7 @@ import type { AuthProfileCredential, AuthProfileStore, ProfileUsageStats } from 
 import { resolveOAuthPath } from "../../config/paths.js";
 import { withFileLock } from "../../infra/file-lock.js";
 import { loadJsonFile, saveJsonFile } from "../../infra/json-file.js";
-import { AUTH_STORE_LOCK_OPTIONS, AUTH_STORE_VERSION, log } from "./constants.js";
+import { AUTH_STORE_LOCK_OPTIONS, AUTH_STORE_VERSION, getAuthProfilesLogger } from "./constants.js";
 import { syncExternalCliCredentials } from "./external-cli-sync.js";
 import { ensureAuthStoreFile, resolveAuthStorePath, resolveLegacyAuthStorePath } from "./paths.js";
 
@@ -274,7 +274,7 @@ function loadAuthProfileStoreForAgent(
     if (mainStore && Object.keys(mainStore.profiles).length > 0) {
       // Clone main store to subagent directory for auth inheritance
       saveJsonFile(authPath, mainStore);
-      log.info("inherited auth-profiles from main agent", { agentDir });
+      getAuthProfilesLogger().info("inherited auth-profiles from main agent", { agentDir });
       return mainStore;
     }
   }
@@ -305,7 +305,7 @@ function loadAuthProfileStoreForAgent(
       fs.unlinkSync(legacyPath);
     } catch (err) {
       if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
-        log.warn("failed to delete legacy auth.json after migration", {
+        getAuthProfilesLogger().warn("failed to delete legacy auth.json after migration", {
           err,
           legacyPath,
         });
