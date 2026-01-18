@@ -2,7 +2,7 @@ import os from "node:os";
 import path from "node:path";
 
 import type { ClawdbotConfig } from "../config/config.js";
-import type { ProviderConfig } from "./domain.js";
+import type { AlertTargetConfig, ProviderConfig } from "./domain.js";
 import { deepMerge } from "./utils/deep-merge.js";
 
 export type ClawlineAdapterOverrides = {
@@ -18,11 +18,12 @@ export type ResolvedClawlineConfig = ProviderConfig & {
   adapterOverrides: ClawlineAdapterOverrides;
 };
 
-type ProviderConfigBase = Omit<ProviderConfig, "adapter">;
+type ProviderConfigBase = Omit<ProviderConfig, "adapter" | "alertTarget">;
 
 export type ClawlineConfigInput = {
   enabled?: boolean;
   adapter?: ClawlineAdapterOverrides;
+  alertTarget?: Partial<AlertTargetConfig>;
 } & Partial<ProviderConfigBase>;
 
 const defaultStatePath = path.join(os.homedir(), ".clawdbot", "clawline");
@@ -55,6 +56,10 @@ const DEFAULTS: ResolvedClawlineConfig = {
     allowedOrigins: [],
   },
   adapter: null,
+  alertTarget: {
+    channel: "clawline",
+    to: "flynn",
+  },
   adapterOverrides: {},
   auth: {
     jwtSigningKey: null,

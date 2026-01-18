@@ -49,6 +49,7 @@ import { ClientMessageError, HttpError } from "./errors.js";
 import { SlidingWindowRateLimiter } from "./rate-limiter.js";
 import { createAssetHandlers } from "./http-assets.js";
 import { callGateway } from "../gateway/call.js";
+import { sendMessage } from "../infra/outbound/message.js";
 import { GATEWAY_CLIENT_MODES, GATEWAY_CLIENT_NAMES } from "../gateway/protocol/client-info.js";
 
 export const PROTOCOL_VERSION = 1;
@@ -62,10 +63,12 @@ const INLINE_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif",
 const MAX_ATTACHMENTS_COUNT = 4;
 // Hard ceiling for a single client payload: 64 KB text budget + 256 KB inline assets + JSON overhead.
 const MAX_TOTAL_PAYLOAD_BYTES = 320 * 1024;
+const MAX_ALERT_BODY_BYTES = 4 * 1024;
 type ChannelType = "personal" | "admin";
 const DEFAULT_CHANNEL_TYPE: ChannelType = "personal";
 const ADMIN_CHANNEL_TYPE: ChannelType = "admin";
 const ADMIN_TRANSCRIPT_USER_ID = "__clawline_admin__";
+const DEFAULT_ALERT_SOURCE = "notify";
 
 function truncateUtf8(value: string, maxBytes: number): string {
   if (Buffer.byteLength(value, "utf8") <= maxBytes) {
@@ -336,6 +339,10 @@ const DEFAULT_CONFIG: ProviderConfig = {
     allowedOrigins: []
   },
   adapter: null,
+  alertTarget: {
+    channel: "clawline",
+    to: "flynn"
+  },
   auth: {
     jwtSigningKey: null,
     tokenTtlSeconds: 31_536_000,
@@ -967,6 +974,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         logHttpRequest("download_complete", { assetId });
         return;
       }
+      if (req.method === "POST" && parsedUrl.pathname === "/alert") {
+        await handleAlertHttpRequest(req, res);
+        return;
+      }
       logHttpRequest("request_not_found", {
         method: req.method ?? "UNKNOWN",
         path: parsedUrl.pathname
@@ -981,6 +992,151 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       }
     }
   });
+
+  async function handleAlertHttpRequest(req: http.IncomingMessage, res: http.ServerResponse) {
+    logHttpRequest("alert_request_start");
+    try {
+      const payload = await parseAlertPayload(req);
+      const text = buildAlertText(payload.message, payload.source);
+      await wakeGatewayForAlert(text);
+      await deliverAlertTarget(text);
+      res.setHeader("Content-Type", "application/json");
+      res.writeHead(200);
+      res.end(JSON.stringify({ ok: true }));
+      logHttpRequest("alert_request_complete");
+    } catch (err) {
+      if (err instanceof HttpError) {
+        logHttpRequest("alert_request_error", { status: err.status, code: err.code });
+        sendHttpError(res, err.status, err.code, err.message);
+      } else {
+        logger.error("alert_request_failed", err);
+        sendHttpError(res, 500, "server_error", "Internal error");
+      }
+    }
+  }
+
+  async function parseAlertPayload(
+    req: http.IncomingMessage
+  ): Promise<{ message: string; source?: string }> {
+    const raw = await readRequestBody(req, MAX_ALERT_BODY_BYTES);
+    if (raw.length === 0) {
+      throw new HttpError(400, "invalid_request", "Empty alert payload");
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw.toString("utf8"));
+    } catch {
+      throw new HttpError(400, "invalid_json", "Alert payload must be valid JSON");
+    }
+    if (!parsed || typeof parsed !== "object") {
+      throw new HttpError(400, "invalid_request", "Alert payload must be an object");
+    }
+    const message = typeof (parsed as any).message === "string" ? (parsed as any).message : "";
+    const source = typeof (parsed as any).source === "string" ? (parsed as any).source : undefined;
+    if (!message.trim()) {
+      throw new HttpError(400, "invalid_message", "Alert message is required");
+    }
+    return { message, source };
+  }
+
+  async function readRequestBody(req: http.IncomingMessage, limit: number): Promise<Buffer> {
+    return await new Promise<Buffer>((resolve, reject) => {
+      const chunks: Buffer[] = [];
+      let size = 0;
+      const cleanup = () => {
+        req.off("data", handleData);
+        req.off("end", handleEnd);
+        req.off("error", handleError);
+      };
+      const handleError = (err: Error) => {
+        cleanup();
+        reject(err);
+      };
+      const handleEnd = () => {
+        cleanup();
+        resolve(Buffer.concat(chunks));
+      };
+      const handleData = (chunk: Buffer) => {
+        size += chunk.length;
+        if (size > limit) {
+          cleanup();
+          req.destroy();
+          reject(new HttpError(413, "payload_too_large", "Alert payload too large"));
+          return;
+        }
+        chunks.push(chunk);
+      };
+      req.on("data", handleData);
+      req.on("end", handleEnd);
+      req.on("error", handleError);
+    });
+  }
+
+  function buildAlertText(message: string, source?: string): string {
+    const normalizedMessage = normalizeAlertMessage(message);
+    if (!normalizedMessage) {
+      throw new HttpError(400, "invalid_message", "Alert message is required");
+    }
+    const normalizedSource = resolveAlertSource(source);
+    const text = normalizedSource ? `[${normalizedSource}] ${normalizedMessage}` : normalizedMessage;
+    if (Buffer.byteLength(text, "utf8") > config.sessions.maxMessageBytes) {
+      throw new HttpError(400, "message_too_large", "Alert message exceeds max size");
+    }
+    return text;
+  }
+
+  function normalizeAlertMessage(value: string): string | null {
+    const cleaned = value.replace(CONTROL_CHARS_REGEX, "").trim();
+    if (!cleaned) {
+      return null;
+    }
+    return cleaned;
+  }
+
+  function resolveAlertSource(source?: string): string | undefined {
+    const cleaned = source ? sanitizeLabel(source) : undefined;
+    return cleaned ?? DEFAULT_ALERT_SOURCE;
+  }
+
+  async function wakeGatewayForAlert(text: string) {
+    try {
+      await callGateway({
+        method: "wake",
+        params: { text, mode: "now" },
+        clientName: GATEWAY_CLIENT_NAMES.CLI,
+        clientDisplayName: "clawline-alert",
+        clientVersion: "clawline",
+        mode: GATEWAY_CLIENT_MODES.BACKEND
+      });
+    } catch (err) {
+      logger.error("alert_gateway_wake_failed", err);
+      throw err instanceof HttpError ? err : new HttpError(502, "wake_failed", "Failed to wake CLU");
+    }
+  }
+
+  async function deliverAlertTarget(text: string) {
+    const channel = config.alertTarget.channel.trim();
+    const to = config.alertTarget.to?.trim();
+    if (!channel || !to) {
+      throw new HttpError(500, "alert_target_missing", "Alert target is not configured");
+    }
+    try {
+      await sendMessage({
+        channel,
+        to,
+        content: text,
+        cfg: clawdbotCfg,
+        gateway: {
+          clientName: GATEWAY_CLIENT_NAMES.CLI,
+          clientDisplayName: "clawline-alert",
+          mode: GATEWAY_CLIENT_MODES.BACKEND
+        }
+      });
+    } catch (err) {
+      logger.error("alert_delivery_failed", err);
+      throw err instanceof HttpError ? err : new HttpError(502, "delivery_failed", "Failed to deliver alert");
+    }
+  }
 
   const sockets = new Set<net.Socket>();
   httpServer.on("connection", (socket) => {

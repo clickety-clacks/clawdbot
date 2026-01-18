@@ -16,6 +16,10 @@ export type ClawlineConfig = {
     allowedOrigins?: string[];
   };
   adapter?: ClawlineAdapterConfig;
+  alertTarget?: {
+    channel?: string;
+    to?: string;
+  };
   auth?: {
     jwtSigningKey?: string | null;
     tokenTtlSeconds?: number | null;

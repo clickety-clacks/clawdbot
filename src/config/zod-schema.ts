@@ -155,6 +155,12 @@ const ClawlineConfigSchema = z
         systemPrompt: z.string().optional(),
       })
       .optional(),
+    alertTarget: z
+      .object({
+        channel: z.string().optional(),
+        to: z.string().optional(),
+      })
+      .optional(),
     auth: z
       .object({
         jwtSigningKey: z.string().nullable().optional(),
