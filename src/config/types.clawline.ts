@@ -10,6 +10,7 @@ export type ClawlineConfig = {
   enabled?: boolean;
   port?: number;
   statePath?: string;
+  alertInstructionsPath?: string;
   network?: {
     bindAddress?: string;
     allowInsecurePublic?: boolean;

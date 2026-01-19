@@ -3,6 +3,11 @@
   "version": "2026.1.17-1",
   "type": "module",
   "description": "Clawdbot Clawline channel plugin",
+  "dependencies": {
+    "better-sqlite3": "12.6.2",
+    "busboy": "1.6.0",
+    "jsonwebtoken": "9.0.3"
+  },
   "clawdbot": {
     "extensions": ["./index.ts"]
   }

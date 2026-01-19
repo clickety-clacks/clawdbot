@@ -56,7 +56,6 @@ export type { ChannelConfigSchema, ChannelPlugin } from "../channels/plugins/typ
 export type { ClawdbotPluginApi } from "../plugins/types.js";
 export type { PluginRuntime } from "../plugins/runtime/types.js";
 export type { ClawdbotConfig } from "../config/config.js";
-export { chunkText } from "../auto-reply/chunk.js";
 export type { ChannelDock } from "../channels/dock.js";
 export { getChatChannelMeta } from "../channels/registry.js";
 export type {
