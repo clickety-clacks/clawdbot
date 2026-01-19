@@ -65,3 +65,20 @@ The server binds to `127.0.0.1` by default. When binding to any other address
 you **must** set `clawline.network.allowInsecurePublic = true` and provide an
 allowlist of `network.allowedOrigins`. Run Clawline behind Tailscale, a VPN, or
 a reverse proxy with TLS termination for production use.
+
+## Allowlist, pairing, and admin access
+
+Clawline tracks paired devices in `~/.clawdbot/clawline/allowlist.json`. Each entry carries
+metadata plus an `isAdmin` flag that controls whether the device should see the admin
+transcript:
+
+- Tokens now only encode identity (`deviceId` + `userId`); they do **not** embed the admin flag.
+- The running provider reloads the allowlist whenever the file changes. Changing `isAdmin`
+  immediately updates replay + live fan-out—no need to reissue tokens.
+- When a WebSocket authenticates, the server replies with an `auth_result` payload that includes
+  `isAdmin: true|false`. Clients can use that field to hide/disable their admin UI, but the
+  provider still enforces delivery, so flipping the allowlist entry is authoritative.
+
+During pairing the first approved device automatically becomes admin if no existing entries have
+`isAdmin: true`. After that, toggle the flag manually in `allowlist.json` (or via your own tooling)
+whenever you need to promote/demote a device.
