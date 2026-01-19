@@ -73,7 +73,6 @@ async function setupTestServer(
   await fs.mkdir(mediaPath, { recursive: true });
   await fs.mkdir(path.join(mediaPath, "assets"), { recursive: true });
   await fs.mkdir(path.join(mediaPath, "tmp"), { recursive: true });
-  await fs.mkdir(path.join(root, "sessions"), { recursive: true });
   const allowlistPath = path.join(statePath, "allowlist.json");
   await fs.writeFile(
     allowlistPath,
@@ -89,6 +88,7 @@ async function setupTestServer(
     const contents = options.alertInstructionsText ?? "";
     await fs.writeFile(alertInstructionsPath, contents);
   }
+  const sessionStorePath = path.join(root, "sessions.json");
 
   const server = await createProviderServer({
     config: {
@@ -100,7 +100,7 @@ async function setupTestServer(
     clawdbotConfig: testClawdbotConfig,
     replyResolver: testReplyResolver,
     logger: silentLogger,
-    sessionStorePath: path.join(root, "sessions"),
+    sessionStorePath,
   });
   await server.start();
   const cleanup = async () => {
@@ -202,6 +202,22 @@ async function performPairRequest(port: number, deviceId: string) {
   }
 }
 
+async function authenticateDevice(port: number, deviceId: string, token: string) {
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+  await waitForOpen(ws);
+  ws.send(
+    JSON.stringify({
+      type: "auth",
+      protocolVersion: PROTOCOL_VERSION,
+      deviceId,
+      token,
+    }),
+  );
+  const response = await waitForMessage(ws);
+  expect(response).toMatchObject({ type: "auth_result", success: true });
+  return { ws, auth: response };
+}
+
 async function uploadAsset(port: number, token: string, data: Buffer, mimeType: string) {
   const form = new FormData();
   form.set("file", new Blob([data], { type: mimeType }), "upload.bin");
@@ -277,6 +293,123 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("does not deliver admin channel messages to non-admin sessions", async () => {
+    const adminDeviceId = randomUUID();
+    const userDeviceId = randomUUID();
+    const baseEntry = {
+      claimedName: "Test Device",
+      deviceInfo: {
+        platform: "iOS",
+        model: "iPhone",
+        osVersion: "17.0",
+        appVersion: "1.0",
+      },
+      tokenDelivered: true,
+      createdAt: Date.now() - 1_000,
+      lastSeenAt: Date.now() - 500,
+    };
+    const ctx = await setupTestServer([
+      {
+        ...baseEntry,
+        deviceId: adminDeviceId,
+        userId: "user_admin",
+        isAdmin: true,
+      },
+      {
+        ...baseEntry,
+        deviceId: userDeviceId,
+        userId: "user_regular",
+        isAdmin: false,
+      },
+    ]);
+    const cleanupWs = async (...sockets: WebSocket[]) => {
+      sockets.forEach((ws) => {
+        try {
+          ws.terminate();
+        } catch {
+          /* ignore */
+        }
+      });
+    };
+    try {
+      const adminPair = await performPairRequest(ctx.port, adminDeviceId);
+      const userPair = await performPairRequest(ctx.port, userDeviceId);
+      const { ws: adminWs } = await authenticateDevice(
+        ctx.port,
+        adminDeviceId,
+        adminPair.token as string,
+      );
+      const { ws: userWs } = await authenticateDevice(
+        ctx.port,
+        userDeviceId,
+        userPair.token as string,
+      );
+
+      const received: any[] = [];
+      const listener = (data: WebSocket.RawData) => {
+        received.push(JSON.parse(data.toString()));
+      };
+      userWs.on("message", listener);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      received.length = 0;
+
+      adminWs.send(
+        JSON.stringify({
+          type: "message",
+          id: `c_${randomUUID()}`,
+          channelType: "admin",
+          content: "secret-admin-update",
+        }),
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(received).toHaveLength(0);
+      userWs.off("message", listener);
+      await cleanupWs(adminWs, userWs);
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("includes isAdmin in auth_result based on allowlist entry", async () => {
+    const adminDeviceId = randomUUID();
+    const userDeviceId = randomUUID();
+    const baseEntry = {
+      claimedName: "Flagged Device",
+      deviceInfo: {
+        platform: "iOS",
+        model: "iPhone",
+      },
+      createdAt: Date.now() - 10_000,
+      lastSeenAt: Date.now() - 5_000,
+      tokenDelivered: true,
+    };
+    const ctx = await setupTestServer([
+      { ...baseEntry, deviceId: adminDeviceId, userId: "user_admin_flag", isAdmin: true },
+      { ...baseEntry, deviceId: userDeviceId, userId: "user_regular_flag", isAdmin: false },
+    ]);
+    try {
+      const adminPair = await performPairRequest(ctx.port, adminDeviceId);
+      const userPair = await performPairRequest(ctx.port, userDeviceId);
+      const { ws: adminWs, auth: adminAuth } = await authenticateDevice(
+        ctx.port,
+        adminDeviceId,
+        adminPair.token as string,
+      );
+      const { ws: userWs, auth: userAuth } = await authenticateDevice(
+        ctx.port,
+        userDeviceId,
+        userPair.token as string,
+      );
+      expect(adminAuth.isAdmin).toBe(true);
+      expect(userAuth.isAdmin).toBe(false);
+      adminWs.terminate();
+      userWs.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("handles alert endpoint by waking gateway and sending message", async () => {
     const ctx = await setupTestServer();
     try {
@@ -320,7 +453,9 @@ describe.sequential("clawline provider server", () => {
       const payload = await response.json();
       expect(payload).toEqual({ ok: true });
       const expected = "[codex] Check on Flynn\n\nFollow up with Flynn ASAP.";
-      const wakeCall = gatewayCallMock.mock.calls[0]?.[0] as { params?: { text?: string } } | undefined;
+      const wakeCall = gatewayCallMock.mock.calls[0]?.[0] as
+        | { params?: { text?: string } }
+        | undefined;
       expect(wakeCall?.params?.text).toBe(expected);
       const sendCall = sendMessageMock.mock.calls[0]?.[0] as { content?: string } | undefined;
       expect(sendCall?.content).toBe(expected);
@@ -341,7 +476,9 @@ describe.sequential("clawline provider server", () => {
       });
       expect(response.status).toBe(200);
       const expected = `[codex] Check on Flynn\n\n${DEFAULT_ALERT_INSTRUCTIONS_TEXT}`;
-      const wakeCall = gatewayCallMock.mock.calls[0]?.[0] as { params?: { text?: string } } | undefined;
+      const wakeCall = gatewayCallMock.mock.calls[0]?.[0] as
+        | { params?: { text?: string } }
+        | undefined;
       expect(wakeCall?.params?.text).toBe(expected);
       const sendCall = sendMessageMock.mock.calls[0]?.[0] as { content?: string } | undefined;
       expect(sendCall?.content).toBe(expected);
