@@ -57,8 +57,6 @@ export type { ClawdbotPluginApi } from "../plugins/types.js";
 export type { PluginRuntime } from "../plugins/runtime/types.js";
 export type { ClawdbotConfig } from "../config/config.js";
 export { chunkText } from "../auto-reply/chunk.js";
-export { sendClawlineOutboundMessage } from "../clawline/outbound.js";
-export { startClawlineService, type ClawlineServiceHandle } from "../clawline/service.js";
 export type { ChannelDock } from "../channels/dock.js";
 export { getChatChannelMeta } from "../channels/registry.js";
 export type {
@@ -83,6 +81,8 @@ export type { WizardPrompter } from "../wizard/prompts.js";
 export { DEFAULT_ACCOUNT_ID, normalizeAccountId } from "../routing/session-key.js";
 export type { ReplyPayload } from "../auto-reply/types.js";
 export { SILENT_REPLY_TOKEN, isSilentReplyText } from "../auto-reply/tokens.js";
+export { sendClawlineOutboundMessage } from "../clawline/outbound.js";
+export { startClawlineService, type ClawlineServiceHandle } from "../clawline/service.js";
 export {
   buildPendingHistoryContextFromMap,
   clearHistoryEntries,

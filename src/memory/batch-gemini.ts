@@ -1,4 +1,5 @@
-import { createSubsystemLogger } from "../logging.js";
+import { createSubsystemLogger } from "../logging/subsystem.js";
+import { isTruthyEnvValue } from "../infra/env.js";
 import type { GeminiEmbeddingClient } from "./embeddings-gemini.js";
 import { hashText } from "./internal.js";
 
@@ -33,7 +34,7 @@ export type GeminiBatchOutputLine = {
 };
 
 const GEMINI_BATCH_MAX_REQUESTS = 50000;
-const debugEmbeddings = process.env.CLAWDBOT_DEBUG_MEMORY_EMBEDDINGS === "1";
+const debugEmbeddings = isTruthyEnvValue(process.env.CLAWDBOT_DEBUG_MEMORY_EMBEDDINGS);
 const log = createSubsystemLogger("memory/embeddings");
 
 const debugLog = (message: string, meta?: Record<string, unknown>) => {
@@ -183,7 +184,9 @@ async function fetchGeminiBatchStatus(params: {
   batchName: string;
 }): Promise<GeminiBatchStatus> {
   const baseUrl = getGeminiBaseUrl(params.gemini);
-  const name = params.batchName.startsWith("batches/") ? params.batchName : `batches/${params.batchName}`;
+  const name = params.batchName.startsWith("batches/")
+    ? params.batchName
+    : `batches/${params.batchName}`;
   const statusUrl = `${baseUrl}/${name}`;
   debugLog("memory embeddings: gemini batch status", { statusUrl });
   const res = await fetch(statusUrl, {
@@ -328,7 +331,11 @@ export async function runGeminiEmbeddingBatches(params: {
       requests: group.length,
     });
 
-    if (!params.wait && batchInfo.state && !["SUCCEEDED", "COMPLETED", "DONE"].includes(batchInfo.state)) {
+    if (
+      !params.wait &&
+      batchInfo.state &&
+      !["SUCCEEDED", "COMPLETED", "DONE"].includes(batchInfo.state)
+    ) {
       throw new Error(
         `gemini batch ${batchName} submitted; enable remote.batch.wait to await completion`,
       );
@@ -376,8 +383,7 @@ export async function runGeminiEmbeddingBatches(params: {
         errors.push(`${customId}: ${line.response.error.message}`);
         continue;
       }
-      const embedding =
-        line.embedding?.values ?? line.response?.embedding?.values ?? [];
+      const embedding = line.embedding?.values ?? line.response?.embedding?.values ?? [];
       if (embedding.length === 0) {
         errors.push(`${customId}: empty embedding`);
         continue;

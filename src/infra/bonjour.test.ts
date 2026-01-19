@@ -1,19 +1,25 @@
 import os from "node:os";
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const createService = vi.fn();
-const shutdown = vi.fn();
-const registerUnhandledRejectionHandler = vi.fn();
+import * as logging from "../logging.js";
 
-const logWarn = vi.fn();
-const logDebug = vi.fn();
+const mocks = vi.hoisted(() => ({
+  createService: vi.fn(),
+  shutdown: vi.fn(),
+  registerUnhandledRejectionHandler: vi.fn(),
+  logWarn: vi.fn(),
+  logDebug: vi.fn(),
+}));
+const { createService, shutdown, registerUnhandledRejectionHandler, logWarn, logDebug } = mocks;
 
 const asString = (value: unknown, fallback: string) =>
   typeof value === "string" && value.trim() ? value : fallback;
 
-vi.mock("../logger.js", () => {
+vi.mock("../logger.js", async () => {
+  const actual = await vi.importActual<typeof import("../logger.js")>("../logger.js");
   return {
+    ...actual,
     logWarn: (message: string) => logWarn(message),
     logDebug: (message: string) => logDebug(message),
     logInfo: vi.fn(),
@@ -50,6 +56,12 @@ describe("gateway bonjour advertiser", () => {
   };
 
   const prevEnv = { ...process.env };
+
+  beforeEach(() => {
+    vi.spyOn(logging, "getLogger").mockReturnValue({
+      info: (...args: unknown[]) => getLoggerInfo(...args),
+    });
+  });
 
   afterEach(() => {
     for (const key of Object.keys(process.env)) {

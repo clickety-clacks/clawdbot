@@ -3,7 +3,12 @@ import type { loadConfig } from "../config/config.js";
 import { startGmailWatcher, stopGmailWatcher } from "../hooks/gmail-watcher.js";
 import { startHeartbeatRunner } from "../infra/heartbeat-runner.js";
 import { resetDirectoryCache } from "../infra/outbound/target-resolver.js";
+import {
+  authorizeGatewaySigusr1Restart,
+  setGatewaySigusr1RestartPolicy,
+} from "../infra/restart.js";
 import { setCommandLaneConcurrency } from "../process/command-queue.js";
+import { isTruthyEnvValue } from "../infra/env.js";
 import type { ChannelKind, GatewayReloadPlan } from "./config-reload.js";
 import { resolveHooksConfig } from "./hooks.js";
 import { startBrowserControlServerIfEnabled } from "./server-browser.js";
@@ -37,6 +42,7 @@ export function createGatewayReloadHandlers(params: {
     plan: GatewayReloadPlan,
     nextConfig: ReturnType<typeof loadConfig>,
   ) => {
+    setGatewaySigusr1RestartPolicy({ allowExternal: nextConfig.commands?.restart === true });
     const state = params.getState();
     const nextState = { ...state };
 
@@ -80,7 +86,7 @@ export function createGatewayReloadHandlers(params: {
 
     if (plan.restartGmailWatcher) {
       await stopGmailWatcher().catch(() => {});
-      if (process.env.CLAWDBOT_SKIP_GMAIL_WATCHER !== "1") {
+      if (!isTruthyEnvValue(process.env.CLAWDBOT_SKIP_GMAIL_WATCHER)) {
         try {
           const gmailResult = await startGmailWatcher(nextConfig);
           if (gmailResult.started) {
@@ -102,8 +108,8 @@ export function createGatewayReloadHandlers(params: {
 
     if (plan.restartChannels.size > 0) {
       if (
-        process.env.CLAWDBOT_SKIP_CHANNELS === "1" ||
-        process.env.CLAWDBOT_SKIP_PROVIDERS === "1"
+        isTruthyEnvValue(process.env.CLAWDBOT_SKIP_CHANNELS) ||
+        isTruthyEnvValue(process.env.CLAWDBOT_SKIP_PROVIDERS)
       ) {
         params.logChannels.info(
           "skipping channel reload (CLAWDBOT_SKIP_CHANNELS=1 or CLAWDBOT_SKIP_PROVIDERS=1)",
@@ -138,8 +144,9 @@ export function createGatewayReloadHandlers(params: {
 
   const requestGatewayRestart = (
     plan: GatewayReloadPlan,
-    _nextConfig: ReturnType<typeof loadConfig>,
+    nextConfig: ReturnType<typeof loadConfig>,
   ) => {
+    setGatewaySigusr1RestartPolicy({ allowExternal: nextConfig.commands?.restart === true });
     const reasons = plan.restartReasons.length
       ? plan.restartReasons.join(", ")
       : plan.changedPaths.join(", ");
@@ -148,6 +155,7 @@ export function createGatewayReloadHandlers(params: {
       params.logReload.warn("no SIGUSR1 listener found; restart skipped");
       return;
     }
+    authorizeGatewaySigusr1Restart();
     process.emit("SIGUSR1");
   };
 

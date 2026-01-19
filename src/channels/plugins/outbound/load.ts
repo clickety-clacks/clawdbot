@@ -2,12 +2,6 @@ import type { ChannelId, ChannelOutboundAdapter } from "../types.js";
 import type { PluginRegistry } from "../../../plugins/registry.js";
 import { getActivePluginRegistry } from "../../../plugins/runtime.js";
 
-type CoreOutboundLoader = () => Promise<ChannelOutboundAdapter>;
-
-const CORE_LOADERS: Record<string, CoreOutboundLoader> = {
-  clawline: async () => (await import("./clawline.js")).clawlineOutbound,
-};
-
 // Channel docking: outbound sends should stay cheap to import.
 //
 // The full channel plugins (src/channels/plugins/*.ts) pull in status,
@@ -34,12 +28,6 @@ export async function loadChannelOutboundAdapter(
   if (outbound) {
     cache.set(id, outbound);
     return outbound;
-  }
-  const loader = CORE_LOADERS[id];
-  if (loader) {
-    const loaded = await loader();
-    cache.set(id, loaded);
-    return loaded;
   }
   return undefined;
 }

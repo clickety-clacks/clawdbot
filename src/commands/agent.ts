@@ -1,4 +1,5 @@
 import {
+  listAgentIds,
   resolveAgentDir,
   resolveAgentModelFallbacksOverride,
   resolveAgentModelPrimary,
@@ -50,9 +51,11 @@ import { applyVerboseOverride } from "../sessions/level-overrides.js";
 import { resolveSendPolicy } from "../sessions/send-policy.js";
 import { resolveMessageChannel } from "../utils/message-channel.js";
 import { deliverAgentCommandResult } from "./agent/delivery.js";
+import { resolveAgentRunContext } from "./agent/run-context.js";
 import { resolveSession } from "./agent/session.js";
 import { updateSessionStoreAfterAgentRun } from "./agent/session-store.js";
 import type { AgentCommandOpts } from "./agent/types.js";
+import { normalizeAgentId } from "../routing/session-key.js";
 
 export async function agentCommand(
   opts: AgentCommandOpts,
@@ -61,13 +64,31 @@ export async function agentCommand(
 ) {
   const body = (opts.message ?? "").trim();
   if (!body) throw new Error("Message (--message) is required");
-  if (!opts.to && !opts.sessionId && !opts.sessionKey) {
-    throw new Error("Pass --to <E.164> or --session-id to choose a session");
+  if (!opts.to && !opts.sessionId && !opts.sessionKey && !opts.agentId) {
+    throw new Error("Pass --to <E.164>, --session-id, or --agent to choose a session");
   }
 
   const cfg = loadConfig();
+  const agentIdOverrideRaw = opts.agentId?.trim();
+  const agentIdOverride = agentIdOverrideRaw ? normalizeAgentId(agentIdOverrideRaw) : undefined;
+  if (agentIdOverride) {
+    const knownAgents = listAgentIds(cfg);
+    if (!knownAgents.includes(agentIdOverride)) {
+      throw new Error(
+        `Unknown agent id "${agentIdOverrideRaw}". Use "clawdbot agents list" to see configured agents.`,
+      );
+    }
+  }
+  if (agentIdOverride && opts.sessionKey) {
+    const sessionAgentId = resolveAgentIdFromSessionKey(opts.sessionKey);
+    if (sessionAgentId !== agentIdOverride) {
+      throw new Error(
+        `Agent id "${agentIdOverrideRaw}" does not match session key agent "${sessionAgentId}".`,
+      );
+    }
+  }
   const agentCfg = cfg.agents?.defaults;
-  const sessionAgentId = resolveAgentIdFromSessionKey(opts.sessionKey?.trim());
+  const sessionAgentId = agentIdOverride ?? resolveAgentIdFromSessionKey(opts.sessionKey?.trim());
   const workspaceDirRaw = resolveAgentWorkspaceDir(cfg, sessionAgentId);
   const agentDir = resolveAgentDir(cfg, sessionAgentId);
   const workspace = await ensureAgentWorkspace({
@@ -114,6 +135,7 @@ export async function agentCommand(
     to: opts.to,
     sessionId: opts.sessionId,
     sessionKey: opts.sessionKey,
+    agentId: agentIdOverride,
   });
 
   const {
@@ -346,7 +368,11 @@ export async function agentCommand(
     let fallbackProvider = provider;
     let fallbackModel = model;
     try {
-      const messageChannel = resolveMessageChannel(opts.messageChannel, opts.channel);
+      const runContext = resolveAgentRunContext(opts);
+      const messageChannel = resolveMessageChannel(
+        runContext.messageChannel,
+        opts.replyChannel ?? opts.channel,
+      );
       const fallbackResult = await runWithModelFallback({
         cfg,
         provider,
@@ -378,6 +404,11 @@ export async function agentCommand(
             sessionId,
             sessionKey,
             messageChannel,
+            agentAccountId: runContext.accountId,
+            currentChannelId: runContext.currentChannelId,
+            currentThreadTs: runContext.currentThreadTs,
+            replyToMode: runContext.replyToMode,
+            hasRepliedRef: runContext.hasRepliedRef,
             sessionFile,
             workspaceDir,
             config: cfg,

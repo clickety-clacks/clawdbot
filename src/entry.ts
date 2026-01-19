@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
+import path from "node:path";
 import process from "node:process";
 
 import { applyCliProfileEnv, parseCliProfileArgs } from "./cli/profile.js";
+import { isTruthyEnvValue } from "./infra/env.js";
 import { attachChildProcessBridge } from "./process/child-process-bridge.js";
 
 process.title = "clawdbot";
@@ -20,7 +22,8 @@ function hasExperimentalWarningSuppressed(nodeOptions: string): boolean {
 }
 
 function ensureExperimentalWarningSuppressed(): boolean {
-  if (process.env.CLAWDBOT_NODE_OPTIONS_READY === "1") return false;
+  if (isTruthyEnvValue(process.env.CLAWDBOT_NO_RESPAWN)) return false;
+  if (isTruthyEnvValue(process.env.CLAWDBOT_NODE_OPTIONS_READY)) return false;
   const nodeOptions = process.env.NODE_OPTIONS ?? "";
   if (hasExperimentalWarningSuppressed(nodeOptions)) return false;
 
@@ -53,6 +56,24 @@ function ensureExperimentalWarningSuppressed(): boolean {
   // Parent must not continue running the CLI.
   return true;
 }
+
+function normalizeWindowsArgv(argv: string[]): string[] {
+  if (process.platform !== "win32") return argv;
+  if (argv.length < 3) return argv;
+  const execBase = path.basename(process.execPath).toLowerCase();
+  const arg1 = path.basename(argv[1] ?? "").toLowerCase();
+  const arg2 = path.basename(argv[2] ?? "").toLowerCase();
+  const looksLikeEntry = arg1 === "entry.ts" || arg1 === "entry.js";
+  if (arg1 === execBase) {
+    return [argv[0], ...argv.slice(2)];
+  }
+  if (looksLikeEntry && arg2 === execBase) {
+    return [argv[0], argv[1], ...argv.slice(3)];
+  }
+  return argv;
+}
+
+process.argv = normalizeWindowsArgv(process.argv);
 
 if (!ensureExperimentalWarningSuppressed()) {
   const parsed = parseCliProfileArgs(process.argv);

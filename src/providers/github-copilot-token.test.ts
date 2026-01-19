@@ -18,7 +18,8 @@ describe("github-copilot token", () => {
     vi.resetModules();
     loadJsonFile.mockReset();
     saveJsonFile.mockReset();
-    resolveStateDir.mockReset().mockReturnValue("/tmp/clawdbot-state");
+    resolveStateDir.mockReset();
+    resolveStateDir.mockReturnValue("/tmp/clawdbot-state");
   });
 
   it("derives baseUrl from token", async () => {

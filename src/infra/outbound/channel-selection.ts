@@ -44,7 +44,6 @@ export async function listConfiguredMessageChannels(
 ): Promise<MessageChannelId[]> {
   const channels: MessageChannelId[] = [];
   for (const plugin of listChannelPlugins()) {
-    if (plugin.meta?.showConfigured === false) continue;
     if (!isKnownChannel(plugin.id)) continue;
     if (await isPluginConfigured(plugin, cfg)) {
       channels.push(plugin.id as MessageChannelId);

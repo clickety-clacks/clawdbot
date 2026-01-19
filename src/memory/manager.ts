@@ -10,7 +10,7 @@ import type { ResolvedMemorySearchConfig } from "../agents/memory-search.js";
 import { resolveMemorySearchConfig } from "../agents/memory-search.js";
 import type { ClawdbotConfig } from "../config/config.js";
 import { resolveSessionTranscriptsDirForAgent } from "../config/sessions/paths.js";
-import { createSubsystemLogger } from "../logging.js";
+import { createSubsystemLogger } from "../logging/subsystem.js";
 import { onSessionTranscriptUpdate } from "../sessions/transcript-events.js";
 import { resolveUserPath } from "../utils.js";
 import {
@@ -697,9 +697,7 @@ export class MemoryIndexManager {
 
   private async removeIndexFiles(basePath: string): Promise<void> {
     const suffixes = ["", "-wal", "-shm"];
-    await Promise.all(
-      suffixes.map((suffix) => fs.rm(`${basePath}${suffix}`, { force: true })),
-    );
+    await Promise.all(suffixes.map((suffix) => fs.rm(`${basePath}${suffix}`, { force: true })));
   }
 
   private ensureSchema() {
@@ -1064,8 +1062,8 @@ export class MemoryIndexManager {
     const batch = this.settings.remote?.batch;
     const enabled = Boolean(
       batch?.enabled &&
-        ((this.openAi && this.provider.id === "openai") ||
-          (this.gemini && this.provider.id === "gemini")),
+      ((this.openAi && this.provider.id === "openai") ||
+        (this.gemini && this.provider.id === "gemini")),
     );
     return {
       enabled,

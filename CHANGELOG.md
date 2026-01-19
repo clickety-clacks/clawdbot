@@ -2,10 +2,40 @@
 
 Docs: https://docs.clawd.bot
 
+## 2026.1.19-1
+
+### Changes
+- Usage: add `/usage cost` summaries and macOS menu cost submenu with daily charting.
+
+### Fixes
+- Plugins: surface plugin load/register/config errors in gateway logs with plugin/source context.
+<<<<<<< Updated upstream
+- Agents: propagate accountId into embedded runs so sub-agent announce routing honors the originating account. (#1058)
+||||||| Stash base
+=======
+- Compaction: include tool failure summaries in safeguard compaction to prevent retry loops. (#1084)
+>>>>>>> Stashed changes
+
 ## 2026.1.18-5
 
 ### Changes
 - Dependencies: update core + plugin deps (grammy, vitest, openai, Microsoft agents hosting, etc.).
+- Onboarding: add allowlist prompts and username-to-id resolution across core and extension channels.
+- TUI: add searchable model picker for quicker model selection. (#1198) — thanks @vignesh07.
+- Docs: clarify allowlist input types and onboarding behavior for messaging channels.
+
+### Fixes
+- Configure: hide OpenRouter auto routing model from the model picker. (#1182) — thanks @zerone0x.
+- Docs: make docs:list fail fast with a clear error if the docs directory is missing.
+- macOS: load menu session previews asynchronously so items populate while the menu is open.
+- macOS: use label colors for session preview text so previews render in menu subviews.
+- macOS: suppress usage error text in the menubar cost view.
+- Telegram: honor pairing allowlists for native slash commands.
+- TUI: highlight model search matches and stabilize search ordering.
+- CLI: keep banners on routed commands, restore config guarding outside fast-path routing, and tighten fast-path flag parsing while skipping console capture for extra speed. (#1195) — thanks @gumadeiras.
+- Slack: resolve Bolt import interop for Bun + Node. (#1191) — thanks @CoreyH.
+- Gateway: require authorized restarts for SIGUSR1 (restart/apply/update) so config gating can't be bypassed.
+- Discord: stop reconnecting the gateway after aborts to prevent duplicate listeners.
 
 ## 2026.1.18-4
 

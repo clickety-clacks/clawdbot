@@ -6,7 +6,22 @@ import { setVerbose } from "../../globals.js";
 import { defaultRuntime } from "../../runtime.js";
 import { formatDocsLink } from "../../terminal/links.js";
 import { theme } from "../../terminal/theme.js";
+import { runCommandWithRuntime } from "../cli-utils.js";
 import { parsePositiveIntOrUndefined } from "./helpers.js";
+
+function resolveVerbose(opts: { verbose?: boolean; debug?: boolean }): boolean {
+  return Boolean(opts.verbose || opts.debug);
+}
+
+function parseTimeoutMs(timeout: unknown): number | null | undefined {
+  const parsed = parsePositiveIntOrUndefined(timeout);
+  if (timeout !== undefined && parsed === undefined) {
+    defaultRuntime.error("--timeout must be a positive integer (milliseconds)");
+    defaultRuntime.exit(1);
+    return null;
+  }
+  return parsed;
+}
 
 export function registerStatusHealthSessionsCommands(program: Command) {
   program
@@ -37,15 +52,13 @@ Examples:
         `\n${theme.muted("Docs:")} ${formatDocsLink("/cli/status", "docs.clawd.bot/cli/status")}\n`,
     )
     .action(async (opts) => {
-      const verbose = Boolean(opts.verbose || opts.debug);
+      const verbose = resolveVerbose(opts);
       setVerbose(verbose);
-      const timeout = parsePositiveIntOrUndefined(opts.timeout);
-      if (opts.timeout !== undefined && timeout === undefined) {
-        defaultRuntime.error("--timeout must be a positive integer (milliseconds)");
-        defaultRuntime.exit(1);
+      const timeout = parseTimeoutMs(opts.timeout);
+      if (timeout === null) {
         return;
       }
-      try {
+      await runCommandWithRuntime(defaultRuntime, async () => {
         await statusCommand(
           {
             json: Boolean(opts.json),
@@ -57,10 +70,7 @@ Examples:
           },
           defaultRuntime,
         );
-      } catch (err) {
-        defaultRuntime.error(String(err));
-        defaultRuntime.exit(1);
-      }
+      });
     });
 
   program
@@ -76,15 +86,13 @@ Examples:
         `\n${theme.muted("Docs:")} ${formatDocsLink("/cli/health", "docs.clawd.bot/cli/health")}\n`,
     )
     .action(async (opts) => {
-      const verbose = Boolean(opts.verbose || opts.debug);
+      const verbose = resolveVerbose(opts);
       setVerbose(verbose);
-      const timeout = parsePositiveIntOrUndefined(opts.timeout);
-      if (opts.timeout !== undefined && timeout === undefined) {
-        defaultRuntime.error("--timeout must be a positive integer (milliseconds)");
-        defaultRuntime.exit(1);
+      const timeout = parseTimeoutMs(opts.timeout);
+      if (timeout === null) {
         return;
       }
-      try {
+      await runCommandWithRuntime(defaultRuntime, async () => {
         await healthCommand(
           {
             json: Boolean(opts.json),
@@ -93,10 +101,7 @@ Examples:
           },
           defaultRuntime,
         );
-      } catch (err) {
-        defaultRuntime.error(String(err));
-        defaultRuntime.exit(1);
-      }
+      });
     });
 
   program

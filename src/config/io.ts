@@ -8,10 +8,12 @@ import JSON5 from "json5";
 import {
   loadShellEnvFallback,
   resolveShellEnvFallbackTimeoutMs,
+  shouldDeferShellEnvFallback,
   shouldEnableShellEnvFallback,
 } from "../infra/shell-env.js";
 import { DuplicateAgentDirError, findDuplicateAgentDirs } from "./agent-dirs.js";
 import {
+  applyCompactionDefaults,
   applyContextPruningDefaults,
   applyLoggingDefaults,
   applyMessageDefaults,
@@ -282,7 +284,7 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
   function loadConfig(): ClawdbotConfig {
     try {
       if (!deps.fs.existsSync(configPath)) {
-        if (shouldEnableShellEnvFallback(deps.env)) {
+        if (shouldEnableShellEnvFallback(deps.env) && !shouldDeferShellEnvFallback(deps.env)) {
           loadShellEnvFallback({
             enabled: true,
             env: deps.env,
@@ -333,9 +335,11 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
         }
       }
       const cfg = applyModelDefaults(
-        applyContextPruningDefaults(
-          applySessionDefaults(
-            applyLoggingDefaults(applyMessageDefaults(validated.data as ClawdbotConfig)),
+        applyCompactionDefaults(
+          applyContextPruningDefaults(
+            applySessionDefaults(
+              applyLoggingDefaults(applyMessageDefaults(validated.data as ClawdbotConfig)),
+            ),
           ),
         ),
       );
@@ -352,7 +356,7 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
       applyConfigEnv(cfg, deps.env);
 
       const enabled = shouldEnableShellEnvFallback(deps.env) || cfg.env?.shellEnv?.enabled === true;
-      if (enabled) {
+      if (enabled && !shouldDeferShellEnvFallback(deps.env)) {
         loadShellEnvFallback({
           enabled: true,
           env: deps.env,
@@ -379,7 +383,9 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
       const hash = hashConfigRaw(null);
       const config = applyTalkApiKey(
         applyModelDefaults(
-          applyContextPruningDefaults(applySessionDefaults(applyMessageDefaults({}))),
+          applyCompactionDefaults(
+            applyContextPruningDefaults(applySessionDefaults(applyMessageDefaults({}))),
+          ),
         ),
       );
       const legacyIssues: LegacyConfigIssue[] = [];
@@ -527,6 +533,7 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
   }
 
   async function writeConfigFile(cfg: ClawdbotConfig) {
+    clearConfigCache();
     const dir = path.dirname(configPath);
     await deps.fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
     const json = JSON.stringify(applyModelDefaults(stampConfigVersion(cfg)), null, 2)
@@ -583,8 +590,52 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
 // NOTE: These wrappers intentionally do *not* cache the resolved config path at
 // module scope. `CLAWDBOT_CONFIG_PATH` (and friends) are expected to work even
 // when set after the module has been imported (tests, one-off scripts, etc.).
+const DEFAULT_CONFIG_CACHE_MS = 200;
+let configCache: {
+  configPath: string;
+  expiresAt: number;
+  config: ClawdbotConfig;
+} | null = null;
+
+function resolveConfigCacheMs(env: NodeJS.ProcessEnv): number {
+  const raw = env.CLAWDBOT_CONFIG_CACHE_MS?.trim();
+  if (raw === "" || raw === "0") return 0;
+  if (!raw) return DEFAULT_CONFIG_CACHE_MS;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed)) return DEFAULT_CONFIG_CACHE_MS;
+  return Math.max(0, parsed);
+}
+
+function shouldUseConfigCache(env: NodeJS.ProcessEnv): boolean {
+  if (env.CLAWDBOT_DISABLE_CONFIG_CACHE?.trim()) return false;
+  return resolveConfigCacheMs(env) > 0;
+}
+
+function clearConfigCache(): void {
+  configCache = null;
+}
+
 export function loadConfig(): ClawdbotConfig {
-  return createConfigIO({ configPath: resolveConfigPath() }).loadConfig();
+  const configPath = resolveConfigPath();
+  const now = Date.now();
+  if (shouldUseConfigCache(process.env)) {
+    const cached = configCache;
+    if (cached && cached.configPath === configPath && cached.expiresAt > now) {
+      return cached.config;
+    }
+  }
+  const config = createConfigIO({ configPath }).loadConfig();
+  if (shouldUseConfigCache(process.env)) {
+    const cacheMs = resolveConfigCacheMs(process.env);
+    if (cacheMs > 0) {
+      configCache = {
+        configPath,
+        expiresAt: now + cacheMs,
+        config,
+      };
+    }
+  }
+  return config;
 }
 
 export async function readConfigFileSnapshot(): Promise<ConfigFileSnapshot> {
@@ -594,5 +645,6 @@ export async function readConfigFileSnapshot(): Promise<ConfigFileSnapshot> {
 }
 
 export async function writeConfigFile(cfg: ClawdbotConfig): Promise<void> {
+  clearConfigCache();
   await createConfigIO({ configPath: resolveConfigPath() }).writeConfigFile(cfg);
 }

@@ -1,5 +1,5 @@
 name: clawline
-description: Operate the Clawline mobile provider: approve or deny pending devices, explain the UX to users, restart/verify the gateway, and diagnose allowlist/denylist/rate-limit issues on hosts like tars.
+description: Operate the Clawline mobile provider: approve or deny pending devices, explain the UX to users, restart/verify the gateway, and diagnose allowlist/denylist/rate-limit issues on gateway hosts.
 ---
 
 # Clawline Pairing Flow (Pending ➜ Allowlist)
@@ -22,7 +22,7 @@ All paths live under `~/.clawdbot/clawline/` (configurable via `clawline.statePa
 | `allowlist.json` | Approved devices (`deviceId`, `userId`, admin flag, metadata) |
 | `pending.json` | Waiting devices (claimed name, platform, requested timestamp) |
 | `denylist.json` | Hot-reload kill switch; immediately terminates matching sessions |
-| `alert-instructions.md` | Markdown block appended to every Clawline alert before it pages Flynn |
+| `alert-instructions.md` | Markdown block appended to every Clawline alert before it pages the operator |
 
 The provider now watches **allowlist** and **pending** for changes, so edits take effect without restarting.
 Updates propagate immediately (the watcher reacts as soon as the file write completes), so you can approve/deny and tell the user to retry right away.
@@ -32,20 +32,18 @@ Updates propagate immediately (the watcher reacts as soon as the file write comp
 - File path: `~/.clawdbot/clawline/alert-instructions.md` (overridable via `clawline.alertInstructionsPath`).
 - Format: free-form Markdown/plain text; the provider reads it fresh on each alert and appends it to the alert body separated by a blank line.
 - Default text (auto-created if the file is missing):  
-  `After handling this alert, evaluate: would Flynn want to know what happened? If yes, report to him. Don't just process silently.`
-- Operators (or CLU) can edit the file at runtime—no restart needed. Empty/whitespace-only contents disable the overlay temporarily.
+  `After handling this alert, decide whether the operator should be notified. If yes, report it. Don't just process silently.`
+- Operators (or automation) can edit the file at runtime—no restart needed. Empty/whitespace-only contents disable the overlay temporarily.
 - Keep the text short enough to stay under `sessions.maxMessageBytes` (~64 KB). If it’s too long, the provider logs `alert_instructions_skipped` and sends the alert without the overlay.
 
 ## Inspect Pending & Allowlist
 
 ```bash
 # Pending devices (waiting for approval)
-ssh -i ~/.ssh/id_ed25519_tars -o IdentitiesOnly=yes tars \
-  'jq ".entries" ~/.clawdbot/clawline/pending.json 2>/dev/null'
+jq ".entries" ~/.clawdbot/clawline/pending.json 2>/dev/null
 
 # Approved devices
-ssh -i ~/.ssh/id_ed25519_tars -o IdentitiesOnly=yes tars \
-  'jq ".entries" ~/.clawdbot/clawline/allowlist.json 2>/dev/null'
+jq ".entries" ~/.clawdbot/clawline/allowlist.json 2>/dev/null
 ```
 
 Each pending entry looks like:
@@ -53,7 +51,7 @@ Each pending entry looks like:
 ```json
 {
   "deviceId": "E3F4…",
-  "claimedName": "Flynn’s iPhone",
+  "claimedName": "Example iPhone",
   "deviceInfo": { "platform": "iOS", "model": "iPhone 17 Pro" },
   "requestedAt": 1768510800000
 }
@@ -61,10 +59,10 @@ Each pending entry looks like:
 
 ## Approve a Device
 
-Move the entry from `pending.json` to `allowlist.json`. The helper below runs entirely on the gateway host (tars):
+Move the entry from `pending.json` to `allowlist.json`. The helper below runs locally:
 
 ```bash
-ssh -i ~/.ssh/id_ed25519_tars -o IdentitiesOnly=yes tars 'python3 - <<\"PY\"
+python3 - <<'PY'
 import json, pathlib, uuid, time
 root = pathlib.Path.home() / ".clawdbot" / "clawline"
 pending = json.loads((root / "pending.json").read_text())
@@ -90,7 +88,7 @@ allowlist["entries"].append({
 (root / "pending.json").write_text(json.dumps(pending, indent=2) + "\\n")
 allowlist_path.write_text(json.dumps(allowlist, indent=2) + "\\n")
 print("Approved", device_id)
-PY'
+PY
 ```
 
 As soon as the allowlist entry is written:
@@ -103,7 +101,7 @@ As soon as the allowlist entry is written:
 2. Optionally add the `deviceId` to `denylist.json` to kill future attempts:
 
 ```bash
-ssh -i ~/.ssh/id_ed25519_tars -o IdentitiesOnly=yes tars 'python3 - <<\"PY\"
+python3 - <<'PY'
 import json, pathlib, time
 root = pathlib.Path.home() / ".clawdbot" / "clawline"
 pending = json.loads((root / "pending.json").read_text())
@@ -116,7 +114,7 @@ deny = json.loads(deny_path.read_text()) if deny_path.exists() else []
 deny.append({"deviceId": device_id, "createdAt": int(time.time()*1000)})
 deny_path.write_text(json.dumps(deny, indent=2) + "\\n")
 print("Denied", device_id)
-PY'
+PY
 ```
 
 The provider notifies the waiting client (`pair_denied`) and closes the socket.
@@ -134,12 +132,12 @@ Clawline stores every uploaded asset in the media directory (defaults to `~/.cla
 2. Use the MIME type recorded earlier (usually provided alongside the attachment) to interpret it. If unknown, run `file --mime-type`.
 3. Clean up any temp copies after processing.
 
-**Fallback (remote or path unknown)**
+**Fallback (local HTTP)**
 
-If you’re not on the gateway host or the media path isn’t mounted, use the provider’s authenticated endpoint:
+If the media path isn’t accessible, use the provider’s authenticated endpoint:
 ```bash
 curl -f -H "Authorization: Bearer $TOKEN" \
-     "http://<gateway-host>:<port>/download/a_123" \
+     "http://127.0.0.1:<port>/download/a_123" \
      -o /tmp/a_123.bin
 ```
 
@@ -148,17 +146,17 @@ This mirrors what the mobile app and adapter do. Either approach yields the same
 ## Explaining the UX to Users
 
 - When the user says “Anyone trying to connect?”, read `pending.json` and summarize device names + wait duration.
-- Approvals happen conversationally: “Let Flynn’s iPhone in” ➜ run the approval snippet and confirm.
+- Approvals happen conversationally: “Let Example iPhone in” ➜ run the approval snippet and confirm.
 - Users can retry on the phone; if the socket closed (timeout/denied), the client reconnects and keeps polling automatically.
 - The first-ever device still bootstraps itself as admin (empty allowlist). After that, *all* approvals go through this pending flow.
 
-## Gateway Ops (tars)
+## Gateway Ops
 
 - **Restart** (only needed if the binary changed):  
-  `ssh … tars 'PATH="/opt/homebrew/bin:$PATH" tmux kill-session -t clawgate; cd ~/src/clawdbot && PATH="$HOME/Library/pnpm:/opt/homebrew/bin:$PATH" tmux new-session -d -s clawgate "pnpm clawdbot gateway"'`
+  Use your standard gateway service wrapper or process manager (not tmux) to restart. Use tmux only to run monitoring or restart commands. Verify health by checking the process/port.
 - **Health check**:  
-  `curl -sS http://tars.tail4105e8.ts.net:18792/version` → `{"protocolVersion":1}`  
-  `wscat -c ws://tars.tail4105e8.ts.net:18792/ws` → send junk, expect `invalid_message`.
+  `curl -sS http://127.0.0.1:18792/version` → `{"protocolVersion":1}`  
+  `wscat -c ws://127.0.0.1:18792/ws` → send junk, expect `invalid_message`.
 - **Rate limits** (override via `~/.clawdbot/clawdbot.json`):  
   `pairing.maxRequestsPerMinute`, `pairing.maxPendingRequests`, `sessions.maxMessagesPerSecond`, etc.
 
@@ -174,7 +172,7 @@ The JWT issued during pairing is bound to the `userId` recorded in `allowlist.js
 
 This invalidates the stored token because the device must obtain a fresh JWT during the new pairing flow.
 
-- **“Rate limited” during pairing** → inspect `clawdbot.json` overrides and ensure the watchdog on tars was updated (run `ssh … cat ~/.clawdbot/clawdbot.json | jq .clawline`).
+- **“Rate limited” during pairing** → inspect `clawdbot.json` overrides (run `cat ~/.clawdbot/clawdbot.json | jq .clawline`).
 - **Stuck pending entry** → remove it from `pending.json` (the socket will get `pair_denied`) and ask the user to retry.
 - **Tokens not delivered** → confirm the device appears in `allowlist.json` with `"tokenDelivered": false`; the next `pair_request` will resend automatically.
 - **Manual allowlist edits** (e.g., restoring a backup) now apply immediately—still restart if you edit schemas or other gateway config files.

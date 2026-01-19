@@ -3,7 +3,7 @@ import type { OAuthCredentials } from "@mariozechner/pi-ai";
 import lockfile from "proper-lockfile";
 import { resolveOAuthPath } from "../../config/paths.js";
 import { loadJsonFile, saveJsonFile } from "../../infra/json-file.js";
-import { AUTH_STORE_LOCK_OPTIONS, AUTH_STORE_VERSION, getAuthProfilesLogger } from "./constants.js";
+import { AUTH_STORE_LOCK_OPTIONS, AUTH_STORE_VERSION, log } from "./constants.js";
 import { syncExternalCliCredentials } from "./external-cli-sync.js";
 import { ensureAuthStoreFile, resolveAuthStorePath, resolveLegacyAuthStorePath } from "./paths.js";
 import type { AuthProfileCredential, AuthProfileStore, ProfileUsageStats } from "./types.js";
@@ -246,7 +246,7 @@ function loadAuthProfileStoreForAgent(
     if (mainStore && Object.keys(mainStore.profiles).length > 0) {
       // Clone main store to subagent directory for auth inheritance
       saveJsonFile(authPath, mainStore);
-      getAuthProfilesLogger().info("inherited auth-profiles from main agent", { agentDir });
+      log.info("inherited auth-profiles from main agent", { agentDir });
       return mainStore;
     }
   }
@@ -307,7 +307,7 @@ function loadAuthProfileStoreForAgent(
       fs.unlinkSync(legacyPath);
     } catch (err) {
       if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
-        getAuthProfilesLogger().warn("failed to delete legacy auth.json after migration", {
+        log.warn("failed to delete legacy auth.json after migration", {
           err,
           legacyPath,
         });

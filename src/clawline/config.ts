@@ -53,7 +53,7 @@ function resolvePathValue(value: string | undefined, fallback: string): string {
 }
 
 const DEFAULTS: ResolvedClawlineConfig = {
-  enabled: true,
+  enabled: false,
   port: 18800,
   statePath: defaultStatePath,
   alertInstructionsPath: defaultAlertInstructionsPath,
@@ -125,6 +125,6 @@ export function resolveClawlineConfig(
     ? { ...input.adapter }
     : {};
   merged.adapterOverrides = adapterOverrides;
-  merged.enabled = input.enabled ?? true;
+  merged.enabled = input.enabled === true;
   return merged;
 }

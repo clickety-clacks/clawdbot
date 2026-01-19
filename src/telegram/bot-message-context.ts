@@ -3,7 +3,7 @@ import type { Bot } from "grammy";
 import { resolveAckReaction } from "../agents/identity.js";
 import { hasControlCommand } from "../auto-reply/command-detection.js";
 import { normalizeCommandBody } from "../auto-reply/commands-registry.js";
-import { formatInboundEnvelope } from "../auto-reply/envelope.js";
+import { formatInboundEnvelope, resolveEnvelopeFormatOptions } from "../auto-reply/envelope.js";
 import {
   buildPendingHistoryContextFromMap,
   recordPendingHistoryEntry,
@@ -13,6 +13,7 @@ import { finalizeInboundContext } from "../auto-reply/reply/inbound-context.js";
 import { buildMentionRegexes, matchesMentionPatterns } from "../auto-reply/reply/mentions.js";
 import { formatLocationText, toLocationContext } from "../channels/location.js";
 import {
+  readSessionUpdatedAt,
   recordSessionMetaFromInbound,
   resolveStorePath,
   updateLastRoute,
@@ -41,7 +42,7 @@ import {
 import {
   firstDefined,
   isSenderAllowed,
-  normalizeAllowFrom,
+  normalizeAllowFromWithStore,
   resolveSenderAllowMatch,
 } from "./bot-access.js";
 import { upsertTelegramPairingRequest } from "./pairing-store.js";
@@ -137,12 +138,12 @@ export const buildTelegramMessageContext = async ({
     },
   });
   const mentionRegexes = buildMentionRegexes(cfg, route.agentId);
-  const effectiveDmAllow = normalizeAllowFrom([...(allowFrom ?? []), ...storeAllowFrom]);
+  const effectiveDmAllow = normalizeAllowFromWithStore({ allowFrom, storeAllowFrom });
   const groupAllowOverride = firstDefined(topicConfig?.allowFrom, groupConfig?.allowFrom);
-  const effectiveGroupAllow = normalizeAllowFrom([
-    ...(groupAllowOverride ?? groupAllowFrom ?? []),
-    ...storeAllowFrom,
-  ]);
+  const effectiveGroupAllow = normalizeAllowFromWithStore({
+    allowFrom: groupAllowOverride ?? groupAllowFrom,
+    storeAllowFrom,
+  });
   const hasGroupAllowOverride = typeof groupAllowOverride !== "undefined";
 
   if (isGroup && groupConfig?.enabled === false) {
@@ -417,6 +418,14 @@ export const buildTelegramMessageContext = async ({
   const conversationLabel = isGroup
     ? (groupLabel ?? `group:${chatId}`)
     : buildSenderLabel(msg, senderId || chatId);
+  const storePath = resolveStorePath(cfg.session?.store, {
+    agentId: route.agentId,
+  });
+  const envelopeOptions = resolveEnvelopeFormatOptions(cfg);
+  const previousTimestamp = readSessionUpdatedAt({
+    storePath,
+    sessionKey: route.sessionKey,
+  });
   const body = formatInboundEnvelope({
     channel: "Telegram",
     from: conversationLabel,
@@ -428,6 +437,8 @@ export const buildTelegramMessageContext = async ({
       username: senderUsername || undefined,
       id: senderId || undefined,
     },
+    previousTimestamp,
+    envelope: envelopeOptions,
   });
   let combinedBody = body;
   if (isGroup && historyKey && historyLimit > 0) {
@@ -444,6 +455,7 @@ export const buildTelegramMessageContext = async ({
           body: `${entry.body} [id:${entry.messageId ?? "unknown"} chat:${chatId}]`,
           chatType: "group",
           senderLabel: entry.sender,
+          envelope: envelopeOptions,
         }),
     });
   }
@@ -504,9 +516,6 @@ export const buildTelegramMessageContext = async ({
     OriginatingTo: `telegram:${chatId}`,
   });
 
-  const storePath = resolveStorePath(cfg.session?.store, {
-    agentId: route.agentId,
-  });
   void recordSessionMetaFromInbound({
     storePath,
     sessionKey: ctxPayload.SessionKey ?? route.sessionKey,

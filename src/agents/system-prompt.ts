@@ -20,8 +20,12 @@ function buildSkillsSection(params: {
   const trimmed = params.skillsPrompt?.trim();
   if (!trimmed || params.isMinimal) return [];
   return [
-    "## Skills",
-    `Skills provide task-specific instructions. Use \`${params.readToolName}\` to load the SKILL.md at the location listed for that skill.`,
+    "## Skills (mandatory)",
+    "Before replying: scan <available_skills> <description> entries.",
+    `- If exactly one skill clearly applies: read its SKILL.md at <location> with \`${params.readToolName}\`, then follow it.`,
+    "- If multiple could apply: choose the most specific one, then read/follow it.",
+    "- If none clearly apply: do not read any SKILL.md.",
+    "Constraints: never read more than one skill up front; only read after selecting.",
     trimmed,
     "",
   ];
@@ -109,11 +113,7 @@ function buildMessagingSection(params: {
   ];
 }
 
-function buildDocsSection(params: {
-  docsPath?: string;
-  isMinimal: boolean;
-  readToolName: string;
-}) {
+function buildDocsSection(params: { docsPath?: string; isMinimal: boolean; readToolName: string }) {
   const docsPath = params.docsPath?.trim();
   if (!docsPath || params.isMinimal) return [];
   return [
@@ -358,6 +358,7 @@ export function buildAgentSystemPrompt(params: {
     "Default: do not narrate routine, low-risk tool calls (just call the tool).",
     "Narrate only when it helps: multi-step work, complex/challenging problems, sensitive actions (e.g., deletions), or when the user explicitly asks.",
     "Keep narration brief and value-dense; avoid repeating obvious steps.",
+    "Use plain human language for narration unless in a technical context.",
     "",
     "## Clawdbot CLI Quick Reference",
     "Clawdbot is controlled via subcommands. Do not invent commands.",

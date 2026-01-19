@@ -13,8 +13,9 @@ configuration and adapters as the rest of your deployment.
 
 ## Enabling
 
-The provider is enabled by default. Add a `clawline` block to configure bind
-address, port, or media paths:
+The provider is disabled by default. Enable it via the onboarding wizard or add
+an explicit `clawline.enabled: true` block to configure bind address, port, or
+media paths:
 
 ```json5
 {
@@ -38,7 +39,8 @@ The default `allowedOrigins: ["null"]` matches how the mobile apps connect when 
 `Origin: null` (file:// contexts). When you expose the provider beyond loopback, replace this list with the exact
 https origins (and set `allowInsecurePublic` accordingly).
 
-Set `clawline.enabled` to `false` to disable the service entirely.
+Set `clawline.enabled` to `false` (or omit the block) to keep the service
+disabled unless a user explicitly enables it.
 
 ## Adapter overrides
 

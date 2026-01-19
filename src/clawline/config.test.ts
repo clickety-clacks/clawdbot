@@ -10,7 +10,7 @@ describe("resolveClawlineConfig", () => {
 
   it("applies defaults when config is missing", () => {
     const cfg = resolveClawlineConfig({} as ClawdbotConfig);
-    expect(cfg.enabled).toBe(true);
+    expect(cfg.enabled).toBe(false);
     expect(cfg.port).toBe(18800);
     expect(cfg.statePath).toBe(path.join(home, ".clawdbot", "clawline"));
     expect(cfg.media.storagePath).toBe(
@@ -101,5 +101,13 @@ describe("resolveClawlineConfig", () => {
 
     expect(cfg.alertTarget.channel).toBe("clawline");
     expect(cfg.alertTarget.to).toBe("river");
+  });
+
+  it("allows opt-in enablement", () => {
+    const cfg = resolveClawlineConfig({
+      clawline: { enabled: true },
+    } as ClawdbotConfig);
+
+    expect(cfg.enabled).toBe(true);
   });
 });

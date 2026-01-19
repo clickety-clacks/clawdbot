@@ -956,8 +956,7 @@
           "providers/synthetic",
           "providers/opencode",
           "providers/glm",
-          "providers/zai",
-          "providers/clawline"
+          "providers/zai"
         ]
       },
       {

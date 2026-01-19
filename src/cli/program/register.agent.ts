@@ -8,6 +8,7 @@ import { formatDocsLink } from "../../terminal/links.js";
 import { theme } from "../../terminal/theme.js";
 import { hasExplicitOptions } from "../command-options.js";
 import { createDefaultDeps } from "../deps.js";
+import { runCommandWithRuntime } from "../cli-utils.js";
 import { collectOption } from "./helpers.js";
 
 export function registerAgentCommands(program: Command, args: { agentChannelOptions: string }) {
@@ -17,22 +18,22 @@ export function registerAgentCommands(program: Command, args: { agentChannelOpti
     .requiredOption("-m, --message <text>", "Message body for the agent")
     .option("-t, --to <number>", "Recipient number in E.164 used to derive the session key")
     .option("--session-id <id>", "Use an explicit session id")
+    .option("--agent <id>", "Agent id (overrides routing bindings)")
     .option("--thinking <level>", "Thinking level: off | minimal | low | medium | high")
     .option("--verbose <on|off>", "Persist agent verbose level for the session")
     .option(
       "--channel <channel>",
       `Delivery channel: ${args.agentChannelOptions} (default: ${DEFAULT_CHAT_CHANNEL})`,
     )
+    .option("--reply-to <target>", "Delivery target override (separate from session routing)")
+    .option("--reply-channel <channel>", "Delivery channel override (separate from routing)")
+    .option("--reply-account <id>", "Delivery account id override")
     .option(
       "--local",
       "Run the embedded agent locally (requires model provider API keys in your shell)",
       false,
     )
-    .option(
-      "--deliver",
-      "Send the agent's reply back to the selected channel (requires --to)",
-      false,
-    )
+    .option("--deliver", "Send the agent's reply back to the selected channel", false)
     .option("--json", "Output result as JSON", false)
     .option(
       "--timeout <seconds>",
@@ -44,9 +45,11 @@ export function registerAgentCommands(program: Command, args: { agentChannelOpti
         `
 Examples:
   clawdbot agent --to +15555550123 --message "status update"
+  clawdbot agent --agent ops --message "Summarize logs"
   clawdbot agent --session-id 1234 --message "Summarize inbox" --thinking medium
   clawdbot agent --to +15555550123 --message "Trace logs" --verbose on --json
   clawdbot agent --to +15555550123 --message "Summon reply" --deliver
+  clawdbot agent --agent ops --message "Generate report" --deliver --reply-channel slack --reply-to "#reports"
 
 ${theme.muted("Docs:")} ${formatDocsLink("/cli/agent", "docs.clawd.bot/cli/agent")}`,
     )
@@ -55,12 +58,9 @@ ${theme.muted("Docs:")} ${formatDocsLink("/cli/agent", "docs.clawd.bot/cli/agent
       setVerbose(verboseLevel === "on");
       // Build default deps (keeps parity with other commands; future-proofing).
       const deps = createDefaultDeps();
-      try {
+      await runCommandWithRuntime(defaultRuntime, async () => {
         await agentCliCommand(opts, defaultRuntime, deps);
-      } catch (err) {
-        defaultRuntime.error(String(err));
-        defaultRuntime.exit(1);
-      }
+      });
     });
 
   const agents = program
@@ -78,15 +78,12 @@ ${theme.muted("Docs:")} ${formatDocsLink("/cli/agent", "docs.clawd.bot/cli/agent
     .option("--json", "Output JSON instead of text", false)
     .option("--bindings", "Include routing bindings", false)
     .action(async (opts) => {
-      try {
+      await runCommandWithRuntime(defaultRuntime, async () => {
         await agentsListCommand(
           { json: Boolean(opts.json), bindings: Boolean(opts.bindings) },
           defaultRuntime,
         );
-      } catch (err) {
-        defaultRuntime.error(String(err));
-        defaultRuntime.exit(1);
-      }
+      });
     });
 
   agents
@@ -99,7 +96,7 @@ ${theme.muted("Docs:")} ${formatDocsLink("/cli/agent", "docs.clawd.bot/cli/agent
     .option("--non-interactive", "Disable prompts; requires --workspace", false)
     .option("--json", "Output JSON summary", false)
     .action(async (name, opts, command) => {
-      try {
+      await runCommandWithRuntime(defaultRuntime, async () => {
         const hasFlags = hasExplicitOptions(command, [
           "workspace",
           "model",
@@ -120,10 +117,7 @@ ${theme.muted("Docs:")} ${formatDocsLink("/cli/agent", "docs.clawd.bot/cli/agent
           defaultRuntime,
           { hasFlags },
         );
-      } catch (err) {
-        defaultRuntime.error(String(err));
-        defaultRuntime.exit(1);
-      }
+      });
     });
 
   agents
@@ -132,7 +126,7 @@ ${theme.muted("Docs:")} ${formatDocsLink("/cli/agent", "docs.clawd.bot/cli/agent
     .option("--force", "Skip confirmation", false)
     .option("--json", "Output JSON summary", false)
     .action(async (id, opts) => {
-      try {
+      await runCommandWithRuntime(defaultRuntime, async () => {
         await agentsDeleteCommand(
           {
             id: String(id),
@@ -141,18 +135,12 @@ ${theme.muted("Docs:")} ${formatDocsLink("/cli/agent", "docs.clawd.bot/cli/agent
           },
           defaultRuntime,
         );
-      } catch (err) {
-        defaultRuntime.error(String(err));
-        defaultRuntime.exit(1);
-      }
+      });
     });
 
   agents.action(async () => {
-    try {
+    await runCommandWithRuntime(defaultRuntime, async () => {
       await agentsListCommand({}, defaultRuntime);
-    } catch (err) {
-      defaultRuntime.error(String(err));
-      defaultRuntime.exit(1);
-    }
+    });
   });
 }

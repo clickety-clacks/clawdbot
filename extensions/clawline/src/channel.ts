@@ -1,6 +1,7 @@
 import type { ChannelPlugin, ClawdbotConfig } from "clawdbot/plugin-sdk";
-import { DEFAULT_ACCOUNT_ID, getChatChannelMeta } from "clawdbot/plugin-sdk";
+import { DEFAULT_ACCOUNT_ID } from "clawdbot/plugin-sdk";
 
+import { clawlineOnboardingAdapter } from "./onboarding.js";
 import { clawlineOutbound } from "./outbound.js";
 
 type ResolvedClawlineAccount = {
@@ -9,18 +10,26 @@ type ResolvedClawlineAccount = {
   configured: boolean;
 };
 
-const meta = getChatChannelMeta("clawline");
+const meta = {
+  id: "clawline",
+  label: "Clawline",
+  selectionLabel: "Clawline (local devices)",
+  docsPath: "/providers/clawline",
+  docsLabel: "clawline",
+  blurb: "first-party local gateway; enable via config/onboarding.",
+  order: 10,
+} as const;
 
 function resolveClawlineAccount(params: {
   cfg: ClawdbotConfig;
   accountId?: string | null;
 }): ResolvedClawlineAccount {
   const resolvedAccountId = params.accountId ?? DEFAULT_ACCOUNT_ID;
-  const enabled = params.cfg.clawline?.enabled !== false;
+  const enabled = params.cfg.clawline?.enabled === true;
   return {
     accountId: resolvedAccountId,
     enabled,
-    configured: true,
+    configured: enabled,
   };
 }
 
@@ -30,6 +39,7 @@ export const clawlinePlugin: ChannelPlugin<ResolvedClawlineAccount> = {
     ...meta,
     showConfigured: false,
   },
+  onboarding: clawlineOnboardingAdapter,
   capabilities: {
     chatTypes: ["direct"],
     media: false,
@@ -39,7 +49,8 @@ export const clawlinePlugin: ChannelPlugin<ResolvedClawlineAccount> = {
     listAccountIds: () => [DEFAULT_ACCOUNT_ID],
     resolveAccount: (cfg, accountId) => resolveClawlineAccount({ cfg, accountId }),
     defaultAccountId: () => DEFAULT_ACCOUNT_ID,
-    isConfigured: () => true,
+    isConfigured: (account, cfg) =>
+      Boolean(cfg.clawline?.enabled === true && account.enabled === true),
     describeAccount: (account) => ({
       accountId: account.accountId,
       enabled: account.enabled,

@@ -54,11 +54,7 @@ const ClawlineConfigSchema = z
         storagePath: z.string().optional(),
         maxInlineBytes: z.number().int().nonnegative().optional(),
         maxUploadBytes: z.number().int().nonnegative().optional(),
-        unreferencedUploadTtlSeconds: z
-          .number()
-          .int()
-          .nonnegative()
-          .optional(),
+        unreferencedUploadTtlSeconds: z.number().int().nonnegative().optional(),
       })
       .optional(),
     sessions: z

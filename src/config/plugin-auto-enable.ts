@@ -45,10 +45,7 @@ function recordHasKeys(value: unknown): boolean {
   return isRecord(value) && Object.keys(value).length > 0;
 }
 
-function accountsHaveKeys(
-  value: unknown,
-  keys: string[],
-): boolean {
+function accountsHaveKeys(value: unknown, keys: string[]): boolean {
   if (!isRecord(value)) return false;
   for (const account of Object.values(value)) {
     if (!isRecord(account)) continue;
@@ -59,7 +56,10 @@ function accountsHaveKeys(
   return false;
 }
 
-function resolveChannelConfig(cfg: ClawdbotConfig, channelId: string): Record<string, unknown> | null {
+function resolveChannelConfig(
+  cfg: ClawdbotConfig,
+  channelId: string,
+): Record<string, unknown> | null {
   const channels = cfg.channels as Record<string, unknown> | undefined;
   const entry = channels?.[channelId];
   return isRecord(entry) ? entry : null;
@@ -132,13 +132,6 @@ function isWhatsAppConfigured(cfg: ClawdbotConfig): boolean {
   const entry = resolveChannelConfig(cfg, "whatsapp");
   if (!entry) return false;
   return recordHasKeys(entry);
-}
-
-function isClawlineConfigured(cfg: ClawdbotConfig): boolean {
-  const entry = cfg.clawline;
-  if (!isRecord(entry)) return false;
-  if (entry.enabled === false) return false;
-  return true;
 }
 
 function isGenericChannelConfigured(cfg: ClawdbotConfig, channelId: string): boolean {
@@ -241,7 +234,10 @@ function isProviderConfigured(cfg: ClawdbotConfig, providerId: string): boolean 
   return false;
 }
 
-function resolveConfiguredPlugins(cfg: ClawdbotConfig, env: NodeJS.ProcessEnv): PluginEnableChange[] {
+function resolveConfiguredPlugins(
+  cfg: ClawdbotConfig,
+  env: NodeJS.ProcessEnv,
+): PluginEnableChange[] {
   const changes: PluginEnableChange[] = [];
   for (const channelId of CHANNEL_PLUGIN_IDS) {
     if (isChannelConfigured(cfg, channelId, env)) {
@@ -250,12 +246,6 @@ function resolveConfiguredPlugins(cfg: ClawdbotConfig, env: NodeJS.ProcessEnv): 
         reason: `${channelId} configured`,
       });
     }
-  }
-  if (isClawlineConfigured(cfg)) {
-    changes.push({
-      pluginId: "clawline",
-      reason: "clawline configured",
-    });
   }
   for (const mapping of PROVIDER_PLUGIN_IDS) {
     if (isProviderConfigured(cfg, mapping.providerId)) {

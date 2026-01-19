@@ -14,6 +14,7 @@ final class MenuSessionsInjector: NSObject, NSMenuDelegate {
     private weak var statusItem: NSStatusItem?
     private var loadTask: Task<Void, Never>?
     private var nodesLoadTask: Task<Void, Never>?
+    private var previewTasks: [Task<Void, Never>] = []
     private var isMenuOpen = false
     private var lastKnownMenuWidth: CGFloat?
     private var menuOpenWidth: CGFloat?
@@ -26,6 +27,10 @@ final class MenuSessionsInjector: NSObject, NSMenuDelegate {
     private var cachedUsageErrorText: String?
     private var usageCacheUpdatedAt: Date?
     private let usageRefreshIntervalSeconds: TimeInterval = 30
+    private var cachedCostSummary: GatewayCostUsageSummary?
+    private var cachedCostErrorText: String?
+    private var costCacheUpdatedAt: Date?
+    private let costRefreshIntervalSeconds: TimeInterval = 45
     private let nodesStore = NodesStore.shared
     #if DEBUG
     private var testControlChannelConnected: Bool?
@@ -63,6 +68,7 @@ final class MenuSessionsInjector: NSObject, NSMenuDelegate {
             guard let self else { return }
             await self.refreshCache(force: forceRefresh)
             await self.refreshUsageCache(force: forceRefresh)
+            await self.refreshCostUsageCache(force: forceRefresh)
             await MainActor.run {
                 guard self.isMenuOpen else { return }
                 self.inject(into: menu)
@@ -87,6 +93,7 @@ final class MenuSessionsInjector: NSObject, NSMenuDelegate {
         self.menuOpenWidth = nil
         self.loadTask?.cancel()
         self.nodesLoadTask?.cancel()
+        self.cancelPreviewTasks()
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
@@ -107,6 +114,7 @@ extension MenuSessionsInjector {
     private var mainSessionKey: String { WorkActivityStore.shared.mainSessionKey }
 
     private func inject(into menu: NSMenu) {
+        self.cancelPreviewTasks()
         // Remove any previous injected items.
         for item in menu.items where item.tag == self.tag {
             menu.removeItem(item)
@@ -197,6 +205,7 @@ extension MenuSessionsInjector {
         }
 
         cursor = self.insertUsageSection(into: menu, at: cursor, width: width)
+        cursor = self.insertCostUsageSection(into: menu, at: cursor, width: width)
 
         DispatchQueue.main.async { [weak self, weak headerView] in
             guard let self, let headerView else { return }
@@ -341,6 +350,28 @@ extension MenuSessionsInjector {
         return cursor
     }
 
+    private func insertCostUsageSection(into menu: NSMenu, at cursor: Int, width: CGFloat) -> Int {
+        guard self.isControlChannelConnected else { return cursor }
+        guard let submenu = self.buildCostUsageSubmenu(width: width) else { return cursor }
+        var cursor = cursor
+
+        if cursor > 0, !menu.items[cursor - 1].isSeparatorItem {
+            let separator = NSMenuItem.separator()
+            separator.tag = self.tag
+            menu.insertItem(separator, at: cursor)
+            cursor += 1
+        }
+
+        let item = NSMenuItem(title: "Usage cost (30 days)", action: nil, keyEquivalent: "")
+        item.tag = self.tag
+        item.isEnabled = true
+        item.image = NSImage(systemSymbolName: "chart.bar.xaxis", accessibilityDescription: nil)
+        item.submenu = submenu
+        menu.insertItem(item, at: cursor)
+        cursor += 1
+        return cursor
+    }
+
     private var selectedUsageProviderId: String? {
         guard let model = self.cachedSnapshot?.defaults.model.nonEmpty else { return nil }
         let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -388,6 +419,36 @@ extension MenuSessionsInjector {
         case .disconnected:
             "Gateway disconnected"
         }
+    }
+
+    private func buildCostUsageSubmenu(width: CGFloat) -> NSMenu? {
+        if let error = self.cachedCostErrorText, !error.isEmpty, self.cachedCostSummary == nil {
+            let menu = NSMenu()
+            let item = NSMenuItem(title: error, action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            menu.addItem(item)
+            return menu
+        }
+
+        guard let summary = self.cachedCostSummary else { return nil }
+        guard !summary.daily.isEmpty else { return nil }
+
+        let menu = NSMenu()
+        menu.delegate = self
+
+        let chartView = CostUsageHistoryMenuView(summary: summary, width: width)
+        let hosting = NSHostingView(rootView: AnyView(chartView))
+        let controller = NSHostingController(rootView: AnyView(chartView))
+        let size = controller.sizeThatFits(in: CGSize(width: width, height: .greatestFiniteMagnitude))
+        hosting.frame = NSRect(origin: .zero, size: NSSize(width: width, height: size.height))
+
+        let chartItem = NSMenuItem()
+        chartItem.view = hosting
+        chartItem.isEnabled = false
+        chartItem.representedObject = "costUsageChart"
+        menu.addItem(chartItem)
+
+        return menu
     }
 
     private func gatewayEntry() -> NodeInfo? {
@@ -454,13 +515,44 @@ extension MenuSessionsInjector {
         item.tag = self.tag
         item.isEnabled = false
         let view = AnyView(SessionMenuPreviewView(
-            sessionKey: sessionKey,
             width: width,
-            maxItems: 10,
             maxLines: maxLines,
-            title: title))
-        item.view = self.makeHostedView(rootView: view, width: width, highlighted: false)
+            title: title,
+            items: [],
+            status: .loading))
+        let hosting = NSHostingView(rootView: view)
+        hosting.frame.size.width = max(1, width)
+        let size = hosting.fittingSize
+        hosting.frame = NSRect(origin: .zero, size: NSSize(width: width, height: size.height))
+        item.view = hosting
+
+        let task = Task { [weak hosting] in
+            let snapshot = await SessionMenuPreviewLoader.load(sessionKey: sessionKey, maxItems: 10)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard let hosting else { return }
+                let nextView = AnyView(SessionMenuPreviewView(
+                    width: width,
+                    maxLines: maxLines,
+                    title: title,
+                    items: snapshot.items,
+                    status: snapshot.status))
+                hosting.rootView = nextView
+                hosting.invalidateIntrinsicContentSize()
+                hosting.frame.size.width = max(1, width)
+                let size = hosting.fittingSize
+                hosting.frame.size.height = size.height
+            }
+        }
+        self.previewTasks.append(task)
         return item
+    }
+
+    private func cancelPreviewTasks() {
+        for task in self.previewTasks {
+            task.cancel()
+        }
+        self.previewTasks.removeAll()
     }
 
     private func makeMessageItem(text: String, symbolName: String, width: CGFloat, maxLines: Int? = 2) -> NSMenuItem {
@@ -545,6 +637,31 @@ extension MenuSessionsInjector {
             self.cachedUsageErrorText = nil
         }
         self.usageCacheUpdatedAt = Date()
+    }
+
+    private func refreshCostUsageCache(force: Bool) async {
+        if !force,
+           let updated = self.costCacheUpdatedAt,
+           Date().timeIntervalSince(updated) < self.costRefreshIntervalSeconds
+        {
+            return
+        }
+
+        guard self.isControlChannelConnected else {
+            self.cachedCostSummary = nil
+            self.cachedCostErrorText = nil
+            self.costCacheUpdatedAt = Date()
+            return
+        }
+
+        do {
+            self.cachedCostSummary = try await CostUsageLoader.loadSummary()
+            self.cachedCostErrorText = nil
+        } catch {
+            self.cachedCostSummary = nil
+            self.cachedCostErrorText = self.compactUsageError(error)
+        }
+        self.costCacheUpdatedAt = Date()
     }
 
     private func compactUsageError(_ error: Error) -> String {

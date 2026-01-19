@@ -4,23 +4,20 @@ import path from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const execSyncMock = vi.hoisted(() => vi.fn());
-
-vi.mock("node:child_process", () => ({
-  execSync: execSyncMock,
-}));
+const execSyncMock = vi.fn();
 
 describe("cli credentials", () => {
   beforeEach(() => {
-    vi.useFakeTimers();
     vi.resetModules();
+    vi.useFakeTimers();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     vi.useRealTimers();
-    vi.resetModules();
     execSyncMock.mockReset();
     delete process.env.CODEX_HOME;
+    const { resetCliCredentialCachesForTest } = await import("./cli-credentials.js");
+    resetCliCredentialCachesForTest();
   });
 
   it("updates the Claude Code keychain item in place", async () => {
@@ -45,11 +42,14 @@ describe("cli credentials", () => {
 
     const { writeClaudeCliKeychainCredentials } = await import("./cli-credentials.js");
 
-    const ok = writeClaudeCliKeychainCredentials({
-      access: "new-access",
-      refresh: "new-refresh",
-      expires: Date.now() + 60_000,
-    });
+    const ok = writeClaudeCliKeychainCredentials(
+      {
+        access: "new-access",
+        refresh: "new-refresh",
+        expires: Date.now() + 60_000,
+      },
+      { execSync: execSyncMock },
+    );
 
     expect(ok).toBe(true);
     expect(commands.some((cmd) => cmd.includes("delete-generic-password"))).toBe(false);
@@ -131,11 +131,13 @@ describe("cli credentials", () => {
       allowKeychainPrompt: true,
       ttlMs: 15 * 60 * 1000,
       platform: "darwin",
+      execSync: execSyncMock,
     });
     const second = readClaudeCliCredentialsCached({
       allowKeychainPrompt: false,
       ttlMs: 15 * 60 * 1000,
       platform: "darwin",
+      execSync: execSyncMock,
     });
 
     expect(first).toBeTruthy();
@@ -162,6 +164,7 @@ describe("cli credentials", () => {
       allowKeychainPrompt: true,
       ttlMs: 15 * 60 * 1000,
       platform: "darwin",
+      execSync: execSyncMock,
     });
 
     vi.advanceTimersByTime(15 * 60 * 1000 + 1);
@@ -170,6 +173,7 @@ describe("cli credentials", () => {
       allowKeychainPrompt: true,
       ttlMs: 15 * 60 * 1000,
       platform: "darwin",
+      execSync: execSyncMock,
     });
 
     expect(first).toBeTruthy();
@@ -197,7 +201,7 @@ describe("cli credentials", () => {
     });
 
     const { readCodexCliCredentials } = await import("./cli-credentials.js");
-    const creds = readCodexCliCredentials({ platform: "darwin" });
+    const creds = readCodexCliCredentials({ platform: "darwin", execSync: execSyncMock });
 
     expect(creds).toMatchObject({
       access: "keychain-access",
@@ -227,7 +231,7 @@ describe("cli credentials", () => {
     );
 
     const { readCodexCliCredentials } = await import("./cli-credentials.js");
-    const creds = readCodexCliCredentials();
+    const creds = readCodexCliCredentials({ execSync: execSyncMock });
 
     expect(creds).toMatchObject({
       access: "file-access",

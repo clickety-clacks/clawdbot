@@ -12,6 +12,23 @@ export type ChannelPluginCatalogEntry = {
 
 const CATALOG: ChannelPluginCatalogEntry[] = [
   {
+    id: "clawline",
+    meta: {
+      id: "clawline",
+      label: "Clawline",
+      selectionLabel: "Clawline (local devices)",
+      docsPath: "/providers/clawline",
+      docsLabel: "clawline",
+      blurb: "first-party local gateway; enable via config/onboarding.",
+      order: 10,
+    },
+    install: {
+      npmSpec: "@clawdbot/clawline",
+      localPath: "extensions/clawline",
+      defaultChoice: "local",
+    },
+  },
+  {
     id: "msteams",
     meta: {
       id: "msteams",

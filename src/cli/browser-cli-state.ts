@@ -14,14 +14,21 @@ import {
 import { browserAct } from "../browser/client-actions-core.js";
 import { danger } from "../globals.js";
 import { defaultRuntime } from "../runtime.js";
+import { parseBooleanValue } from "../utils/boolean.js";
 import type { BrowserParentOpts } from "./browser-cli-shared.js";
 import { registerBrowserCookiesAndStorageCommands } from "./browser-cli-state.cookies-storage.js";
+import { runCommandWithRuntime } from "./cli-utils.js";
 
 function parseOnOff(raw: string): boolean | null {
-  const v = raw.trim().toLowerCase();
-  if (v === "on" || v === "true" || v === "1") return true;
-  if (v === "off" || v === "false" || v === "0") return false;
-  return null;
+  const parsed = parseBooleanValue(raw);
+  return parsed === undefined ? null : parsed;
+}
+
+function runBrowserCommand(action: () => Promise<void>) {
+  return runCommandWithRuntime(defaultRuntime, action, (err) => {
+    defaultRuntime.error(danger(String(err)));
+    defaultRuntime.exit(1);
+  });
 }
 
 export function registerBrowserStateCommands(
@@ -47,7 +54,7 @@ export function registerBrowserStateCommands(
         defaultRuntime.exit(1);
         return;
       }
-      try {
+      await runBrowserCommand(async () => {
         const result = await browserAct(
           baseUrl,
           {
@@ -63,10 +70,7 @@ export function registerBrowserStateCommands(
           return;
         }
         defaultRuntime.log(`viewport set: ${width}x${height}`);
-      } catch (err) {
-        defaultRuntime.error(danger(String(err)));
-        defaultRuntime.exit(1);
-      }
+      });
     });
 
   set
@@ -84,7 +88,7 @@ export function registerBrowserStateCommands(
         defaultRuntime.exit(1);
         return;
       }
-      try {
+      await runBrowserCommand(async () => {
         const result = await browserSetOffline(baseUrl, {
           offline,
           targetId: opts.targetId?.trim() || undefined,
@@ -95,10 +99,7 @@ export function registerBrowserStateCommands(
           return;
         }
         defaultRuntime.log(`offline: ${offline}`);
-      } catch (err) {
-        defaultRuntime.error(danger(String(err)));
-        defaultRuntime.exit(1);
-      }
+      });
     });
 
   set
@@ -110,7 +111,7 @@ export function registerBrowserStateCommands(
       const parent = parentOpts(cmd);
       const baseUrl = resolveBrowserControlUrl(parent?.url);
       const profile = parent?.browserProfile;
-      try {
+      await runBrowserCommand(async () => {
         const parsed = JSON.parse(String(opts.json)) as unknown;
         if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
           throw new Error("headers json must be an object");
@@ -129,10 +130,7 @@ export function registerBrowserStateCommands(
           return;
         }
         defaultRuntime.log("headers set");
-      } catch (err) {
-        defaultRuntime.error(danger(String(err)));
-        defaultRuntime.exit(1);
-      }
+      });
     });
 
   set
@@ -146,7 +144,7 @@ export function registerBrowserStateCommands(
       const parent = parentOpts(cmd);
       const baseUrl = resolveBrowserControlUrl(parent?.url);
       const profile = parent?.browserProfile;
-      try {
+      await runBrowserCommand(async () => {
         const result = await browserSetHttpCredentials(baseUrl, {
           username: username?.trim() || undefined,
           password,
@@ -159,10 +157,7 @@ export function registerBrowserStateCommands(
           return;
         }
         defaultRuntime.log(opts.clear ? "credentials cleared" : "credentials set");
-      } catch (err) {
-        defaultRuntime.error(danger(String(err)));
-        defaultRuntime.exit(1);
-      }
+      });
     });
 
   set
@@ -178,7 +173,7 @@ export function registerBrowserStateCommands(
       const parent = parentOpts(cmd);
       const baseUrl = resolveBrowserControlUrl(parent?.url);
       const profile = parent?.browserProfile;
-      try {
+      await runBrowserCommand(async () => {
         const result = await browserSetGeolocation(baseUrl, {
           latitude: Number.isFinite(latitude) ? latitude : undefined,
           longitude: Number.isFinite(longitude) ? longitude : undefined,
@@ -193,10 +188,7 @@ export function registerBrowserStateCommands(
           return;
         }
         defaultRuntime.log(opts.clear ? "geolocation cleared" : "geolocation set");
-      } catch (err) {
-        defaultRuntime.error(danger(String(err)));
-        defaultRuntime.exit(1);
-      }
+      });
     });
 
   set
@@ -216,7 +208,7 @@ export function registerBrowserStateCommands(
         defaultRuntime.exit(1);
         return;
       }
-      try {
+      await runBrowserCommand(async () => {
         const result = await browserSetMedia(baseUrl, {
           colorScheme,
           targetId: opts.targetId?.trim() || undefined,
@@ -227,10 +219,7 @@ export function registerBrowserStateCommands(
           return;
         }
         defaultRuntime.log(`media colorScheme: ${colorScheme}`);
-      } catch (err) {
-        defaultRuntime.error(danger(String(err)));
-        defaultRuntime.exit(1);
-      }
+      });
     });
 
   set
@@ -242,7 +231,7 @@ export function registerBrowserStateCommands(
       const parent = parentOpts(cmd);
       const baseUrl = resolveBrowserControlUrl(parent?.url);
       const profile = parent?.browserProfile;
-      try {
+      await runBrowserCommand(async () => {
         const result = await browserSetTimezone(baseUrl, {
           timezoneId,
           targetId: opts.targetId?.trim() || undefined,
@@ -253,10 +242,7 @@ export function registerBrowserStateCommands(
           return;
         }
         defaultRuntime.log(`timezone: ${timezoneId}`);
-      } catch (err) {
-        defaultRuntime.error(danger(String(err)));
-        defaultRuntime.exit(1);
-      }
+      });
     });
 
   set
@@ -268,7 +254,7 @@ export function registerBrowserStateCommands(
       const parent = parentOpts(cmd);
       const baseUrl = resolveBrowserControlUrl(parent?.url);
       const profile = parent?.browserProfile;
-      try {
+      await runBrowserCommand(async () => {
         const result = await browserSetLocale(baseUrl, {
           locale,
           targetId: opts.targetId?.trim() || undefined,
@@ -279,10 +265,7 @@ export function registerBrowserStateCommands(
           return;
         }
         defaultRuntime.log(`locale: ${locale}`);
-      } catch (err) {
-        defaultRuntime.error(danger(String(err)));
-        defaultRuntime.exit(1);
-      }
+      });
     });
 
   set
@@ -294,7 +277,7 @@ export function registerBrowserStateCommands(
       const parent = parentOpts(cmd);
       const baseUrl = resolveBrowserControlUrl(parent?.url);
       const profile = parent?.browserProfile;
-      try {
+      await runBrowserCommand(async () => {
         const result = await browserSetDevice(baseUrl, {
           name,
           targetId: opts.targetId?.trim() || undefined,
@@ -305,9 +288,6 @@ export function registerBrowserStateCommands(
           return;
         }
         defaultRuntime.log(`device: ${name}`);
-      } catch (err) {
-        defaultRuntime.error(danger(String(err)));
-        defaultRuntime.exit(1);
-      }
+      });
     });
 }

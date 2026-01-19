@@ -1,11 +1,13 @@
+import { createRequire } from "node:module";
 import fs from "node:fs";
 import path from "node:path";
 
 import { Logger as TsLogger } from "tslog";
 
-import { type ClawdbotConfig, loadConfig } from "../config/config.js";
+import type { ClawdbotConfig } from "../config/types.js";
 import type { ConsoleStyle } from "./console.js";
 import { type LogLevel, levelToMinLevel, normalizeLogLevel } from "./levels.js";
+import { readLoggingConfig } from "./config.js";
 import { loggingState } from "./state.js";
 
 // Pin to /tmp so mac Debug UI and docs match; os.tmpdir() can be a per-user
@@ -16,6 +18,8 @@ export const DEFAULT_LOG_FILE = path.join(DEFAULT_LOG_DIR, "clawdbot.log"); // l
 const LOG_PREFIX = "clawdbot";
 const LOG_SUFFIX = ".log";
 const MAX_LOG_AGE_MS = 24 * 60 * 60 * 1000; // 24h
+
+const requireConfig = createRequire(import.meta.url);
 
 export type LoggerSettings = {
   level?: LogLevel;
@@ -33,8 +37,18 @@ type ResolvedSettings = {
 export type LoggerResolvedSettings = ResolvedSettings;
 
 function resolveSettings(): ResolvedSettings {
-  const cfg: ClawdbotConfig["logging"] | undefined =
-    (loggingState.overrideSettings as LoggerSettings | null) ?? loadConfig().logging;
+  let cfg: ClawdbotConfig["logging"] | undefined =
+    (loggingState.overrideSettings as LoggerSettings | null) ?? readLoggingConfig();
+  if (!cfg) {
+    try {
+      const loaded = requireConfig("../config/config.js") as {
+        loadConfig?: () => ClawdbotConfig;
+      };
+      cfg = loaded.loadConfig?.().logging;
+    } catch {
+      cfg = undefined;
+    }
+  }
   const level = normalizeLogLevel(cfg?.level, "info");
   const file = cfg?.file ?? defaultRollingPathForToday();
   return { level, file };

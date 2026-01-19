@@ -4,7 +4,7 @@ import { resolveAgentWorkspaceDir, resolveDefaultAgentId } from "../agents/agent
 import type { ClawdbotConfig } from "../config/config.js";
 import type { NodeBridgeServer } from "./bridge/server.js";
 import { listNodePairing, updatePairedNodeMetadata } from "./node-pairing.js";
-import { createSubsystemLogger } from "../logging.js";
+import { createSubsystemLogger } from "../logging/subsystem.js";
 import { bumpSkillsSnapshotVersion } from "../agents/skills/refresh.js";
 
 type RemoteNodeRecord = {
@@ -36,7 +36,20 @@ function extractErrorMessage(err: unknown): string | undefined {
   if (typeof err === "object" && "message" in err && typeof err.message === "string") {
     return err.message;
   }
-  return String(err);
+  if (typeof err === "number" || typeof err === "boolean" || typeof err === "bigint") {
+    return String(err);
+  }
+  if (typeof err === "symbol") {
+    return err.toString();
+  }
+  if (typeof err === "object") {
+    try {
+      return JSON.stringify(err);
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
 }
 
 function logRemoteBinProbeFailure(nodeId: string, err: unknown) {
