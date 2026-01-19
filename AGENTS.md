@@ -94,10 +94,6 @@
 - Mobile: before using a simulator, check for connected real devices (iOS + Android) and prefer them when available.
 
 ## Commit & Pull Request Guidelines
-
-**Full maintainer PR workflow (optional):** If you want the repo's end-to-end maintainer workflow (triage order, quality bar, rebase rules, commit/changelog conventions, co-contributor policy, and the `review-pr` > `prepare-pr` > `merge-pr` pipeline), see `.agents/skills/PR_WORKFLOW.md`. Maintainers may use other workflows; when a maintainer specifies a workflow, follow that. If no workflow is specified, default to PR_WORKFLOW.
-
-- Create commits with `scripts/committer "<msg>" <file...>`; avoid manual `git add`/`git commit` so staging stays scoped.
 - Follow concise, action-oriented commit messages (e.g., `CLI: add verbose flag to send`).
 - Group related changes; avoid bundling unrelated refactors.
 - PR submission template (canonical): `.github/pull_request_template.md`
@@ -184,3 +180,20 @@
 - Publish: `npm publish --access public --otp="<otp>"` (run from the package dir).
 - Verify without local npmrc side effects: `npm view <pkg> version --userconfig "$(mktemp)"`.
 - Kill the tmux session after publish.
+
+## Exclamation Mark Escaping Workaround
+The Claude Code Bash tool escapes `!` to `\\!` in command arguments. When using `clawdbot message send` with messages containing exclamation marks, use heredoc syntax:
+
+```bash
+# WRONG - will send "Hello\\!" with backslash
+clawdbot message send --to "+1234" --message 'Hello!'
+
+# CORRECT - use heredoc to avoid escaping
+clawdbot message send --to "+1234" --message "$(cat <<'EOF'
+Hello!
+EOF
+)"
+```
+
+This is a Claude Code quirk, not a clawdbot bug.
+- Create commits with `scripts/committer "<msg>" <file...>`; avoid manual `git add`/`git commit` so staging stays scoped.
