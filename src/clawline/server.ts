@@ -26,10 +26,7 @@ import { resolveAgentIdFromSessionKey, updateLastRoute } from "../config/session
 import { rawDataToString } from "../infra/ws.js";
 import { recordClawlineSessionActivity } from "./session-store.js";
 import type { ClawlineAdapterOverrides } from "./config.js";
-import {
-  buildClawlineSessionKey,
-  clawlineSessionFileName,
-} from "./session-key.js";
+import { buildClawlineSessionKey, clawlineSessionFileName } from "./session-key.js";
 import { deepMerge } from "./utils/deep-merge.js";
 import type {
   AllowlistEntry,
@@ -56,10 +53,19 @@ export const PROTOCOL_VERSION = 1;
 
 // eslint-disable-next-line no-control-regex
 const CONTROL_CHARS_REGEX = /[\u0000-\u001F\u007F]/g;
-const UUID_V4_REGEX = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/;
-const SERVER_EVENT_ID_REGEX = /^s_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
-const ASSET_ID_REGEX = /^a_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
-const INLINE_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "image/heic"]);
+const UUID_V4_REGEX =
+  /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/;
+const SERVER_EVENT_ID_REGEX =
+  /^s_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+const ASSET_ID_REGEX =
+  /^a_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+const INLINE_IMAGE_MIME_TYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+  "image/heic",
+]);
 const MAX_ATTACHMENTS_COUNT = 4;
 // Hard ceiling for a single client payload: 64 KB text budget + 256 KB inline assets + JSON overhead.
 const MAX_TOTAL_PAYLOAD_BYTES = 320 * 1024;
@@ -113,7 +119,7 @@ function sanitizeDeviceInfo(info: DeviceInfo): DeviceInfo {
     platform: sanitizeField(info.platform) ?? "",
     model: sanitizeField(info.model) ?? "",
     osVersion: sanitizeField(info.osVersion),
-    appVersion: sanitizeField(info.appVersion)
+    appVersion: sanitizeField(info.appVersion),
   };
 }
 
@@ -149,7 +155,7 @@ async function notifyGatewayOfPending(entry: PendingEntry) {
 
 function normalizeAttachmentsInput(
   raw: unknown,
-  mediaConfig: ProviderConfig["media"]
+  mediaConfig: ProviderConfig["media"],
 ): { attachments: NormalizedAttachment[]; inlineBytes: number; assetIds: string[] } {
   if (raw === undefined) {
     return { attachments: [], inlineBytes: 0, assetIds: [] };
@@ -275,10 +281,14 @@ function validateDeviceInfo(value: any): value is DeviceInfo {
   if (!requiredString(value.platform) || !requiredString(value.model)) {
     return false;
   }
-  if (value.osVersion !== undefined && (!requiredString(value.osVersion) && value.osVersion !== "")) {
+  if (value.osVersion !== undefined && !requiredString(value.osVersion) && value.osVersion !== "") {
     return false;
   }
-  if (value.appVersion !== undefined && (!requiredString(value.appVersion) && value.appVersion !== "")) {
+  if (
+    value.appVersion !== undefined &&
+    !requiredString(value.appVersion) &&
+    value.appVersion !== ""
+  ) {
     return false;
   }
   return true;
@@ -327,7 +337,7 @@ type ServerMessage = {
 enum MessageStreamingState {
   Finalized = 0,
   Active = 1,
-  Failed = 2
+  Failed = 2,
 }
 
 export const DEFAULT_ALERT_INSTRUCTIONS_TEXT = `After handling this alert, evaluate: would Flynn want to know what happened? If yes, report to him. Don't just process silently.`;
@@ -339,30 +349,30 @@ const DEFAULT_CONFIG: ProviderConfig = {
   network: {
     bindAddress: "127.0.0.1",
     allowInsecurePublic: false,
-    allowedOrigins: []
+    allowedOrigins: [],
   },
   adapter: null,
   alertTarget: {
     channel: "clawline",
-    to: "flynn"
+    to: "flynn",
   },
   auth: {
     jwtSigningKey: null,
     tokenTtlSeconds: 31_536_000,
     maxAttemptsPerMinute: 5,
-    reissueGraceSeconds: 600
+    reissueGraceSeconds: 600,
   },
   pairing: {
     maxPendingRequests: 100,
     maxRequestsPerMinute: 5,
     pendingTtlSeconds: 300,
-    pendingSocketTimeoutSeconds: 300
+    pendingSocketTimeoutSeconds: 300,
   },
   media: {
     storagePath: path.join(os.homedir(), ".clawdbot", "clawline-media"),
     maxInlineBytes: 262_144,
     maxUploadBytes: 104_857_600,
-    unreferencedUploadTtlSeconds: 3600
+    unreferencedUploadTtlSeconds: 3600,
   },
   sessions: {
     maxMessageBytes: 65_536,
@@ -374,12 +384,12 @@ const DEFAULT_CONFIG: ProviderConfig = {
     maxQueuedMessages: 20,
     maxWriteQueueDepth: 1000,
     adapterExecuteTimeoutSeconds: 300,
-    streamInactivitySeconds: 300
+    streamInactivitySeconds: 300,
   },
   streams: {
     chunkPersistIntervalMs: 100,
-    chunkBufferBytes: 1_048_576
-  }
+    chunkBufferBytes: 1_048_576,
+  },
 };
 
 const ALLOWLIST_FILENAME = "allowlist.json";
@@ -464,7 +474,7 @@ const userSequenceStmt = (db: SqliteDatabase) =>
      VALUES (?, 1)
      ON CONFLICT(userId)
      DO UPDATE SET nextSequence = user_sequences.nextSequence + 1
-     RETURNING nextSequence as sequence`
+     RETURNING nextSequence as sequence`,
   );
 
 function sha256(input: string): string {
@@ -479,7 +489,7 @@ function hashAttachments(attachments: NormalizedAttachment[]): string {
   const parts = attachments.map((attachment) =>
     attachment.type === "image"
       ? `{"type":"image","mimeType":${quote(attachment.mimeType)},"data":${quote(attachment.data)}}`
-      : `{"type":"asset","assetId":${quote(attachment.assetId)}}`
+      : `{"type":"asset","assetId":${quote(attachment.assetId)}}`,
   );
   return sha256(`[${parts.join(",")}]`);
 }
@@ -503,14 +513,16 @@ function parseServerMessage(json: string): ServerMessage {
 export async function createProviderServer(options: ProviderOptions): Promise<ProviderServer> {
   const config = mergeConfig(options.config);
   const adapterOverrides =
-    ((options.config as { adapterOverrides?: ClawlineAdapterOverrides } | undefined)?.adapterOverrides) ?? {};
+    (options.config as { adapterOverrides?: ClawlineAdapterOverrides } | undefined)
+      ?.adapterOverrides ?? {};
   const clawdbotCfg = options.clawdbotConfig;
   const logger: Logger = options.logger ?? console;
   const sessionStorePath = options.sessionStorePath;
   const mainSessionKey = options.mainSessionKey?.trim() || "agent:main:main";
   const mainSessionAgentId = resolveAgentIdFromSessionKey(mainSessionKey);
   const alertInstructionsPath =
-    typeof config.alertInstructionsPath === "string" && config.alertInstructionsPath.trim().length > 0
+    typeof config.alertInstructionsPath === "string" &&
+    config.alertInstructionsPath.trim().length > 0
       ? path.resolve(config.alertInstructionsPath.trim())
       : null;
 
@@ -637,42 +649,44 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     sequenceStatement = userSequenceStmt(newDb);
     insertEventStmt = newDb.prepare(
       `INSERT INTO events (id, userId, sequence, originatingDeviceId, payloadJson, payloadBytes, timestamp)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
     );
-    updateMessageAckStmt = newDb.prepare(`UPDATE messages SET ackSent = 1 WHERE deviceId = ? AND clientId = ?`);
+    updateMessageAckStmt = newDb.prepare(
+      `UPDATE messages SET ackSent = 1 WHERE deviceId = ? AND clientId = ?`,
+    );
     insertMessageStmt = newDb.prepare(
       `INSERT INTO messages (deviceId, userId, clientId, serverEventId, serverSequence, content, contentHash, attachmentsHash, timestamp, streaming, ackSent)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ${MessageStreamingState.Active}, 0)`
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ${MessageStreamingState.Active}, 0)`,
     );
     selectMessageStmt = newDb.prepare(
       `SELECT deviceId, userId, clientId, serverEventId, serverSequence, content, contentHash, attachmentsHash, timestamp, streaming, ackSent
-       FROM messages WHERE deviceId = ? AND clientId = ?`
+       FROM messages WHERE deviceId = ? AND clientId = ?`,
     );
     updateMessageStreamingStmt = newDb.prepare(
-      `UPDATE messages SET streaming = ? WHERE deviceId = ? AND clientId = ?`
+      `UPDATE messages SET streaming = ? WHERE deviceId = ? AND clientId = ?`,
     );
     insertMessageAssetStmt = newDb.prepare(
-      `INSERT INTO message_assets (deviceId, clientId, assetId) VALUES (?, ?, ?)`
+      `INSERT INTO message_assets (deviceId, clientId, assetId) VALUES (?, ?, ?)`,
     );
     insertAssetStmt = newDb.prepare(
-      `INSERT INTO assets (assetId, userId, mimeType, size, createdAt, uploaderDeviceId) VALUES (?, ?, ?, ?, ?, ?)`
+      `INSERT INTO assets (assetId, userId, mimeType, size, createdAt, uploaderDeviceId) VALUES (?, ?, ?, ?, ?, ?)`,
     );
     selectAssetStmt = newDb.prepare(
-      `SELECT assetId, userId, mimeType, size, createdAt FROM assets WHERE assetId = ?`
+      `SELECT assetId, userId, mimeType, size, createdAt FROM assets WHERE assetId = ?`,
     );
     selectExpiredAssetsStmt = newDb.prepare(
       `SELECT assetId FROM assets
        WHERE createdAt <= ?
          AND NOT EXISTS (
            SELECT 1 FROM message_assets WHERE message_assets.assetId = assets.assetId
-         )`
+         )`,
     );
     deleteAssetStmt = newDb.prepare(
       `DELETE FROM assets
        WHERE assetId = ?
          AND NOT EXISTS (
            SELECT 1 FROM message_assets WHERE message_assets.assetId = assets.assetId
-         )`
+         )`,
     );
     ({
       handleUpload,
@@ -709,10 +723,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         attachments: NormalizedAttachment[],
         attachmentsHash: string,
         assetIds: string[],
-        channelType: ChannelType
+        channelType: ChannelType,
       ) => {
         for (const assetId of assetIds) {
-          const asset = selectAssetStmt.get(assetId) as { assetId: string; userId: string } | undefined;
+          const asset = selectAssetStmt.get(assetId) as
+            | { assetId: string; userId: string }
+            | undefined;
           if (!asset) {
             throw new ClientMessageError("asset_not_found", "Asset not found");
           }
@@ -734,7 +750,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           streaming: false,
           deviceId: session.deviceId,
           attachments: attachments.length > 0 ? attachments : undefined,
-          channelType
+          channelType,
         };
         const payloadJson = JSON.stringify(event);
         const payloadBytes = Buffer.byteLength(payloadJson, "utf8");
@@ -746,7 +762,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           session.deviceId,
           payloadJson,
           payloadBytes,
-          timestamp
+          timestamp,
         );
         insertMessageStmt.run(
           session.deviceId,
@@ -757,42 +773,44 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           content,
           sha256(content),
           attachmentsHash,
-          timestamp
+          timestamp,
         );
         for (const assetId of assetIds) {
           insertMessageAssetStmt.run(session.deviceId, messageId, assetId);
         }
         return { event, sequence: sequenceRow.sequence };
-      }
+      },
     );
 
     selectEventsAfterStmt = newDb.prepare(
-      `SELECT id, payloadJson FROM events WHERE userId = ? AND sequence > ? ORDER BY sequence ASC`
+      `SELECT id, payloadJson FROM events WHERE userId = ? AND sequence > ? ORDER BY sequence ASC`,
     );
     selectEventsTailStmt = newDb.prepare(
-      `SELECT id, payloadJson FROM events WHERE userId = ? ORDER BY sequence DESC LIMIT ?`
+      `SELECT id, payloadJson FROM events WHERE userId = ? ORDER BY sequence DESC LIMIT ?`,
     );
     selectEventByIdStmt = newDb.prepare(
-      `SELECT id, userId, sequence, timestamp FROM events WHERE id = ?`
+      `SELECT id, userId, sequence, timestamp FROM events WHERE id = ?`,
     );
     selectEventsAfterTimestampStmt = newDb.prepare(
-      `SELECT id, payloadJson FROM events WHERE userId = ? AND timestamp > ? ORDER BY sequence ASC`
+      `SELECT id, payloadJson FROM events WHERE userId = ? AND timestamp > ? ORDER BY sequence ASC`,
     );
-    insertEventTx = newDb.transaction((event: ServerMessage, userId: string, originatingDeviceId?: string) => {
-      const payloadJson = JSON.stringify(event);
-      const payloadBytes = Buffer.byteLength(payloadJson, "utf8");
-      const sequenceRow = sequenceStatement.get(userId) as { sequence: number };
-      insertEventStmt.run(
-        event.id,
-        userId,
-        sequenceRow.sequence,
-        originatingDeviceId ?? null,
-        payloadJson,
-        payloadBytes,
-        event.timestamp
-      );
-      return sequenceRow.sequence;
-    });
+    insertEventTx = newDb.transaction(
+      (event: ServerMessage, userId: string, originatingDeviceId?: string) => {
+        const payloadJson = JSON.stringify(event);
+        const payloadBytes = Buffer.byteLength(payloadJson, "utf8");
+        const sequenceRow = sequenceStatement.get(userId) as { sequence: number };
+        insertEventStmt.run(
+          event.id,
+          userId,
+          sequenceRow.sequence,
+          originatingDeviceId ?? null,
+          payloadJson,
+          payloadBytes,
+          event.timestamp,
+        );
+        return sequenceRow.sequence;
+      },
+    );
 
     db = newDb;
     return true;
@@ -845,8 +863,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             attachment.mimeType,
             buffer.length,
             nowMs(),
-            params.deviceId
-          )
+            params.deviceId,
+          ),
         );
         inlineAssetIds.push(assetId);
         updated.push({ ...attachment, assetId });
@@ -889,8 +907,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         asset.mimeType,
         asset.size,
         nowMs(),
-        session.deviceId
-      )
+        session.deviceId,
+      ),
     );
     return newAssetId;
   }
@@ -944,9 +962,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         res.writeHead(404).end();
         return;
       }
-      const headerIncludes = (headerValue: string | string[] | undefined, needle: string): boolean => {
+      const headerIncludes = (
+        headerValue: string | string[] | undefined,
+        needle: string,
+      ): boolean => {
         if (typeof headerValue === "string") return headerValue.toLowerCase().includes(needle);
-        if (Array.isArray(headerValue)) return headerValue.some((value) => value.toLowerCase().includes(needle));
+        if (Array.isArray(headerValue))
+          return headerValue.some((value) => value.toLowerCase().includes(needle));
         return false;
       };
       const isUpgradeRequest =
@@ -956,20 +978,24 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         // Let the upgrade handler take over without sending an HTTP response.
         logHttpRequest("request_upgrade_passthrough", {
           method: req.method ?? "UNKNOWN",
-          path: req.url ?? "UNKNOWN"
+          path: req.url ?? "UNKNOWN",
         });
         return;
       }
       const parsedUrl = new URL(req.url, "http://localhost");
       logHttpRequest("request_received", {
         method: req.method ?? "UNKNOWN",
-        path: parsedUrl.pathname
+        path: parsedUrl.pathname,
       });
       if (req.method === "GET" && parsedUrl.pathname === "/version") {
         res.setHeader("Content-Type", "application/json");
         res.writeHead(200);
         res.end(JSON.stringify({ protocolVersion: PROTOCOL_VERSION }));
-        logHttpRequest("request_handled", { method: req.method, path: parsedUrl.pathname, status: 200 });
+        logHttpRequest("request_handled", {
+          method: req.method,
+          path: parsedUrl.pathname,
+          status: 200,
+        });
         return;
       }
       if (req.method === "POST" && parsedUrl.pathname === "/upload") {
@@ -991,7 +1017,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       }
       logHttpRequest("request_not_found", {
         method: req.method ?? "UNKNOWN",
-        path: parsedUrl.pathname
+        path: parsedUrl.pathname,
       });
       res.writeHead(404).end();
     } catch (err) {
@@ -1028,7 +1054,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   }
 
   async function parseAlertPayload(
-    req: http.IncomingMessage
+    req: http.IncomingMessage,
   ): Promise<{ message: string; source?: string }> {
     const raw = await readRequestBody(req, MAX_ALERT_BODY_BYTES);
     if (raw.length === 0) {
@@ -1090,7 +1116,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       throw new HttpError(400, "invalid_message", "Alert message is required");
     }
     const normalizedSource = resolveAlertSource(source);
-    const text = normalizedSource ? `[${normalizedSource}] ${normalizedMessage}` : normalizedMessage;
+    const text = normalizedSource
+      ? `[${normalizedSource}] ${normalizedMessage}`
+      : normalizedMessage;
     if (Buffer.byteLength(text, "utf8") > config.sessions.maxMessageBytes) {
       throw new HttpError(400, "message_too_large", "Alert message exceeds max size");
     }
@@ -1156,7 +1184,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       }
       try {
         await ensureDir(path.dirname(alertInstructionsPath));
-        await fs.writeFile(`${alertInstructionsPath}`, `${DEFAULT_ALERT_INSTRUCTIONS_TEXT}\n`, "utf8");
+        await fs.writeFile(
+          `${alertInstructionsPath}`,
+          `${DEFAULT_ALERT_INSTRUCTIONS_TEXT}\n`,
+          "utf8",
+        );
         logger.info?.("alert_instructions_initialized", { alertInstructionsPath });
       } catch (writeErr) {
         logger.warn?.("alert_instructions_write_failed", writeErr);
@@ -1172,11 +1204,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         clientName: GATEWAY_CLIENT_NAMES.CLI,
         clientDisplayName: "clawline-alert",
         clientVersion: "clawline",
-        mode: GATEWAY_CLIENT_MODES.BACKEND
+        mode: GATEWAY_CLIENT_MODES.BACKEND,
       });
     } catch (err) {
       logger.error("alert_gateway_wake_failed", err);
-      throw err instanceof HttpError ? err : new HttpError(502, "wake_failed", "Failed to wake CLU");
+      throw err instanceof HttpError
+        ? err
+        : new HttpError(502, "wake_failed", "Failed to wake CLU");
     }
   }
 
@@ -1195,12 +1229,14 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         gateway: {
           clientName: GATEWAY_CLIENT_NAMES.CLI,
           clientDisplayName: "clawline-alert",
-          mode: GATEWAY_CLIENT_MODES.BACKEND
-        }
+          mode: GATEWAY_CLIENT_MODES.BACKEND,
+        },
       });
     } catch (err) {
       logger.error("alert_delivery_failed", err);
-      throw err instanceof HttpError ? err : new HttpError(502, "delivery_failed", "Failed to deliver alert");
+      throw err instanceof HttpError
+        ? err
+        : new HttpError(502, "delivery_failed", "Failed to deliver alert");
     }
   }
 
@@ -1216,7 +1252,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     const origin = request.headers.origin ?? "null";
     logger.info?.("[clawline:http] ws_upgrade_received", {
       url: request.url,
-      origin
+      origin,
     });
     if (request.url !== "/ws") {
       logger.info?.("[clawline:http] ws_upgrade_rejected_path", { url: request.url });
@@ -1229,7 +1265,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       logger.info?.("[clawline:http] ws_upgrade_origin_check", {
         origin,
         allowed: config.network.allowedOrigins,
-        originAllowed
+        originAllowed,
       });
       if (!originAllowed) {
         socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
@@ -1237,7 +1273,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         return;
       }
     } else {
-      logger.info?.("[clawline:http] ws_upgrade_origin_check", { origin, allowed: "any", originAllowed });
+      logger.info?.("[clawline:http] ws_upgrade_origin_check", {
+        origin,
+        allowed: "any",
+        originAllowed,
+      });
     }
     logger.info?.("[clawline:http] ws_upgrade_forward", { origin });
     wss.handleUpgrade(request, socket, head, (ws) => {
@@ -1253,13 +1293,19 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const perUserQueue = new Map<string, Promise<unknown>>();
   const pairRateLimiter = new SlidingWindowRateLimiter(config.pairing.maxRequestsPerMinute, 60_000);
   const authRateLimiter = new SlidingWindowRateLimiter(config.auth.maxAttemptsPerMinute, 60_000);
-  const messageRateLimiter = new SlidingWindowRateLimiter(config.sessions.maxMessagesPerSecond, 1_000);
+  const messageRateLimiter = new SlidingWindowRateLimiter(
+    config.sessions.maxMessagesPerSecond,
+    1_000,
+  );
   let writeQueue: Promise<void> = Promise.resolve();
   const pendingCleanupInterval = setInterval(() => expirePendingPairs(), 1_000);
   if (typeof pendingCleanupInterval.unref === "function") {
     pendingCleanupInterval.unref();
   }
-  const maintenanceIntervalMs = Math.min(60_000, Math.max(1_000, config.media.unreferencedUploadTtlSeconds * 250));
+  const maintenanceIntervalMs = Math.min(
+    60_000,
+    Math.max(1_000, config.media.unreferencedUploadTtlSeconds * 250),
+  );
   const assetCleanupInterval =
     config.media.unreferencedUploadTtlSeconds > 0
       ? setInterval(() => {
@@ -1269,10 +1315,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   if (assetCleanupInterval && typeof assetCleanupInterval.unref === "function") {
     assetCleanupInterval.unref();
   }
-  const allowlistWatcher: FSWatcher = watch(allowlistPath, { persistent: false }, () => {
-    void refreshAllowlistFromDisk();
-  });
-  allowlistWatcher.on("error", (err) => logger.warn?.("allowlist_watch_failed", err));
   const pendingFileWatcher: FSWatcher = watch(pendingPath, { persistent: false }, () => {
     void refreshPendingFile();
   });
@@ -1298,7 +1340,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     const result = writeQueue.then(run, run);
     writeQueue = result.then(
       () => undefined,
-      () => undefined
+      () => undefined,
     );
     return result;
   }
@@ -1334,13 +1376,17 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     try {
       const next = await loadDenylist(denylistPath);
       const newlyRevoked = next.filter(
-        (entry) => !denylist.some((existing) => existing.deviceId === entry.deviceId)
+        (entry) => !denylist.some((existing) => existing.deviceId === entry.deviceId),
       );
       denylist = next;
       for (const revoked of newlyRevoked) {
         const session = sessionsByDevice.get(revoked.deviceId);
         if (session) {
-          sendJson(session.socket, { type: "error", code: "token_revoked", message: "Device revoked" })
+          sendJson(session.socket, {
+            type: "error",
+            code: "token_revoked",
+            message: "Device revoked",
+          })
             .catch(() => {})
             .finally(() => session.socket.close(1008));
         }
@@ -1349,7 +1395,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         if (isDenylisted(deviceId)) {
           pendingSockets.delete(deviceId);
           void removePendingEntry(deviceId).catch(() => {});
-          void sendJson(pending.socket, { type: "pair_result", success: false, reason: "pair_rejected" })
+          void sendJson(pending.socket, {
+            type: "pair_result",
+            success: false,
+            reason: "pair_rejected",
+          })
             .catch(() => {})
             .finally(() => pending.socket.close(1000));
         }
@@ -1421,7 +1471,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       type: "pair_result",
       success: true,
       token,
-      userId: entry.userId
+      userId: entry.userId,
     })
       .then(() => true)
       .catch(() => false);
@@ -1441,7 +1491,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       sub: entry.userId,
       deviceId: entry.deviceId,
       isAdmin: entry.isAdmin,
-      iat: Math.floor(Date.now() / 1000)
+      iat: Math.floor(Date.now() / 1000),
     };
     if (config.auth.tokenTtlSeconds) {
       payload.exp = payload.iat! + config.auth.tokenTtlSeconds;
@@ -1549,14 +1599,21 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         | { id: string; userId: string; sequence: number; timestamp: number }
         | undefined;
       if (anchorRow) {
-        anchor = { userId: anchorRow.userId, sequence: anchorRow.sequence, timestamp: anchorRow.timestamp };
+        anchor = {
+          userId: anchorRow.userId,
+          sequence: anchorRow.sequence,
+          timestamp: anchorRow.timestamp,
+        };
       }
     }
     const combined: ServerMessage[] = [];
     for (const target of transcriptTargets) {
       let rows: EventRow[] = [];
       if (!anchor) {
-        rows = selectEventsTailStmt.all(target.userId, config.sessions.maxReplayMessages) as EventRow[];
+        rows = selectEventsTailStmt.all(
+          target.userId,
+          config.sessions.maxReplayMessages,
+        ) as EventRow[];
       } else if (target.userId === anchor.userId) {
         rows = selectEventsAfterStmt.all(target.userId, anchor.sequence) as EventRow[];
       } else {
@@ -1584,7 +1641,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       sessionId: session.sessionId,
       replayCount: limited.length,
       replayTruncated: combined.length > limited.length,
-      historyReset: lastMessageId ? false : true
+      historyReset: lastMessageId ? false : true,
     };
     await sendJson(session.socket, payload);
     for (const event of limited) {
@@ -1633,7 +1690,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     return true;
   }
 
-  function broadcastToChannelSessions(channelType: ChannelType, session: Session, payload: ServerMessage) {
+  function broadcastToChannelSessions(
+    channelType: ChannelType,
+    session: Session,
+    payload: ServerMessage,
+  ) {
     if (channelType === ADMIN_CHANNEL_TYPE) {
       broadcastToAdmins(payload);
       return;
@@ -1657,7 +1718,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     attachments: NormalizedAttachment[],
     attachmentsHash: string,
     assetIds: string[],
-    channelType: ChannelType
+    channelType: ChannelType,
   ): Promise<{ event: ServerMessage; sequence: number }> {
     const timestamp = nowMs();
     try {
@@ -1672,8 +1733,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             attachments,
             attachmentsHash,
             assetIds,
-            channelType
-          ) as { event: ServerMessage; sequence: number }
+            channelType,
+          ) as { event: ServerMessage; sequence: number },
       );
     } catch (err: any) {
       if (err && typeof err.message === "string" && err.message.includes("FOREIGN KEY")) {
@@ -1687,7 +1748,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     session: Session,
     targetUserId: string,
     content: string,
-    channelType: ChannelType
+    channelType: ChannelType,
   ): Promise<ServerMessage> {
     const timestamp = nowMs();
     const event: ServerMessage = {
@@ -1697,7 +1758,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       content,
       timestamp,
       streaming: false,
-      channelType
+      channelType,
     };
     await appendEvent(event, targetUserId);
     return event;
@@ -1760,7 +1821,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   function registerSession(session: Session) {
     const existing = sessionsByDevice.get(session.deviceId);
     if (existing && existing.socket !== session.socket) {
-      sendJson(existing.socket, { type: "error", code: "session_replaced", message: "Session replaced" })
+      sendJson(existing.socket, {
+        type: "error",
+        code: "session_replaced",
+        message: "Session replaced",
+      })
         .catch(() => {})
         .finally(() => existing.socket.close(SESSION_REPLACED_CODE));
       removeSession(existing);
@@ -1824,7 +1889,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           | undefined;
         const incomingHash = sha256(payload.content);
         if (existing) {
-          if (existing.contentHash !== incomingHash || existing.attachmentsHash !== attachmentsHash) {
+          if (
+            existing.contentHash !== incomingHash ||
+            existing.attachmentsHash !== attachmentsHash
+          ) {
             throw new ClientMessageError("invalid_message", "Duplicate mismatch");
           }
           if (existing.streaming === MessageStreamingState.Failed) {
@@ -1849,14 +1917,14 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         const materialized = await materializeInlineAttachments({
           attachments: attachmentsInfo.attachments,
           ownerUserId: targetUserId,
-          deviceId: session.deviceId
+          deviceId: session.deviceId,
         });
         const assetIds = attachmentsInfo.assetIds.concat(materialized.inlineAssetIds);
         const ownership = await ensureChannelAttachmentOwnership({
           attachments: materialized.attachments,
           assetIds,
           session,
-          channelType
+          channelType,
         });
 
         const { event } = await persistUserMessage(
@@ -1867,7 +1935,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           ownership.attachments,
           attachmentsHash,
           ownership.assetIds,
-          channelType
+          channelType,
         );
         await new Promise<void>((resolve) => {
           session.socket.send(JSON.stringify({ type: "ack", id: payload.id }), (err) => {
@@ -1879,10 +1947,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         });
         broadcastToChannelSessions(channelType, session, event);
 
-        const attachmentSummary = describeClawlineAttachments(
-          ownership.attachments,
-          assetsDir,
-        );
+        const attachmentSummary = describeClawlineAttachments(ownership.attachments, assetsDir);
         const inboundBody = attachmentSummary
           ? `${payload.content}\n\n${attachmentSummary}`
           : payload.content;
@@ -1963,7 +2028,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               session,
               targetUserId,
               assistantText,
-              channelType
+              channelType,
             );
             broadcastToChannelSessions(channelType, session, assistantEvent);
           },
@@ -1999,7 +2064,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         await dispatcher.waitForIdle();
 
         if (!queuedFinal) {
-          updateMessageStreamingStmt.run(MessageStreamingState.Failed, session.deviceId, payload.id);
+          updateMessageStreamingStmt.run(
+            MessageStreamingState.Failed,
+            session.deviceId,
+            payload.id,
+          );
           await sendJson(session.socket, {
             type: "error",
             code: "server_error",
@@ -2008,7 +2077,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           });
           return;
         }
-        updateMessageStreamingStmt.run(MessageStreamingState.Finalized, session.deviceId, payload.id);
+        updateMessageStreamingStmt.run(
+          MessageStreamingState.Finalized,
+          session.deviceId,
+          payload.id,
+        );
       });
     } catch (err) {
       if (err instanceof ClientMessageError) {
@@ -2025,16 +2098,18 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
     const now = nowMs();
     const socketTtlMs =
-      Math.max(
-        1,
-        config.pairing.pendingSocketTimeoutSeconds ?? config.pairing.pendingTtlSeconds
-      ) * 1000;
+      Math.max(1, config.pairing.pendingSocketTimeoutSeconds ?? config.pairing.pendingTtlSeconds) *
+      1000;
     const entryTtlMs = Math.max(1, config.pairing.pendingTtlSeconds) * 1000;
     for (const [deviceId, pending] of pendingSockets) {
       if (now - pending.createdAt >= socketTtlMs) {
         pendingSockets.delete(deviceId);
         void removePendingEntry(deviceId).catch(() => {});
-        void sendJson(pending.socket, { type: "pair_result", success: false, reason: "pair_timeout" })
+        void sendJson(pending.socket, {
+          type: "pair_result",
+          success: false,
+          reason: "pair_timeout",
+        })
           .catch(() => {})
           .finally(() => {
             pending.socket.close(1000);
@@ -2123,14 +2198,14 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   wss.on("connection", (ws, req) => {
     logger.info?.("[clawline:http] ws_connection_open", {
       origin: req?.headers?.origin ?? "null",
-      remoteAddress: req?.socket?.remoteAddress
+      remoteAddress: req?.socket?.remoteAddress,
     });
     connectionState.set(ws, { authenticated: false });
 
     ws.on("message", async (raw) => {
       const rawString = rawDataToString(raw);
       logger.info?.("[clawline:http] ws_message_received", {
-        bytes: Buffer.byteLength(rawString, "utf8")
+        bytes: Buffer.byteLength(rawString, "utf8"),
       });
       let payload: any;
       try {
@@ -2148,7 +2223,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         case "pair_request":
           logger.info?.("[clawline:http] ws_pair_request_dispatch", {
             deviceId: payload.deviceId,
-            protocolVersion: payload.protocolVersion
+            protocolVersion: payload.protocolVersion,
           });
           await handlePairRequest(ws, payload);
           break;
@@ -2170,15 +2245,21 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   async function handlePairRequest(ws: WebSocket, payload: any) {
     logger.info?.("[clawline:http] pair_request_start", {
       deviceId: payload?.deviceId,
-      protocolVersion: payload?.protocolVersion
+      protocolVersion: payload?.protocolVersion,
     });
     if (payload.protocolVersion !== PROTOCOL_VERSION) {
-      await sendJson(ws, { type: "error", code: "invalid_message", message: "Unsupported protocol" });
+      await sendJson(ws, {
+        type: "error",
+        code: "invalid_message",
+        message: "Unsupported protocol",
+      });
       ws.close();
       return;
     }
     if (!validateDeviceId(payload.deviceId)) {
-      logger.warn?.("[clawline:http] pair_request_invalid_device_id", { deviceId: payload.deviceId });
+      logger.warn?.("[clawline:http] pair_request_invalid_device_id", {
+        deviceId: payload.deviceId,
+      });
       await sendJson(ws, { type: "error", code: "invalid_message", message: "Invalid deviceId" });
       return;
     }
@@ -2195,28 +2276,42 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       return;
     }
     if (!validateDeviceInfo(payload.deviceInfo)) {
-      await sendJson(ws, { type: "error", code: "invalid_message", message: "Invalid device info" });
+      await sendJson(ws, {
+        type: "error",
+        code: "invalid_message",
+        message: "Invalid device info",
+      });
       return;
     }
     const sanitizedInfo = sanitizeDeviceInfo(payload.deviceInfo);
     if (!sanitizedInfo.platform || !sanitizedInfo.model) {
-      await sendJson(ws, { type: "error", code: "invalid_message", message: "Invalid device info" });
+      await sendJson(ws, {
+        type: "error",
+        code: "invalid_message",
+        message: "Invalid device info",
+      });
       return;
     }
     const sanitizedClaimedName = sanitizeLabel(payload.claimedName);
     const deviceId = payload.deviceId;
+    await refreshAllowlistFromDisk();
     const entry = findAllowlistEntry(deviceId);
     if (entry) {
       logger.info?.("[clawline:http] pair_request_allowlist_entry", {
         deviceId,
         isAdmin: entry.isAdmin,
         tokenDelivered: entry.tokenDelivered,
-        lastSeenAt: entry.lastSeenAt
+        lastSeenAt: entry.lastSeenAt,
       });
     }
     if (entry && !entry.tokenDelivered) {
       const token = issueToken(entry);
-      const delivered = await sendJson(ws, { type: "pair_result", success: true, token, userId: entry.userId })
+      const delivered = await sendJson(ws, {
+        type: "pair_result",
+        success: true,
+        token,
+        userId: entry.userId,
+      })
         .then(() => true)
         .catch(() => false);
       if (delivered) {
@@ -2230,7 +2325,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       const graceMs = config.auth.reissueGraceSeconds * 1000;
       if (now - entry.createdAt <= graceMs) {
         const token = issueToken(entry);
-        const delivered = await sendJson(ws, { type: "pair_result", success: true, token, userId: entry.userId })
+        const delivered = await sendJson(ws, {
+          type: "pair_result",
+          success: true,
+          token,
+          userId: entry.userId,
+        })
           .then(() => true)
           .catch(() => false);
         if (delivered) {
@@ -2250,7 +2350,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         isAdmin: true,
         tokenDelivered: false,
         createdAt: nowMs(),
-        lastSeenAt: null
+        lastSeenAt: null,
       };
       allowlist.entries.push(newEntry);
       await persistAllowlist();
@@ -2268,7 +2368,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     if (entry && entry.tokenDelivered) {
       logger.info?.("[clawline:http] pair_request_token_redispatch", { deviceId });
       const token = issueToken(entry);
-      const delivered = await sendJson(ws, { type: "pair_result", success: true, token, userId: entry.userId })
+      const delivered = await sendJson(ws, {
+        type: "pair_result",
+        success: true,
+        token,
+        userId: entry.userId,
+      })
         .then(() => true)
         .catch(() => false);
       if (delivered) {
@@ -2282,7 +2387,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     const existingPendingEntry = findPendingEntry(deviceId);
     const pendingCount = pendingFile.entries.length + (existingPendingEntry ? 0 : 1);
     if (pendingCount > config.pairing.maxPendingRequests) {
-      await sendJson(ws, { type: "error", code: "rate_limited", message: "Too many pending requests" });
+      await sendJson(ws, {
+        type: "error",
+        code: "rate_limited",
+        message: "Too many pending requests",
+      });
       ws.close(1008);
       return;
     }
@@ -2291,17 +2400,17 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       deviceId,
       claimedName: sanitizedClaimedName,
       deviceInfo: sanitizedInfo,
-      requestedAt: existingPendingEntry ? existingPendingEntry.requestedAt : now
+      requestedAt: existingPendingEntry ? existingPendingEntry.requestedAt : now,
     };
     logger.info?.("[clawline:http] pair_request_upsert_pending", {
       deviceId,
       claimedName: sanitizedClaimedName,
-      pendingCount: pendingFile.entries.length + (existingPendingEntry ? 0 : 1)
+      pendingCount: pendingFile.entries.length + (existingPendingEntry ? 0 : 1),
     });
     await upsertPendingEntry(pendingEntry);
     logger.info?.("[clawline:http] pair_request_pending_persisted", {
       deviceId,
-      pendingEntries: pendingFile.entries.length
+      pendingEntries: pendingFile.entries.length,
     });
     notifyGatewayOfPending(pendingEntry)
       .then(() =>
@@ -2326,14 +2435,20 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       socket: ws,
       claimedName: sanitizedClaimedName,
       deviceInfo: sanitizedInfo,
-      createdAt: now
+      createdAt: now,
     });
-    await sendJson(ws, { type: "pair_result", success: false, reason: "pair_pending" }).catch(() => {});
+    await sendJson(ws, { type: "pair_result", success: false, reason: "pair_pending" }).catch(
+      () => {},
+    );
   }
 
   async function handleAuth(ws: WebSocket, payload: any) {
     if (payload.protocolVersion !== PROTOCOL_VERSION) {
-      await sendJson(ws, { type: "error", code: "invalid_message", message: "Unsupported protocol" });
+      await sendJson(ws, {
+        type: "error",
+        code: "invalid_message",
+        message: "Unsupported protocol",
+      });
       ws.close();
       return;
     }
@@ -2360,7 +2475,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       ws.close();
       return;
     }
-    if (typeof decoded.deviceId !== "string" || !timingSafeStringEqual(decoded.deviceId, payload.deviceId)) {
+    if (
+      typeof decoded.deviceId !== "string" ||
+      !timingSafeStringEqual(decoded.deviceId, payload.deviceId)
+    ) {
       await sendJson(ws, { type: "auth_result", success: false, reason: "auth_failed" });
       ws.close();
       return;
@@ -2395,14 +2513,21 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       deviceId: session.deviceId,
       userId: session.userId,
       isAdmin: session.isAdmin,
-      sessionId: session.sessionId
+      sessionId: session.sessionId,
     });
     try {
       await updateLastSeen(session.deviceId, nowMs());
       const lastMessageId =
         typeof payload.lastMessageId === "string" ? payload.lastMessageId : null;
-      if (typeof payload.lastMessageId === "string" && !SERVER_EVENT_ID_REGEX.test(payload.lastMessageId)) {
-        await sendJson(ws, { type: "error", code: "invalid_message", message: "Invalid lastMessageId" });
+      if (
+        typeof payload.lastMessageId === "string" &&
+        !SERVER_EVENT_ID_REGEX.test(payload.lastMessageId)
+      ) {
+        await sendJson(ws, {
+          type: "error",
+          code: "invalid_message",
+          message: "Invalid lastMessageId",
+        });
         ws.close();
         return;
       }
@@ -2410,7 +2535,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     } catch {
       removeSession(session);
       connectionState.delete(ws);
-      await sendJson(ws, { type: "error", code: "server_error", message: "Replay failed" }).catch(() => {});
+      await sendJson(ws, { type: "error", code: "server_error", message: "Replay failed" }).catch(
+        () => {},
+      );
       ws.close(1011);
       return;
     }
@@ -2466,7 +2593,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     },
     async stop() {
       if (!started) return;
-      allowlistWatcher.close();
       pendingFileWatcher.close();
       denylistWatcher.close();
       clearInterval(pendingCleanupInterval);
