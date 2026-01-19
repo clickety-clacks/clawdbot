@@ -33,6 +33,16 @@ const PROVIDER_PLUGIN_IDS: Array<{ pluginId: string; providerId: string }> = [
   { pluginId: "copilot-proxy", providerId: "copilot-proxy" },
 ];
 
+const SERVICE_PLUGIN_CHECKS: Array<{
+  pluginId: string;
+  isConfigured: (cfg: ClawdbotConfig) => boolean;
+}> = [
+  {
+    pluginId: "clawline",
+    isConfigured: (cfg) => cfg.clawline?.enabled === true,
+  },
+];
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
@@ -252,6 +262,14 @@ function resolveConfiguredPlugins(
       changes.push({
         pluginId: mapping.pluginId,
         reason: `${mapping.providerId} auth configured`,
+      });
+    }
+  }
+  for (const service of SERVICE_PLUGIN_CHECKS) {
+    if (service.isConfigured(cfg)) {
+      changes.push({
+        pluginId: service.pluginId,
+        reason: `${service.pluginId} service enabled`,
       });
     }
   }

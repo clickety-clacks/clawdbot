@@ -352,10 +352,6 @@ const DEFAULT_CONFIG: ProviderConfig = {
     allowedOrigins: [],
   },
   adapter: null,
-  alertTarget: {
-    channel: "clawline",
-    to: "flynn",
-  },
   auth: {
     jwtSigningKey: null,
     tokenTtlSeconds: 31_536_000,
@@ -1037,7 +1033,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       let text = buildAlertText(payload.message, payload.source);
       text = await applyAlertInstructions(text);
       await wakeGatewayForAlert(text);
-      await deliverAlertTarget(text);
       res.setHeader("Content-Type", "application/json");
       res.writeHead(200);
       res.end(JSON.stringify({ ok: true }));
@@ -1214,32 +1209,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
   }
 
-  async function deliverAlertTarget(text: string) {
-    const channel = config.alertTarget.channel.trim();
-    const to = config.alertTarget.to?.trim();
-    if (!channel || !to) {
-      throw new HttpError(500, "alert_target_missing", "Alert target is not configured");
-    }
-    try {
-      await sendMessage({
-        channel,
-        to,
-        content: text,
-        cfg: clawdbotCfg,
-        gateway: {
-          clientName: GATEWAY_CLIENT_NAMES.CLI,
-          clientDisplayName: "clawline-alert",
-          mode: GATEWAY_CLIENT_MODES.BACKEND,
-        },
-      });
-    } catch (err) {
-      logger.error("alert_delivery_failed", err);
-      throw err instanceof HttpError
-        ? err
-        : new HttpError(502, "delivery_failed", "Failed to deliver alert");
-    }
-  }
-
   const sockets = new Set<net.Socket>();
   httpServer.on("connection", (socket) => {
     sockets.add(socket);
@@ -1315,6 +1284,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   if (assetCleanupInterval && typeof assetCleanupInterval.unref === "function") {
     assetCleanupInterval.unref();
   }
+  const allowlistWatcher: FSWatcher = watch(allowlistPath, { persistent: false }, () => {
+    void refreshAllowlistFromDisk();
+  });
+  allowlistWatcher.on("error", (err) => logger.warn?.("allowlist_watch_failed", err));
   const pendingFileWatcher: FSWatcher = watch(pendingPath, { persistent: false }, () => {
     void refreshPendingFile();
   });
@@ -2593,6 +2566,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     },
     async stop() {
       if (!started) return;
+      allowlistWatcher.close();
       pendingFileWatcher.close();
       denylistWatcher.close();
       clearInterval(pendingCleanupInterval);

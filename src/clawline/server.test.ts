@@ -277,7 +277,7 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
-  it("handles alert endpoint by waking gateway and sending message", async () => {
+  it("handles alert endpoint by waking gateway", async () => {
     const ctx = await setupTestServer();
     try {
       const response = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
@@ -294,15 +294,6 @@ describe.sequential("clawline provider server", () => {
       };
       expect(wakeCall?.params?.text).toBe("[codex] Check on Flynn");
       expect(wakeCall?.params?.mode).toBe("now");
-      expect(sendMessageMock).toHaveBeenCalledTimes(1);
-      const sendCall = sendMessageMock.mock.calls[0]?.[0] as {
-        channel?: string;
-        to?: string;
-        content?: string;
-      };
-      expect(sendCall?.channel).toBe("clawline");
-      expect(sendCall?.to).toBe("flynn");
-      expect(sendCall?.content).toBe("[codex] Check on Flynn");
     } finally {
       await ctx.cleanup();
     }
@@ -320,10 +311,10 @@ describe.sequential("clawline provider server", () => {
       const payload = await response.json();
       expect(payload).toEqual({ ok: true });
       const expected = "[codex] Check on Flynn\n\nFollow up with Flynn ASAP.";
-      const wakeCall = gatewayCallMock.mock.calls[0]?.[0] as { params?: { text?: string } } | undefined;
+      const wakeCall = gatewayCallMock.mock.calls[0]?.[0] as
+        | { params?: { text?: string } }
+        | undefined;
       expect(wakeCall?.params?.text).toBe(expected);
-      const sendCall = sendMessageMock.mock.calls[0]?.[0] as { content?: string } | undefined;
-      expect(sendCall?.content).toBe(expected);
     } finally {
       await ctx.cleanup();
     }
@@ -341,10 +332,10 @@ describe.sequential("clawline provider server", () => {
       });
       expect(response.status).toBe(200);
       const expected = `[codex] Check on Flynn\n\n${DEFAULT_ALERT_INSTRUCTIONS_TEXT}`;
-      const wakeCall = gatewayCallMock.mock.calls[0]?.[0] as { params?: { text?: string } } | undefined;
+      const wakeCall = gatewayCallMock.mock.calls[0]?.[0] as
+        | { params?: { text?: string } }
+        | undefined;
       expect(wakeCall?.params?.text).toBe(expected);
-      const sendCall = sendMessageMock.mock.calls[0]?.[0] as { content?: string } | undefined;
-      expect(sendCall?.content).toBe(expected);
     } finally {
       await ctx.cleanup();
     }
