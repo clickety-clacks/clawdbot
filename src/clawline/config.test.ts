@@ -13,15 +13,12 @@ describe("resolveClawlineConfig", () => {
     expect(cfg.enabled).toBe(true);
     expect(cfg.port).toBe(18800);
     expect(cfg.statePath).toBe(path.join(home, ".clawdbot", "clawline"));
-    expect(cfg.media.storagePath).toBe(
-      path.join(home, ".clawdbot", "clawline-media"),
-    );
+    expect(cfg.media.storagePath).toBe(path.join(home, ".clawdbot", "clawline-media"));
     expect(cfg.alertInstructionsPath).toBe(
       path.join(home, ".clawdbot", "clawline", "alert-instructions.md"),
     );
     expect(cfg.network.bindAddress).toBe("127.0.0.1");
     expect(cfg.network.allowInsecurePublic).toBe(false);
-    expect(cfg.alertTarget).toEqual({ channel: "clawline", to: "flynn" });
   });
 
   it("merges overrides from config", () => {
@@ -64,12 +61,8 @@ describe("resolveClawlineConfig", () => {
     } as ClawdbotConfig);
 
     expect(cfg.statePath).toBe(path.join(home, "custom", "clawline"));
-    expect(cfg.media.storagePath).toBe(
-      path.join(home, "custom", "media"),
-    );
-    expect(cfg.alertInstructionsPath).toBe(
-      path.join(home, "custom", "instructions.md"),
-    );
+    expect(cfg.media.storagePath).toBe(path.join(home, "custom", "media"));
+    expect(cfg.alertInstructionsPath).toBe(path.join(home, "custom", "instructions.md"));
   });
 
   it("resolves relative media paths to absolute", () => {
@@ -82,24 +75,7 @@ describe("resolveClawlineConfig", () => {
       },
     } as ClawdbotConfig);
 
-    expect(cfg.media.storagePath).toBe(
-      path.resolve("relative/media"),
-    );
-    expect(cfg.alertInstructionsPath).toBe(
-      path.resolve("relative/instructions.md"),
-    );
-  });
-
-  it("merges alert target overrides", () => {
-    const cfg = resolveClawlineConfig({
-      clawline: {
-        alertTarget: {
-          to: "river",
-        },
-      },
-    } as ClawdbotConfig);
-
-    expect(cfg.alertTarget.channel).toBe("clawline");
-    expect(cfg.alertTarget.to).toBe("river");
+    expect(cfg.media.storagePath).toBe(path.resolve("relative/media"));
+    expect(cfg.alertInstructionsPath).toBe(path.resolve("relative/instructions.md"));
   });
 });

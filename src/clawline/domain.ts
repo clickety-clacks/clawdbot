@@ -33,10 +33,6 @@ export type PendingEntry = {
 };
 
 export type PendingFile = { version: 1; entries: PendingEntry[] };
-export type AlertTargetConfig = {
-  channel: string;
-  to?: string;
-};
 
 export interface ProviderConfig {
   port: number;
@@ -48,7 +44,6 @@ export interface ProviderConfig {
     allowedOrigins?: string[];
   };
   adapter?: string | null;
-  alertTarget: AlertTargetConfig;
   auth: {
     jwtSigningKey?: string | null;
     tokenTtlSeconds: number | null;
