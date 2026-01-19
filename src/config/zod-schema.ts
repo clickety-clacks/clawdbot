@@ -139,6 +139,7 @@ const ClawlineConfigSchema = z
     enabled: z.boolean().optional(),
     port: z.number().int().positive().optional(),
     statePath: z.string().optional(),
+    alertInstructionsPath: z.string().optional(),
     network: z
       .object({
         bindAddress: z.string().optional(),
