@@ -1312,10 +1312,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   if (assetCleanupInterval && typeof assetCleanupInterval.unref === "function") {
     assetCleanupInterval.unref();
   }
-  const allowlistWatcher: FSWatcher = watch(allowlistPath, { persistent: false }, () => {
-    void refreshAllowlistFromDisk();
-  });
-  allowlistWatcher.on("error", (err) => logger.warn?.("allowlist_watch_failed", err));
   const pendingFileWatcher: FSWatcher = watch(pendingPath, { persistent: false }, () => {
     void refreshPendingFile();
   });
@@ -1500,6 +1496,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     const payload: jwt.JwtPayload = {
       sub: entry.userId,
       deviceId: entry.deviceId,
+      isAdmin: entry.isAdmin,
       iat: Math.floor(Date.now() / 1000),
     };
     if (config.auth.tokenTtlSeconds) {
@@ -2305,6 +2302,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
     const sanitizedClaimedName = sanitizeLabel(payload.claimedName);
     const deviceId = payload.deviceId;
+    await refreshAllowlistFromDisk();
     const entry = findAllowlistEntry(deviceId);
     if (entry) {
       logger.info?.("[clawline:http] pair_request_allowlist_entry", {
@@ -2521,6 +2519,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       authenticated: true,
       deviceId: session.deviceId,
       userId: session.userId,
+      isAdmin: session.isAdmin,
       sessionId: session.sessionId,
     });
     try {
@@ -2601,7 +2600,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     },
     async stop() {
       if (!started) return;
-      allowlistWatcher.close();
       pendingFileWatcher.close();
       denylistWatcher.close();
       clearInterval(pendingCleanupInterval);
