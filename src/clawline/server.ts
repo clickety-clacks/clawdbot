@@ -1422,6 +1422,18 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         void deliverPendingApproval(entry);
       }
     }
+
+    for (const session of sessionsByDevice.values()) {
+      const entry = findAllowlistEntry(session.deviceId);
+      if (!entry) continue;
+      if (session.isAdmin !== entry.isAdmin) {
+        session.isAdmin = entry.isAdmin;
+        const state = connectionState.get(session.socket);
+        if (state && state.authenticated) {
+          state.isAdmin = entry.isAdmin;
+        }
+      }
+    }
   }
 
   function reconcilePendingSocketsWithFile() {
@@ -1618,7 +1630,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       success: true,
       userId: session.userId,
       sessionId: session.sessionId,
-      isAdmin: sessionHasAdminAccess(session),
+      isAdmin: session.isAdmin,
       replayCount: limited.length,
       replayTruncated: combined.length > limited.length,
       historyReset: lastMessageId ? false : true,
@@ -1632,41 +1644,39 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
   }
 
-  function broadcastToUser(userId: string, payload: ServerMessage) {
-    const sessions = userSessions.get(userId);
-    if (!sessions) return;
-    for (const session of sessions) {
-      if (session.socket.readyState !== WebSocket.OPEN) continue;
-      session.socket.send(JSON.stringify(payload), (err) => {
-        if (err) {
-          session.socket.close();
-        }
-      });
+  function sendPayloadToSession(session: Session, payload: ServerMessage) {
+    if (payload.channelType === ADMIN_CHANNEL_TYPE && !session.isAdmin) {
+      return;
     }
-  }
-
-  function broadcastToAdmins(payload: ServerMessage) {
-    for (const session of sessionsByDevice.values()) {
-      if (!sessionHasAdminAccess(session)) continue;
-      if (session.socket.readyState !== WebSocket.OPEN) continue;
-      session.socket.send(JSON.stringify(payload), (err) => {
-        if (err) {
-          session.socket.close();
-        }
-      });
-    }
-  }
-
-  function deliverToDevice(deviceId: string, payload: ServerMessage): boolean {
-    const session = sessionsByDevice.get(deviceId);
-    if (!session || session.socket.readyState !== WebSocket.OPEN) {
-      return false;
-    }
+    if (session.socket.readyState !== WebSocket.OPEN) return;
     session.socket.send(JSON.stringify(payload), (err) => {
       if (err) {
         session.socket.close();
       }
     });
+  }
+
+  function broadcastToUser(userId: string, payload: ServerMessage) {
+    const sessions = userSessions.get(userId);
+    if (!sessions) return;
+    for (const session of sessions) {
+      sendPayloadToSession(session, payload);
+    }
+  }
+
+  function broadcastToAdmins(payload: ServerMessage) {
+    for (const session of sessionsByDevice.values()) {
+      if (!session.isAdmin) continue;
+      sendPayloadToSession(session, payload);
+    }
+  }
+
+  function deliverToDevice(deviceId: string, payload: ServerMessage): boolean {
+    const session = sessionsByDevice.get(deviceId);
+    if (!session) {
+      return false;
+    }
+    sendPayloadToSession(session, payload);
     return true;
   }
 
@@ -1675,6 +1685,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     session: Session,
     payload: ServerMessage,
   ) {
+    if (!payload.channelType) {
+      payload.channelType = channelType;
+    }
     if (channelType === ADMIN_CHANNEL_TYPE) {
       broadcastToAdmins(payload);
       return;
