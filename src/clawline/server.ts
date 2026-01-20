@@ -306,6 +306,7 @@ type Session = {
   socket: WebSocket;
   deviceId: string;
   userId: string;
+  isAdmin: boolean;
   sessionId: string;
   sessionKey: string;
   peerId: string;
@@ -317,6 +318,7 @@ type ConnectionState = {
   authenticated: boolean;
   deviceId?: string;
   userId?: string;
+  isAdmin?: boolean;
   sessionId?: string;
 };
 
@@ -350,10 +352,6 @@ const DEFAULT_CONFIG: ProviderConfig = {
     allowedOrigins: [],
   },
   adapter: null,
-  alertTarget: {
-    channel: "clawline",
-    to: "flynn",
-  },
   auth: {
     jwtSigningKey: null,
     tokenTtlSeconds: 31_536_000,
@@ -1035,7 +1033,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       let text = buildAlertText(payload.message, payload.source);
       text = await applyAlertInstructions(text);
       await wakeGatewayForAlert(text);
-      await deliverAlertTarget(text);
       res.setHeader("Content-Type", "application/json");
       res.writeHead(200);
       res.end(JSON.stringify({ ok: true }));
@@ -1209,32 +1206,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       throw err instanceof HttpError
         ? err
         : new HttpError(502, "wake_failed", "Failed to wake CLU");
-    }
-  }
-
-  async function deliverAlertTarget(text: string) {
-    const channel = config.alertTarget.channel.trim();
-    const to = config.alertTarget.to?.trim();
-    if (!channel || !to) {
-      throw new HttpError(500, "alert_target_missing", "Alert target is not configured");
-    }
-    try {
-      await sendMessage({
-        channel,
-        to,
-        content: text,
-        cfg: clawdbotCfg,
-        gateway: {
-          clientName: GATEWAY_CLIENT_NAMES.CLI,
-          clientDisplayName: "clawline-alert",
-          mode: GATEWAY_CLIENT_MODES.BACKEND,
-        },
-      });
-    } catch (err) {
-      logger.error("alert_delivery_failed", err);
-      throw err instanceof HttpError
-        ? err
-        : new HttpError(502, "delivery_failed", "Failed to deliver alert");
     }
   }
 
@@ -1415,15 +1386,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     return allowlist.entries.find((entry) => entry.deviceId === deviceId);
   }
 
-  function deviceHasAdminAccess(deviceId: string): boolean {
-    const entry = findAllowlistEntry(deviceId);
-    return entry?.isAdmin === true;
-  }
-
-  function sessionHasAdminAccess(session: Session): boolean {
-    return deviceHasAdminAccess(session.deviceId);
-  }
-
   function findPendingEntry(deviceId: string) {
     return pendingFile.entries.find((entry) => entry.deviceId === deviceId);
   }
@@ -1501,6 +1463,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     const payload: jwt.JwtPayload = {
       sub: entry.userId,
       deviceId: entry.deviceId,
+      isAdmin: entry.isAdmin,
       iat: Math.floor(Date.now() / 1000),
     };
     if (config.auth.tokenTtlSeconds) {
@@ -1600,7 +1563,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     const transcriptTargets: Array<{ userId: string; channelType: ChannelType }> = [
       { userId: session.userId, channelType: DEFAULT_CHANNEL_TYPE },
     ];
-    if (sessionHasAdminAccess(session)) {
+    if (session.isAdmin) {
       transcriptTargets.push({ userId: ADMIN_TRANSCRIPT_USER_ID, channelType: ADMIN_CHANNEL_TYPE });
     }
     let anchor: { userId: string; sequence: number; timestamp: number } | null = null;
@@ -1649,7 +1612,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       success: true,
       userId: session.userId,
       sessionId: session.sessionId,
-      isAdmin: sessionHasAdminAccess(session),
       replayCount: limited.length,
       replayTruncated: combined.length > limited.length,
       historyReset: lastMessageId ? false : true,
@@ -1678,7 +1640,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
   function broadcastToAdmins(payload: ServerMessage) {
     for (const session of sessionsByDevice.values()) {
-      if (!sessionHasAdminAccess(session)) continue;
+      if (!session.isAdmin) continue;
       if (session.socket.readyState !== WebSocket.OPEN) continue;
       session.socket.send(JSON.stringify(payload), (err) => {
         if (err) {
@@ -1883,7 +1845,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       }
       const attachmentsHash = hashAttachments(attachmentsInfo.attachments);
       const channelType = normalizeChannelType(payload.channelType);
-      if (channelType === ADMIN_CHANNEL_TYPE && !sessionHasAdminAccess(session)) {
+      if (channelType === ADMIN_CHANNEL_TYPE && !session.isAdmin) {
         throw new ClientMessageError("forbidden", "Admin channel requires admin access");
       }
       const targetUserId = getTranscriptUserId(session, channelType);
@@ -2305,6 +2267,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
     const sanitizedClaimedName = sanitizeLabel(payload.claimedName);
     const deviceId = payload.deviceId;
+    await refreshAllowlistFromDisk();
     const entry = findAllowlistEntry(deviceId);
     if (entry) {
       logger.info?.("[clawline:http] pair_request_allowlist_entry", {
@@ -2510,6 +2473,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       socket: ws,
       deviceId: entry.deviceId,
       userId: entry.userId,
+      isAdmin: entry.isAdmin,
       sessionId: `session_${randomUUID()}`,
       sessionKey,
       peerId,
@@ -2521,6 +2485,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       authenticated: true,
       deviceId: session.deviceId,
       userId: session.userId,
+      isAdmin: session.isAdmin,
       sessionId: session.sessionId,
     });
     try {

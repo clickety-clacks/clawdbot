@@ -73,6 +73,7 @@ async function setupTestServer(
   await fs.mkdir(mediaPath, { recursive: true });
   await fs.mkdir(path.join(mediaPath, "assets"), { recursive: true });
   await fs.mkdir(path.join(mediaPath, "tmp"), { recursive: true });
+  await fs.mkdir(path.join(root, "sessions"), { recursive: true });
   const allowlistPath = path.join(statePath, "allowlist.json");
   await fs.writeFile(
     allowlistPath,
@@ -88,7 +89,6 @@ async function setupTestServer(
     const contents = options.alertInstructionsText ?? "";
     await fs.writeFile(alertInstructionsPath, contents);
   }
-  const sessionStorePath = path.join(root, "sessions.json");
 
   const server = await createProviderServer({
     config: {
@@ -100,7 +100,7 @@ async function setupTestServer(
     clawdbotConfig: testClawdbotConfig,
     replyResolver: testReplyResolver,
     logger: silentLogger,
-    sessionStorePath,
+    sessionStorePath: path.join(root, "sessions"),
   });
   await server.start();
   const cleanup = async () => {
@@ -200,22 +200,6 @@ async function performPairRequest(port: number, deviceId: string) {
   } finally {
     ws.terminate();
   }
-}
-
-async function authenticateDevice(port: number, deviceId: string, token: string) {
-  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
-  await waitForOpen(ws);
-  ws.send(
-    JSON.stringify({
-      type: "auth",
-      protocolVersion: PROTOCOL_VERSION,
-      deviceId,
-      token,
-    }),
-  );
-  const response = await waitForMessage(ws);
-  expect(response).toMatchObject({ type: "auth_result", success: true });
-  return { ws, auth: response };
 }
 
 async function uploadAsset(port: number, token: string, data: Buffer, mimeType: string) {
@@ -410,7 +394,7 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
-  it("handles alert endpoint by waking gateway and sending message", async () => {
+  it("handles alert endpoint by waking gateway", async () => {
     const ctx = await setupTestServer();
     try {
       const response = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
@@ -427,15 +411,6 @@ describe.sequential("clawline provider server", () => {
       };
       expect(wakeCall?.params?.text).toBe("[codex] Check on Flynn");
       expect(wakeCall?.params?.mode).toBe("now");
-      expect(sendMessageMock).toHaveBeenCalledTimes(1);
-      const sendCall = sendMessageMock.mock.calls[0]?.[0] as {
-        channel?: string;
-        to?: string;
-        content?: string;
-      };
-      expect(sendCall?.channel).toBe("clawline");
-      expect(sendCall?.to).toBe("flynn");
-      expect(sendCall?.content).toBe("[codex] Check on Flynn");
     } finally {
       await ctx.cleanup();
     }
@@ -457,8 +432,6 @@ describe.sequential("clawline provider server", () => {
         | { params?: { text?: string } }
         | undefined;
       expect(wakeCall?.params?.text).toBe(expected);
-      const sendCall = sendMessageMock.mock.calls[0]?.[0] as { content?: string } | undefined;
-      expect(sendCall?.content).toBe(expected);
     } finally {
       await ctx.cleanup();
     }
@@ -480,8 +453,6 @@ describe.sequential("clawline provider server", () => {
         | { params?: { text?: string } }
         | undefined;
       expect(wakeCall?.params?.text).toBe(expected);
-      const sendCall = sendMessageMock.mock.calls[0]?.[0] as { content?: string } | undefined;
-      expect(sendCall?.content).toBe(expected);
     } finally {
       await ctx.cleanup();
     }
