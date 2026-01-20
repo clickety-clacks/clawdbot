@@ -73,7 +73,9 @@ async function setupTestServer(
   await fs.mkdir(mediaPath, { recursive: true });
   await fs.mkdir(path.join(mediaPath, "assets"), { recursive: true });
   await fs.mkdir(path.join(mediaPath, "tmp"), { recursive: true });
-  await fs.mkdir(path.join(root, "sessions"), { recursive: true });
+  const sessionStoreDir = path.join(root, "sessions");
+  await fs.mkdir(sessionStoreDir, { recursive: true });
+  const sessionStorePath = path.join(sessionStoreDir, "sessions.json");
   const allowlistPath = path.join(statePath, "allowlist.json");
   await fs.writeFile(
     allowlistPath,
@@ -100,7 +102,7 @@ async function setupTestServer(
     clawdbotConfig: testClawdbotConfig,
     replyResolver: testReplyResolver,
     logger: silentLogger,
-    sessionStorePath: path.join(root, "sessions"),
+    sessionStorePath,
   });
   await server.start();
   const cleanup = async () => {
@@ -216,6 +218,27 @@ async function uploadAsset(port: number, token: string, data: Buffer, mimeType: 
     throw new Error(`Upload failed with status ${response.status}`);
   }
   return response.json() as Promise<{ assetId: string; mimeType: string; size: number }>;
+}
+
+async function authenticateDevice(port: number, deviceId: string, token: string) {
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+  await waitForOpen(ws);
+  ws.send(
+    JSON.stringify({
+      type: "auth",
+      protocolVersion: PROTOCOL_VERSION,
+      deviceId,
+      token,
+    }),
+  );
+  const auth = await waitForMessage(ws);
+  if (!auth?.success) {
+    ws.terminate();
+    throw new Error(
+      `Auth failed for ${deviceId}: ${typeof auth === "object" ? JSON.stringify(auth) : auth}`,
+    );
+  }
+  return { ws, auth };
 }
 
 describe.sequential("clawline provider server", () => {
