@@ -12,9 +12,7 @@ function resolvePowerShellPath(): string {
       "v1.0",
       "powershell.exe",
     );
-    if (fs.existsSync(candidate)) {
-      return candidate;
-    }
+    if (fs.existsSync(candidate)) return candidate;
   }
   return "powershell.exe";
 }
