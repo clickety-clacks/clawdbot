@@ -1,23 +1,6 @@
-import fs from "node:fs";
-import path from "node:path";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-
-function resolvePowerShellPath(): string {
-  const systemRoot = process.env.SystemRoot || process.env.WINDIR;
-  if (systemRoot) {
-    const candidate = path.join(
-      systemRoot,
-      "System32",
-      "WindowsPowerShell",
-      "v1.0",
-      "powershell.exe",
-    );
-    if (fs.existsSync(candidate)) return candidate;
-  }
-  return "powershell.exe";
-}
 
 function resolvePowerShellPath(): string {
   const systemRoot = process.env.SystemRoot || process.env.WINDIR;
