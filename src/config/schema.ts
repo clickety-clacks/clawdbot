@@ -47,6 +47,7 @@ export type ChannelUiMetadata = {
 const GROUP_LABELS: Record<string, string> = {
   wizard: "Wizard",
   update: "Update",
+  diagnostics: "Diagnostics",
   logging: "Logging",
   gateway: "Gateway",
   agents: "Agents",
@@ -73,6 +74,7 @@ const GROUP_LABELS: Record<string, string> = {
 const GROUP_ORDER: Record<string, number> = {
   wizard: 20,
   update: 25,
+  diagnostics: 27,
   gateway: 30,
   agents: 40,
   tools: 50,
@@ -101,11 +103,23 @@ const FIELD_LABELS: Record<string, string> = {
   "meta.lastTouchedAt": "Config Last Touched At",
   "update.channel": "Update Channel",
   "update.checkOnStart": "Update Check on Start",
+  "diagnostics.enabled": "Diagnostics Enabled",
+  "diagnostics.otel.enabled": "OpenTelemetry Enabled",
+  "diagnostics.otel.endpoint": "OpenTelemetry Endpoint",
+  "diagnostics.otel.protocol": "OpenTelemetry Protocol",
+  "diagnostics.otel.headers": "OpenTelemetry Headers",
+  "diagnostics.otel.serviceName": "OpenTelemetry Service Name",
+  "diagnostics.otel.traces": "OpenTelemetry Traces Enabled",
+  "diagnostics.otel.metrics": "OpenTelemetry Metrics Enabled",
+  "diagnostics.otel.logs": "OpenTelemetry Logs Enabled",
+  "diagnostics.otel.sampleRate": "OpenTelemetry Trace Sample Rate",
+  "diagnostics.otel.flushIntervalMs": "OpenTelemetry Flush Interval (ms)",
   "gateway.remote.url": "Remote Gateway URL",
   "gateway.remote.sshTarget": "Remote Gateway SSH Target",
   "gateway.remote.sshIdentity": "Remote Gateway SSH Identity",
   "gateway.remote.token": "Remote Gateway Token",
   "gateway.remote.password": "Remote Gateway Password",
+  "gateway.remote.tlsFingerprint": "Remote Gateway TLS Fingerprint",
   "gateway.auth.token": "Gateway Token",
   "gateway.auth.password": "Gateway Password",
   "tools.media.image.enabled": "Enable Image Understanding",
@@ -169,6 +183,8 @@ const FIELD_LABELS: Record<string, string> = {
   "gateway.http.endpoints.chatCompletions.enabled": "OpenAI Chat Completions Endpoint",
   "gateway.reload.mode": "Config Reload Mode",
   "gateway.reload.debounceMs": "Config Reload Debounce (ms)",
+  "gateway.nodes.allowCommands": "Gateway Node Allowlist (Extra Commands)",
+  "gateway.nodes.denyCommands": "Gateway Node Denylist",
   "skills.load.watch": "Watch Skills",
   "skills.load.watchDebounceMs": "Skills Watch Debounce (ms)",
   "agents.defaults.workspace": "Workspace",
@@ -248,6 +264,7 @@ const FIELD_LABELS: Record<string, string> = {
   "channels.slack": "Slack",
   "channels.signal": "Signal",
   "channels.imessage": "iMessage",
+  "channels.bluebubbles": "BlueBubbles",
   "channels.msteams": "MS Teams",
   "channels.telegram.botToken": "Telegram Bot Token",
   "channels.telegram.dmPolicy": "Telegram DM Policy",
@@ -266,6 +283,7 @@ const FIELD_LABELS: Record<string, string> = {
   "channels.whatsapp.debounceMs": "WhatsApp Message Debounce (ms)",
   "channels.signal.dmPolicy": "Signal DM Policy",
   "channels.imessage.dmPolicy": "iMessage DM Policy",
+  "channels.bluebubbles.dmPolicy": "BlueBubbles DM Policy",
   "channels.discord.dm.policy": "Discord DM Policy",
   "channels.discord.retry.attempts": "Discord Retry Attempts",
   "channels.discord.retry.minDelayMs": "Discord Retry Min Delay (ms)",
@@ -304,9 +322,11 @@ const FIELD_LABELS: Record<string, string> = {
 const FIELD_HELP: Record<string, string> = {
   "meta.lastTouchedVersion": "Auto-set when Clawdbot writes the config.",
   "meta.lastTouchedAt": "ISO timestamp of the last config write (auto-set).",
-  "update.channel": 'Update channel for npm installs ("stable" or "beta").',
+  "update.channel": 'Update channel for git + npm installs ("stable", "beta", or "dev").',
   "update.checkOnStart": "Check for npm updates when the gateway starts (default: true).",
   "gateway.remote.url": "Remote Gateway WebSocket URL (ws:// or wss://).",
+  "gateway.remote.tlsFingerprint":
+    "Expected sha256 TLS fingerprint for the remote gateway (pin to avoid MITM).",
   "gateway.remote.sshTarget":
     "Remote gateway over SSH (tunnels the gateway port to localhost). Format: user@host or user@host:port.",
   "gateway.remote.sshIdentity": "Optional SSH identity file path (passed to ssh -i).",
@@ -318,6 +338,10 @@ const FIELD_HELP: Record<string, string> = {
     "Enable the OpenAI-compatible `POST /v1/chat/completions` endpoint (default: false).",
   "gateway.reload.mode": 'Hot reload strategy for config changes ("hybrid" recommended).',
   "gateway.reload.debounceMs": "Debounce window (ms) before applying config changes.",
+  "gateway.nodes.allowCommands":
+    "Extra node.invoke commands to allow beyond the gateway defaults (array of command strings).",
+  "gateway.nodes.denyCommands":
+    "Commands to block even if present in node claims or default allowlist.",
   "tools.exec.applyPatch.enabled":
     "Experimental. Enables apply_patch for OpenAI models when allowed by tool policy.",
   "tools.exec.applyPatch.allowModels":
@@ -338,12 +362,18 @@ const FIELD_HELP: Record<string, string> = {
   "tools.message.crossContext.marker.suffix":
     'Text suffix for cross-context markers (supports "{channel}").',
   "tools.message.broadcast.enabled": "Enable broadcast action (default: true).",
-  "tools.web.search.enabled": "Enable the web_search tool (requires Brave API key).",
-  "tools.web.search.provider": 'Search provider (only "brave" supported today).',
+  "tools.web.search.enabled": "Enable the web_search tool (requires a provider API key).",
+  "tools.web.search.provider": 'Search provider ("brave" or "perplexity").',
   "tools.web.search.apiKey": "Brave Search API key (fallback: BRAVE_API_KEY env var).",
   "tools.web.search.maxResults": "Default number of results to return (1-10).",
   "tools.web.search.timeoutSeconds": "Timeout in seconds for web_search requests.",
   "tools.web.search.cacheTtlMinutes": "Cache TTL in minutes for web_search results.",
+  "tools.web.search.perplexity.apiKey":
+    "Perplexity or OpenRouter API key (fallback: PERPLEXITY_API_KEY or OPENROUTER_API_KEY env var).",
+  "tools.web.search.perplexity.baseUrl":
+    "Perplexity base URL override (default: https://openrouter.ai/api/v1 or https://api.perplexity.ai).",
+  "tools.web.search.perplexity.model":
+    'Perplexity model override (default: "perplexity/sonar-pro").',
   "tools.web.fetch.enabled": "Enable the web_fetch tool (lightweight HTTP fetch).",
   "tools.web.fetch.maxChars": "Max characters returned by web_fetch (truncated).",
   "tools.web.fetch.timeoutSeconds": "Timeout in seconds for web_fetch requests.",
@@ -534,6 +564,8 @@ const FIELD_HELP: Record<string, string> = {
     'Direct message access control ("pairing" recommended). "open" requires channels.signal.allowFrom=["*"].',
   "channels.imessage.dmPolicy":
     'Direct message access control ("pairing" recommended). "open" requires channels.imessage.allowFrom=["*"].',
+  "channels.bluebubbles.dmPolicy":
+    'Direct message access control ("pairing" recommended). "open" requires channels.bluebubbles.allowFrom=["*"].',
   "channels.discord.dm.policy":
     'Direct message access control ("pairing" recommended). "open" requires channels.discord.dm.allowFrom=["*"].',
   "channels.discord.retry.attempts":
@@ -548,6 +580,7 @@ const FIELD_HELP: Record<string, string> = {
 
 const FIELD_PLACEHOLDERS: Record<string, string> = {
   "gateway.remote.url": "ws://host:18789",
+  "gateway.remote.tlsFingerprint": "sha256:ab12cd34…",
   "gateway.remote.sshTarget": "user@host",
   "gateway.controlUi.basePath": "/clawdbot",
 };

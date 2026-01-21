@@ -9,6 +9,7 @@ import { runEmbeddedPiAgent } from "../../agents/pi-embedded.js";
 import {
   isCompactionFailureError,
   isContextOverflowError,
+  isLikelyContextOverflowError,
   sanitizeUserFacingText,
 } from "../../agents/pi-embedded-helpers.js";
 import {
@@ -209,6 +210,8 @@ export async function runAgentTurnWithFallback(params: {
             sessionKey: params.sessionKey,
             messageProvider: params.sessionCtx.Provider?.trim().toLowerCase() || undefined,
             agentAccountId: params.sessionCtx.AccountId,
+            messageTo: params.sessionCtx.OriginatingTo ?? params.sessionCtx.To,
+            messageThreadId: params.sessionCtx.MessageThreadId ?? undefined,
             // Provider threading context for tool auto-injection
             ...buildThreadingToolContext({
               sessionCtx: params.sessionCtx,
@@ -301,6 +304,9 @@ export async function runAgentTurnWithFallback(params: {
                       text,
                       mediaUrls: payload.mediaUrls,
                       mediaUrl: payload.mediaUrls?.[0],
+                      replyToId: payload.replyToId,
+                      replyToTag: payload.replyToTag,
+                      replyToCurrent: payload.replyToCurrent,
                     },
                     params.sessionCtx.MessageSid,
                   );
@@ -419,9 +425,7 @@ export async function runAgentTurnWithFallback(params: {
       break;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      const isContextOverflow =
-        isContextOverflowError(message) ||
-        /context.*overflow|too large|context window/i.test(message);
+      const isContextOverflow = isLikelyContextOverflowError(message);
       const isCompactionFailure = isCompactionFailureError(message);
       const isSessionCorruption = /function call turn comes immediately after/i.test(message);
       const isRoleOrderingError = /incorrect role information|roles must alternate/i.test(message);

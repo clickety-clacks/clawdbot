@@ -21,6 +21,7 @@ import {
   ensureAuthProfileStore,
   getApiKeyForModel,
   resolveAuthProfileOrder,
+  type ResolvedProviderAuth,
 } from "../model-auth.js";
 import { ensureClawdbotModelsJson } from "../models-config.js";
 import {
@@ -47,11 +48,7 @@ import { buildEmbeddedRunPayloads } from "./run/payloads.js";
 import type { EmbeddedPiAgentMeta, EmbeddedPiRunResult } from "./types.js";
 import { describeUnknownError } from "./utils.js";
 
-type ApiKeyInfo = {
-  apiKey: string;
-  profileId?: string;
-  source: string;
-};
+type ApiKeyInfo = ResolvedProviderAuth;
 
 export async function runEmbeddedPiAgent(
   params: RunEmbeddedPiAgentParams,
@@ -151,6 +148,15 @@ export async function runEmbeddedPiAgent(
 
       const applyApiKeyInfo = async (candidate?: string): Promise<void> => {
         apiKeyInfo = await resolveApiKeyForCandidate(candidate);
+        if (!apiKeyInfo.apiKey) {
+          if (apiKeyInfo.mode !== "aws-sdk") {
+            throw new Error(
+              `No API key resolved for provider "${model.provider}" (auth mode: ${apiKeyInfo.mode}).`,
+            );
+          }
+          lastProfileId = apiKeyInfo.profileId;
+          return;
+        }
         if (model.provider === "github-copilot") {
           const { resolveCopilotApiToken } =
             await import("../../providers/github-copilot-token.js");
@@ -202,6 +208,8 @@ export async function runEmbeddedPiAgent(
             messageChannel: params.messageChannel,
             messageProvider: params.messageProvider,
             agentAccountId: params.agentAccountId,
+            messageTo: params.messageTo,
+            messageThreadId: params.messageThreadId,
             currentChannelId: params.currentChannelId,
             currentThreadTs: params.currentThreadTs,
             replyToMode: params.replyToMode,
@@ -239,6 +247,7 @@ export async function runEmbeddedPiAgent(
             onToolResult: params.onToolResult,
             onAgentEvent: params.onAgentEvent,
             extraSystemPrompt: params.extraSystemPrompt,
+            streamParams: params.streamParams,
             ownerNumbers: params.ownerNumbers,
             enforceFinalTag: params.enforceFinalTag,
           });
@@ -482,6 +491,17 @@ export async function runEmbeddedPiAgent(
               agentMeta,
               aborted,
               systemPromptReport: attempt.systemPromptReport,
+              // Handle client tool calls (OpenResponses hosted tools)
+              stopReason: attempt.clientToolCall ? "tool_calls" : undefined,
+              pendingToolCalls: attempt.clientToolCall
+                ? [
+                    {
+                      id: `call_${Date.now()}`,
+                      name: attempt.clientToolCall.name,
+                      arguments: JSON.stringify(attempt.clientToolCall.params),
+                    },
+                  ]
+                : undefined,
             },
             didSendViaMessagingTool: attempt.didSendViaMessagingTool,
             messagingToolSentTexts: attempt.messagingToolSentTexts,

@@ -5,7 +5,12 @@ import type { Command } from "commander";
 
 import { readConfigFileSnapshot, writeConfigFile } from "../config/config.js";
 import { resolveClawdbotPackageRoot } from "../infra/clawdbot-root.js";
-import { compareSemverStrings, fetchNpmTagVersion } from "../infra/update-check.js";
+import {
+  checkUpdateStatus,
+  compareSemverStrings,
+  fetchNpmTagVersion,
+  resolveNpmChannelTag,
+} from "../infra/update-check.js";
 import { parseSemver } from "../infra/runtime-guard.js";
 import {
   runGatewayUpdate,
@@ -13,16 +18,36 @@ import {
   type UpdateStepInfo,
   type UpdateStepProgress,
 } from "../infra/update-runner.js";
+import {
+  channelToNpmTag,
+  DEFAULT_GIT_CHANNEL,
+  DEFAULT_PACKAGE_CHANNEL,
+  formatUpdateChannelLabel,
+  normalizeUpdateChannel,
+  resolveEffectiveUpdateChannel,
+} from "../infra/update-channels.js";
 import { defaultRuntime } from "../runtime.js";
 import { formatDocsLink } from "../terminal/links.js";
+import { formatCliCommand } from "./command-format.js";
 import { stylePromptMessage } from "../terminal/prompt-style.js";
 import { theme } from "../terminal/theme.js";
+import { renderTable } from "../terminal/table.js";
+import {
+  formatUpdateAvailableHint,
+  formatUpdateOneLiner,
+  resolveUpdateAvailability,
+} from "../commands/status.update.js";
+import { syncPluginsForUpdateChannel, updateNpmInstalledPlugins } from "../plugins/update.js";
 
 export type UpdateCommandOptions = {
   json?: boolean;
   restart?: boolean;
   channel?: string;
   tag?: string;
+  timeout?: string;
+};
+export type UpdateStatusOptions = {
+  json?: boolean;
   timeout?: string;
 };
 
@@ -39,9 +64,6 @@ const STEP_LABELS: Record<string, string> = {
   "global update": "Updating via package manager",
 };
 
-type UpdateChannel = "stable" | "beta";
-
-const DEFAULT_UPDATE_CHANNEL: UpdateChannel = "stable";
 const UPDATE_QUIPS = [
   "Leveled up! New skills unlocked. You're welcome.",
   "Fresh code, same lobster. Miss me?",
@@ -65,22 +87,11 @@ const UPDATE_QUIPS = [
   "Version bump! Same chaos energy, fewer crashes (probably).",
 ];
 
-function normalizeChannel(value?: string | null): UpdateChannel | null {
-  if (!value) return null;
-  const normalized = value.trim().toLowerCase();
-  if (normalized === "stable" || normalized === "beta") return normalized;
-  return null;
-}
-
 function normalizeTag(value?: string | null): string | null {
   if (!value) return null;
   const trimmed = value.trim();
   if (!trimmed) return null;
   return trimmed.startsWith("clawdbot@") ? trimmed.slice("clawdbot@".length) : trimmed;
-}
-
-function channelToTag(channel: UpdateChannel): string {
-  return channel === "beta" ? "beta" : "latest";
 }
 
 function pickUpdateQuip(): string {
@@ -117,6 +128,125 @@ async function isGitCheckout(root: string): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+function formatGitStatusLine(params: {
+  branch: string | null;
+  tag: string | null;
+  sha: string | null;
+}): string {
+  const shortSha = params.sha ? params.sha.slice(0, 8) : null;
+  const branch = params.branch && params.branch !== "HEAD" ? params.branch : null;
+  const tag = params.tag;
+  const parts = [
+    branch ?? (tag ? "detached" : "git"),
+    tag ? `tag ${tag}` : null,
+    shortSha ? `@ ${shortSha}` : null,
+  ].filter(Boolean);
+  return parts.join(" · ");
+}
+
+export async function updateStatusCommand(opts: UpdateStatusOptions): Promise<void> {
+  const timeoutMs = opts.timeout ? Number.parseInt(opts.timeout, 10) * 1000 : undefined;
+  if (timeoutMs !== undefined && (Number.isNaN(timeoutMs) || timeoutMs <= 0)) {
+    defaultRuntime.error("--timeout must be a positive integer (seconds)");
+    defaultRuntime.exit(1);
+    return;
+  }
+
+  const root =
+    (await resolveClawdbotPackageRoot({
+      moduleUrl: import.meta.url,
+      argv1: process.argv[1],
+      cwd: process.cwd(),
+    })) ?? process.cwd();
+  const configSnapshot = await readConfigFileSnapshot();
+  const configChannel = configSnapshot.valid
+    ? normalizeUpdateChannel(configSnapshot.config.update?.channel)
+    : null;
+
+  const update = await checkUpdateStatus({
+    root,
+    timeoutMs: timeoutMs ?? 3500,
+    fetchGit: true,
+    includeRegistry: true,
+  });
+  const channelInfo = resolveEffectiveUpdateChannel({
+    configChannel,
+    installKind: update.installKind,
+    git: update.git ? { tag: update.git.tag, branch: update.git.branch } : undefined,
+  });
+  const channelLabel = formatUpdateChannelLabel({
+    channel: channelInfo.channel,
+    source: channelInfo.source,
+    gitTag: update.git?.tag ?? null,
+    gitBranch: update.git?.branch ?? null,
+  });
+  const gitLabel =
+    update.installKind === "git"
+      ? formatGitStatusLine({
+          branch: update.git?.branch ?? null,
+          tag: update.git?.tag ?? null,
+          sha: update.git?.sha ?? null,
+        })
+      : null;
+  const updateAvailability = resolveUpdateAvailability(update);
+  const updateLine = formatUpdateOneLiner(update).replace(/^Update:\s*/i, "");
+
+  if (opts.json) {
+    defaultRuntime.log(
+      JSON.stringify(
+        {
+          update,
+          channel: {
+            value: channelInfo.channel,
+            source: channelInfo.source,
+            label: channelLabel,
+            config: configChannel,
+          },
+          availability: updateAvailability,
+        },
+        null,
+        2,
+      ),
+    );
+    return;
+  }
+
+  const tableWidth = Math.max(60, (process.stdout.columns ?? 120) - 1);
+  const installLabel =
+    update.installKind === "git"
+      ? `git (${update.root ?? "unknown"})`
+      : update.installKind === "package"
+        ? update.packageManager
+        : "unknown";
+  const rows = [
+    { Item: "Install", Value: installLabel },
+    { Item: "Channel", Value: channelLabel },
+    ...(gitLabel ? [{ Item: "Git", Value: gitLabel }] : []),
+    {
+      Item: "Update",
+      Value: updateAvailability.available ? theme.warn(`available · ${updateLine}`) : updateLine,
+    },
+  ];
+
+  defaultRuntime.log(theme.heading("Clawdbot update status"));
+  defaultRuntime.log("");
+  defaultRuntime.log(
+    renderTable({
+      width: tableWidth,
+      columns: [
+        { key: "Item", header: "Item", minWidth: 10 },
+        { key: "Value", header: "Value", flex: true, minWidth: 24 },
+      ],
+      rows,
+    }).trimEnd(),
+  );
+  defaultRuntime.log("");
+  const updateHint = formatUpdateAvailableHint(update);
+  if (updateHint) {
+    defaultRuntime.log(theme.warn(updateHint));
   }
 }
 
@@ -261,13 +391,14 @@ export async function updateCommand(opts: UpdateCommandOptions): Promise<void> {
     })) ?? process.cwd();
 
   const configSnapshot = await readConfigFileSnapshot();
+  let activeConfig = configSnapshot.valid ? configSnapshot.config : null;
   const storedChannel = configSnapshot.valid
-    ? normalizeChannel(configSnapshot.config.update?.channel)
+    ? normalizeUpdateChannel(configSnapshot.config.update?.channel)
     : null;
 
-  const requestedChannel = normalizeChannel(opts.channel);
+  const requestedChannel = normalizeUpdateChannel(opts.channel);
   if (opts.channel && !requestedChannel) {
-    defaultRuntime.error(`--channel must be "stable" or "beta" (got "${opts.channel}")`);
+    defaultRuntime.error(`--channel must be "stable", "beta", or "dev" (got "${opts.channel}")`);
     defaultRuntime.exit(1);
     return;
   }
@@ -278,13 +409,19 @@ export async function updateCommand(opts: UpdateCommandOptions): Promise<void> {
     return;
   }
 
-  const channel = requestedChannel ?? storedChannel ?? DEFAULT_UPDATE_CHANNEL;
-  const tag = normalizeTag(opts.tag) ?? channelToTag(channel);
-
   const gitCheckout = await isGitCheckout(root);
+  const defaultChannel = gitCheckout ? DEFAULT_GIT_CHANNEL : DEFAULT_PACKAGE_CHANNEL;
+  const channel = requestedChannel ?? storedChannel ?? defaultChannel;
+  const explicitTag = normalizeTag(opts.tag);
+  let tag = explicitTag ?? channelToNpmTag(channel);
   if (!gitCheckout) {
     const currentVersion = await readPackageVersion(root);
-    const targetVersion = await resolveTargetVersion(tag, timeoutMs);
+    const targetVersion = explicitTag
+      ? await resolveTargetVersion(tag, timeoutMs)
+      : await resolveNpmChannelTag({ channel, timeoutMs }).then((resolved) => {
+          tag = resolved.tag;
+          return resolved.version;
+        });
     const cmp =
       currentVersion && targetVersion ? compareSemverStrings(currentVersion, targetVersion) : null;
     const needsConfirm =
@@ -316,9 +453,9 @@ export async function updateCommand(opts: UpdateCommandOptions): Promise<void> {
         return;
       }
     }
-  } else if ((opts.channel || opts.tag) && !opts.json) {
+  } else if (opts.tag && !opts.json) {
     defaultRuntime.log(
-      theme.muted("Note: --channel/--tag apply to npm installs only; git updates ignore them."),
+      theme.muted("Note: --tag applies to npm installs only; git updates ignore it."),
     );
   }
 
@@ -331,6 +468,7 @@ export async function updateCommand(opts: UpdateCommandOptions): Promise<void> {
       },
     };
     await writeConfigFile(next);
+    activeConfig = next;
     if (!opts.json) {
       defaultRuntime.log(theme.muted(`Update channel set to ${requestedChannel}.`));
     }
@@ -350,6 +488,7 @@ export async function updateCommand(opts: UpdateCommandOptions): Promise<void> {
     argv1: process.argv[1],
     timeoutMs,
     progress,
+    channel,
     tag,
   });
 
@@ -373,7 +512,7 @@ export async function updateCommand(opts: UpdateCommandOptions): Promise<void> {
     if (result.reason === "not-git-install") {
       defaultRuntime.log(
         theme.warn(
-          "Skipped: this Clawdbot install isn't a git checkout, and the package manager couldn't be detected. Update via your package manager, then run `clawdbot doctor` and `clawdbot daemon restart`.",
+          `Skipped: this Clawdbot install isn't a git checkout, and the package manager couldn't be detected. Update via your package manager, then run \`${formatCliCommand("clawdbot doctor")}\` and \`${formatCliCommand("clawdbot daemon restart")}\`.`,
         ),
       );
       defaultRuntime.log(
@@ -382,6 +521,87 @@ export async function updateCommand(opts: UpdateCommandOptions): Promise<void> {
     }
     defaultRuntime.exit(0);
     return;
+  }
+
+  if (activeConfig) {
+    const pluginLogger = opts.json
+      ? {}
+      : {
+          info: (msg: string) => defaultRuntime.log(msg),
+          warn: (msg: string) => defaultRuntime.log(theme.warn(msg)),
+          error: (msg: string) => defaultRuntime.log(theme.error(msg)),
+        };
+
+    if (!opts.json) {
+      defaultRuntime.log("");
+      defaultRuntime.log(theme.heading("Updating plugins..."));
+    }
+
+    const syncResult = await syncPluginsForUpdateChannel({
+      config: activeConfig,
+      channel,
+      workspaceDir: root,
+      logger: pluginLogger,
+    });
+    let pluginConfig = syncResult.config;
+
+    const npmResult = await updateNpmInstalledPlugins({
+      config: pluginConfig,
+      skipIds: new Set(syncResult.summary.switchedToNpm),
+      logger: pluginLogger,
+    });
+    pluginConfig = npmResult.config;
+
+    if (syncResult.changed || npmResult.changed) {
+      await writeConfigFile(pluginConfig);
+    }
+
+    if (!opts.json) {
+      const summarizeList = (list: string[]) => {
+        if (list.length <= 6) return list.join(", ");
+        return `${list.slice(0, 6).join(", ")} +${list.length - 6} more`;
+      };
+
+      if (syncResult.summary.switchedToBundled.length > 0) {
+        defaultRuntime.log(
+          theme.muted(
+            `Switched to bundled plugins: ${summarizeList(syncResult.summary.switchedToBundled)}.`,
+          ),
+        );
+      }
+      if (syncResult.summary.switchedToNpm.length > 0) {
+        defaultRuntime.log(
+          theme.muted(`Restored npm plugins: ${summarizeList(syncResult.summary.switchedToNpm)}.`),
+        );
+      }
+      for (const warning of syncResult.summary.warnings) {
+        defaultRuntime.log(theme.warn(warning));
+      }
+      for (const error of syncResult.summary.errors) {
+        defaultRuntime.log(theme.error(error));
+      }
+
+      const updated = npmResult.outcomes.filter((entry) => entry.status === "updated").length;
+      const unchanged = npmResult.outcomes.filter((entry) => entry.status === "unchanged").length;
+      const failed = npmResult.outcomes.filter((entry) => entry.status === "error").length;
+      const skipped = npmResult.outcomes.filter((entry) => entry.status === "skipped").length;
+
+      if (npmResult.outcomes.length === 0) {
+        defaultRuntime.log(theme.muted("No plugin updates needed."));
+      } else {
+        const parts = [`${updated} updated`, `${unchanged} unchanged`];
+        if (failed > 0) parts.push(`${failed} failed`);
+        if (skipped > 0) parts.push(`${skipped} skipped`);
+        defaultRuntime.log(theme.muted(`npm plugins: ${parts.join(", ")}.`));
+      }
+
+      for (const outcome of npmResult.outcomes) {
+        if (outcome.status !== "error") continue;
+        defaultRuntime.log(theme.error(outcome.message));
+      }
+    }
+  } else if (!opts.json) {
+    defaultRuntime.log(theme.warn("Skipping plugin updates: config is invalid."));
   }
 
   // Restart daemon if requested
@@ -410,7 +630,9 @@ export async function updateCommand(opts: UpdateCommandOptions): Promise<void> {
       if (!opts.json) {
         defaultRuntime.log(theme.warn(`Daemon restart failed: ${String(err)}`));
         defaultRuntime.log(
-          theme.muted("You may need to restart the daemon manually: clawdbot daemon restart"),
+          theme.muted(
+            `You may need to restart the daemon manually: ${formatCliCommand("clawdbot daemon restart")}`,
+          ),
         );
       }
     }
@@ -419,12 +641,14 @@ export async function updateCommand(opts: UpdateCommandOptions): Promise<void> {
     if (result.mode === "npm" || result.mode === "pnpm") {
       defaultRuntime.log(
         theme.muted(
-          "Tip: Run `clawdbot doctor`, then `clawdbot daemon restart` to apply updates to a running gateway.",
+          `Tip: Run \`${formatCliCommand("clawdbot doctor")}\`, then \`${formatCliCommand("clawdbot daemon restart")}\` to apply updates to a running gateway.`,
         ),
       );
     } else {
       defaultRuntime.log(
-        theme.muted("Tip: Run `clawdbot daemon restart` to apply updates to a running gateway."),
+        theme.muted(
+          `Tip: Run \`${formatCliCommand("clawdbot daemon restart")}\` to apply updates to a running gateway.`,
+        ),
       );
     }
   }
@@ -435,12 +659,12 @@ export async function updateCommand(opts: UpdateCommandOptions): Promise<void> {
 }
 
 export function registerUpdateCli(program: Command) {
-  program
+  const update = program
     .command("update")
     .description("Update Clawdbot to the latest version")
     .option("--json", "Output result as JSON", false)
     .option("--restart", "Restart the gateway daemon after a successful update", false)
-    .option("--channel <stable|beta>", "Persist update channel (npm installs only)")
+    .option("--channel <stable|beta|dev>", "Persist update channel (git + npm)")
     .option("--tag <dist-tag|version>", "Override npm dist-tag or version for this update")
     .option("--timeout <seconds>", "Timeout for each update step in seconds (default: 1200)")
     .addHelpText(
@@ -449,7 +673,8 @@ export function registerUpdateCli(program: Command) {
         `
 Examples:
   clawdbot update                   # Update a source checkout (git)
-  clawdbot update --channel beta    # Switch to the beta channel (npm installs)
+  clawdbot update --channel beta    # Switch to beta channel (git + npm)
+  clawdbot update --channel dev     # Switch to dev channel (git + npm)
   clawdbot update --tag beta        # One-off update to a dist-tag or version
   clawdbot update --restart         # Update and restart the daemon
   clawdbot update --json            # Output result as JSON
@@ -470,6 +695,38 @@ ${theme.muted("Docs:")} ${formatDocsLink("/cli/update", "docs.clawd.bot/cli/upda
           restart: Boolean(opts.restart),
           channel: opts.channel as string | undefined,
           tag: opts.tag as string | undefined,
+          timeout: opts.timeout as string | undefined,
+        });
+      } catch (err) {
+        defaultRuntime.error(String(err));
+        defaultRuntime.exit(1);
+      }
+    });
+
+  update
+    .command("status")
+    .description("Show update channel and version status")
+    .option("--json", "Output result as JSON", false)
+    .option("--timeout <seconds>", "Timeout for update checks in seconds (default: 3)")
+    .addHelpText(
+      "after",
+      () =>
+        `
+Examples:
+  clawdbot update status
+  clawdbot update status --json
+  clawdbot update status --timeout 10
+
+Notes:
+  - Shows current update channel (stable/beta/dev) and source
+  - Includes git tag/branch/SHA for source checkouts
+
+${theme.muted("Docs:")} ${formatDocsLink("/cli/update", "docs.clawd.bot/cli/update")}`,
+    )
+    .action(async (opts) => {
+      try {
+        await updateStatusCommand({
+          json: Boolean(opts.json),
           timeout: opts.timeout as string | undefined,
         });
       } catch (err) {

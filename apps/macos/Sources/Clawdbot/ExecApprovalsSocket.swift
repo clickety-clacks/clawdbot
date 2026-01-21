@@ -28,7 +28,7 @@ private struct ExecApprovalSocketDecision: Codable {
     var decision: ExecApprovalDecision
 }
 
-fileprivate struct ExecHostSocketRequest: Codable {
+private struct ExecHostSocketRequest: Codable {
     var type: String
     var id: String
     var nonce: String
@@ -37,7 +37,7 @@ fileprivate struct ExecHostSocketRequest: Codable {
     var requestJson: String
 }
 
-fileprivate struct ExecHostRequest: Codable {
+private struct ExecHostRequest: Codable {
     var command: [String]
     var rawCommand: String?
     var cwd: String?
@@ -46,9 +46,10 @@ fileprivate struct ExecHostRequest: Codable {
     var needsScreenRecording: Bool?
     var agentId: String?
     var sessionKey: String?
+    var approvalDecision: ExecApprovalDecision?
 }
 
-fileprivate struct ExecHostRunResult: Codable {
+private struct ExecHostRunResult: Codable {
     var exitCode: Int?
     var timedOut: Bool
     var success: Bool
@@ -57,13 +58,13 @@ fileprivate struct ExecHostRunResult: Codable {
     var error: String?
 }
 
-fileprivate struct ExecHostError: Codable {
+private struct ExecHostError: Codable {
     var code: String
     var message: String
     var reason: String?
 }
 
-fileprivate struct ExecHostResponse: Codable {
+private struct ExecHostResponse: Codable {
     var type: String
     var id: String
     var ok: Bool
@@ -74,29 +75,32 @@ fileprivate struct ExecHostResponse: Codable {
 enum ExecApprovalsSocketClient {
     private struct TimeoutError: LocalizedError {
         var message: String
-        var errorDescription: String? { message }
+        var errorDescription: String? { self.message }
     }
 
     static func requestDecision(
         socketPath: String,
         token: String,
         request: ExecApprovalPromptRequest,
-        timeoutMs: Int = 15_000) async -> ExecApprovalDecision?
+        timeoutMs: Int = 15000) async -> ExecApprovalDecision?
     {
         let trimmedPath = socketPath.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedPath.isEmpty, !trimmedToken.isEmpty else { return nil }
         do {
-            return try await AsyncTimeout.withTimeoutMs(timeoutMs: timeoutMs, onTimeout: {
-                TimeoutError(message: "exec approvals socket timeout")
-            }, operation: {
-                try await Task.detached {
-                    try self.requestDecisionSync(
-                        socketPath: trimmedPath,
-                        token: trimmedToken,
-                        request: request)
-                }.value
-            })
+            return try await AsyncTimeout.withTimeoutMs(
+                timeoutMs: timeoutMs,
+                onTimeout: {
+                    TimeoutError(message: "exec approvals socket timeout")
+                },
+                operation: {
+                    try await Task.detached {
+                        try self.requestDecisionSync(
+                            socketPath: trimmedPath,
+                            token: trimmedToken,
+                            request: request)
+                    }.value
+                })
         } catch {
             return nil
         }
@@ -254,7 +258,21 @@ enum ExecApprovalsPromptPresenter {
 }
 
 @MainActor
-fileprivate enum ExecHostExecutor {
+private enum ExecHostExecutor {
+    private struct ExecApprovalContext {
+        let command: [String]
+        let displayCommand: String
+        let trimmedAgent: String?
+        let approvals: ExecApprovalsResolved
+        let security: ExecSecurity
+        let ask: ExecAsk
+        let autoAllowSkills: Bool
+        let env: [String: String]?
+        let resolution: ExecCommandResolution?
+        let allowlistMatch: ExecAllowlistEntry?
+        let skillAllow: Bool
+    }
+
     private static let blockedEnvKeys: Set<String> = [
         "PATH",
         "NODE_OPTIONS",
@@ -273,14 +291,93 @@ fileprivate enum ExecHostExecutor {
     static func handle(_ request: ExecHostRequest) async -> ExecHostResponse {
         let command = request.command.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         guard !command.isEmpty else {
-            return ExecHostResponse(
-                type: "exec-res",
-                id: UUID().uuidString,
-                ok: false,
-                payload: nil,
-                error: ExecHostError(code: "INVALID_REQUEST", message: "command required", reason: "invalid"))
+            return self.errorResponse(
+                code: "INVALID_REQUEST",
+                message: "command required",
+                reason: "invalid")
         }
 
+        let context = await self.buildContext(request: request, command: command)
+        if context.security == .deny {
+            return self.errorResponse(
+                code: "UNAVAILABLE",
+                message: "SYSTEM_RUN_DISABLED: security=deny",
+                reason: "security=deny")
+        }
+
+        let approvalDecision = request.approvalDecision
+        if approvalDecision == .deny {
+            return self.errorResponse(
+                code: "UNAVAILABLE",
+                message: "SYSTEM_RUN_DENIED: user denied",
+                reason: "user-denied")
+        }
+
+        var approvedByAsk = approvalDecision != nil
+        if self.requiresAsk(
+            ask: context.ask,
+            security: context.security,
+            allowlistMatch: context.allowlistMatch,
+            skillAllow: context.skillAllow),
+           approvalDecision == nil
+        {
+            let decision = ExecApprovalsPromptPresenter.prompt(
+                ExecApprovalPromptRequest(
+                    command: context.displayCommand,
+                    cwd: request.cwd,
+                    host: "node",
+                    security: context.security.rawValue,
+                    ask: context.ask.rawValue,
+                    agentId: context.trimmedAgent,
+                    resolvedPath: context.resolution?.resolvedPath))
+
+            switch decision {
+            case .deny:
+                return self.errorResponse(
+                    code: "UNAVAILABLE",
+                    message: "SYSTEM_RUN_DENIED: user denied",
+                    reason: "user-denied")
+            case .allowAlways:
+                approvedByAsk = true
+                self.persistAllowlistEntry(decision: decision, context: context)
+            case .allowOnce:
+                approvedByAsk = true
+            }
+        }
+
+        self.persistAllowlistEntry(decision: approvalDecision, context: context)
+
+        if context.security == .allowlist,
+           context.allowlistMatch == nil,
+           !context.skillAllow,
+           !approvedByAsk
+        {
+            return self.errorResponse(
+                code: "UNAVAILABLE",
+                message: "SYSTEM_RUN_DENIED: allowlist miss",
+                reason: "allowlist-miss")
+        }
+
+        if let match = context.allowlistMatch {
+            ExecApprovalsStore.recordAllowlistUse(
+                agentId: context.trimmedAgent,
+                pattern: match.pattern,
+                command: context.displayCommand,
+                resolvedPath: context.resolution?.resolvedPath)
+        }
+
+        if let errorResponse = await self.ensureScreenRecordingAccess(request.needsScreenRecording) {
+            return errorResponse
+        }
+
+        return await self.runCommand(
+            command: command,
+            cwd: request.cwd,
+            env: context.env,
+            timeoutMs: request.timeoutMs)
+    }
+
+    private static func buildContext(request: ExecHostRequest, command: [String]) async -> ExecApprovalContext {
         let displayCommand = ExecCommandFormatter.displayString(
             for: command,
             rawCommand: request.rawCommand)
@@ -306,90 +403,72 @@ fileprivate enum ExecHostExecutor {
         } else {
             skillAllow = false
         }
+        return ExecApprovalContext(
+            command: command,
+            displayCommand: displayCommand,
+            trimmedAgent: trimmedAgent,
+            approvals: approvals,
+            security: security,
+            ask: ask,
+            autoAllowSkills: autoAllowSkills,
+            env: env,
+            resolution: resolution,
+            allowlistMatch: allowlistMatch,
+            skillAllow: skillAllow)
+    }
 
-        if security == .deny {
-            return ExecHostResponse(
-                type: "exec-res",
-                id: UUID().uuidString,
-                ok: false,
-                payload: nil,
-                error: ExecHostError(code: "UNAVAILABLE", message: "SYSTEM_RUN_DISABLED: security=deny", reason: "security=deny"))
+    private static func requiresAsk(
+        ask: ExecAsk,
+        security: ExecSecurity,
+        allowlistMatch: ExecAllowlistEntry?,
+        skillAllow: Bool) -> Bool
+    {
+        if ask == .always { return true }
+        if ask == .onMiss, security == .allowlist, allowlistMatch == nil, !skillAllow { return true }
+        return false
+    }
+
+    private static func persistAllowlistEntry(
+        decision: ExecApprovalDecision?,
+        context: ExecApprovalContext)
+    {
+        guard decision == .allowAlways, context.security == .allowlist else { return }
+        guard let pattern = self.allowlistPattern(command: context.command, resolution: context.resolution) else {
+            return
         }
+        ExecApprovalsStore.addAllowlistEntry(agentId: context.trimmedAgent, pattern: pattern)
+    }
 
-        let requiresAsk: Bool = {
-            if ask == .always { return true }
-            if ask == .onMiss && security == .allowlist && allowlistMatch == nil && !skillAllow { return true }
-            return false
-        }()
+    private static func allowlistPattern(
+        command: [String],
+        resolution: ExecCommandResolution?) -> String?
+    {
+        let pattern = resolution?.resolvedPath ?? resolution?.rawExecutable ?? command.first ?? ""
+        return pattern.isEmpty ? nil : pattern
+    }
 
-        var approvedByAsk = false
-        if requiresAsk {
-            let decision = ExecApprovalsPromptPresenter.prompt(
-                ExecApprovalPromptRequest(
-                    command: displayCommand,
-                    cwd: request.cwd,
-                    host: "node",
-                    security: security.rawValue,
-                    ask: ask.rawValue,
-                    agentId: trimmedAgent,
-                    resolvedPath: resolution?.resolvedPath))
+    private static func ensureScreenRecordingAccess(_ needsScreenRecording: Bool?) async -> ExecHostResponse? {
+        guard needsScreenRecording == true else { return nil }
+        let authorized = await PermissionManager
+            .status([.screenRecording])[.screenRecording] ?? false
+        if authorized { return nil }
+        return self.errorResponse(
+            code: "UNAVAILABLE",
+            message: "PERMISSION_MISSING: screenRecording",
+            reason: "permission:screenRecording")
+    }
 
-            switch decision {
-            case .deny:
-                return ExecHostResponse(
-                    type: "exec-res",
-                    id: UUID().uuidString,
-                    ok: false,
-                    payload: nil,
-                    error: ExecHostError(code: "UNAVAILABLE", message: "SYSTEM_RUN_DENIED: user denied", reason: "user-denied"))
-            case .allowAlways:
-                approvedByAsk = true
-                if security == .allowlist {
-                    let pattern = resolution?.resolvedPath ?? resolution?.rawExecutable ?? command.first ?? ""
-                    if !pattern.isEmpty {
-                        ExecApprovalsStore.addAllowlistEntry(agentId: trimmedAgent, pattern: pattern)
-                    }
-                }
-            case .allowOnce:
-                approvedByAsk = true
-            }
-        }
-
-        if security == .allowlist && allowlistMatch == nil && !skillAllow && !approvedByAsk {
-            return ExecHostResponse(
-                type: "exec-res",
-                id: UUID().uuidString,
-                ok: false,
-                payload: nil,
-                error: ExecHostError(code: "UNAVAILABLE", message: "SYSTEM_RUN_DENIED: allowlist miss", reason: "allowlist-miss"))
-        }
-
-        if let match = allowlistMatch {
-            ExecApprovalsStore.recordAllowlistUse(
-                agentId: trimmedAgent,
-                pattern: match.pattern,
-                command: displayCommand,
-                resolvedPath: resolution?.resolvedPath)
-        }
-
-        if request.needsScreenRecording == true {
-            let authorized = await PermissionManager
-                .status([.screenRecording])[.screenRecording] ?? false
-            if !authorized {
-                return ExecHostResponse(
-                    type: "exec-res",
-                    id: UUID().uuidString,
-                    ok: false,
-                    payload: nil,
-                    error: ExecHostError(code: "UNAVAILABLE", message: "PERMISSION_MISSING: screenRecording", reason: "permission:screenRecording"))
-            }
-        }
-
-        let timeoutSec = request.timeoutMs.flatMap { Double($0) / 1000.0 }
+    private static func runCommand(
+        command: [String],
+        cwd: String?,
+        env: [String: String]?,
+        timeoutMs: Int?) async -> ExecHostResponse
+    {
+        let timeoutSec = timeoutMs.flatMap { Double($0) / 1000.0 }
         let result = await Task.detached { () -> ShellExecutor.ShellResult in
             await ShellExecutor.runDetailed(
                 command: command,
-                cwd: request.cwd,
+                cwd: cwd,
                 env: env,
                 timeout: timeoutSec)
         }.value
@@ -400,7 +479,24 @@ fileprivate enum ExecHostExecutor {
             stdout: result.stdout,
             stderr: result.stderr,
             error: result.errorMessage)
-        return ExecHostResponse(
+        return self.successResponse(payload)
+    }
+
+    private static func errorResponse(
+        code: String,
+        message: String,
+        reason: String?) -> ExecHostResponse
+    {
+        ExecHostResponse(
+            type: "exec-res",
+            id: UUID().uuidString,
+            ok: false,
+            payload: nil,
+            error: ExecHostError(code: code, message: message, reason: reason))
+    }
+
+    private static func successResponse(_ payload: ExecHostRunResult) -> ExecHostResponse {
+        ExecHostResponse(
             type: "exec-res",
             id: UUID().uuidString,
             ok: true,
@@ -621,7 +717,7 @@ private final class ExecApprovalsSocketServer: @unchecked Sendable {
 
     private func handleExecRequest(_ request: ExecHostSocketRequest) async -> ExecHostResponse {
         let nowMs = Int(Date().timeIntervalSince1970 * 1000)
-        if abs(nowMs - request.ts) > 10_000 {
+        if abs(nowMs - request.ts) > 10000 {
             return ExecHostResponse(
                 type: "exec-res",
                 id: request.id,

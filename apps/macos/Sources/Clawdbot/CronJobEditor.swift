@@ -1,10 +1,12 @@
 import ClawdbotProtocol
+import Observation
 import SwiftUI
 
 struct CronJobEditor: View {
     let job: CronJob?
     @Binding var isSaving: Bool
     @Binding var error: String?
+    @Bindable var channelsStore: ChannelsStore
     let onCancel: () -> Void
     let onSave: ([String: AnyCodable]) -> Void
 
@@ -45,12 +47,28 @@ struct CronJobEditor: View {
     @State var systemEventText: String = ""
     @State var agentMessage: String = ""
     @State var deliver: Bool = false
-    @State var channel: GatewayAgentChannel = .last
+    @State var channel: String = "last"
     @State var to: String = ""
     @State var thinking: String = ""
     @State var timeoutSeconds: String = ""
     @State var bestEffortDeliver: Bool = false
     @State var postPrefix: String = "Cron"
+
+    var channelOptions: [String] {
+        let ordered = self.channelsStore.orderedChannelIds()
+        var options = ["last"] + ordered
+        let trimmed = self.channel.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty, !options.contains(trimmed) {
+            options.append(trimmed)
+        }
+        var seen = Set<String>()
+        return options.filter { seen.insert($0).inserted }
+    }
+
+    func channelLabel(for id: String) -> String {
+        if id == "last" { return "last" }
+        return self.channelsStore.resolveChannelLabel(id)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -333,13 +351,9 @@ struct CronJobEditor: View {
                     GridRow {
                         self.gridLabel("Channel")
                         Picker("", selection: self.$channel) {
-                            Text("last").tag(GatewayAgentChannel.last)
-                            Text("whatsapp").tag(GatewayAgentChannel.whatsapp)
-                            Text("telegram").tag(GatewayAgentChannel.telegram)
-                            Text("discord").tag(GatewayAgentChannel.discord)
-                            Text("slack").tag(GatewayAgentChannel.slack)
-                            Text("signal").tag(GatewayAgentChannel.signal)
-                            Text("imessage").tag(GatewayAgentChannel.imessage)
+                            ForEach(self.channelOptions, id: \.self) { channel in
+                                Text(self.channelLabel(for: channel)).tag(channel)
+                            }
                         }
                         .labelsHidden()
                         .pickerStyle(.segmented)

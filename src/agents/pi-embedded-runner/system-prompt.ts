@@ -23,6 +23,7 @@ export function buildEmbeddedSystemPrompt(params: {
   /** Controls which hardcoded sections to include. Defaults to "full". */
   promptMode?: PromptMode;
   runtimeInfo: {
+    agentId?: string;
     host: string;
     os: string;
     arch: string;
@@ -31,6 +32,8 @@ export function buildEmbeddedSystemPrompt(params: {
     provider?: string;
     capabilities?: string[];
     channel?: string;
+    /** Supported message actions for the current channel (e.g., react, edit, unsend) */
+    channelActions?: string[];
   };
   sandboxInfo?: EmbeddedSandboxInfo;
   tools: AgentTool[];

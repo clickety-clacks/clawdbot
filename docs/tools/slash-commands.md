@@ -58,6 +58,7 @@ They run immediately, are stripped before the model sees the message, and the re
 Text + native (when enabled):
 - `/help`
 - `/commands`
+- `/skill <name> [input]` (run a skill by name)
 - `/status` (show current status; includes provider usage/quota for the current model provider when available)
 - `/context [list|detail|json]` (explain “context”; `detail` shows per-file + per-tool + per-skill + system prompt size)
 - `/whoami` (show your sender id; alias: `/id`)
@@ -72,7 +73,7 @@ Text + native (when enabled):
 - `/dock-slack` (alias: `/dock_slack`) (switch replies to Slack)
 - `/activation mention|always` (groups only)
 - `/send on|off|inherit` (owner-only)
-- `/reset` or `/new`
+- `/reset` or `/new [model]` (optional model hint; remainder is passed through)
 - `/think <off|minimal|low|medium|high|xhigh>` (dynamic choices by model/provider; aliases: `/thinking`, `/t`)
 - `/verbose on|full|off` (alias: `/v`)
 - `/reasoning on|off|stream` (alias: `/reason`; when on, sends a separate message prefixed `Reasoning:`; `stream` = Telegram draft only)
@@ -90,6 +91,7 @@ Text-only:
 
 Notes:
 - Commands accept an optional `:` between the command and args (e.g. `/think: high`, `/send: on`, `/help:`).
+- `/new <model>` accepts a model alias, `provider/model`, or a provider name (fuzzy match); if no match, the text is treated as the message body.
 - For full provider usage breakdown, use `clawdbot status --usage`.
 - `/usage` controls the per-response usage footer; `/usage cost` prints a local cost summary from Clawdbot session logs.
 - `/restart` is disabled by default; set `commands.restart: true` to enable it.
@@ -102,6 +104,9 @@ Notes:
 - Currently: `/help`, `/commands`, `/status`, `/whoami` (`/id`).
 - Unauthorized command-only messages are silently ignored, and inline `/...` tokens are treated as plain text.
 - **Skill commands:** `user-invocable` skills are exposed as slash commands. Names are sanitized to `a-z0-9_` (max 32 chars); collisions get numeric suffixes (e.g. `_2`).
+  - `/skill <name> [input]` runs a skill by name (useful when native command limits prevent per-skill commands).
+  - By default, skill commands are forwarded to the model as a normal request.
+  - Skills may optionally declare `command-dispatch: tool` to route the command directly to a tool (deterministic, no model).
 - **Native command arguments:** Discord uses autocomplete for dynamic options (and button menus when you omit required args). Telegram and Slack show a button menu when a command supports choices and you omit the arg.
 
 ## Usage surfaces (what shows where)

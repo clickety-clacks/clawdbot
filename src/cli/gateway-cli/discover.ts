@@ -46,7 +46,6 @@ export function dedupeBeacons(beacons: GatewayBonjourBeacon[]): GatewayBonjourBe
       b.displayName ?? "",
       host,
       String(b.port ?? ""),
-      String(b.bridgePort ?? ""),
       String(b.gatewayPort ?? ""),
     ].join("|");
     if (seen.has(key)) continue;
@@ -65,7 +64,8 @@ export function renderBeaconLines(beacon: GatewayBonjourBeacon, rich: boolean): 
 
   const host = pickBeaconHost(beacon);
   const gatewayPort = pickGatewayPort(beacon);
-  const wsUrl = host ? `ws://${host}:${gatewayPort}` : null;
+  const scheme = beacon.gatewayTls ? "wss" : "ws";
+  const wsUrl = host ? `${scheme}://${host}:${gatewayPort}` : null;
 
   const lines = [`- ${title} ${domain}`];
 
@@ -81,6 +81,18 @@ export function renderBeaconLines(beacon: GatewayBonjourBeacon, rich: boolean): 
 
   if (wsUrl) {
     lines.push(`  ${colorize(rich, theme.muted, "ws")}: ${colorize(rich, theme.command, wsUrl)}`);
+  }
+  if (beacon.role) {
+    lines.push(`  ${colorize(rich, theme.muted, "role")}: ${beacon.role}`);
+  }
+  if (beacon.transport) {
+    lines.push(`  ${colorize(rich, theme.muted, "transport")}: ${beacon.transport}`);
+  }
+  if (beacon.gatewayTls) {
+    const fingerprint = beacon.gatewayTlsFingerprintSha256
+      ? `sha256 ${beacon.gatewayTlsFingerprintSha256}`
+      : "enabled";
+    lines.push(`  ${colorize(rich, theme.muted, "tls")}: ${fingerprint}`);
   }
   if (typeof beacon.sshPort === "number" && beacon.sshPort > 0 && host) {
     const ssh = `ssh -N -L 18789:127.0.0.1:18789 <user>@${host} -p ${beacon.sshPort}`;

@@ -6,17 +6,13 @@ import { UserMessageComponent } from "./user-message.js";
 
 export class ChatLog extends Container {
   private toolById = new Map<string, ToolExecutionComponent>();
-  private streamingAssistant: AssistantMessageComponent | null = null;
-  private streamingRunId: string | null = null;
-  private streamingText: string | null = null;
+  private streamingRuns = new Map<string, AssistantMessageComponent>();
   private toolsExpanded = false;
 
   clearAll() {
     this.clear();
     this.toolById.clear();
-    this.streamingAssistant = null;
-    this.streamingRunId = null;
-    this.streamingText = null;
+    this.streamingRuns.clear();
   }
 
   addSystem(text: string) {
@@ -28,48 +24,36 @@ export class ChatLog extends Container {
     this.addChild(new UserMessageComponent(text));
   }
 
+  private resolveRunId(runId?: string) {
+    return runId ?? "default";
+  }
+
   startAssistant(text: string, runId?: string) {
     const component = new AssistantMessageComponent(text);
-    this.streamingAssistant = component;
-    this.streamingRunId = runId ?? null;
-    this.streamingText = text;
+    this.streamingRuns.set(this.resolveRunId(runId), component);
     this.addChild(component);
     return component;
   }
 
   updateAssistant(text: string, runId?: string) {
-    if (
-      !this.streamingAssistant ||
-      (runId && this.streamingRunId && runId !== this.streamingRunId)
-    ) {
+    const effectiveRunId = this.resolveRunId(runId);
+    const existing = this.streamingRuns.get(effectiveRunId);
+    if (!existing) {
       this.startAssistant(text, runId);
       return;
     }
-    this.streamingText = text;
-    this.streamingAssistant.setText(text);
-  }
-
-  getStreamingText(runId?: string) {
-    if (!this.streamingAssistant) return null;
-    if (runId && this.streamingRunId && runId !== this.streamingRunId) {
-      return null;
-    }
-    return this.streamingText;
+    existing.setText(text);
   }
 
   finalizeAssistant(text: string, runId?: string) {
-    if (
-      this.streamingAssistant &&
-      (!runId || runId === this.streamingRunId || text === this.streamingText)
-    ) {
-      this.streamingText = text;
-      this.streamingAssistant.setText(text);
-    } else {
-      this.startAssistant(text, runId);
+    const effectiveRunId = this.resolveRunId(runId);
+    const existing = this.streamingRuns.get(effectiveRunId);
+    if (existing) {
+      existing.setText(text);
+      this.streamingRuns.delete(effectiveRunId);
+      return;
     }
-    this.streamingAssistant = null;
-    this.streamingRunId = null;
-    this.streamingText = null;
+    this.addChild(new AssistantMessageComponent(text));
   }
 
   startTool(toolCallId: string, toolName: string, args: unknown) {

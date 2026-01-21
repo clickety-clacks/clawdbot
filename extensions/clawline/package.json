@@ -9,6 +9,20 @@
     "jsonwebtoken": "9.0.3"
   },
   "clawdbot": {
-    "extensions": ["./index.ts"]
+    "extensions": ["./index.ts"],
+    "channel": {
+      "id": "clawline",
+      "label": "Clawline",
+      "selectionLabel": "Clawline (local devices)",
+      "docsPath": "/providers/clawline",
+      "docsLabel": "clawline",
+      "blurb": "first-party local gateway; enable via config/onboarding.",
+      "order": 10
+    },
+    "install": {
+      "npmSpec": "@clawdbot/clawline",
+      "localPath": "extensions/clawline",
+      "defaultChoice": "local"
+    }
   }
 }

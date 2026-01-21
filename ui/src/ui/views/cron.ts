@@ -7,7 +7,7 @@ import {
   formatCronState,
   formatNextRun,
 } from "../presenter";
-import type { CronJob, CronRunLogEntry, CronStatus } from "../types";
+import type { ChannelUiMetaEntry, CronJob, CronRunLogEntry, CronStatus } from "../types";
 import type { CronFormState } from "../ui-types";
 
 export type CronProps = {
@@ -17,6 +17,9 @@ export type CronProps = {
   error: string | null;
   busy: boolean;
   form: CronFormState;
+  channels: string[];
+  channelLabels?: Record<string, string>;
+  channelMeta?: ChannelUiMetaEntry[];
   runsJobId: string | null;
   runs: CronRunLogEntry[];
   onFormChange: (patch: Partial<CronFormState>) => void;
@@ -28,7 +31,29 @@ export type CronProps = {
   onLoadRuns: (jobId: string) => void;
 };
 
+function buildChannelOptions(props: CronProps): string[] {
+  const options = ["last", ...props.channels.filter(Boolean)];
+  const current = props.form.channel?.trim();
+  if (current && !options.includes(current)) {
+    options.push(current);
+  }
+  const seen = new Set<string>();
+  return options.filter((value) => {
+    if (seen.has(value)) return false;
+    seen.add(value);
+    return true;
+  });
+}
+
+function resolveChannelLabel(props: CronProps, channel: string): string {
+  if (channel === "last") return "last";
+  const meta = props.channelMeta?.find((entry) => entry.id === channel);
+  if (meta?.label) return meta.label;
+  return props.channelLabels?.[channel] ?? channel;
+}
+
 export function renderCron(props: CronProps) {
+  const channelOptions = buildChannelOptions(props);
   return html`
     <section class="grid grid-cols-2">
       <div class="card">
@@ -185,20 +210,18 @@ export function renderCron(props: CronProps) {
 	                <label class="field">
 	                  <span>Channel</span>
 	                  <select
-	                    .value=${props.form.channel}
+	                    .value=${props.form.channel || "last"}
 	                    @change=${(e: Event) =>
 	                      props.onFormChange({
 	                        channel: (e.target as HTMLSelectElement).value as CronFormState["channel"],
 	                      })}
 	                  >
-	                    <option value="last">Last</option>
-                    <option value="whatsapp">WhatsApp</option>
-                    <option value="telegram">Telegram</option>
-                    <option value="discord">Discord</option>
-                    <option value="slack">Slack</option>
-                    <option value="signal">Signal</option>
-                    <option value="imessage">iMessage</option>
-                    <option value="msteams">MS Teams</option>
+	                    ${channelOptions.map(
+                        (channel) =>
+                          html`<option value=${channel}>
+                            ${resolveChannelLabel(props, channel)}
+                          </option>`,
+                      )}
                   </select>
                 </label>
                 <label class="field">

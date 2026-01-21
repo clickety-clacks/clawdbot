@@ -5,7 +5,9 @@ import type {
   SettingsListTheme,
 } from "@mariozechner/pi-tui";
 import chalk from "chalk";
+import { highlight, supportsLanguage } from "cli-highlight";
 import type { SearchableSelectListTheme } from "../components/searchable-select-list.js";
+import { createSyntaxTheme } from "./syntax-theme.js";
 
 const palette = {
   text: "#E8E3D5",
@@ -33,6 +35,29 @@ const palette = {
 
 const fg = (hex: string) => (text: string) => chalk.hex(hex)(text);
 const bg = (hex: string) => (text: string) => chalk.bgHex(hex)(text);
+
+const syntaxTheme = createSyntaxTheme(fg(palette.code));
+
+/**
+ * Highlight code with syntax coloring.
+ * Returns an array of lines with ANSI escape codes.
+ */
+function highlightCode(code: string, lang?: string): string[] {
+  try {
+    // Auto-detect can be slow for very large blocks; prefer explicit language when available.
+    // Check if language is supported, fall back to auto-detect
+    const language = lang && supportsLanguage(lang) ? lang : undefined;
+    const highlighted = highlight(code, {
+      language,
+      theme: syntaxTheme,
+      ignoreIllegals: true,
+    });
+    return highlighted.split("\n");
+  } catch {
+    // If highlighting fails, return plain code
+    return code.split("\n").map((line) => fg(palette.code)(line));
+  }
+}
 
 export const theme = {
   fg: fg(palette.text),
@@ -70,6 +95,7 @@ export const markdownTheme: MarkdownTheme = {
   italic: (text) => chalk.italic(text),
   strikethrough: (text) => chalk.strikethrough(text),
   underline: (text) => chalk.underline(text),
+  highlightCode,
 };
 
 export const selectListTheme: SelectListTheme = {
@@ -78,6 +104,11 @@ export const selectListTheme: SelectListTheme = {
   description: (text) => fg(palette.dim)(text),
   scrollInfo: (text) => fg(palette.dim)(text),
   noMatch: (text) => fg(palette.dim)(text),
+};
+
+export const filterableSelectListTheme = {
+  ...selectListTheme,
+  filterLabel: (text: string) => fg(palette.dim)(text),
 };
 
 export const settingsListTheme: SettingsListTheme = {

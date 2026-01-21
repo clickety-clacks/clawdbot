@@ -12,6 +12,7 @@ import type {
   HealthSnapshot,
   LogEntry,
   LogLevel,
+  NostrProfile,
   PresenceEntry,
   SessionsListResult,
   SkillStatusReport,
@@ -24,6 +25,9 @@ import type {
   ExecApprovalsFile,
   ExecApprovalsSnapshot,
 } from "./controllers/exec-approvals";
+import type { DevicePairingList } from "./controllers/devices";
+import type { ExecApprovalRequest } from "./controllers/exec-approval";
+import type { NostrProfileFormState } from "./views/channels.nostr-profile-form";
 
 export type AppViewState = {
   settings: UiSettings;
@@ -48,6 +52,9 @@ export type AppViewState = {
   chatQueue: ChatQueueItem[];
   nodesLoading: boolean;
   nodes: Array<Record<string, unknown>>;
+  devicesLoading: boolean;
+  devicesError: string | null;
+  devicesList: DevicePairingList | null;
   execApprovalsLoading: boolean;
   execApprovalsSaving: boolean;
   execApprovalsDirty: boolean;
@@ -56,6 +63,9 @@ export type AppViewState = {
   execApprovalsSelectedAgent: string | null;
   execApprovalsTarget: "gateway" | "node";
   execApprovalsTargetNodeId: string | null;
+  execApprovalQueue: ExecApprovalRequest[];
+  execApprovalBusy: boolean;
+  execApprovalError: string | null;
   configLoading: boolean;
   configRaw: string;
   configValid: boolean | null;
@@ -77,6 +87,8 @@ export type AppViewState = {
   whatsappLoginQrDataUrl: string | null;
   whatsappLoginConnected: boolean | null;
   whatsappBusy: boolean;
+  nostrProfileFormState: NostrProfileFormState | null;
+  nostrProfileAccountId: string | null;
   configFormDirty: boolean;
   presenceLoading: boolean;
   presenceEntries: PresenceEntry[];
@@ -133,6 +145,13 @@ export type AppViewState = {
   handleWhatsAppLogout: () => Promise<void>;
   handleChannelConfigSave: () => Promise<void>;
   handleChannelConfigReload: () => Promise<void>;
+  handleNostrProfileEdit: (accountId: string, profile: NostrProfile | null) => void;
+  handleNostrProfileCancel: () => void;
+  handleNostrProfileFieldChange: (field: keyof NostrProfile, value: string) => void;
+  handleNostrProfileSave: () => Promise<void>;
+  handleNostrProfileImport: () => Promise<void>;
+  handleNostrProfileToggleAdvanced: () => void;
+  handleExecApprovalDecision: (decision: "allow-once" | "allow-always" | "deny") => Promise<void>;
   handleConfigLoad: () => Promise<void>;
   handleConfigSave: () => Promise<void>;
   handleConfigApply: () => Promise<void>;

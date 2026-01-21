@@ -3,7 +3,8 @@ export type ModelApi =
   | "openai-responses"
   | "anthropic-messages"
   | "google-generative-ai"
-  | "github-copilot";
+  | "github-copilot"
+  | "bedrock-converse-stream";
 
 export type ModelCompatConfig = {
   supportsStore?: boolean;
@@ -11,6 +12,8 @@ export type ModelCompatConfig = {
   supportsReasoningEffort?: boolean;
   maxTokensField?: "max_completion_tokens" | "max_tokens";
 };
+
+export type ModelProviderAuthMode = "api-key" | "aws-sdk" | "oauth" | "token";
 
 export type ModelDefinitionConfig = {
   id: string;
@@ -33,6 +36,7 @@ export type ModelDefinitionConfig = {
 export type ModelProviderConfig = {
   baseUrl: string;
   apiKey?: string;
+  auth?: ModelProviderAuthMode;
   api?: ModelApi;
   headers?: Record<string, string>;
   authHeader?: boolean;

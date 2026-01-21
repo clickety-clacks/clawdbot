@@ -3,11 +3,14 @@ import path from "node:path";
 
 import { runCommandWithTimeout } from "../process/exec.js";
 import { parseSemver } from "./runtime-guard.js";
+import { channelToNpmTag, type UpdateChannel } from "./update-channels.js";
 
 export type PackageManager = "pnpm" | "bun" | "npm" | "unknown";
 
 export type GitUpdateStatus = {
   root: string;
+  sha: string | null;
+  tag: string | null;
   branch: string | null;
   upstream: string | null;
   dirty: boolean | null;
@@ -90,6 +93,8 @@ export async function checkGitUpdateStatus(params: {
 
   const base: GitUpdateStatus = {
     root,
+    sha: null,
+    tag: null,
     branch: null,
     upstream: null,
     dirty: null,
@@ -106,6 +111,17 @@ export async function checkGitUpdateStatus(params: {
     return { ...base, error: branchRes?.stderr?.trim() || "git unavailable" };
   }
   const branch = branchRes.stdout.trim() || null;
+
+  const shaRes = await runCommandWithTimeout(["git", "-C", root, "rev-parse", "HEAD"], {
+    timeoutMs,
+  }).catch(() => null);
+  const sha = shaRes && shaRes.code === 0 ? shaRes.stdout.trim() : null;
+
+  const tagRes = await runCommandWithTimeout(
+    ["git", "-C", root, "describe", "--tags", "--exact-match"],
+    { timeoutMs },
+  ).catch(() => null);
+  const tag = tagRes && tagRes.code === 0 ? tagRes.stdout.trim() : null;
 
   const upstreamRes = await runCommandWithTimeout(
     ["git", "-C", root, "rev-parse", "--abbrev-ref", "@{upstream}"],
@@ -144,6 +160,8 @@ export async function checkGitUpdateStatus(params: {
 
   return {
     root,
+    sha,
+    tag,
     branch,
     upstream,
     dirty,
@@ -296,6 +314,30 @@ export async function fetchNpmTagVersion(params: {
   } catch (err) {
     return { tag, version: null, error: String(err) };
   }
+}
+
+export async function resolveNpmChannelTag(params: {
+  channel: UpdateChannel;
+  timeoutMs?: number;
+}): Promise<{ tag: string; version: string | null }> {
+  const channelTag = channelToNpmTag(params.channel);
+  const channelStatus = await fetchNpmTagVersion({ tag: channelTag, timeoutMs: params.timeoutMs });
+  if (params.channel !== "beta") {
+    return { tag: channelTag, version: channelStatus.version };
+  }
+
+  const latestStatus = await fetchNpmTagVersion({ tag: "latest", timeoutMs: params.timeoutMs });
+  if (!latestStatus.version) {
+    return { tag: channelTag, version: channelStatus.version };
+  }
+  if (!channelStatus.version) {
+    return { tag: "latest", version: latestStatus.version };
+  }
+  const cmp = compareSemverStrings(channelStatus.version, latestStatus.version);
+  if (cmp != null && cmp < 0) {
+    return { tag: "latest", version: latestStatus.version };
+  }
+  return { tag: channelTag, version: channelStatus.version };
 }
 
 export function compareSemverStrings(a: string | null, b: string | null): number | null {

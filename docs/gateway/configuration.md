@@ -17,6 +17,19 @@ If the file is missing, Clawdbot uses safe-ish defaults (embedded Pi agent + per
 
 > **New to configuration?** Check out the [Configuration Examples](/gateway/configuration-examples) guide for complete examples with detailed explanations!
 
+## Strict config validation
+
+Clawdbot only accepts configurations that fully match the schema.
+Unknown keys, malformed types, or invalid values cause the Gateway to **refuse to start** for safety.
+
+When validation fails:
+- The Gateway does not boot.
+- Only diagnostic commands are allowed (for example: `clawdbot doctor`, `clawdbot logs`, `clawdbot health`, `clawdbot status`, `clawdbot service`, `clawdbot help`).
+- Run `clawdbot doctor` to see the exact issues.
+- Run `clawdbot doctor --fix` (or `--yes`) to apply migrations/repairs.
+
+Doctor never writes changes unless you explicitly opt into `--fix`/`--yes`.
+
 ## Schema + UI hints
 
 The Gateway exposes a JSON Schema representation of the config via `config.schema` for UI editors.
@@ -1401,7 +1414,7 @@ Each `agents.defaults.models` entry can include:
 - `alias` (optional model shortcut, e.g. `/opus`).
 - `params` (optional provider-specific API params passed through to the model request).
 
-`params` is also applied to streaming runs (embedded agent + compaction). Supported keys today: `temperature`, `maxTokens`. These merge with call-time options; caller-supplied values win. `temperature` is an advanced knob—leave unset unless you know the model’s defaults and need a change.
+`params` is also applied to streaming runs (embedded agent + compaction). Supported keys today: `temperature`, `maxTokens`, `cacheControlTtl` (`"5m"` or `"1h"`, Anthropic API + OpenRouter Anthropic models only; ignored for Anthropic OAuth/Claude Code tokens). These merge with call-time options; caller-supplied values win. `temperature` is an advanced knob—leave unset unless you know the model’s defaults and need a change. Anthropic API defaults to `"1h"` unless you override (`cacheControlTtl: "5m"`). Clawdbot includes the `extended-cache-ttl-2025-04-11` beta flag for Anthropic API; keep it if you override provider headers.
 
 Example:
 
@@ -1827,7 +1840,7 @@ Example:
 
 `agents.defaults.subagents` configures sub-agent defaults:
 - `model`: default model for spawned sub-agents (string or `{ primary, fallbacks }`). If omitted, sub-agents inherit the caller’s model unless overridden per agent or per call.
-- `maxConcurrent`: max concurrent sub-agent runs (default 1)
+- `maxConcurrent`: max concurrent sub-agent runs (default 8)
 - `archiveAfterMinutes`: auto-archive sub-agent sessions after N minutes (default 60; set `0` to disable)
 - Per-subagent tool policy: `tools.subagents.tools.allow` / `tools.subagents.tools.deny` (deny wins)
 
@@ -1961,7 +1974,7 @@ Notes:
 
 `agents.defaults.maxConcurrent` sets the maximum number of embedded agent runs that can
 execute in parallel across sessions. Each session is still serialized (one run
-per session key at a time). Default: 1.
+per session key at a time). Default: 4.
 
 ### `agents.defaults.sandbox`
 
@@ -2656,6 +2669,7 @@ Notes:
 - `clawdbot gateway` refuses to start unless `gateway.mode` is set to `local` (or you pass the override flag).
 - `gateway.port` controls the single multiplexed port used for WebSocket + HTTP (control UI, hooks, A2UI).
 - OpenAI Chat Completions endpoint: **disabled by default**; enable with `gateway.http.endpoints.chatCompletions.enabled: true`.
+- OpenResponses endpoint: **disabled by default**; enable with `gateway.http.endpoints.responses.enabled: true`.
 - Precedence: `--port` > `CLAWDBOT_GATEWAY_PORT` > `gateway.port` > default `18789`.
 - Non-loopback binds (`lan`/`tailnet`/`auto`) require auth. Use `gateway.auth.token` (or `CLAWDBOT_GATEWAY_TOKEN`).
 - The onboarding wizard generates a gateway token by default (even on loopback).
@@ -2663,7 +2677,7 @@ Notes:
 
 Auth and Tailscale:
 - `gateway.auth.mode` sets the handshake requirements (`token` or `password`).
-- `gateway.auth.token` stores the shared token for token auth (used by the CLI on the same machine).
+- `gateway.auth.token` stores the shared token for token auth (used by the CLI on the same machine and as the bootstrap credential for device pairing).
 - When `gateway.auth.mode` is set, only that method is accepted (plus optional Tailscale headers).
 - `gateway.auth.password` can be set here, or via `CLAWDBOT_GATEWAY_PASSWORD` (recommended).
 - `gateway.auth.allowTailscale` allows Tailscale Serve identity headers
@@ -2672,6 +2686,9 @@ Auth and Tailscale:
   `true`, Serve requests do not need a token/password; set `false` to require
   explicit credentials. Defaults to `true` when `tailscale.mode = "serve"` and
   auth mode is not `password`.
+- After pairing, the Gateway issues **device tokens** scoped to the device role + scopes.
+  These are returned in `hello-ok.auth.deviceToken`; clients should persist and reuse them
+  instead of the shared token. Rotate/revoke via `device.token.rotate`/`device.token.revoke`.
 - `gateway.tailscale.mode: "serve"` uses Tailscale Serve (tailnet only, loopback bind).
 - `gateway.tailscale.mode: "funnel"` exposes the dashboard publicly; requires auth.
 - `gateway.tailscale.resetOnExit` resets Serve/Funnel config on shutdown.
@@ -2680,6 +2697,7 @@ Remote client defaults (CLI):
 - `gateway.remote.url` sets the default Gateway WebSocket URL for CLI calls when `gateway.mode = "remote"`.
 - `gateway.remote.token` supplies the token for remote calls (leave unset for no auth).
 - `gateway.remote.password` supplies the password for remote calls (leave unset for no auth).
+- `gateway.remote.tlsFingerprint` pins the gateway TLS cert fingerprint (sha256).
 
 macOS app behavior:
 - Clawdbot.app watches `~/.clawdbot/clawdbot.json` and switches modes live when `gateway.mode` or `gateway.remote.url` changes.
@@ -2693,11 +2711,35 @@ macOS app behavior:
     remote: {
       url: "ws://gateway.tailnet:18789",
       token: "your-token",
-      password: "your-password"
+      password: "your-password",
+      tlsFingerprint: "sha256:ab12cd34..."
     }
   }
 }
 ```
+
+### `gateway.nodes` (Node command allowlist)
+
+The Gateway enforces a per-platform command allowlist for `node.invoke`. Nodes must both
+**declare** a command and have it **allowed** by the Gateway to run it.
+
+Use this section to extend or deny commands:
+
+```json5
+{
+  gateway: {
+    nodes: {
+      allowCommands: ["custom.vendor.command"], // extra commands beyond defaults
+      denyCommands: ["sms.send"]      // block a command even if declared
+    }
+  }
+}
+```
+
+Notes:
+- `allowCommands` extends the built-in per-platform defaults.
+- `denyCommands` always wins (even if the node claims the command).
+- `node.invoke` rejects commands that are not declared by the node.
 
 ### `gateway.reload` (Config hot reload)
 
@@ -2946,7 +2988,7 @@ Auto-generated certs require `openssl` on PATH; if generation fails, the bridge 
 
 ### `discovery.wideArea` (Wide-Area Bonjour / unicast DNS‑SD)
 
-When enabled, the Gateway writes a unicast DNS-SD zone for `_clawdbot-bridge._tcp` under `~/.clawdbot/dns/` using the standard discovery domain `clawdbot.internal.`
+When enabled, the Gateway writes a unicast DNS-SD zone for `_clawdbot-gw._tcp` under `~/.clawdbot/dns/` using the standard discovery domain `clawdbot.internal.`
 
 To make iOS/Android discover across networks (Vienna ⇄ London), pair this with:
 - a DNS server on the gateway host serving `clawdbot.internal.` (CoreDNS is recommended)

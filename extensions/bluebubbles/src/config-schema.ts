@@ -4,9 +4,23 @@ const allowFromEntry = z.union([z.string(), z.number()]);
 
 const bluebubblesActionSchema = z
   .object({
-    reactions: z.boolean().optional(),
+    reactions: z.boolean().default(true),
+    edit: z.boolean().default(true),
+    unsend: z.boolean().default(true),
+    reply: z.boolean().default(true),
+    sendWithEffect: z.boolean().default(true),
+    renameGroup: z.boolean().default(true),
+    setGroupIcon: z.boolean().default(true),
+    addParticipant: z.boolean().default(true),
+    removeParticipant: z.boolean().default(true),
+    leaveGroup: z.boolean().default(true),
+    sendAttachment: z.boolean().default(true),
   })
   .optional();
+
+const bluebubblesGroupConfigSchema = z.object({
+  requireMention: z.boolean().optional(),
+});
 
 const bluebubblesAccountSchema = z.object({
   name: z.string().optional(),
@@ -22,6 +36,9 @@ const bluebubblesAccountSchema = z.object({
   dmHistoryLimit: z.number().int().min(0).optional(),
   textChunkLimit: z.number().int().positive().optional(),
   mediaMaxMb: z.number().int().positive().optional(),
+  sendReadReceipts: z.boolean().optional(),
+  blockStreaming: z.boolean().optional(),
+  groups: z.object({}).catchall(bluebubblesGroupConfigSchema).optional(),
 });
 
 export const BlueBubblesConfigSchema = bluebubblesAccountSchema.extend({

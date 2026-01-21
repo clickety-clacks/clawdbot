@@ -50,19 +50,17 @@ pnpm add -g clawdbot@latest
 ```
 We do **not** recommend Bun for the Gateway runtime (WhatsApp/Telegram bugs).
 
-To stay on the beta channel for CLI updates:
+To switch update channels (git + npm installs):
 
 ```bash
 clawdbot update --channel beta
-```
-
-Switch back to stable later:
-
-```bash
+clawdbot update --channel dev
 clawdbot update --channel stable
 ```
 
 Use `--tag <dist-tag|version>` for a one-off install tag/version.
+
+See [Development channels](/install/development-channels) for channel semantics and release notes.
 
 Note: on npm installs, the gateway logs an update hint on startup (checks the current channel tag). Disable via `update.checkOnStart: false`.
 
@@ -88,7 +86,8 @@ clawdbot update --restart
 
 It runs a safe-ish update flow:
 - Requires a clean worktree.
-- Fetches + rebases against the configured upstream.
+- Switches to the selected channel (tag or branch).
+- Fetches + rebases against the configured upstream (dev channel).
 - Installs deps, builds, builds the Control UI, and runs `clawdbot doctor`.
 
 If you installed via **npm/pnpm** (no git metadata), `clawdbot update` will try to update via your package manager. If it can’t detect the install, use “Update (global install)” instead.
@@ -119,12 +118,13 @@ git pull
 pnpm install
 pnpm build
 pnpm ui:build # auto-installs UI deps on first run
-pnpm clawdbot doctor
-pnpm clawdbot health
+clawdbot doctor
+clawdbot health
 ```
 
 Notes:
 - `pnpm build` matters when you run the packaged `clawdbot` binary ([`dist/entry.js`](https://github.com/clawdbot/clawdbot/blob/main/dist/entry.js)) or use Node to run `dist/`.
+- If you run from a repo checkout without a global install, use `pnpm clawdbot ...` for CLI commands.
 - If you run directly from TypeScript (`pnpm clawdbot ...`), a rebuild is usually unnecessary, but **config migrations still apply** → run doctor.
 - Switching between global and git installs is easy: install the other flavor, then run `clawdbot doctor` so the gateway service entrypoint is rewritten to the current install.
 

@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 
 import { defaultRuntime } from "../../runtime.js";
+import { formatCliCommand } from "../../cli/command-format.js";
 import { DEFAULT_SANDBOX_IMAGE, SANDBOX_AGENT_WORKSPACE_MOUNT } from "./constants.js";
 import { readRegistry, updateRegistry } from "./registry.js";
 import { computeSandboxConfigHash } from "./config-hash.js";
@@ -214,13 +215,13 @@ async function readContainerConfigHash(containerName: string): Promise<string | 
 
 function formatSandboxRecreateHint(params: { scope: SandboxConfig["scope"]; sessionKey: string }) {
   if (params.scope === "session") {
-    return `clawdbot sandbox recreate --session ${params.sessionKey}`;
+    return formatCliCommand(`clawdbot sandbox recreate --session ${params.sessionKey}`);
   }
   if (params.scope === "agent") {
     const agentId = resolveSandboxAgentId(params.sessionKey) ?? "main";
-    return `clawdbot sandbox recreate --agent ${agentId}`;
+    return formatCliCommand(`clawdbot sandbox recreate --agent ${agentId}`);
   }
-  return "clawdbot sandbox recreate --all";
+  return formatCliCommand("clawdbot sandbox recreate --all");
 }
 
 export async function ensureSandboxContainer(params: {
@@ -256,8 +257,7 @@ export async function ensureSandboxContainer(params: {
     registryEntry = registry.entries.find((entry) => entry.containerName === containerName);
     currentHash = await readContainerConfigHash(containerName);
     if (!currentHash) {
-      currentHash =
-        registryEntry?.configHash ?? null;
+      currentHash = registryEntry?.configHash ?? null;
     }
     hashMismatch = !currentHash || currentHash !== expectedHash;
     if (hashMismatch) {
@@ -296,7 +296,7 @@ export async function ensureSandboxContainer(params: {
     createdAtMs: now,
     lastUsedAtMs: now,
     image: params.cfg.docker.image,
-    configHash: hashMismatch && running ? currentHash ?? undefined : expectedHash,
+    configHash: hashMismatch && running ? (currentHash ?? undefined) : expectedHash,
   });
   return containerName;
 }

@@ -188,11 +188,12 @@ export async function runTui(opts: TuiOptions) {
     password: opts.password,
   });
 
+  const tui = new TUI(new ProcessTerminal());
   const header = new Text("", 1, 0);
   const statusContainer = new Container();
   const footer = new Text("", 1, 0);
   const chatLog = new ChatLog();
-  const editor = new CustomEditor(editorTheme);
+  const editor = new CustomEditor(tui, editorTheme);
   const root = new Container();
   root.addChild(header);
   root.addChild(chatLog);
@@ -212,7 +213,6 @@ export async function runTui(opts: TuiOptions) {
     );
   };
 
-  const tui = new TUI(new ProcessTerminal());
   tui.addChild(root);
   tui.setFocus(editor);
 

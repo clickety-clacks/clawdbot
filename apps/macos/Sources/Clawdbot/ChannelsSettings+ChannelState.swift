@@ -426,34 +426,17 @@ extension ChannelsSettings {
     }
 
     private func resolveChannelTitle(_ id: String) -> String {
-        if let label = self.store.snapshot?.channelLabels[id], !label.isEmpty {
-            return label
-        }
+        let label = self.store.resolveChannelLabel(id)
+        if label != id { return label }
         return id.prefix(1).uppercased() + id.dropFirst()
     }
 
     private func resolveChannelDetailTitle(_ id: String) -> String {
-        switch id {
-        case "whatsapp": "WhatsApp Web"
-        case "telegram": "Telegram Bot"
-        case "discord": "Discord Bot"
-        case "slack": "Slack Bot"
-        case "signal": "Signal REST"
-        case "imessage": "iMessage"
-        default: self.resolveChannelTitle(id)
-        }
+        self.store.resolveChannelDetailLabel(id)
     }
 
     private func resolveChannelSystemImage(_ id: String) -> String {
-        switch id {
-        case "whatsapp": "message"
-        case "telegram": "paperplane"
-        case "discord": "bubble.left.and.bubble.right"
-        case "slack": "number"
-        case "signal": "antenna.radiowaves.left.and.right"
-        case "imessage": "message.fill"
-        default: "message"
-        }
+        self.store.resolveChannelSystemImage(id)
     }
 
     private func channelStatusDictionary(_ id: String) -> [String: AnyCodable]? {

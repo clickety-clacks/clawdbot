@@ -43,6 +43,7 @@ describe("runGatewayUpdate", () => {
     const { runner, calls } = createRunner({
       [`git -C ${tempDir} rev-parse --show-toplevel`]: { stdout: tempDir },
       [`git -C ${tempDir} rev-parse HEAD`]: { stdout: "abc123" },
+      [`git -C ${tempDir} rev-parse --abbrev-ref HEAD`]: { stdout: "main" },
       [`git -C ${tempDir} status --porcelain`]: { stdout: " M README.md" },
     });
 
@@ -67,11 +68,12 @@ describe("runGatewayUpdate", () => {
     const { runner, calls } = createRunner({
       [`git -C ${tempDir} rev-parse --show-toplevel`]: { stdout: tempDir },
       [`git -C ${tempDir} rev-parse HEAD`]: { stdout: "abc123" },
+      [`git -C ${tempDir} rev-parse --abbrev-ref HEAD`]: { stdout: "main" },
       [`git -C ${tempDir} status --porcelain`]: { stdout: "" },
       [`git -C ${tempDir} rev-parse --abbrev-ref --symbolic-full-name @{upstream}`]: {
         stdout: "origin/main",
       },
-      [`git -C ${tempDir} fetch --all --prune`]: { stdout: "" },
+      [`git -C ${tempDir} fetch --all --prune --tags`]: { stdout: "" },
       [`git -C ${tempDir} rebase @{upstream}`]: { code: 1, stderr: "conflict" },
       [`git -C ${tempDir} rebase --abort`]: { stdout: "" },
     });
@@ -85,6 +87,42 @@ describe("runGatewayUpdate", () => {
     expect(result.status).toBe("error");
     expect(result.reason).toBe("rebase-failed");
     expect(calls.some((call) => call.includes("rebase --abort"))).toBe(true);
+  });
+
+  it("uses stable tag when beta tag is older than release", async () => {
+    await fs.mkdir(path.join(tempDir, ".git"));
+    await fs.writeFile(
+      path.join(tempDir, "package.json"),
+      JSON.stringify({ name: "clawdbot", version: "1.0.0", packageManager: "pnpm@8.0.0" }),
+      "utf-8",
+    );
+    const stableTag = "v2026.1.20-1";
+    const betaTag = "v2026.1.19-beta.2";
+    const { runner, calls } = createRunner({
+      [`git -C ${tempDir} rev-parse --show-toplevel`]: { stdout: tempDir },
+      [`git -C ${tempDir} rev-parse HEAD`]: { stdout: "abc123" },
+      [`git -C ${tempDir} status --porcelain`]: { stdout: "" },
+      [`git -C ${tempDir} fetch --all --prune --tags`]: { stdout: "" },
+      [`git -C ${tempDir} tag --list v* --sort=-v:refname`]: {
+        stdout: `${stableTag}\n${betaTag}\n`,
+      },
+      [`git -C ${tempDir} checkout --detach ${stableTag}`]: { stdout: "" },
+      "pnpm install": { stdout: "" },
+      "pnpm build": { stdout: "" },
+      "pnpm ui:build": { stdout: "" },
+      "pnpm clawdbot doctor --non-interactive": { stdout: "" },
+    });
+
+    const result = await runGatewayUpdate({
+      cwd: tempDir,
+      runCommand: async (argv, _options) => runner(argv),
+      timeoutMs: 5000,
+      channel: "beta",
+    });
+
+    expect(result.status).toBe("ok");
+    expect(calls).toContain(`git -C ${tempDir} checkout --detach ${stableTag}`);
+    expect(calls).not.toContain(`git -C ${tempDir} checkout --detach ${betaTag}`);
   });
 
   it("skips update when no git root", async () => {

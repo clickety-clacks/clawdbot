@@ -5,7 +5,7 @@ import {
   parseConfigJson5,
   readConfigFileSnapshot,
   resolveConfigSnapshotHash,
-  validateConfigObject,
+  validateConfigObjectWithPlugins,
   writeConfigFile,
 } from "../../config/config.js";
 import { applyLegacyMigrations } from "../../config/legacy.js";
@@ -13,7 +13,7 @@ import { applyMergePatch } from "../../config/merge-patch.js";
 import { buildConfigSchema } from "../../config/schema.js";
 import { scheduleGatewaySigusr1Restart } from "../../infra/restart.js";
 import {
-  DOCTOR_NONINTERACTIVE_HINT,
+  formatDoctorNonInteractiveHint,
   type RestartSentinelPayload,
   writeRestartSentinel,
 } from "../../infra/restart-sentinel.js";
@@ -170,7 +170,7 @@ export const configHandlers: GatewayRequestHandlers = {
       respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, parsedRes.error));
       return;
     }
-    const validated = validateConfigObject(parsedRes.parsed);
+    const validated = validateConfigObjectWithPlugins(parsedRes.parsed);
     if (!validated.ok) {
       respond(
         false,
@@ -248,7 +248,7 @@ export const configHandlers: GatewayRequestHandlers = {
     const merged = applyMergePatch(snapshot.config, parsedRes.parsed);
     const migrated = applyLegacyMigrations(merged);
     const resolved = migrated.next ?? merged;
-    const validated = validateConfigObject(resolved);
+    const validated = validateConfigObjectWithPlugins(resolved);
     if (!validated.ok) {
       respond(
         false,
@@ -303,7 +303,7 @@ export const configHandlers: GatewayRequestHandlers = {
       respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, parsedRes.error));
       return;
     }
-    const validated = validateConfigObject(parsedRes.parsed);
+    const validated = validateConfigObjectWithPlugins(parsedRes.parsed);
     if (!validated.ok) {
       respond(
         false,
@@ -336,7 +336,7 @@ export const configHandlers: GatewayRequestHandlers = {
       ts: Date.now(),
       sessionKey,
       message: note ?? null,
-      doctorHint: DOCTOR_NONINTERACTIVE_HINT,
+      doctorHint: formatDoctorNonInteractiveHint(),
       stats: {
         mode: "config.apply",
         root: CONFIG_PATH_CLAWDBOT,

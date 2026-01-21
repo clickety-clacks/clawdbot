@@ -79,10 +79,24 @@ This intentionally excludes version managers (nvm/fnm/volta/asdf) and package
 managers (pnpm/npm) because the daemon does not load your shell init. Runtime
 variables like `DISPLAY` should live in `~/.clawdbot/.env` (loaded early by the
 gateway).
+Exec runs on `host=gateway` merge your login-shell `PATH` into the exec environment,
+so missing tools usually mean your shell init isn’t exporting them (or set
+`tools.exec.pathPrepend`). See [/tools/exec](/tools/exec).
 
 WhatsApp + Telegram channels require **Node**; Bun is unsupported. If your
 service was installed with Bun or a version-managed Node path, run `clawdbot doctor`
 to migrate to a system Node install.
+
+### Skill missing API key in sandbox
+
+**Symptom:** Skill works on host but fails in sandbox with missing API key.
+
+**Why:** sandboxed exec runs inside Docker and does **not** inherit host `process.env`.
+
+**Fix:**
+- set `agents.defaults.sandbox.docker.env` (or per-agent `agents.list[].sandbox.docker.env`)
+- or bake the key into your custom sandbox image
+- then run `clawdbot sandbox recreate --agent <id>` (or `--all`)
 
 ### Service Running but Port Not Listening
 
@@ -326,6 +340,22 @@ Clawdbot keeps conversation history in memory.
 
 ## Common troubleshooting
 
+### “Gateway won’t start — configuration invalid”
+
+Clawdbot now refuses to start when the config contains unknown keys, malformed values, or invalid types.
+This is intentional for safety.
+
+Fix it with Doctor:
+```bash
+clawdbot doctor
+clawdbot doctor --fix
+```
+
+Notes:
+- `clawdbot doctor` reports every invalid entry.
+- `clawdbot doctor --fix` applies migrations/repairs and rewrites the config.
+- Diagnostic commands like `clawdbot logs`, `clawdbot health`, `clawdbot status`, and `clawdbot service` still run even if the config is invalid.
+
 ### “All models failed” — what should I check first?
 
 - **Credentials** present for the provider(s) being tried (auth profiles + env vars).
@@ -362,7 +392,7 @@ clawdbot channels login
 ### Build errors on `main` — what’s the standard fix path?
 
 1) `git pull origin main && pnpm install`
-2) `pnpm clawdbot doctor`
+2) `clawdbot doctor`
 3) Check GitHub issues or Discord
 4) Temporary workaround: check out an older commit
 
@@ -376,7 +406,7 @@ Typical recovery:
 git status   # ensure you’re in the repo root
 pnpm install
 pnpm build
-pnpm clawdbot doctor
+clawdbot doctor
 clawdbot daemon restart
 ```
 

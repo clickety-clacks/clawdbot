@@ -177,6 +177,7 @@ Recommendations:
 - **Use the latest generation, best-tier model** for any bot that can run tools or touch files/networks.
 - **Avoid weaker tiers** (for example, Sonnet or Haiku) for tool-enabled agents or untrusted inboxes.
 - If you must use a smaller model, **reduce blast radius** (read-only tools, strong sandboxing, minimal filesystem access, strict allowlists).
+- When running small models, **enable sandboxing for all sessions** and **disable web_search/web_fetch/browser** unless inputs are tightly controlled.
 
 ## Reasoning & verbose output in groups
 
@@ -267,6 +268,13 @@ Doctor can generate one for you: `clawdbot doctor --generate-gateway-token`.
 
 Note: `gateway.remote.token` is **only** for remote CLI calls; it does not
 protect local WS access.
+Optional: pin remote TLS with `gateway.remote.tlsFingerprint` when using `wss://`.
+
+Local device pairing:
+- Device pairing is auto‑approved for **local** connects (loopback or the
+  gateway host’s own tailnet address) to keep same‑host clients smooth.
+- Other tailnet peers are **not** treated as local; they still need pairing
+  approval.
 
 Auth modes:
 - `gateway.auth.mode: "token"`: shared bearer token (recommended for most setups).

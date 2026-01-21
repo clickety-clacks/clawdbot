@@ -55,8 +55,11 @@ type ReadSessionUpdatedAt = typeof import("../../config/sessions.js").readSessio
 type UpdateLastRoute = typeof import("../../config/sessions.js").updateLastRoute;
 type LoadConfig = typeof import("../../config/config.js").loadConfig;
 type WriteConfigFile = typeof import("../../config/config.js").writeConfigFile;
+type RecordChannelActivity = typeof import("../../infra/channel-activity.js").recordChannelActivity;
+type GetChannelActivity = typeof import("../../infra/channel-activity.js").getChannelActivity;
 type EnqueueSystemEvent = typeof import("../../infra/system-events.js").enqueueSystemEvent;
 type RunCommandWithTimeout = typeof import("../../process/exec.js").runCommandWithTimeout;
+type FormatNativeDependencyHint = typeof import("./native-deps.js").formatNativeDependencyHint;
 type LoadWebMedia = typeof import("../../web/media.js").loadWebMedia;
 type DetectMime = typeof import("../../media/mime.js").detectMime;
 type MediaKindFromMime = typeof import("../../media/constants.js").mediaKindFromMime;
@@ -144,6 +147,7 @@ export type PluginRuntime = {
   system: {
     enqueueSystemEvent: EnqueueSystemEvent;
     runCommandWithTimeout: RunCommandWithTimeout;
+    formatNativeDependencyHint: FormatNativeDependencyHint;
   };
   media: {
     loadWebMedia: LoadWebMedia;
@@ -187,6 +191,10 @@ export type PluginRuntime = {
     media: {
       fetchRemoteMedia: FetchRemoteMedia;
       saveMediaBuffer: SaveMediaBuffer;
+    };
+    activity: {
+      record: RecordChannelActivity;
+      get: GetChannelActivity;
     };
     session: {
       resolveStorePath: ResolveStorePath;

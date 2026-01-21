@@ -17,6 +17,18 @@
   transition: grid-template-columns var(--shell-focus-duration) var(--shell-focus-ease);
 }
 
+.shell--chat {
+  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
+}
+
+@supports (height: 100dvh) {
+  .shell--chat {
+    height: 100dvh;
+  }
+}
+
 .shell--nav-collapsed {
   grid-template-columns: 0px minmax(0, 1fr);
 }
@@ -307,6 +319,11 @@
   min-height: 0;
   overflow-y: auto; /* Enable vertical scrolling for pages with long content */
   overflow-x: hidden;
+}
+
+/* Chat handles its own scrolling (chat-thread); avoid double scrollbars. */
+.content--chat {
+  overflow: hidden;
 }
 
 .shell--chat .content {

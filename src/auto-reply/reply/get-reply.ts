@@ -19,6 +19,7 @@ import { handleInlineActions } from "./get-reply-inline-actions.js";
 import { runPreparedReply } from "./get-reply-run.js";
 import { finalizeInboundContext } from "./inbound-context.js";
 import { initSessionState } from "./session.js";
+import { applyResetModelOverride } from "./session-reset-model.js";
 import { stageSandboxMedia } from "./stage-sandbox-media.js";
 import { createTypingController } from "./typing.js";
 
@@ -28,8 +29,11 @@ export async function getReplyFromConfig(
   configOverride?: ClawdbotConfig,
 ): Promise<ReplyPayload | ReplyPayload[] | undefined> {
   const cfg = configOverride ?? loadConfig();
+  const targetSessionKey =
+    ctx.CommandSource === "native" ? ctx.CommandTargetSessionKey?.trim() : undefined;
+  const agentSessionKey = targetSessionKey || ctx.SessionKey;
   const agentId = resolveSessionAgentId({
-    sessionKey: ctx.SessionKey,
+    sessionKey: agentSessionKey,
     config: cfg,
   });
   const agentCfg = cfg.agents?.defaults;
@@ -103,6 +107,7 @@ export async function getReplyFromConfig(
     sessionKey,
     sessionId,
     isNewSession,
+    resetTriggered,
     systemSent,
     abortedLastRun,
     storePath,
@@ -110,7 +115,23 @@ export async function getReplyFromConfig(
     groupResolution,
     isGroup,
     triggerBodyNormalized,
+    bodyStripped,
   } = sessionState;
+
+  await applyResetModelOverride({
+    cfg,
+    resetTriggered,
+    bodyStripped,
+    sessionCtx,
+    ctx: finalized,
+    sessionEntry,
+    sessionStore,
+    sessionKey,
+    storePath,
+    defaultProvider,
+    defaultModel,
+    aliasIndex,
+  });
 
   const directiveResult = await resolveReplyDirectives({
     ctx: finalized,
@@ -178,6 +199,7 @@ export async function getReplyFromConfig(
     sessionCtx,
     cfg,
     agentId,
+    agentDir,
     sessionEntry,
     previousSessionEntry,
     sessionStore,
@@ -255,9 +277,11 @@ export async function getReplyFromConfig(
     perMessageQueueOptions,
     typing,
     opts,
+    defaultProvider,
     defaultModel,
     timeoutMs,
     isNewSession,
+    resetTriggered,
     systemSent,
     sessionEntry,
     sessionStore,

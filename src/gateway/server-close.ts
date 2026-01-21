@@ -3,7 +3,6 @@ import type { WebSocketServer } from "ws";
 import type { CanvasHostHandler, CanvasHostServer } from "../canvas-host/server.js";
 import { type ChannelId, listChannelPlugins } from "../channels/plugins/index.js";
 import { stopGmailWatcher } from "../hooks/gmail-watcher.js";
-import type { NodeBridgeServer } from "../infra/bridge/server.js";
 import type { PluginServicesHandle } from "../plugins/services.js";
 
 export function createGatewayCloseHandler(params: {
@@ -11,7 +10,6 @@ export function createGatewayCloseHandler(params: {
   tailscaleCleanup: (() => Promise<void>) | null;
   canvasHost: CanvasHostHandler | null;
   canvasHostServer: CanvasHostServer | null;
-  bridge: NodeBridgeServer | null;
   stopChannel: (name: ChannelId, accountId?: string) => Promise<void>;
   pluginServices: PluginServicesHandle | null;
   cron: { stop: () => void };
@@ -57,13 +55,6 @@ export function createGatewayCloseHandler(params: {
     if (params.canvasHostServer) {
       try {
         await params.canvasHostServer.close();
-      } catch {
-        /* ignore */
-      }
-    }
-    if (params.bridge) {
-      try {
-        await params.bridge.close();
       } catch {
         /* ignore */
       }
@@ -116,6 +107,12 @@ export function createGatewayCloseHandler(params: {
       await params.browserControl.stop().catch(() => {});
     }
     await new Promise<void>((resolve) => params.wss.close(() => resolve()));
+    const httpServer = params.httpServer as HttpServer & {
+      closeIdleConnections?: () => void;
+    };
+    if (typeof httpServer.closeIdleConnections === "function") {
+      httpServer.closeIdleConnections();
+    }
     await new Promise<void>((resolve, reject) =>
       params.httpServer.close((err) => (err ? reject(err) : resolve())),
     );

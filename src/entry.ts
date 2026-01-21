@@ -59,18 +59,61 @@ function ensureExperimentalWarningSuppressed(): boolean {
 
 function normalizeWindowsArgv(argv: string[]): string[] {
   if (process.platform !== "win32") return argv;
-  if (argv.length < 3) return argv;
-  const execBase = path.basename(process.execPath).toLowerCase();
-  const arg1 = path.basename(argv[1] ?? "").toLowerCase();
-  const arg2 = path.basename(argv[2] ?? "").toLowerCase();
-  const looksLikeEntry = arg1 === "entry.ts" || arg1 === "entry.js";
-  if (arg1 === execBase) {
-    return [argv[0], ...argv.slice(2)];
+  if (argv.length < 2) return argv;
+  const stripControlChars = (value: string): string => {
+    let out = "";
+    for (let i = 0; i < value.length; i += 1) {
+      const code = value.charCodeAt(i);
+      if (code >= 32 && code !== 127) {
+        out += value[i];
+      }
+    }
+    return out;
+  };
+  const normalizeArg = (value: string): string =>
+    stripControlChars(value)
+      .replace(/^['"]+|['"]+$/g, "")
+      .trim();
+  const normalizeCandidate = (value: string): string =>
+    normalizeArg(value).replace(/^\\\\\\?\\/, "");
+  const execPath = normalizeCandidate(process.execPath);
+  const execPathLower = execPath.toLowerCase();
+  const execBase = path.basename(execPath).toLowerCase();
+  const isExecPath = (value: string | undefined): boolean => {
+    if (!value) return false;
+    const lower = normalizeCandidate(value).toLowerCase();
+    return (
+      lower === execPathLower ||
+      path.basename(lower) === execBase ||
+      lower.endsWith("\\node.exe") ||
+      lower.endsWith("/node.exe") ||
+      lower.includes("node.exe")
+    );
+  };
+  const next = [...argv];
+  for (let i = 1; i <= 3 && i < next.length; ) {
+    if (isExecPath(next[i])) {
+      next.splice(i, 1);
+      continue;
+    }
+    i += 1;
   }
-  if (looksLikeEntry && arg2 === execBase) {
-    return [argv[0], argv[1], ...argv.slice(3)];
+  const filtered = next.filter((arg, index) => index === 0 || !isExecPath(arg));
+  if (filtered.length < 3) return filtered;
+  const cleaned = [...filtered];
+  for (let i = 2; i < cleaned.length; ) {
+    const arg = cleaned[i];
+    if (!arg || arg.startsWith("-")) {
+      i += 1;
+      continue;
+    }
+    if (isExecPath(arg)) {
+      cleaned.splice(i, 1);
+      continue;
+    }
+    break;
   }
-  return argv;
+  return cleaned;
 }
 
 process.argv = normalizeWindowsArgv(process.argv);

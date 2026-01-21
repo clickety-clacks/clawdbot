@@ -6,7 +6,7 @@ import Testing
 struct ClawdbotConfigFileTests {
     @Test
     func configPathRespectsEnvOverride() async {
-        let override = FileManager.default.temporaryDirectory
+        let override = FileManager().temporaryDirectory
             .appendingPathComponent("clawdbot-config-\(UUID().uuidString)")
             .appendingPathComponent("clawdbot.json")
             .path
@@ -19,7 +19,7 @@ struct ClawdbotConfigFileTests {
     @MainActor
     @Test
     func remoteGatewayPortParsesAndMatchesHost() async {
-        let override = FileManager.default.temporaryDirectory
+        let override = FileManager().temporaryDirectory
             .appendingPathComponent("clawdbot-config-\(UUID().uuidString)")
             .appendingPathComponent("clawdbot.json")
             .path
@@ -28,13 +28,13 @@ struct ClawdbotConfigFileTests {
             ClawdbotConfigFile.saveDict([
                 "gateway": [
                     "remote": [
-                        "url": "ws://bridge.ts.net:19999",
+                        "url": "ws://gateway.ts.net:19999",
                     ],
                 ],
             ])
             #expect(ClawdbotConfigFile.remoteGatewayPort() == 19999)
-            #expect(ClawdbotConfigFile.remoteGatewayPort(matchingHost: "bridge.ts.net") == 19999)
-            #expect(ClawdbotConfigFile.remoteGatewayPort(matchingHost: "bridge") == 19999)
+            #expect(ClawdbotConfigFile.remoteGatewayPort(matchingHost: "gateway.ts.net") == 19999)
+            #expect(ClawdbotConfigFile.remoteGatewayPort(matchingHost: "gateway") == 19999)
             #expect(ClawdbotConfigFile.remoteGatewayPort(matchingHost: "other.ts.net") == nil)
         }
     }
@@ -42,7 +42,7 @@ struct ClawdbotConfigFileTests {
     @MainActor
     @Test
     func setRemoteGatewayUrlPreservesScheme() async {
-        let override = FileManager.default.temporaryDirectory
+        let override = FileManager().temporaryDirectory
             .appendingPathComponent("clawdbot-config-\(UUID().uuidString)")
             .appendingPathComponent("clawdbot.json")
             .path
@@ -64,7 +64,7 @@ struct ClawdbotConfigFileTests {
 
     @Test
     func stateDirOverrideSetsConfigPath() async {
-        let dir = FileManager.default.temporaryDirectory
+        let dir = FileManager().temporaryDirectory
             .appendingPathComponent("clawdbot-state-\(UUID().uuidString)", isDirectory: true)
             .path
 

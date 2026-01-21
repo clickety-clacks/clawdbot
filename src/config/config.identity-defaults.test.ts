@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { DEFAULT_AGENT_MAX_CONCURRENT, DEFAULT_SUBAGENT_MAX_CONCURRENT } from "./agent-limits.js";
 import { withTempHome } from "./test-helpers.js";
 
 describe("config identity defaults", () => {
@@ -164,8 +165,6 @@ describe("config identity defaults", () => {
             messages: {
               messagePrefix: "[clawdbot]",
               responsePrefix: "🦞",
-              // legacy field should be ignored (moved to providers)
-              textChunkLimit: 9999,
             },
             channels: {
               whatsapp: { allowFrom: ["+15555550123"], textChunkLimit: 4444 },
@@ -286,7 +285,7 @@ describe("config identity defaults", () => {
     });
   });
 
-  it("does not synthesize agent/session when absent", async () => {
+  it("does not synthesize agent list/session when absent", async () => {
     await withTempHome(async (home) => {
       const configDir = path.join(home, ".clawdbot");
       await fs.mkdir(configDir, { recursive: true });
@@ -308,7 +307,9 @@ describe("config identity defaults", () => {
 
       expect(cfg.messages?.responsePrefix).toBeUndefined();
       expect(cfg.messages?.groupChat?.mentionPatterns).toBeUndefined();
-      expect(cfg.agents).toBeUndefined();
+      expect(cfg.agents?.list).toBeUndefined();
+      expect(cfg.agents?.defaults?.maxConcurrent).toBe(DEFAULT_AGENT_MAX_CONCURRENT);
+      expect(cfg.agents?.defaults?.subagents?.maxConcurrent).toBe(DEFAULT_SUBAGENT_MAX_CONCURRENT);
       expect(cfg.session).toBeUndefined();
     });
   });

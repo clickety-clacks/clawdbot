@@ -1,5 +1,4 @@
 import { describe, expect, test, vi } from "vitest";
-import fs from "node:fs/promises";
 import { WebSocket } from "ws";
 import { PROTOCOL_VERSION } from "./protocol/index.js";
 import { HANDSHAKE_TIMEOUT_MS } from "./server-constants.js";
@@ -16,13 +15,14 @@ import {
 installGatewayTestHooks();
 
 async function waitForWsClose(ws: WebSocket, timeoutMs: number): Promise<boolean> {
-  const deadline = process.hrtime.bigint() + BigInt(timeoutMs) * 1_000_000n;
-  while (process.hrtime.bigint() < deadline) {
-    if (ws.readyState === WebSocket.CLOSED) return true;
-    // Yield to the event loop without relying on timers (fake timers can leak).
-    await fs.stat(process.cwd()).catch(() => {});
-  }
-  return ws.readyState === WebSocket.CLOSED;
+  if (ws.readyState === WebSocket.CLOSED) return true;
+  return await new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(ws.readyState === WebSocket.CLOSED), timeoutMs);
+    ws.once("close", () => {
+      clearTimeout(timer);
+      resolve(true);
+    });
+  });
 }
 
 describe("gateway server auth/connect", () => {
@@ -53,6 +53,22 @@ describe("gateway server auth/connect", () => {
     expect(payload?.snapshot?.configPath).toBe(CONFIG_PATH_CLAWDBOT);
     expect(payload?.snapshot?.stateDir).toBe(STATE_DIR_CLAWDBOT);
 
+    ws.close();
+    await server.close();
+  });
+
+  test("sends connect challenge on open", async () => {
+    const port = await getFreePort();
+    const server = await startGatewayServer(port);
+    const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+    const evtPromise = onceMessage<{ payload?: unknown }>(
+      ws,
+      (o) => o.type === "event" && o.event === "connect.challenge",
+    );
+    await new Promise<void>((resolve) => ws.once("open", resolve));
+    const evt = await evtPromise;
+    const nonce = (evt.payload as { nonce?: unknown } | undefined)?.nonce;
+    expect(typeof nonce).toBe("string");
     ws.close();
     await server.close();
   });
@@ -98,6 +114,159 @@ describe("gateway server auth/connect", () => {
 
     ws.close();
     await server.close();
+  });
+
+  test("accepts device token auth for paired device", async () => {
+    const { loadOrCreateDeviceIdentity } = await import("../infra/device-identity.js");
+    const { approveDevicePairing, getPairedDevice, listDevicePairing } =
+      await import("../infra/device-pairing.js");
+    const { server, ws, port, prevToken } = await startServerWithClient("secret");
+    const res = await connectReq(ws, { token: "secret" });
+    if (!res.ok) {
+      const list = await listDevicePairing();
+      const pending = list.pending.at(0);
+      expect(pending?.requestId).toBeDefined();
+      if (pending?.requestId) {
+        await approveDevicePairing(pending.requestId);
+      }
+    }
+
+    const identity = loadOrCreateDeviceIdentity();
+    const paired = await getPairedDevice(identity.deviceId);
+    const deviceToken = paired?.tokens?.operator?.token;
+    expect(deviceToken).toBeDefined();
+
+    ws.close();
+
+    const ws2 = new WebSocket(`ws://127.0.0.1:${port}`);
+    await new Promise<void>((resolve) => ws2.once("open", resolve));
+    const res2 = await connectReq(ws2, { token: deviceToken });
+    expect(res2.ok).toBe(true);
+
+    ws2.close();
+    await server.close();
+    if (prevToken === undefined) {
+      delete process.env.CLAWDBOT_GATEWAY_TOKEN;
+    } else {
+      process.env.CLAWDBOT_GATEWAY_TOKEN = prevToken;
+    }
+  });
+
+  test("requires pairing for scope upgrades", async () => {
+    const { mkdtemp } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { buildDeviceAuthPayload } = await import("./device-auth.js");
+    const { loadOrCreateDeviceIdentity, publicKeyRawBase64UrlFromPem, signDevicePayload } =
+      await import("../infra/device-identity.js");
+    const { approveDevicePairing, getPairedDevice, listDevicePairing } =
+      await import("../infra/device-pairing.js");
+    const { GATEWAY_CLIENT_MODES, GATEWAY_CLIENT_NAMES } =
+      await import("../utils/message-channel.js");
+    const { server, ws, port, prevToken } = await startServerWithClient("secret");
+    const identityDir = await mkdtemp(join(tmpdir(), "clawdbot-device-scope-"));
+    const identity = loadOrCreateDeviceIdentity(join(identityDir, "device.json"));
+    const client = {
+      id: GATEWAY_CLIENT_NAMES.TEST,
+      version: "1.0.0",
+      platform: "test",
+      mode: GATEWAY_CLIENT_MODES.TEST,
+    };
+    const buildDevice = (scopes: string[]) => {
+      const signedAtMs = Date.now();
+      const payload = buildDeviceAuthPayload({
+        deviceId: identity.deviceId,
+        clientId: client.id,
+        clientMode: client.mode,
+        role: "operator",
+        scopes,
+        signedAtMs,
+        token: "secret",
+      });
+      return {
+        id: identity.deviceId,
+        publicKey: publicKeyRawBase64UrlFromPem(identity.publicKeyPem),
+        signature: signDevicePayload(identity.privateKeyPem, payload),
+        signedAt: signedAtMs,
+      };
+    };
+    const initial = await connectReq(ws, {
+      token: "secret",
+      scopes: ["operator.read"],
+      client,
+      device: buildDevice(["operator.read"]),
+    });
+    if (!initial.ok) {
+      const list = await listDevicePairing();
+      const pending = list.pending.at(0);
+      expect(pending?.requestId).toBeDefined();
+      if (pending?.requestId) {
+        await approveDevicePairing(pending.requestId);
+      }
+    }
+
+    let paired = await getPairedDevice(identity.deviceId);
+    expect(paired?.scopes).toContain("operator.read");
+
+    ws.close();
+
+    const ws2 = new WebSocket(`ws://127.0.0.1:${port}`);
+    await new Promise<void>((resolve) => ws2.once("open", resolve));
+    const res = await connectReq(ws2, {
+      token: "secret",
+      scopes: ["operator.admin"],
+      client,
+      device: buildDevice(["operator.admin"]),
+    });
+    expect(res.ok).toBe(true);
+    paired = await getPairedDevice(identity.deviceId);
+    expect(paired?.scopes).toContain("operator.admin");
+
+    ws2.close();
+    await server.close();
+    if (prevToken === undefined) {
+      delete process.env.CLAWDBOT_GATEWAY_TOKEN;
+    } else {
+      process.env.CLAWDBOT_GATEWAY_TOKEN = prevToken;
+    }
+  });
+
+  test("rejects revoked device token", async () => {
+    const { loadOrCreateDeviceIdentity } = await import("../infra/device-identity.js");
+    const { approveDevicePairing, getPairedDevice, listDevicePairing, revokeDeviceToken } =
+      await import("../infra/device-pairing.js");
+    const { server, ws, port, prevToken } = await startServerWithClient("secret");
+    const res = await connectReq(ws, { token: "secret" });
+    if (!res.ok) {
+      const list = await listDevicePairing();
+      const pending = list.pending.at(0);
+      expect(pending?.requestId).toBeDefined();
+      if (pending?.requestId) {
+        await approveDevicePairing(pending.requestId);
+      }
+    }
+
+    const identity = loadOrCreateDeviceIdentity();
+    const paired = await getPairedDevice(identity.deviceId);
+    const deviceToken = paired?.tokens?.operator?.token;
+    expect(deviceToken).toBeDefined();
+
+    await revokeDeviceToken({ deviceId: identity.deviceId, role: "operator" });
+
+    ws.close();
+
+    const ws2 = new WebSocket(`ws://127.0.0.1:${port}`);
+    await new Promise<void>((resolve) => ws2.once("open", resolve));
+    const res2 = await connectReq(ws2, { token: deviceToken });
+    expect(res2.ok).toBe(false);
+
+    ws2.close();
+    await server.close();
+    if (prevToken === undefined) {
+      delete process.env.CLAWDBOT_GATEWAY_TOKEN;
+    } else {
+      process.env.CLAWDBOT_GATEWAY_TOKEN = prevToken;
+    }
   });
 
   test("rejects invalid password", async () => {
@@ -149,6 +318,12 @@ describe("gateway server auth/connect", () => {
               version: "dev",
               platform: "web",
               mode: "webchat",
+            },
+            device: {
+              id: 123,
+              publicKey: "bad",
+              signature: "bad",
+              signedAt: "bad",
             },
           },
         }),

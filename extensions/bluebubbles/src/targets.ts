@@ -20,9 +20,39 @@ const SERVICE_PREFIXES: Array<{ prefix: string; service: BlueBubblesService }> =
   { prefix: "sms:", service: "sms" },
   { prefix: "auto:", service: "auto" },
 ];
+const CHAT_IDENTIFIER_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const CHAT_IDENTIFIER_HEX_RE = /^[0-9a-f]{24,64}$/i;
+
+function parseRawChatGuid(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const parts = trimmed.split(";");
+  if (parts.length !== 3) return null;
+  const service = parts[0]?.trim();
+  const separator = parts[1]?.trim();
+  const identifier = parts[2]?.trim();
+  if (!service || !identifier) return null;
+  if (separator !== "+" && separator !== "-") return null;
+  return `${service};${separator};${identifier}`;
+}
 
 function stripPrefix(value: string, prefix: string): string {
   return value.slice(prefix.length).trim();
+}
+
+function stripBlueBubblesPrefix(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  if (!trimmed.toLowerCase().startsWith("bluebubbles:")) return trimmed;
+  return trimmed.slice("bluebubbles:".length).trim();
+}
+
+function looksLikeRawChatIdentifier(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  if (/^chat\d+$/i.test(trimmed)) return true;
+  return CHAT_IDENTIFIER_UUID_RE.test(trimmed) || CHAT_IDENTIFIER_HEX_RE.test(trimmed);
 }
 
 export function normalizeBlueBubblesHandle(raw: string): string {
@@ -36,8 +66,83 @@ export function normalizeBlueBubblesHandle(raw: string): string {
   return trimmed.replace(/\s+/g, "");
 }
 
-export function parseBlueBubblesTarget(raw: string): BlueBubblesTarget {
+/**
+ * Extracts the handle from a chat_guid if it's a DM (1:1 chat).
+ * BlueBubbles chat_guid format for DM: "service;-;handle" (e.g., "iMessage;-;+19257864429")
+ * Group chat format: "service;+;groupId" (has "+" instead of "-")
+ */
+export function extractHandleFromChatGuid(chatGuid: string): string | null {
+  const parts = chatGuid.split(";");
+  // DM format: service;-;handle (3 parts, middle is "-")
+  if (parts.length === 3 && parts[1] === "-") {
+    const handle = parts[2]?.trim();
+    if (handle) return normalizeBlueBubblesHandle(handle);
+  }
+  return null;
+}
+
+export function normalizeBlueBubblesMessagingTarget(raw: string): string | undefined {
+  let trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  trimmed = stripBlueBubblesPrefix(trimmed);
+  if (!trimmed) return undefined;
+  try {
+    const parsed = parseBlueBubblesTarget(trimmed);
+    if (parsed.kind === "chat_id") return `chat_id:${parsed.chatId}`;
+    if (parsed.kind === "chat_guid") {
+      // For DM chat_guids, normalize to just the handle for easier comparison.
+      // This allows "chat_guid:iMessage;-;+1234567890" to match "+1234567890".
+      const handle = extractHandleFromChatGuid(parsed.chatGuid);
+      if (handle) return handle;
+      // For group chats or unrecognized formats, keep the full chat_guid
+      return `chat_guid:${parsed.chatGuid}`;
+    }
+    if (parsed.kind === "chat_identifier") return `chat_identifier:${parsed.chatIdentifier}`;
+    const handle = normalizeBlueBubblesHandle(parsed.to);
+    if (!handle) return undefined;
+    return parsed.service === "auto" ? handle : `${parsed.service}:${handle}`;
+  } catch {
+    return trimmed;
+  }
+}
+
+export function looksLikeBlueBubblesTargetId(raw: string, normalized?: string): boolean {
   const trimmed = raw.trim();
+  if (!trimmed) return false;
+  const candidate = stripBlueBubblesPrefix(trimmed);
+  if (!candidate) return false;
+  if (parseRawChatGuid(candidate)) return true;
+  const lowered = candidate.toLowerCase();
+  if (/^(imessage|sms|auto):/.test(lowered)) return true;
+  if (
+    /^(chat_id|chatid|chat|chat_guid|chatguid|guid|chat_identifier|chatidentifier|chatident|group):/.test(
+      lowered,
+    )
+  ) {
+    return true;
+  }
+  // Recognize chat<digits> patterns (e.g., "chat660250192681427962") as chat IDs
+  if (/^chat\d+$/i.test(candidate)) return true;
+  if (looksLikeRawChatIdentifier(candidate)) return true;
+  if (candidate.includes("@")) return true;
+  const digitsOnly = candidate.replace(/[\s().-]/g, "");
+  if (/^\+?\d{3,}$/.test(digitsOnly)) return true;
+  if (normalized) {
+    const normalizedTrimmed = normalized.trim();
+    if (!normalizedTrimmed) return false;
+    const normalizedLower = normalizedTrimmed.toLowerCase();
+    if (
+      /^(imessage|sms|auto):/.test(normalizedLower) ||
+      /^(chat_id|chat_guid|chat_identifier):/.test(normalizedLower)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function parseBlueBubblesTarget(raw: string): BlueBubblesTarget {
+  const trimmed = stripBlueBubblesPrefix(raw);
   if (!trimmed) throw new Error("BlueBubbles target is required");
   const lower = trimmed.toLowerCase();
 
@@ -95,6 +200,22 @@ export function parseBlueBubblesTarget(raw: string): BlueBubblesTarget {
     return { kind: "chat_guid", chatGuid: value };
   }
 
+  const rawChatGuid = parseRawChatGuid(trimmed);
+  if (rawChatGuid) {
+    return { kind: "chat_guid", chatGuid: rawChatGuid };
+  }
+
+  // Handle chat<digits> pattern (e.g., "chat660250192681427962") as chat_identifier
+  // These are BlueBubbles chat identifiers (the third part of a chat GUID), not numeric IDs
+  if (/^chat\d+$/i.test(trimmed)) {
+    return { kind: "chat_identifier", chatIdentifier: trimmed };
+  }
+
+  // Handle UUID/hex chat identifiers (e.g., "8b9c1a10536d4d86a336ea03ab7151cc")
+  if (looksLikeRawChatIdentifier(trimmed)) {
+    return { kind: "chat_identifier", chatIdentifier: trimmed };
+  }
+
   return { kind: "handle", to: trimmed, service: "auto" };
 }
 
@@ -138,6 +259,17 @@ export function parseBlueBubblesAllowTarget(raw: string): BlueBubblesAllowTarget
     const chatId = Number.parseInt(value, 10);
     if (Number.isFinite(chatId)) return { kind: "chat_id", chatId };
     if (value) return { kind: "chat_guid", chatGuid: value };
+  }
+
+  // Handle chat<digits> pattern (e.g., "chat660250192681427962") as chat_identifier
+  // These are BlueBubbles chat identifiers (the third part of a chat GUID), not numeric IDs
+  if (/^chat\d+$/i.test(trimmed)) {
+    return { kind: "chat_identifier", chatIdentifier: trimmed };
+  }
+
+  // Handle UUID/hex chat identifiers (e.g., "8b9c1a10536d4d86a336ea03ab7151cc")
+  if (looksLikeRawChatIdentifier(trimmed)) {
+    return { kind: "chat_identifier", chatIdentifier: trimmed };
   }
 
   return { kind: "handle", handle: normalizeBlueBubblesHandle(trimmed) };

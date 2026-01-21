@@ -82,6 +82,12 @@ Notes:
   - `homepage` — URL surfaced as “Website” in the macOS Skills UI (also supported via `metadata.clawdbot.homepage`).
   - `user-invocable` — `true|false` (default: `true`). When `true`, the skill is exposed as a user slash command.
   - `disable-model-invocation` — `true|false` (default: `false`). When `true`, the skill is excluded from the model prompt (still available via user invocation).
+  - `command-dispatch` — `tool` (optional). When set to `tool`, the slash command bypasses the model and dispatches directly to a tool.
+  - `command-tool` — tool name to invoke when `command-dispatch: tool` is set.
+  - `command-arg-mode` — `raw` (default). For tool dispatch, forwards the raw args string to the tool (no core parsing).
+
+    The tool is invoked with params:
+    `{ command: "<raw args>", commandName: "<slash command>", skillName: "<skill name>" }`.
 
 ## Gating (load-time filters)
 
@@ -105,7 +111,7 @@ Fields under `metadata.clawdbot`:
 - `requires.env` — list; env var must exist **or** be provided in config.
 - `requires.config` — list of `clawdbot.json` paths that must be truthy.
 - `primaryEnv` — env var name associated with `skills.entries.<name>.apiKey`.
-- `install` — optional array of installer specs used by the macOS Skills UI (brew/node/go/uv).
+- `install` — optional array of installer specs used by the macOS Skills UI (brew/node/go/uv/download).
 
 Note on sandboxing:
 - `requires.bins` is checked on the **host** at skill load time.
@@ -128,10 +134,13 @@ metadata: {"clawdbot":{"emoji":"♊️","requires":{"bins":["gemini"]},"install"
 
 Notes:
 - If multiple installers are listed, the gateway picks a **single** preferred option (brew when available, otherwise node).
+- If all installers are `download`, Clawdbot lists each entry so you can see the available artifacts.
+- Installer specs can include `os: ["darwin"|"linux"|"win32"]` to filter options by platform.
 - Node installs honor `skills.install.nodeManager` in `clawdbot.json` (default: npm; options: npm/pnpm/yarn/bun).
   This only affects **skill installs**; the Gateway runtime should still be Node
   (Bun is not recommended for WhatsApp/Telegram).
 - Go installs: if `go` is missing and `brew` is available, the gateway installs Go via Homebrew first and sets `GOBIN` to Homebrew’s `bin` when possible.
+ - Download installs: `url` (required), `archive` (`tar.gz` | `tar.bz2` | `zip`), `extract` (default: auto when archive detected), `stripComponents`, `targetDir` (default: `~/.clawdbot/tools/<skillKey>`).
 
 If no `metadata.clawdbot` is present, the skill is always eligible (unless
 disabled in config or blocked by `skills.allowBundled` for bundled skills).
@@ -149,6 +158,10 @@ Bundled/managed skills can be toggled and supplied with env values:
         apiKey: "GEMINI_KEY_HERE",
         env: {
           GEMINI_API_KEY: "GEMINI_KEY_HERE"
+        },
+        config: {
+          endpoint: "https://example.invalid",
+          model: "nano-pro"
         }
       },
       peekaboo: { enabled: true },
@@ -167,6 +180,7 @@ Rules:
 - `enabled: false` disables the skill even if it’s bundled/installed.
 - `env`: injected **only if** the variable isn’t already set in the process.
 - `apiKey`: convenience for skills that declare `metadata.clawdbot.primaryEnv`.
+- `config`: optional bag for custom per-skill fields; custom keys must live here.
 - `allowBundled`: optional allowlist for **bundled** skills only. If set, only
   bundled skills in the list are eligible (managed/workspace skills unaffected).
 

@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { isSubagentSessionKey } from "../routing/session-key.js";
+import { formatCliCommand } from "../cli/command-format.js";
 import { resolveUserPath } from "../utils.js";
 
 export function resolveDefaultAgentWorkspaceDir(
@@ -135,7 +136,8 @@ After the user chooses, update:
 - Notes
 
 3) ~/.clawdbot/clawdbot.json
-Set identity.name, identity.theme, identity.emoji to match IDENTITY.md.
+Run: ${formatCliCommand('clawdbot agents set-identity --workspace "<this workspace>" --from-identity')}
+If multiple agents share a host, add --agent <id>.
 
 ## Cleanup
 Delete BOOTSTRAP.md once this is complete.

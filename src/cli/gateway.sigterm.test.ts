@@ -3,6 +3,7 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 
 const waitForPortOpen = async (
@@ -88,10 +89,7 @@ describe("gateway SIGTERM", () => {
     const err: string[] = [];
 
     const nodeBin = process.execPath;
-    const args = [
-      "--import",
-      "tsx",
-      "src/entry.ts",
+    const entryArgs = [
       "gateway",
       "--port",
       String(port),
@@ -99,21 +97,46 @@ describe("gateway SIGTERM", () => {
       "loopback",
       "--allow-unconfigured",
     ];
+    const env = {
+      ...process.env,
+      CLAWDBOT_NO_RESPAWN: "1",
+      CLAWDBOT_STATE_DIR: stateDir,
+      CLAWDBOT_CONFIG_PATH: configPath,
+      CLAWDBOT_SKIP_CHANNELS: "1",
+      CLAWDBOT_SKIP_BROWSER_CONTROL_SERVER: "1",
+      CLAWDBOT_SKIP_CANVAS_HOST: "1",
+      // Avoid port collisions with other test processes that may also start a gateway server.
+      CLAWDBOT_BRIDGE_HOST: "127.0.0.1",
+      CLAWDBOT_BRIDGE_PORT: "0",
+    };
+    const bootstrapPath = path.join(stateDir, "clawdbot-entry-bootstrap.mjs");
+    const runMainPath = path.resolve("src/cli/run-main.ts");
+    fs.writeFileSync(
+      bootstrapPath,
+      [
+        'import { pathToFileURL } from "node:url";',
+        'const rawArgs = process.env.CLAWDBOT_ENTRY_ARGS ?? "[]";',
+        "let entryArgs = [];",
+        "try {",
+        "  entryArgs = JSON.parse(rawArgs);",
+        "} catch (err) {",
+        '  console.error("Failed to parse CLAWDBOT_ENTRY_ARGS", err);',
+        "  process.exit(1);",
+        "}",
+        "if (!Array.isArray(entryArgs)) entryArgs = [];",
+        'entryArgs = entryArgs.filter((arg) => typeof arg === "string" && !arg.toLowerCase().includes("node.exe"));',
+        `const runMainUrl = ${JSON.stringify(pathToFileURL(runMainPath).href)};`,
+        "const { runCli } = await import(runMainUrl);",
+        'await runCli(["node", "clawdbot", ...entryArgs]);',
+      ].join("\n"),
+      "utf8",
+    );
+    const childArgs = ["--import", "tsx", bootstrapPath];
+    env.CLAWDBOT_ENTRY_ARGS = JSON.stringify(entryArgs);
 
-    child = spawn(nodeBin, args, {
+    child = spawn(nodeBin, childArgs, {
       cwd: process.cwd(),
-      env: {
-        ...process.env,
-        CLAWDBOT_NO_RESPAWN: "1",
-        CLAWDBOT_STATE_DIR: stateDir,
-        CLAWDBOT_CONFIG_PATH: configPath,
-        CLAWDBOT_SKIP_CHANNELS: "1",
-        CLAWDBOT_SKIP_BROWSER_CONTROL_SERVER: "1",
-        CLAWDBOT_SKIP_CANVAS_HOST: "1",
-        // Avoid port collisions with other test processes that may also start a bridge server.
-        CLAWDBOT_BRIDGE_HOST: "127.0.0.1",
-        CLAWDBOT_BRIDGE_PORT: "0",
-      },
+      env,
       stdio: ["ignore", "pipe", "pipe"],
     });
 

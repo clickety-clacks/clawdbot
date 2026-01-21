@@ -1,10 +1,21 @@
 import type { ImageContent } from "@mariozechner/pi-ai";
 import type { ReasoningLevel, ThinkLevel, VerboseLevel } from "../../../auto-reply/thinking.js";
 import type { ClawdbotConfig } from "../../../config/config.js";
+import type { AgentStreamParams } from "../../../commands/agent/types.js";
 import type { enqueueCommand } from "../../../process/command-queue.js";
 import type { ExecElevatedDefaults, ExecToolDefaults } from "../../bash-tools.js";
 import type { BlockReplyChunking, ToolResultFormat } from "../../pi-embedded-subscribe.js";
 import type { SkillSnapshot } from "../../skills.js";
+
+// Simplified tool definition for client-provided tools (OpenResponses hosted tools)
+export type ClientToolDefinition = {
+  type: "function";
+  function: {
+    name: string;
+    description?: string;
+    parameters?: Record<string, unknown>;
+  };
+};
 
 export type RunEmbeddedPiAgentParams = {
   sessionId: string;
@@ -12,6 +23,10 @@ export type RunEmbeddedPiAgentParams = {
   messageChannel?: string;
   messageProvider?: string;
   agentAccountId?: string;
+  /** Delivery target (e.g. telegram:group:123:topic:456) for topic/thread routing. */
+  messageTo?: string;
+  /** Thread/topic identifier for routing replies to the originating thread. */
+  messageThreadId?: string | number;
   /** Current channel ID for auto-threading (Slack). */
   currentChannelId?: string;
   /** Current thread timestamp for auto-threading (Slack). */
@@ -27,6 +42,8 @@ export type RunEmbeddedPiAgentParams = {
   skillsSnapshot?: SkillSnapshot;
   prompt: string;
   images?: ImageContent[];
+  /** Optional client-provided tools (OpenResponses hosted tools). */
+  clientTools?: ClientToolDefinition[];
   provider?: string;
   model?: string;
   authProfileId?: string;
@@ -48,6 +65,9 @@ export type RunEmbeddedPiAgentParams = {
     text?: string;
     mediaUrls?: string[];
     audioAsVoice?: boolean;
+    replyToId?: string;
+    replyToTag?: boolean;
+    replyToCurrent?: boolean;
   }) => void | Promise<void>;
   onBlockReplyFlush?: () => void | Promise<void>;
   blockReplyBreak?: "text_end" | "message_end";
@@ -58,6 +78,7 @@ export type RunEmbeddedPiAgentParams = {
   lane?: string;
   enqueue?: typeof enqueueCommand;
   extraSystemPrompt?: string;
+  streamParams?: AgentStreamParams;
   ownerNumbers?: string[];
   enforceFinalTag?: boolean;
 };

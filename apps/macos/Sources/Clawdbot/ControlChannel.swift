@@ -1,3 +1,4 @@
+import ClawdbotKit
 import ClawdbotProtocol
 import Foundation
 import Observation
@@ -19,7 +20,7 @@ struct ControlAgentEvent: Codable, Sendable, Identifiable {
     let seq: Int
     let stream: String
     let ts: Double
-    let data: [String: AnyCodable]
+    let data: [String: ClawdbotProtocol.AnyCodable]
     let summary: String?
 }
 
@@ -155,8 +156,8 @@ final class ControlChannel {
         timeoutMs: Double? = nil) async throws -> Data
     {
         do {
-            let rawParams = params?.reduce(into: [String: AnyCodable]()) {
-                $0[$1.key] = AnyCodable($1.value.base)
+            let rawParams = params?.reduce(into: [String: ClawdbotKit.AnyCodable]()) {
+                $0[$1.key] = ClawdbotKit.AnyCodable($1.value.base)
             }
             let data = try await GatewayConnection.shared.request(
                 method: method,
@@ -345,7 +346,7 @@ final class ControlChannel {
             let phase = event.data["phase"]?.value as? String ?? ""
             let name = event.data["name"]?.value as? String
             let meta = event.data["meta"]?.value as? String
-            let args = event.data["args"]?.value as? [String: AnyCodable]
+            let args = Self.bridgeToProtocolArgs(event.data["args"])
             WorkActivityStore.shared.handleTool(
                 sessionKey: sessionKey,
                 phase: phase,
@@ -355,6 +356,27 @@ final class ControlChannel {
         default:
             break
         }
+    }
+
+    private static func bridgeToProtocolArgs(
+        _ value: ClawdbotProtocol.AnyCodable?) -> [String: ClawdbotProtocol.AnyCodable]?
+    {
+        guard let value else { return nil }
+        if let dict = value.value as? [String: ClawdbotProtocol.AnyCodable] {
+            return dict
+        }
+        if let dict = value.value as? [String: ClawdbotKit.AnyCodable],
+           let data = try? JSONEncoder().encode(dict),
+           let decoded = try? JSONDecoder().decode([String: ClawdbotProtocol.AnyCodable].self, from: data)
+        {
+            return decoded
+        }
+        if let data = try? JSONEncoder().encode(value),
+           let decoded = try? JSONDecoder().decode([String: ClawdbotProtocol.AnyCodable].self, from: data)
+        {
+            return decoded
+        }
+        return nil
     }
 }
 

@@ -1,7 +1,11 @@
 import crypto from "node:crypto";
 
 import { resolveBlueBubblesAccount } from "./accounts.js";
-import { parseBlueBubblesTarget, normalizeBlueBubblesHandle } from "./targets.js";
+import {
+  extractHandleFromChatGuid,
+  normalizeBlueBubblesHandle,
+  parseBlueBubblesTarget,
+} from "./targets.js";
 import type { ClawdbotConfig } from "clawdbot/plugin-sdk";
 import {
   blueBubblesFetchWithTimeout,
@@ -15,11 +19,51 @@ export type BlueBubblesSendOpts = {
   accountId?: string;
   timeoutMs?: number;
   cfg?: ClawdbotConfig;
+  /** Message GUID to reply to (reply threading) */
+  replyToMessageGuid?: string;
+  /** Part index for reply (default: 0) */
+  replyToPartIndex?: number;
+  /** Effect ID or short name for message effects (e.g., "slam", "balloons") */
+  effectId?: string;
 };
 
 export type BlueBubblesSendResult = {
   messageId: string;
 };
+
+/** Maps short effect names to full Apple effect IDs */
+const EFFECT_MAP: Record<string, string> = {
+  // Bubble effects
+  slam: "com.apple.MobileSMS.expressivesend.impact",
+  loud: "com.apple.MobileSMS.expressivesend.loud",
+  gentle: "com.apple.MobileSMS.expressivesend.gentle",
+  invisible: "com.apple.MobileSMS.expressivesend.invisibleink",
+  "invisible-ink": "com.apple.MobileSMS.expressivesend.invisibleink",
+  "invisible ink": "com.apple.MobileSMS.expressivesend.invisibleink",
+  invisibleink: "com.apple.MobileSMS.expressivesend.invisibleink",
+  // Screen effects
+  echo: "com.apple.messages.effect.CKEchoEffect",
+  spotlight: "com.apple.messages.effect.CKSpotlightEffect",
+  balloons: "com.apple.messages.effect.CKHappyBirthdayEffect",
+  confetti: "com.apple.messages.effect.CKConfettiEffect",
+  love: "com.apple.messages.effect.CKHeartEffect",
+  heart: "com.apple.messages.effect.CKHeartEffect",
+  hearts: "com.apple.messages.effect.CKHeartEffect",
+  lasers: "com.apple.messages.effect.CKLasersEffect",
+  fireworks: "com.apple.messages.effect.CKFireworksEffect",
+  celebration: "com.apple.messages.effect.CKSparklesEffect",
+};
+
+function resolveEffectId(raw?: string): string | undefined {
+  if (!raw) return undefined;
+  const trimmed = raw.trim().toLowerCase();
+  if (EFFECT_MAP[trimmed]) return EFFECT_MAP[trimmed];
+  const normalized = trimmed.replace(/[\s_]+/g, "-");
+  if (EFFECT_MAP[normalized]) return EFFECT_MAP[normalized];
+  const compact = trimmed.replace(/[\s_-]+/g, "");
+  if (EFFECT_MAP[compact]) return EFFECT_MAP[compact];
+  return raw;
+}
 
 function resolveSendTarget(raw: string): BlueBubblesSendTarget {
   const parsed = parseBlueBubblesTarget(raw);
@@ -42,12 +86,18 @@ function resolveSendTarget(raw: string): BlueBubblesSendTarget {
 function extractMessageId(payload: unknown): string {
   if (!payload || typeof payload !== "object") return "unknown";
   const record = payload as Record<string, unknown>;
-  const data = record.data && typeof record.data === "object" ? (record.data as Record<string, unknown>) : null;
+  const data =
+    record.data && typeof record.data === "object" ? (record.data as Record<string, unknown>) : null;
   const candidates = [
     record.messageId,
+    record.messageGuid,
+    record.message_guid,
     record.guid,
     record.id,
     data?.messageId,
+    data?.messageGuid,
+    data?.message_guid,
+    data?.message_id,
     data?.guid,
     data?.id,
   ];
@@ -154,6 +204,7 @@ export async function resolveChatGuidForTarget(params: {
     params.target.kind === "chat_identifier" ? params.target.chatIdentifier : null;
 
   const limit = 500;
+  let participantMatch: string | null = null;
   for (let offset = 0; offset < 5000; offset += limit) {
     const chats = await queryChats({
       baseUrl: params.baseUrl,
@@ -184,16 +235,23 @@ export async function resolveChatGuidForTarget(params: {
         if (identifier && identifier === targetChatIdentifier) return extractChatGuid(chat);
       }
       if (normalizedHandle) {
-        const participants = extractParticipantAddresses(chat).map((entry) =>
-          normalizeBlueBubblesHandle(entry),
-        );
-        if (participants.includes(normalizedHandle)) {
-          return extractChatGuid(chat);
+        const guid = extractChatGuid(chat);
+        const directHandle = guid ? extractHandleFromChatGuid(guid) : null;
+        if (directHandle && directHandle === normalizedHandle) {
+          return guid;
+        }
+        if (!participantMatch && guid) {
+          const participants = extractParticipantAddresses(chat).map((entry) =>
+            normalizeBlueBubblesHandle(entry),
+          );
+          if (participants.includes(normalizedHandle)) {
+            participantMatch = guid;
+          }
         }
       }
     }
   }
-  return null;
+  return participantMatch;
 }
 
 export async function sendMessageBlueBubbles(
@@ -227,12 +285,27 @@ export async function sendMessageBlueBubbles(
       "BlueBubbles send failed: chatGuid not found for target. Use a chat_guid target or ensure the chat exists.",
     );
   }
+  const effectId = resolveEffectId(opts.effectId);
+  const needsPrivateApi = Boolean(opts.replyToMessageGuid || effectId);
   const payload: Record<string, unknown> = {
     chatGuid,
     tempGuid: crypto.randomUUID(),
     message: trimmedText,
-    method: "apple-script",
   };
+  if (needsPrivateApi) {
+    payload.method = "private-api";
+  }
+
+  // Add reply threading support
+  if (opts.replyToMessageGuid) {
+    payload.selectedMessageGuid = opts.replyToMessageGuid;
+    payload.partIndex = typeof opts.replyToPartIndex === "number" ? opts.replyToPartIndex : 0;
+  }
+
+  // Add message effects support
+  if (effectId) {
+    payload.effectId = effectId;
+  }
 
   const url = buildBlueBubblesApiUrl({
     baseUrl,

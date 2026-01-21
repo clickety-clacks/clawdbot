@@ -1,3 +1,4 @@
+import ClawdbotKit
 import ClawdbotProtocol
 import Foundation
 import Observation
@@ -216,7 +217,7 @@ final class OnboardingWizardModel {
 struct OnboardingWizardStepView: View {
     let step: WizardStep
     let isSubmitting: Bool
-    let onSubmit: (AnyCodable?) -> Void
+    let onStepSubmit: (AnyCodable?) -> Void
 
     @State private var textValue: String
     @State private var confirmValue: Bool
@@ -228,7 +229,7 @@ struct OnboardingWizardStepView: View {
     init(step: WizardStep, isSubmitting: Bool, onSubmit: @escaping (AnyCodable?) -> Void) {
         self.step = step
         self.isSubmitting = isSubmitting
-        self.onSubmit = onSubmit
+        self.onStepSubmit = onSubmit
         let options = parseWizardOptions(step.options).enumerated().map { index, option in
             WizardOptionItem(index: index, option: option)
         }
@@ -378,27 +379,27 @@ struct OnboardingWizardStepView: View {
     private func submit() {
         switch wizardStepType(self.step) {
         case "note", "progress":
-            self.onSubmit(nil)
+            self.onStepSubmit(nil)
         case "text":
-            self.onSubmit(AnyCodable(self.textValue))
+            self.onStepSubmit(AnyCodable(self.textValue))
         case "confirm":
-            self.onSubmit(AnyCodable(self.confirmValue))
+            self.onStepSubmit(AnyCodable(self.confirmValue))
         case "select":
             guard self.optionItems.indices.contains(self.selectedIndex) else {
-                self.onSubmit(nil)
+                self.onStepSubmit(nil)
                 return
             }
             let option = self.optionItems[self.selectedIndex].option
-            self.onSubmit(bridgeToLocal(option.value) ?? AnyCodable(option.label))
+            self.onStepSubmit(bridgeToLocal(option.value) ?? AnyCodable(option.label))
         case "multiselect":
             let values = self.optionItems
                 .filter { self.selectedIndices.contains($0.index) }
                 .map { bridgeToLocal($0.option.value) ?? AnyCodable($0.option.label) }
-            self.onSubmit(AnyCodable(values))
+            self.onStepSubmit(AnyCodable(values))
         case "action":
-            self.onSubmit(AnyCodable(true))
+            self.onStepSubmit(AnyCodable(true))
         default:
-            self.onSubmit(nil)
+            self.onStepSubmit(nil)
         }
     }
 }

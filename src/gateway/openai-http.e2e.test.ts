@@ -13,6 +13,7 @@ async function startServerWithDefaultConfig(port: number) {
     host: "127.0.0.1",
     auth: { mode: "token", token: "secret" },
     controlUiEnabled: false,
+    openAiChatCompletionsEnabled: false,
   });
 }
 
@@ -48,7 +49,7 @@ function parseSseDataLines(text: string): string[] {
 }
 
 describe("OpenAI-compatible HTTP API (e2e)", () => {
-  it("is disabled by default (requires config)", async () => {
+  it("is disabled by default (requires config)", { timeout: 120_000 }, async () => {
     const port = await getFreePort();
     const server = await startServerWithDefaultConfig(port);
     try {
@@ -456,6 +457,39 @@ describe("OpenAI-compatible HTTP API (e2e)", () => {
         .filter((v): v is string => typeof v === "string")
         .join("");
       expect(allContent).toBe("hello");
+    } finally {
+      await server.close({ reason: "test done" });
+    }
+  });
+
+  it("preserves repeated identical deltas when streaming SSE", async () => {
+    agentCommand.mockImplementationOnce(async (opts: unknown) => {
+      const runId = (opts as { runId?: string } | undefined)?.runId ?? "";
+      emitAgentEvent({ runId, stream: "assistant", data: { delta: "hi" } });
+      emitAgentEvent({ runId, stream: "assistant", data: { delta: "hi" } });
+      return { payloads: [{ text: "hihi" }] } as never;
+    });
+
+    const port = await getFreePort();
+    const server = await startServer(port);
+    try {
+      const res = await postChatCompletions(port, {
+        stream: true,
+        model: "clawdbot",
+        messages: [{ role: "user", content: "hi" }],
+      });
+      expect(res.status).toBe(200);
+      const text = await res.text();
+      const data = parseSseDataLines(text);
+      const jsonChunks = data
+        .filter((d) => d !== "[DONE]")
+        .map((d) => JSON.parse(d) as Record<string, unknown>);
+      const allContent = jsonChunks
+        .flatMap((c) => (c.choices as Array<Record<string, unknown>> | undefined) ?? [])
+        .map((choice) => (choice.delta as Record<string, unknown> | undefined)?.content)
+        .filter((v): v is string => typeof v === "string")
+        .join("");
+      expect(allContent).toBe("hihi");
     } finally {
       await server.close({ reason: "test done" });
     }

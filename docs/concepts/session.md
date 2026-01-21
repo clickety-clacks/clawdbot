@@ -60,7 +60,7 @@ the workspace is writable. See [Memory](/concepts/memory) and
 - Idle reset (optional): `idleMinutes` adds a sliding idle window. When both daily and idle resets are configured, **whichever expires first** forces a new session.
 - Legacy idle-only: if you set `session.idleMinutes` without any `session.reset`/`resetByType` config, Clawdbot stays in idle-only mode for backward compatibility.
 - Per-type overrides (optional): `resetByType` lets you override the policy for `dm`, `group`, and `thread` sessions (thread = Slack/Discord threads, Telegram topics, Matrix threads when provided by the connector).
-- Reset triggers: exact `/new` or `/reset` (plus any extras in `resetTriggers`) start a fresh session id and pass the remainder of the message through. If `/new` or `/reset` is sent alone, Clawdbot runs a short “hello” greeting turn to confirm the reset.
+- Reset triggers: exact `/new` or `/reset` (plus any extras in `resetTriggers`) start a fresh session id and pass the remainder of the message through. `/new <model>` accepts a model alias, `provider/model`, or provider name (fuzzy match) to set the new session model. If `/new` or `/reset` is sent alone, Clawdbot runs a short “hello” greeting turn to confirm the reset.
 - Manual reset: delete specific keys from the store or remove the JSONL transcript; the next message recreates them.
 - Isolated cron jobs always mint a fresh `sessionId` per run (no idle reuse).
 
@@ -117,8 +117,8 @@ Send these as standalone messages so they register.
 ```
 
 ## Inspecting
-- `pnpm clawdbot status` — shows store path and recent sessions.
-- `pnpm clawdbot sessions --json` — dumps every entry (filter with `--active <minutes>`).
+- `clawdbot status` — shows store path and recent sessions.
+- `clawdbot sessions --json` — dumps every entry (filter with `--active <minutes>`).
 - `clawdbot gateway call sessions.list --params '{}'` — fetch sessions from the running gateway (use `--url`/`--token` for remote gateway access).
 - Send `/status` as a standalone message in chat to see whether the agent is reachable, how much of the session context is used, current thinking/verbose toggles, and when your WhatsApp web creds were last refreshed (helps spot relink needs).
 - Send `/context list` or `/context detail` to see what’s in the system prompt and injected workspace files (and the biggest context contributors).

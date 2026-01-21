@@ -1,8 +1,10 @@
 import { html } from "lit";
+import { repeat } from "lit/directives/repeat.js";
 
 import type { AppViewState } from "./app-view-state";
 import { iconForTab, pathForTab, titleForTab, type Tab } from "./navigation";
 import { loadChatHistory } from "./controllers/chat";
+import { syncUrlWithSessionKey } from "./app-settings";
 import type { SessionsListResult } from "./types";
 import type { ThemeMode } from "./theme";
 import type { ThemeTransitionContext } from "./theme-transition";
@@ -64,10 +66,13 @@ export function renderChatControls(state: AppViewState) {
               sessionKey: next,
               lastActiveSessionKey: next,
             });
+            syncUrlWithSessionKey(state, next, true);
             void loadChatHistory(state);
           }}
         >
-          ${sessionOptions.map(
+          ${repeat(
+            sessionOptions,
+            (entry) => entry.key,
             (entry) =>
               html`<option value=${entry.key}>
                 ${entry.displayName ?? entry.key}
@@ -87,6 +92,18 @@ export function renderChatControls(state: AppViewState) {
         ${refreshIcon}
       </button>
       <span class="chat-controls__separator">|</span>
+      <button
+        class="btn btn--sm btn--icon ${state.settings.chatShowThinking ? "active" : ""}"
+        @click=${() =>
+          state.applySettings({
+            ...state.settings,
+            chatShowThinking: !state.settings.chatShowThinking,
+          })}
+        aria-pressed=${state.settings.chatShowThinking}
+        title="Toggle assistant thinking/working output"
+      >
+        🧠
+      </button>
       <button
         class="btn btn--sm btn--icon ${state.settings.chatFocusMode ? "active" : ""}"
         @click=${() =>
@@ -119,9 +136,11 @@ function resolveSessionOptions(sessionKey: string, sessions: SessionsListResult 
   const seen = new Set<string>();
   const options: Array<{ key: string; displayName?: string }> = [];
 
+  const resolvedCurrent = sessions?.sessions?.find((s) => s.key === sessionKey);
+
   // Add current session key first
   seen.add(sessionKey);
-  options.push({ key: sessionKey });
+  options.push({ key: sessionKey, displayName: resolvedCurrent?.displayName });
 
   // Add sessions from the result
   if (sessions?.sessions) {

@@ -1,333 +1,38 @@
-import type { AccountDataEvents, MatrixClient } from "matrix-js-sdk";
-import { EventType, MsgType, RelationType } from "matrix-js-sdk";
-import type {
-  RoomMessageEventContent,
-  ReactionEventContent,
-} from "matrix-js-sdk/lib/@types/events.js";
+import type { MatrixClient } from "matrix-bot-sdk";
 
 import type { PollInput } from "clawdbot/plugin-sdk";
 import { getMatrixRuntime } from "../runtime.js";
-import { getActiveMatrixClient } from "./active-client.js";
-import {
-  createMatrixClient,
-  isBunRuntime,
-  resolveMatrixAuth,
-  resolveSharedMatrixClient,
-  waitForMatrixSync,
-} from "./client.js";
-import { markdownToMatrixHtml } from "./format.js";
 import { buildPollStartContent, M_POLL_START } from "./poll-types.js";
-import type { CoreConfig } from "../types.js";
+import { resolveMatrixClient, resolveMediaMaxBytes } from "./send/client.js";
+import {
+  buildReplyRelation,
+  buildTextContent,
+  buildThreadRelation,
+  resolveMatrixMsgType,
+  resolveMatrixVoiceDecision,
+} from "./send/formatting.js";
+import {
+  buildMediaContent,
+  prepareImageInfo,
+  resolveMediaDurationMs,
+  uploadMediaMaybeEncrypted,
+} from "./send/media.js";
+import { normalizeThreadId, resolveMatrixRoomId } from "./send/targets.js";
+import {
+  EventType,
+  MsgType,
+  RelationType,
+  type MatrixOutboundContent,
+  type MatrixSendOpts,
+  type MatrixSendResult,
+  type ReactionEventContent,
+} from "./send/types.js";
 
 const MATRIX_TEXT_LIMIT = 4000;
 const getCore = () => getMatrixRuntime();
 
-type MatrixDirectAccountData = AccountDataEvents[EventType.Direct];
-
-type MatrixReplyRelation = {
-  "m.in_reply_to": { event_id: string };
-};
-
-type MatrixMessageContent = Record<string, unknown> & {
-  msgtype: MsgType;
-  body: string;
-};
-
-type MatrixUploadContent = Parameters<MatrixClient["uploadContent"]>[0];
-
-export type MatrixSendResult = {
-  messageId: string;
-  roomId: string;
-};
-
-export type MatrixSendOpts = {
-  client?: MatrixClient;
-  mediaUrl?: string;
-  replyToId?: string;
-  threadId?: string | number | null;
-  timeoutMs?: number;
-  /** Send audio as voice message (voice bubble) instead of audio file. Defaults to false. */
-  audioAsVoice?: boolean;
-};
-
-function ensureNodeRuntime() {
-  if (isBunRuntime()) {
-    throw new Error("Matrix support requires Node (bun runtime not supported)");
-  }
-}
-
-function resolveMediaMaxBytes(): number | undefined {
-  const cfg = getCore().config.loadConfig() as CoreConfig;
-  if (typeof cfg.channels?.matrix?.mediaMaxMb === "number") {
-    return cfg.channels.matrix.mediaMaxMb * 1024 * 1024;
-  }
-  return undefined;
-}
-
-function normalizeTarget(raw: string): string {
-  const trimmed = raw.trim();
-  if (!trimmed) {
-    throw new Error("Matrix target is required (room:<id> or #alias)");
-  }
-  return trimmed;
-}
-
-function normalizeThreadId(raw?: string | number | null): string | null {
-  if (raw === undefined || raw === null) return null;
-  const trimmed = String(raw).trim();
-  return trimmed ? trimmed : null;
-}
-
-async function resolveDirectRoomId(client: MatrixClient, userId: string): Promise<string> {
-  const trimmed = userId.trim();
-  if (!trimmed.startsWith("@")) {
-    throw new Error(`Matrix user IDs must be fully qualified (got "${trimmed}")`);
-  }
-  const directEvent = client.getAccountData(EventType.Direct);
-  const directContent = directEvent?.getContent<MatrixDirectAccountData>();
-  const list = Array.isArray(directContent?.[trimmed]) ? directContent[trimmed] : [];
-  if (list.length > 0) return list[0];
-  const server = await client.getAccountDataFromServer(EventType.Direct);
-  const serverList = Array.isArray(server?.[trimmed]) ? server[trimmed] : [];
-  if (serverList.length > 0) return serverList[0];
-  throw new Error(
-    `No m.direct room found for ${trimmed}. Open a DM first so Matrix can set m.direct.`,
-  );
-}
-
-export async function resolveMatrixRoomId(
-  client: MatrixClient,
-  raw: string,
-): Promise<string> {
-  const target = normalizeTarget(raw);
-  const lowered = target.toLowerCase();
-  if (lowered.startsWith("matrix:")) {
-    return await resolveMatrixRoomId(client, target.slice("matrix:".length));
-  }
-  if (lowered.startsWith("room:")) {
-    return await resolveMatrixRoomId(client, target.slice("room:".length));
-  }
-  if (lowered.startsWith("channel:")) {
-    return await resolveMatrixRoomId(client, target.slice("channel:".length));
-  }
-  if (lowered.startsWith("user:")) {
-    return await resolveDirectRoomId(client, target.slice("user:".length));
-  }
-  if (target.startsWith("@")) {
-    return await resolveDirectRoomId(client, target);
-  }
-  if (target.startsWith("#")) {
-    const resolved = await client.getRoomIdForAlias(target);
-    if (!resolved?.room_id) {
-      throw new Error(`Matrix alias ${target} could not be resolved`);
-    }
-    return resolved.room_id;
-  }
-  return target;
-}
-
-type MatrixImageInfo = {
-  w?: number;
-  h?: number;
-  thumbnail_url?: string;
-  thumbnail_info?: {
-    w: number;
-    h: number;
-    mimetype: string;
-    size: number;
-  };
-};
-
-function buildMediaContent(params: {
-  msgtype: MsgType.Image | MsgType.Audio | MsgType.Video | MsgType.File;
-  body: string;
-  url: string;
-  filename?: string;
-  mimetype?: string;
-  size: number;
-  relation?: MatrixReplyRelation;
-  isVoice?: boolean;
-  durationMs?: number;
-  imageInfo?: MatrixImageInfo;
-}): RoomMessageEventContent {
-  const info: Record<string, unknown> = { mimetype: params.mimetype, size: params.size };
-  if (params.durationMs !== undefined) {
-    info.duration = params.durationMs;
-  }
-  if (params.imageInfo) {
-    if (params.imageInfo.w) info.w = params.imageInfo.w;
-    if (params.imageInfo.h) info.h = params.imageInfo.h;
-    if (params.imageInfo.thumbnail_url) {
-      info.thumbnail_url = params.imageInfo.thumbnail_url;
-      if (params.imageInfo.thumbnail_info) {
-        info.thumbnail_info = params.imageInfo.thumbnail_info;
-      }
-    }
-  }
-  const base: MatrixMessageContent = {
-    msgtype: params.msgtype,
-    body: params.body,
-    filename: params.filename,
-    info,
-    url: params.url,
-  };
-  if (params.isVoice) {
-    base["org.matrix.msc3245.voice"] = {};
-    base["org.matrix.msc1767.audio"] = {
-      duration: params.durationMs,
-    };
-  }
-  if (params.relation) {
-    base["m.relates_to"] = params.relation;
-  }
-  applyMatrixFormatting(base, params.body);
-  return base as RoomMessageEventContent;
-}
-
-function buildTextContent(body: string, relation?: MatrixReplyRelation): RoomMessageEventContent {
-  const content: MatrixMessageContent = relation
-    ? {
-        msgtype: MsgType.Text,
-        body,
-        "m.relates_to": relation,
-      }
-    : {
-        msgtype: MsgType.Text,
-        body,
-      };
-  applyMatrixFormatting(content, body);
-  return content as RoomMessageEventContent;
-}
-
-function applyMatrixFormatting(content: MatrixMessageContent, body: string): void {
-  const formatted = markdownToMatrixHtml(body ?? "");
-  if (!formatted) return;
-  content.format = "org.matrix.custom.html";
-  content.formatted_body = formatted;
-}
-
-function buildReplyRelation(replyToId?: string): MatrixReplyRelation | undefined {
-  const trimmed = replyToId?.trim();
-  if (!trimmed) return undefined;
-  return { "m.in_reply_to": { event_id: trimmed } };
-}
-
-function resolveMatrixMsgType(
-  contentType?: string,
-  fileName?: string,
-): MsgType.Image | MsgType.Audio | MsgType.Video | MsgType.File {
-  const kind = getCore().media.mediaKindFromMime(contentType ?? "");
-  switch (kind) {
-    case "image":
-      return MsgType.Image;
-    case "audio":
-      return MsgType.Audio;
-    case "video":
-      return MsgType.Video;
-    default:
-      return MsgType.File;
-  }
-}
-
-function resolveMatrixVoiceDecision(opts: {
-  wantsVoice: boolean;
-  contentType?: string;
-  fileName?: string;
-}): { useVoice: boolean } {
-  if (!opts.wantsVoice) return { useVoice: false };
-  if (getCore().media.isVoiceCompatibleAudio({ contentType: opts.contentType, fileName: opts.fileName })) {
-    return { useVoice: true };
-  }
-  return { useVoice: false };
-}
-
-const THUMBNAIL_MAX_SIDE = 800;
-const THUMBNAIL_QUALITY = 80;
-
-async function prepareImageInfo(params: {
-  buffer: Buffer;
-  client: MatrixClient;
-}): Promise<MatrixImageInfo | undefined> {
-  const meta = await getCore().media.getImageMetadata(params.buffer).catch(() => null);
-  if (!meta) return undefined;
-  const imageInfo: MatrixImageInfo = { w: meta.width, h: meta.height };
-  const maxDim = Math.max(meta.width, meta.height);
-  if (maxDim > THUMBNAIL_MAX_SIDE) {
-    try {
-      const thumbBuffer = await getCore().media.resizeToJpeg({
-        buffer: params.buffer,
-        maxSide: THUMBNAIL_MAX_SIDE,
-        quality: THUMBNAIL_QUALITY,
-        withoutEnlargement: true,
-      });
-      const thumbMeta = await getCore().media.getImageMetadata(thumbBuffer).catch(() => null);
-      const thumbUri = await params.client.uploadContent(thumbBuffer as MatrixUploadContent, {
-        type: "image/jpeg",
-        name: "thumbnail.jpg",
-      });
-      imageInfo.thumbnail_url = thumbUri.content_uri;
-      if (thumbMeta) {
-        imageInfo.thumbnail_info = {
-          w: thumbMeta.width,
-          h: thumbMeta.height,
-          mimetype: "image/jpeg",
-          size: thumbBuffer.byteLength,
-        };
-      }
-    } catch {
-      // Thumbnail generation failed, continue without it
-    }
-  }
-  return imageInfo;
-}
-
-async function uploadFile(
-  client: MatrixClient,
-  file: MatrixUploadContent | Buffer,
-  params: {
-    contentType?: string;
-    filename?: string;
-    includeFilename?: boolean;
-  },
-): Promise<string> {
-  const upload = await client.uploadContent(file as MatrixUploadContent, {
-    type: params.contentType,
-    name: params.filename,
-    includeFilename: params.includeFilename,
-  });
-  return upload.content_uri;
-}
-
-async function resolveMatrixClient(opts: {
-  client?: MatrixClient;
-  timeoutMs?: number;
-}): Promise<{ client: MatrixClient; stopOnDone: boolean }> {
-  ensureNodeRuntime();
-  if (opts.client) return { client: opts.client, stopOnDone: false };
-  const active = getActiveMatrixClient();
-  if (active) return { client: active, stopOnDone: false };
-  const shouldShareClient = Boolean(process.env.CLAWDBOT_GATEWAY_PORT);
-  if (shouldShareClient) {
-    const client = await resolveSharedMatrixClient({
-      timeoutMs: opts.timeoutMs,
-    });
-    return { client, stopOnDone: false };
-  }
-  const auth = await resolveMatrixAuth();
-  const client = await createMatrixClient({
-    homeserver: auth.homeserver,
-    userId: auth.userId,
-    accessToken: auth.accessToken,
-    localTimeoutMs: opts.timeoutMs,
-  });
-  await client.startClient({
-    initialSyncLimit: 0,
-    lazyLoadMembers: true,
-    threadSupport: true,
-  });
-  await waitForMatrixSync({ client, timeoutMs: opts.timeoutMs });
-  return { client, stopOnDone: true };
-}
+export type { MatrixSendOpts, MatrixSendResult } from "./send/types.js";
+export { resolveMatrixRoomId } from "./send/targets.js";
 
 export async function sendMessageMatrix(
   to: string,
@@ -349,17 +54,28 @@ export async function sendMessageMatrix(
     const chunkLimit = Math.min(textLimit, MATRIX_TEXT_LIMIT);
     const chunks = getCore().channel.text.chunkMarkdownText(trimmedMessage, chunkLimit);
     const threadId = normalizeThreadId(opts.threadId);
-    const relation = threadId ? undefined : buildReplyRelation(opts.replyToId);
-    const sendContent = (content: RoomMessageEventContent) =>
-      threadId ? client.sendMessage(roomId, threadId, content) : client.sendMessage(roomId, content);
+    const relation = threadId
+      ? buildThreadRelation(threadId, opts.replyToId)
+      : buildReplyRelation(opts.replyToId);
+    const sendContent = async (content: MatrixOutboundContent) => {
+      // matrix-bot-sdk uses sendMessage differently
+      const eventId = await client.sendMessage(roomId, content);
+      return eventId;
+    };
 
     let lastMessageId = "";
     if (opts.mediaUrl) {
       const maxBytes = resolveMediaMaxBytes();
       const media = await getCore().media.loadWebMedia(opts.mediaUrl, maxBytes);
-      const contentUri = await uploadFile(client, media.buffer, {
+      const uploaded = await uploadMediaMaybeEncrypted(client, roomId, media.buffer, {
         contentType: media.contentType,
         filename: media.fileName,
+      });
+      const durationMs = await resolveMediaDurationMs({
+        buffer: media.buffer,
+        contentType: media.contentType,
+        fileName: media.fileName,
+        kind: media.kind,
       });
       const baseMsgType = resolveMatrixMsgType(media.contentType, media.fileName);
       const { useVoice } = resolveMatrixVoiceDecision({
@@ -369,37 +85,42 @@ export async function sendMessageMatrix(
       });
       const msgtype = useVoice ? MsgType.Audio : baseMsgType;
       const isImage = msgtype === MsgType.Image;
-      const imageInfo = isImage ? await prepareImageInfo({ buffer: media.buffer, client }) : undefined;
+      const imageInfo = isImage
+        ? await prepareImageInfo({ buffer: media.buffer, client })
+        : undefined;
       const [firstChunk, ...rest] = chunks;
       const body = useVoice ? "Voice message" : (firstChunk ?? media.fileName ?? "(file)");
       const content = buildMediaContent({
         msgtype,
         body,
-        url: contentUri,
+        url: uploaded.url,
+        file: uploaded.file,
         filename: media.fileName,
         mimetype: media.contentType,
         size: media.buffer.byteLength,
+        durationMs,
         relation,
         isVoice: useVoice,
         imageInfo,
       });
-      const response = await sendContent(content);
-      lastMessageId = response.event_id ?? lastMessageId;
+      const eventId = await sendContent(content);
+      lastMessageId = eventId ?? lastMessageId;
       const textChunks = useVoice ? chunks : rest;
+      const followupRelation = threadId ? relation : undefined;
       for (const chunk of textChunks) {
         const text = chunk.trim();
         if (!text) continue;
-        const followup = buildTextContent(text);
-        const followupRes = await sendContent(followup);
-        lastMessageId = followupRes.event_id ?? lastMessageId;
+        const followup = buildTextContent(text, followupRelation);
+        const followupEventId = await sendContent(followup);
+        lastMessageId = followupEventId ?? lastMessageId;
       }
     } else {
       for (const chunk of chunks.length ? chunks : [""]) {
         const text = chunk.trim();
         if (!text) continue;
         const content = buildTextContent(text, relation);
-        const response = await sendContent(content);
-        lastMessageId = response.event_id ?? lastMessageId;
+        const eventId = await sendContent(content);
+        lastMessageId = eventId ?? lastMessageId;
       }
     }
 
@@ -409,7 +130,7 @@ export async function sendMessageMatrix(
     };
   } finally {
     if (stopOnDone) {
-      client.stopClient();
+      client.stop();
     }
   }
 }
@@ -434,26 +155,19 @@ export async function sendPollMatrix(
     const roomId = await resolveMatrixRoomId(client, to);
     const pollContent = buildPollStartContent(poll);
     const threadId = normalizeThreadId(opts.threadId);
-    const response = threadId
-      ? await client.sendEvent(
-          roomId,
-          threadId,
-          M_POLL_START,
-          pollContent,
-        )
-      : await client.sendEvent(
-          roomId,
-          M_POLL_START,
-          pollContent,
-        );
+    const pollPayload = threadId
+      ? { ...pollContent, "m.relates_to": buildThreadRelation(threadId) }
+      : pollContent;
+    // matrix-bot-sdk sendEvent returns eventId string directly
+    const eventId = await client.sendEvent(roomId, M_POLL_START, pollPayload);
 
     return {
-      eventId: response.event_id ?? "unknown",
+      eventId: eventId ?? "unknown",
       roomId,
     };
   } finally {
     if (stopOnDone) {
-      client.stopClient();
+      client.stop();
     }
   }
 }
@@ -470,10 +184,29 @@ export async function sendTypingMatrix(
   });
   try {
     const resolvedTimeoutMs = typeof timeoutMs === "number" ? timeoutMs : 30_000;
-    await resolved.sendTyping(roomId, typing, resolvedTimeoutMs);
+    await resolved.setTyping(roomId, typing, resolvedTimeoutMs);
   } finally {
     if (stopOnDone) {
-      resolved.stopClient();
+      resolved.stop();
+    }
+  }
+}
+
+export async function sendReadReceiptMatrix(
+  roomId: string,
+  eventId: string,
+  client?: MatrixClient,
+): Promise<void> {
+  if (!eventId?.trim()) return;
+  const { client: resolved, stopOnDone } = await resolveMatrixClient({
+    client,
+  });
+  try {
+    const resolvedRoom = await resolveMatrixRoomId(resolved, roomId);
+    await resolved.sendReadReceipt(resolvedRoom, eventId.trim());
+  } finally {
+    if (stopOnDone) {
+      resolved.stop();
     }
   }
 }
@@ -502,7 +235,7 @@ export async function reactMatrixMessage(
     await resolved.sendEvent(resolvedRoom, EventType.Reaction, reaction);
   } finally {
     if (stopOnDone) {
-      resolved.stopClient();
+      resolved.stop();
     }
   }
 }

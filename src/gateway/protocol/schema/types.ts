@@ -13,6 +13,8 @@ import type {
   ModelChoiceSchema,
   ModelsListParamsSchema,
   ModelsListResultSchema,
+  SkillsBinsParamsSchema,
+  SkillsBinsResultSchema,
   SkillsInstallParamsSchema,
   SkillsStatusParamsSchema,
   SkillsUpdateParamsSchema,
@@ -51,7 +53,16 @@ import type {
   ExecApprovalsNodeSetParamsSchema,
   ExecApprovalsSetParamsSchema,
   ExecApprovalsSnapshotSchema,
+  ExecApprovalRequestParamsSchema,
+  ExecApprovalResolveParamsSchema,
 } from "./exec-approvals.js";
+import type {
+  DevicePairApproveParamsSchema,
+  DevicePairListParamsSchema,
+  DevicePairRejectParamsSchema,
+  DeviceTokenRevokeParamsSchema,
+  DeviceTokenRotateParamsSchema,
+} from "./devices.js";
 import type {
   ConnectParamsSchema,
   ErrorShapeSchema,
@@ -72,7 +83,9 @@ import type {
 } from "./logs-chat.js";
 import type {
   NodeDescribeParamsSchema,
+  NodeEventParamsSchema,
   NodeInvokeParamsSchema,
+  NodeInvokeResultParamsSchema,
   NodeListParamsSchema,
   NodePairApproveParamsSchema,
   NodePairListParamsSchema,
@@ -124,6 +137,8 @@ export type NodeRenameParams = Static<typeof NodeRenameParamsSchema>;
 export type NodeListParams = Static<typeof NodeListParamsSchema>;
 export type NodeDescribeParams = Static<typeof NodeDescribeParamsSchema>;
 export type NodeInvokeParams = Static<typeof NodeInvokeParamsSchema>;
+export type NodeInvokeResultParams = Static<typeof NodeInvokeResultParamsSchema>;
+export type NodeEventParams = Static<typeof NodeEventParamsSchema>;
 export type SessionsListParams = Static<typeof SessionsListParamsSchema>;
 export type SessionsResolveParams = Static<typeof SessionsResolveParamsSchema>;
 export type SessionsPatchParams = Static<typeof SessionsPatchParamsSchema>;
@@ -157,6 +172,8 @@ export type ModelChoice = Static<typeof ModelChoiceSchema>;
 export type ModelsListParams = Static<typeof ModelsListParamsSchema>;
 export type ModelsListResult = Static<typeof ModelsListResultSchema>;
 export type SkillsStatusParams = Static<typeof SkillsStatusParamsSchema>;
+export type SkillsBinsParams = Static<typeof SkillsBinsParamsSchema>;
+export type SkillsBinsResult = Static<typeof SkillsBinsResultSchema>;
 export type SkillsInstallParams = Static<typeof SkillsInstallParamsSchema>;
 export type SkillsUpdateParams = Static<typeof SkillsUpdateParamsSchema>;
 export type CronJob = Static<typeof CronJobSchema>;
@@ -175,6 +192,13 @@ export type ExecApprovalsSetParams = Static<typeof ExecApprovalsSetParamsSchema>
 export type ExecApprovalsNodeGetParams = Static<typeof ExecApprovalsNodeGetParamsSchema>;
 export type ExecApprovalsNodeSetParams = Static<typeof ExecApprovalsNodeSetParamsSchema>;
 export type ExecApprovalsSnapshot = Static<typeof ExecApprovalsSnapshotSchema>;
+export type ExecApprovalRequestParams = Static<typeof ExecApprovalRequestParamsSchema>;
+export type ExecApprovalResolveParams = Static<typeof ExecApprovalResolveParamsSchema>;
+export type DevicePairListParams = Static<typeof DevicePairListParamsSchema>;
+export type DevicePairApproveParams = Static<typeof DevicePairApproveParamsSchema>;
+export type DevicePairRejectParams = Static<typeof DevicePairRejectParamsSchema>;
+export type DeviceTokenRotateParams = Static<typeof DeviceTokenRotateParamsSchema>;
+export type DeviceTokenRevokeParams = Static<typeof DeviceTokenRevokeParamsSchema>;
 export type ChatAbortParams = Static<typeof ChatAbortParamsSchema>;
 export type ChatInjectParams = Static<typeof ChatInjectParamsSchema>;
 export type ChatEvent = Static<typeof ChatEventSchema>;

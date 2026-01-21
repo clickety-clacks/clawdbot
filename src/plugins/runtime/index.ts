@@ -52,6 +52,7 @@ import { probeDiscord } from "../../discord/probe.js";
 import { resolveDiscordChannelAllowlist } from "../../discord/resolve-channels.js";
 import { resolveDiscordUserAllowlist } from "../../discord/resolve-users.js";
 import { sendMessageDiscord, sendPollDiscord } from "../../discord/send.js";
+import { getChannelActivity, recordChannelActivity } from "../../infra/channel-activity.js";
 import { enqueueSystemEvent } from "../../infra/system-events.js";
 import { monitorIMessageProvider } from "../../imessage/monitor.js";
 import { probeIMessage } from "../../imessage/probe.js";
@@ -105,6 +106,7 @@ import { loginWeb } from "../../web/login.js";
 import { startWebLoginWithQr, waitForWebLogin } from "../../web/login-qr.js";
 import { sendMessageWhatsApp, sendPollWhatsApp } from "../../web/outbound.js";
 import { registerMemoryCli } from "../../cli/memory-cli.js";
+import { formatNativeDependencyHint } from "./native-deps.js";
 
 import type { PluginRuntime } from "./types.js";
 
@@ -133,6 +135,7 @@ export function createPluginRuntime(): PluginRuntime {
     system: {
       enqueueSystemEvent,
       runCommandWithTimeout,
+      formatNativeDependencyHint,
     },
     media: {
       loadWebMedia,
@@ -176,6 +179,10 @@ export function createPluginRuntime(): PluginRuntime {
       media: {
         fetchRemoteMedia,
         saveMediaBuffer,
+      },
+      activity: {
+        record: recordChannelActivity,
+        get: getChannelActivity,
       },
       session: {
         resolveStorePath,

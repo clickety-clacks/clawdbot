@@ -294,6 +294,7 @@ vi.mock("./doctor-state-migrations.js", () => ({
   detectLegacyStateMigrations: vi.fn().mockResolvedValue({
     targetAgentId: "main",
     targetMainKey: "main",
+    targetScope: undefined,
     stateDir: "/tmp/state",
     oauthDir: "/tmp/oauth",
     sessions: {
@@ -302,6 +303,7 @@ vi.mock("./doctor-state-migrations.js", () => ({
       targetDir: "/tmp/state/agents/main/sessions",
       targetStorePath: "/tmp/state/agents/main/sessions/sessions.json",
       hasLegacy: false,
+      legacyKeys: [],
     },
     agentDir: {
       legacyDir: "/tmp/state/agent",
@@ -356,7 +358,7 @@ describe("doctor command", () => {
       changes: ["Moved routing.allowFrom → channels.whatsapp.allowFrom."],
     });
 
-    await doctorCommand(runtime, { nonInteractive: true });
+    await doctorCommand(runtime, { nonInteractive: true, repair: true });
 
     expect(writeConfigFile).toHaveBeenCalledTimes(1);
     const written = writeConfigFile.mock.calls[0]?.[0] as Record<string, unknown>;

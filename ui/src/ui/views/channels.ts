@@ -3,9 +3,12 @@ import { html, nothing } from "lit";
 import { formatAgo } from "../format";
 import type {
   ChannelAccountSnapshot,
+  ChannelUiMetaEntry,
   ChannelsStatusSnapshot,
   DiscordStatus,
   IMessageStatus,
+  NostrProfile,
+  NostrStatus,
   SignalStatus,
   SlackStatus,
   TelegramStatus,
@@ -20,6 +23,7 @@ import { channelEnabled, renderChannelAccountCount } from "./channels.shared";
 import { renderChannelConfigSection } from "./channels.config";
 import { renderDiscordCard } from "./channels.discord";
 import { renderIMessageCard } from "./channels.imessage";
+import { renderNostrCard } from "./channels.nostr";
 import { renderSignalCard } from "./channels.signal";
 import { renderSlackCard } from "./channels.slack";
 import { renderTelegramCard } from "./channels.telegram";
@@ -37,6 +41,7 @@ export function renderChannels(props: ChannelsProps) {
   const slack = (channels?.slack ?? null) as SlackStatus | null;
   const signal = (channels?.signal ?? null) as SignalStatus | null;
   const imessage = (channels?.imessage ?? null) as IMessageStatus | null;
+  const nostr = (channels?.nostr ?? null) as NostrStatus | null;
   const channelOrder = resolveChannelOrder(props.snapshot);
   const orderedChannels = channelOrder
     .map((key, index) => ({
@@ -59,6 +64,7 @@ export function renderChannels(props: ChannelsProps) {
           slack,
           signal,
           imessage,
+          nostr,
           channelAccounts: props.snapshot?.channelAccounts ?? null,
         }),
       )}
@@ -85,10 +91,13 @@ ${props.snapshot ? JSON.stringify(props.snapshot, null, 2) : "No snapshot yet."}
 }
 
 function resolveChannelOrder(snapshot: ChannelsStatusSnapshot | null): ChannelKey[] {
+  if (snapshot?.channelMeta?.length) {
+    return snapshot.channelMeta.map((entry) => entry.id) as ChannelKey[];
+  }
   if (snapshot?.channelOrder?.length) {
     return snapshot.channelOrder;
   }
-  return ["whatsapp", "telegram", "discord", "slack", "signal", "imessage"];
+  return ["whatsapp", "telegram", "discord", "slack", "signal", "imessage", "nostr"];
 }
 
 function renderChannel(
@@ -138,6 +147,33 @@ function renderChannel(
         imessage: data.imessage,
         accountCountLabel,
       });
+    case "nostr": {
+      const nostrAccounts = data.channelAccounts?.nostr ?? [];
+      const primaryAccount = nostrAccounts[0];
+      const accountId = primaryAccount?.accountId ?? "default";
+      const profile =
+        (primaryAccount as { profile?: NostrProfile | null } | undefined)?.profile ?? null;
+      const showForm =
+        props.nostrProfileAccountId === accountId ? props.nostrProfileFormState : null;
+      const profileFormCallbacks = showForm
+        ? {
+            onFieldChange: props.onNostrProfileFieldChange,
+            onSave: props.onNostrProfileSave,
+            onImport: props.onNostrProfileImport,
+            onCancel: props.onNostrProfileCancel,
+            onToggleAdvanced: props.onNostrProfileToggleAdvanced,
+          }
+        : null;
+      return renderNostrCard({
+        props,
+        nostr: data.nostr,
+        nostrAccounts,
+        accountCountLabel,
+        profileFormState: showForm,
+        profileFormCallbacks,
+        onEditProfile: () => props.onNostrProfileEdit(accountId, profile),
+      });
+    }
     default:
       return renderGenericChannelCard(key, props, data.channelAccounts ?? {});
   }
@@ -148,7 +184,7 @@ function renderGenericChannelCard(
   props: ChannelsProps,
   channelAccounts: Record<string, ChannelAccountSnapshot[]>,
 ) {
-  const label = props.snapshot?.channelLabels?.[key] ?? key;
+  const label = resolveChannelLabel(props.snapshot, key);
   const status = props.snapshot?.channels?.[key] as Record<string, unknown> | undefined;
   const configured = typeof status?.configured === "boolean" ? status.configured : undefined;
   const running = typeof status?.running === "boolean" ? status.running : undefined;
@@ -197,7 +233,47 @@ function renderGenericChannelCard(
   `;
 }
 
+function resolveChannelMetaMap(
+  snapshot: ChannelsStatusSnapshot | null,
+): Record<string, ChannelUiMetaEntry> {
+  if (!snapshot?.channelMeta?.length) return {};
+  return Object.fromEntries(snapshot.channelMeta.map((entry) => [entry.id, entry]));
+}
+
+function resolveChannelLabel(
+  snapshot: ChannelsStatusSnapshot | null,
+  key: string,
+): string {
+  const meta = resolveChannelMetaMap(snapshot)[key];
+  return meta?.label ?? snapshot?.channelLabels?.[key] ?? key;
+}
+
+const RECENT_ACTIVITY_THRESHOLD_MS = 10 * 60 * 1000; // 10 minutes
+
+function hasRecentActivity(account: ChannelAccountSnapshot): boolean {
+  if (!account.lastInboundAt) return false;
+  return Date.now() - account.lastInboundAt < RECENT_ACTIVITY_THRESHOLD_MS;
+}
+
+function deriveRunningStatus(account: ChannelAccountSnapshot): "Yes" | "No" | "Active" {
+  if (account.running) return "Yes";
+  // If we have recent inbound activity, the channel is effectively running
+  if (hasRecentActivity(account)) return "Active";
+  return "No";
+}
+
+function deriveConnectedStatus(account: ChannelAccountSnapshot): "Yes" | "No" | "Active" | "n/a" {
+  if (account.connected === true) return "Yes";
+  if (account.connected === false) return "No";
+  // If connected is null/undefined but we have recent activity, show as active
+  if (hasRecentActivity(account)) return "Active";
+  return "n/a";
+}
+
 function renderGenericAccount(account: ChannelAccountSnapshot) {
+  const runningStatus = deriveRunningStatus(account);
+  const connectedStatus = deriveConnectedStatus(account);
+
   return html`
     <div class="account-card">
       <div class="account-card-header">
@@ -207,7 +283,7 @@ function renderGenericAccount(account: ChannelAccountSnapshot) {
       <div class="status-list account-card-status">
         <div>
           <span class="label">Running</span>
-          <span>${account.running ? "Yes" : "No"}</span>
+          <span>${runningStatus}</span>
         </div>
         <div>
           <span class="label">Configured</span>
@@ -215,7 +291,7 @@ function renderGenericAccount(account: ChannelAccountSnapshot) {
         </div>
         <div>
           <span class="label">Connected</span>
-          <span>${account.connected ? "Yes" : "No"}</span>
+          <span>${connectedStatus}</span>
         </div>
         <div>
           <span class="label">Last inbound</span>

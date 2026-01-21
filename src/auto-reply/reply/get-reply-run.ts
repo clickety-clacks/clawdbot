@@ -38,6 +38,7 @@ import { SILENT_REPLY_TOKEN } from "../tokens.js";
 import type { GetReplyOptions, ReplyPayload } from "../types.js";
 import { runReplyAgent } from "./agent-runner.js";
 import { applySessionHints } from "./body.js";
+import { routeReply } from "./route-reply.js";
 import type { buildCommandContext } from "./commands.js";
 import type { InlineDirectives } from "./directive-handling.js";
 import { buildGroupIntro } from "./groups.js";
@@ -45,13 +46,13 @@ import type { createModelSelectionState } from "./model-selection.js";
 import { resolveQueueSettings } from "./queue.js";
 import { ensureSkillSnapshot, prependSystemEvents } from "./session-updates.js";
 import type { TypingController } from "./typing.js";
-import { createTypingSignaler, resolveTypingMode } from "./typing-mode.js";
+import { resolveTypingMode } from "./typing-mode.js";
 
 type AgentDefaults = NonNullable<ClawdbotConfig["agents"]>["defaults"];
 type ExecOverrides = Pick<ExecToolDefaults, "host" | "security" | "ask" | "node">;
 
 const BARE_SESSION_RESET_PROMPT =
-  "A new session was started via /new or /reset. Say hi briefly (1-2 sentences) and ask what the user wants to do next. Do not mention internal steps, files, tools, or reasoning.";
+  "A new session was started via /new or /reset. Say hi briefly (1-2 sentences) and ask what the user wants to do next. If the runtime model differs from default_model in the system prompt, mention the default model in the greeting. Do not mention internal steps, files, tools, or reasoning.";
 
 type RunPreparedReplyParams = {
   ctx: MsgContext;
@@ -92,9 +93,11 @@ type RunPreparedReplyParams = {
   };
   typing: TypingController;
   opts?: GetReplyOptions;
+  defaultProvider: string;
   defaultModel: string;
   timeoutMs: number;
   isNewSession: boolean;
+  resetTriggered: boolean;
   systemSent: boolean;
   sessionEntry?: SessionEntry;
   sessionStore?: Record<string, SessionEntry>;
@@ -220,9 +223,11 @@ export async function runPreparedReply(
     perMessageQueueOptions,
     typing,
     opts,
+    defaultProvider,
     defaultModel,
     timeoutMs,
     isNewSession,
+    resetTriggered,
     systemSent,
     sessionKey,
     sessionId,
@@ -249,11 +254,6 @@ export async function runPreparedReply(
     configured: sessionCfg?.typingMode ?? agentCfg?.typingMode,
     isGroupChat,
     wasMentioned,
-    isHeartbeat,
-  });
-  const typingSignals = createTypingSignaler({
-    typing,
-    mode: typingMode,
     isHeartbeat,
   });
   const shouldInjectGroupIntro = Boolean(
@@ -374,12 +374,38 @@ export async function runPreparedReply(
       }
     }
   }
+  if (resetTriggered && command.isAuthorizedSender) {
+    const channel = ctx.OriginatingChannel || (command.channel as any);
+    const to = ctx.OriginatingTo || command.from || command.to;
+    if (channel && to) {
+      const modelLabel = `${provider}/${model}`;
+      const defaultLabel = `${defaultProvider}/${defaultModel}`;
+      const text =
+        modelLabel === defaultLabel
+          ? `✅ New session started · model: ${modelLabel}`
+          : `✅ New session started · model: ${modelLabel} (default: ${defaultLabel})`;
+      await routeReply({
+        payload: { text },
+        channel,
+        to,
+        sessionKey,
+        accountId: ctx.AccountId,
+        threadId: ctx.MessageThreadId,
+        cfg,
+      });
+    }
+  }
   const sessionIdFinal = sessionId ?? crypto.randomUUID();
   const sessionFile = resolveSessionFilePath(sessionIdFinal, sessionEntry);
   const queueBodyBase = [threadStarterNote, baseBodyFinal].filter(Boolean).join("\n\n");
-  const queuedBody = mediaNote
-    ? [mediaNote, mediaReplyHint, queueBodyBase].filter(Boolean).join("\n").trim()
+  const queueMessageId = sessionCtx.MessageSid?.trim();
+  const queueMessageIdHint = queueMessageId ? `[message_id: ${queueMessageId}]` : "";
+  const queueBodyWithId = queueMessageIdHint
+    ? `${queueBodyBase}\n${queueMessageIdHint}`
     : queueBodyBase;
+  const queuedBody = mediaNote
+    ? [mediaNote, mediaReplyHint, queueBodyWithId].filter(Boolean).join("\n").trim()
+    : queueBodyWithId;
   const resolvedQueue = resolveQueueSettings({
     cfg,
     channel: sessionCtx.Provider,
@@ -455,10 +481,6 @@ export async function runPreparedReply(
       ...(isReasoningTagProvider(provider) ? { enforceFinalTag: true } : {}),
     },
   };
-
-  if (typingSignals.shouldStartImmediately) {
-    await typingSignals.signalRunStart();
-  }
 
   return runReplyAgent({
     commandBody: prefixedCommandBody,

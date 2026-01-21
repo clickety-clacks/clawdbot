@@ -1,3 +1,5 @@
+import fs from "node:fs";
+
 import { intro as clackIntro, outro as clackOutro } from "@clack/prompts";
 import { resolveAgentWorkspaceDir, resolveDefaultAgentId } from "../agents/agent-scope.js";
 import { DEFAULT_MODEL, DEFAULT_PROVIDER } from "../agents/defaults.js";
@@ -7,8 +9,9 @@ import {
   resolveConfiguredModelRef,
   resolveHooksGmailModel,
 } from "../agents/model-selection.js";
+import { formatCliCommand } from "../cli/command-format.js";
 import type { ClawdbotConfig } from "../config/config.js";
-import { CONFIG_PATH_CLAWDBOT, writeConfigFile } from "../config/config.js";
+import { CONFIG_PATH_CLAWDBOT, readConfigFileSnapshot, writeConfigFile } from "../config/config.js";
 import { resolveGatewayService } from "../daemon/service.js";
 import { buildGatewayConnectionDetails } from "../gateway/call.js";
 import { resolveClawdbotPackageRoot } from "../infra/clawdbot-root.js";
@@ -247,15 +250,32 @@ export async function doctorCommand(
     healthOk,
   });
 
-  cfg = applyWizardMetadata(cfg, { command: "doctor", mode: resolveMode(cfg) });
-  await writeConfigFile(cfg);
-  runtime.log(`Updated ${CONFIG_PATH_CLAWDBOT}`);
+  if (prompter.shouldRepair) {
+    cfg = applyWizardMetadata(cfg, { command: "doctor", mode: resolveMode(cfg) });
+    await writeConfigFile(cfg);
+    runtime.log(`Updated ${CONFIG_PATH_CLAWDBOT}`);
+    const backupPath = `${CONFIG_PATH_CLAWDBOT}.bak`;
+    if (fs.existsSync(backupPath)) {
+      runtime.log(`Backup: ${backupPath}`);
+    }
+  } else {
+    runtime.log(`Run "${formatCliCommand("clawdbot doctor --fix")}" to apply changes.`);
+  }
 
   if (options.workspaceSuggestions !== false) {
     const workspaceDir = resolveAgentWorkspaceDir(cfg, resolveDefaultAgentId(cfg));
     noteWorkspaceBackupTip(workspaceDir);
     if (await shouldSuggestMemorySystem(workspaceDir)) {
       note(MEMORY_SYSTEM_PROMPT, "Workspace");
+    }
+  }
+
+  const finalSnapshot = await readConfigFileSnapshot();
+  if (finalSnapshot.exists && !finalSnapshot.valid) {
+    runtime.error("Invalid config:");
+    for (const issue of finalSnapshot.issues) {
+      const path = issue.path || "<root>";
+      runtime.error(`- ${path}: ${issue.message}`);
     }
   }
 

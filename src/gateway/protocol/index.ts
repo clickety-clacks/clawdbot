@@ -56,6 +56,16 @@ import {
   CronStatusParamsSchema,
   type CronUpdateParams,
   CronUpdateParamsSchema,
+  type DevicePairApproveParams,
+  DevicePairApproveParamsSchema,
+  type DevicePairListParams,
+  DevicePairListParamsSchema,
+  type DevicePairRejectParams,
+  DevicePairRejectParamsSchema,
+  type DeviceTokenRevokeParams,
+  DeviceTokenRevokeParamsSchema,
+  type DeviceTokenRotateParams,
+  DeviceTokenRotateParamsSchema,
   type ExecApprovalsGetParams,
   ExecApprovalsGetParamsSchema,
   type ExecApprovalsNodeGetParams,
@@ -65,6 +75,10 @@ import {
   type ExecApprovalsSetParams,
   ExecApprovalsSetParamsSchema,
   type ExecApprovalsSnapshot,
+  type ExecApprovalRequestParams,
+  ExecApprovalRequestParamsSchema,
+  type ExecApprovalResolveParams,
+  ExecApprovalResolveParamsSchema,
   ErrorCodes,
   type ErrorShape,
   ErrorShapeSchema,
@@ -83,8 +97,12 @@ import {
   ModelsListParamsSchema,
   type NodeDescribeParams,
   NodeDescribeParamsSchema,
+  type NodeEventParams,
+  NodeEventParamsSchema,
   type NodeInvokeParams,
   NodeInvokeParamsSchema,
+  type NodeInvokeResultParams,
+  NodeInvokeResultParamsSchema,
   type NodeListParams,
   NodeListParamsSchema,
   type NodePairApproveParams,
@@ -124,6 +142,9 @@ import {
   SessionsResolveParamsSchema,
   type ShutdownEvent,
   ShutdownEventSchema,
+  type SkillsBinsParams,
+  SkillsBinsParamsSchema,
+  type SkillsBinsResult,
   type SkillsInstallParams,
   SkillsInstallParamsSchema,
   type SkillsStatusParams,
@@ -197,6 +218,10 @@ export const validateNodeRenameParams = ajv.compile<NodeRenameParams>(NodeRename
 export const validateNodeListParams = ajv.compile<NodeListParams>(NodeListParamsSchema);
 export const validateNodeDescribeParams = ajv.compile<NodeDescribeParams>(NodeDescribeParamsSchema);
 export const validateNodeInvokeParams = ajv.compile<NodeInvokeParams>(NodeInvokeParamsSchema);
+export const validateNodeInvokeResultParams = ajv.compile<NodeInvokeResultParams>(
+  NodeInvokeResultParamsSchema,
+);
+export const validateNodeEventParams = ajv.compile<NodeEventParams>(NodeEventParamsSchema);
 export const validateSessionsListParams = ajv.compile<SessionsListParams>(SessionsListParamsSchema);
 export const validateSessionsResolveParams = ajv.compile<SessionsResolveParams>(
   SessionsResolveParamsSchema,
@@ -229,6 +254,7 @@ export const validateChannelsLogoutParams = ajv.compile<ChannelsLogoutParams>(
 );
 export const validateModelsListParams = ajv.compile<ModelsListParams>(ModelsListParamsSchema);
 export const validateSkillsStatusParams = ajv.compile<SkillsStatusParams>(SkillsStatusParamsSchema);
+export const validateSkillsBinsParams = ajv.compile<SkillsBinsParams>(SkillsBinsParamsSchema);
 export const validateSkillsInstallParams =
   ajv.compile<SkillsInstallParams>(SkillsInstallParamsSchema);
 export const validateSkillsUpdateParams = ajv.compile<SkillsUpdateParams>(SkillsUpdateParamsSchema);
@@ -239,11 +265,32 @@ export const validateCronUpdateParams = ajv.compile<CronUpdateParams>(CronUpdate
 export const validateCronRemoveParams = ajv.compile<CronRemoveParams>(CronRemoveParamsSchema);
 export const validateCronRunParams = ajv.compile<CronRunParams>(CronRunParamsSchema);
 export const validateCronRunsParams = ajv.compile<CronRunsParams>(CronRunsParamsSchema);
+export const validateDevicePairListParams = ajv.compile<DevicePairListParams>(
+  DevicePairListParamsSchema,
+);
+export const validateDevicePairApproveParams = ajv.compile<DevicePairApproveParams>(
+  DevicePairApproveParamsSchema,
+);
+export const validateDevicePairRejectParams = ajv.compile<DevicePairRejectParams>(
+  DevicePairRejectParamsSchema,
+);
+export const validateDeviceTokenRotateParams = ajv.compile<DeviceTokenRotateParams>(
+  DeviceTokenRotateParamsSchema,
+);
+export const validateDeviceTokenRevokeParams = ajv.compile<DeviceTokenRevokeParams>(
+  DeviceTokenRevokeParamsSchema,
+);
 export const validateExecApprovalsGetParams = ajv.compile<ExecApprovalsGetParams>(
   ExecApprovalsGetParamsSchema,
 );
 export const validateExecApprovalsSetParams = ajv.compile<ExecApprovalsSetParams>(
   ExecApprovalsSetParamsSchema,
+);
+export const validateExecApprovalRequestParams = ajv.compile<ExecApprovalRequestParams>(
+  ExecApprovalRequestParamsSchema,
+);
+export const validateExecApprovalResolveParams = ajv.compile<ExecApprovalResolveParams>(
+  ExecApprovalResolveParamsSchema,
 );
 export const validateExecApprovalsNodeGetParams = ajv.compile<ExecApprovalsNodeGetParams>(
   ExecApprovalsNodeGetParamsSchema,
@@ -364,6 +411,9 @@ export type {
   NodePairRequestParams,
   NodePairListParams,
   NodePairApproveParams,
+  DevicePairListParams,
+  DevicePairApproveParams,
+  DevicePairRejectParams,
   ConfigGetParams,
   ConfigSetParams,
   ConfigApplyParams,
@@ -388,12 +438,16 @@ export type {
   AgentsListParams,
   AgentsListResult,
   SkillsStatusParams,
+  SkillsBinsParams,
+  SkillsBinsResult,
   SkillsInstallParams,
   SkillsUpdateParams,
   NodePairRejectParams,
   NodePairVerifyParams,
   NodeListParams,
   NodeInvokeParams,
+  NodeInvokeResultParams,
+  NodeEventParams,
   SessionsListParams,
   SessionsResolveParams,
   SessionsPatchParams,

@@ -17,6 +17,7 @@ import { renderSystemdUnavailableHints } from "../daemon/systemd-hints.js";
 import { formatPortDiagnostics, inspectPortUsage } from "../infra/ports.js";
 import { isWSL } from "../infra/wsl.js";
 import type { RuntimeEnv } from "../runtime.js";
+import { formatCliCommand } from "../cli/command-format.js";
 import { note } from "../terminal/note.js";
 import { sleep } from "../utils.js";
 import {
@@ -85,7 +86,13 @@ export async function maybeRepairGatewayDaemon(params: {
   if (params.healthOk) return;
 
   const service = resolveGatewayService();
-  let loaded = await service.isLoaded({ env: process.env });
+  // systemd can throw in containers/WSL; treat as "not loaded" and fall back to hints.
+  let loaded = false;
+  try {
+    loaded = await service.isLoaded({ env: process.env });
+  } catch {
+    loaded = false;
+  }
   let serviceRuntime: Awaited<ReturnType<typeof service.readRuntime>> | undefined;
   if (loaded) {
     serviceRuntime = await service.readRuntime(process.env).catch(() => undefined);
@@ -201,7 +208,7 @@ export async function maybeRepairGatewayDaemon(params: {
   if (process.platform === "darwin") {
     const label = resolveGatewayLaunchAgentLabel(process.env.CLAWDBOT_PROFILE);
     note(
-      `LaunchAgent loaded; stopping requires "clawdbot daemon stop" or launchctl bootout gui/$UID/${label}.`,
+      `LaunchAgent loaded; stopping requires "${formatCliCommand("clawdbot daemon stop")}" or launchctl bootout gui/$UID/${label}.`,
       "Gateway",
     );
   }

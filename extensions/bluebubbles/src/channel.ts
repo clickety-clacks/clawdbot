@@ -2,12 +2,14 @@ import type { ChannelAccountSnapshot, ChannelPlugin, ClawdbotConfig } from "claw
 import {
   applyAccountNameToChannelSection,
   buildChannelConfigSchema,
+  collectBlueBubblesStatusIssues,
   DEFAULT_ACCOUNT_ID,
   deleteAccountFromConfigSection,
   formatPairingApproveHint,
   migrateBaseNameToDefaultAccount,
   normalizeAccountId,
   PAIRING_APPROVED_MESSAGE,
+  resolveBlueBubblesGroupRequireMention,
   setAccountEnabledInConfigSection,
 } from "clawdbot/plugin-sdk";
 
@@ -18,20 +20,30 @@ import {
   resolveDefaultBlueBubblesAccountId,
 } from "./accounts.js";
 import { BlueBubblesConfigSchema } from "./config-schema.js";
-import { probeBlueBubbles } from "./probe.js";
+import { probeBlueBubbles, type BlueBubblesProbe } from "./probe.js";
 import { sendMessageBlueBubbles } from "./send.js";
-import { normalizeBlueBubblesHandle } from "./targets.js";
+import {
+  looksLikeBlueBubblesTargetId,
+  normalizeBlueBubblesHandle,
+  normalizeBlueBubblesMessagingTarget,
+} from "./targets.js";
 import { bluebubblesMessageActions } from "./actions.js";
 import { monitorBlueBubblesProvider, resolveWebhookPathFromConfig } from "./monitor.js";
+import { blueBubblesOnboardingAdapter } from "./onboarding.js";
+import { sendBlueBubblesMedia } from "./media-send.js";
 
 const meta = {
   id: "bluebubbles",
   label: "BlueBubbles",
   selectionLabel: "BlueBubbles (macOS app)",
+  detailLabel: "BlueBubbles",
   docsPath: "/channels/bluebubbles",
   docsLabel: "bluebubbles",
   blurb: "iMessage via the BlueBubbles mac app + REST API.",
+  systemImage: "bubble.left.and.text.bubble.right",
+  aliases: ["bb"],
   order: 75,
+  preferOver: ["imessage"],
 };
 
 export const bluebubblesPlugin: ChannelPlugin<ResolvedBlueBubblesAccount> = {
@@ -39,11 +51,27 @@ export const bluebubblesPlugin: ChannelPlugin<ResolvedBlueBubblesAccount> = {
   meta,
   capabilities: {
     chatTypes: ["direct", "group"],
-    media: false,
+    media: true,
     reactions: true,
+    edit: true,
+    unsend: true,
+    reply: true,
+    effects: true,
+    groupManagement: true,
+  },
+  groups: {
+    resolveRequireMention: resolveBlueBubblesGroupRequireMention,
+  },
+  threading: {
+    buildToolContext: ({ context, hasRepliedRef }) => ({
+      currentChannelId: context.To?.trim() || undefined,
+      currentThreadTs: context.ReplyToId,
+      hasRepliedRef,
+    }),
   },
   reload: { configPrefixes: ["channels.bluebubbles"] },
   configSchema: buildChannelConfigSchema(BlueBubblesConfigSchema),
+  onboarding: blueBubblesOnboardingAdapter,
   config: {
     listAccountIds: (cfg) => listBlueBubblesAccountIds(cfg as ClawdbotConfig),
     resolveAccount: (cfg, accountId) =>
@@ -111,6 +139,13 @@ export const bluebubblesPlugin: ChannelPlugin<ResolvedBlueBubblesAccount> = {
       ];
     },
   },
+  messaging: {
+    normalizeTarget: normalizeBlueBubblesMessagingTarget,
+    targetResolver: {
+      looksLikeId: looksLikeBlueBubblesTargetId,
+      hint: "<handle|chat_guid:GUID|chat_id:ID|chat_identifier:ID>",
+    },
+  },
   setup: {
     resolveAccountId: ({ accountId }) => normalizeAccountId(accountId),
     applyAccountName: ({ cfg, accountId, name }) =>
@@ -152,6 +187,7 @@ export const bluebubblesPlugin: ChannelPlugin<ResolvedBlueBubblesAccount> = {
               enabled: true,
               ...(input.httpUrl ? { serverUrl: input.httpUrl } : {}),
               ...(input.password ? { password: input.password } : {}),
+              ...(input.webhookPath ? { webhookPath: input.webhookPath } : {}),
             },
           },
         } as ClawdbotConfig;
@@ -170,6 +206,7 @@ export const bluebubblesPlugin: ChannelPlugin<ResolvedBlueBubblesAccount> = {
                 enabled: true,
                 ...(input.httpUrl ? { serverUrl: input.httpUrl } : {}),
                 ...(input.password ? { password: input.password } : {}),
+                ...(input.webhookPath ? { webhookPath: input.webhookPath } : {}),
               },
             },
           },
@@ -199,15 +236,39 @@ export const bluebubblesPlugin: ChannelPlugin<ResolvedBlueBubblesAccount> = {
       }
       return { ok: true, to: trimmed };
     },
-    sendText: async ({ cfg, to, text, accountId }) => {
+    sendText: async ({ cfg, to, text, accountId, replyToId }) => {
+      const replyToMessageGuid = typeof replyToId === "string" ? replyToId.trim() : "";
       const result = await sendMessageBlueBubbles(to, text, {
         cfg: cfg as ClawdbotConfig,
         accountId: accountId ?? undefined,
+        replyToMessageGuid: replyToMessageGuid || undefined,
       });
       return { channel: "bluebubbles", ...result };
     },
-    sendMedia: async () => {
-      throw new Error("BlueBubbles media delivery is not supported yet.");
+    sendMedia: async (ctx) => {
+      const { cfg, to, text, mediaUrl, accountId, replyToId } = ctx;
+      const { mediaPath, mediaBuffer, contentType, filename, caption } = ctx as {
+        mediaPath?: string;
+        mediaBuffer?: Uint8Array;
+        contentType?: string;
+        filename?: string;
+        caption?: string;
+      };
+      const resolvedCaption = caption ?? text;
+      const result = await sendBlueBubblesMedia({
+        cfg: cfg as ClawdbotConfig,
+        to,
+        mediaUrl,
+        mediaPath,
+        mediaBuffer,
+        contentType,
+        filename,
+        caption: resolvedCaption ?? undefined,
+        replyToId: replyToId ?? null,
+        accountId: accountId ?? undefined,
+      });
+
+      return { channel: "bluebubbles", ...result };
     },
   },
   status: {
@@ -218,19 +279,7 @@ export const bluebubblesPlugin: ChannelPlugin<ResolvedBlueBubblesAccount> = {
       lastStopAt: null,
       lastError: null,
     },
-    collectStatusIssues: (accounts) =>
-      accounts.flatMap((account) => {
-        const lastError = typeof account.lastError === "string" ? account.lastError.trim() : "";
-        if (!lastError) return [];
-        return [
-          {
-            channel: "bluebubbles",
-            accountId: account.accountId,
-            kind: "runtime",
-            message: `Channel error: ${lastError}`,
-          },
-        ];
-      }),
+    collectStatusIssues: collectBlueBubblesStatusIssues,
     buildChannelSummary: ({ snapshot }) => ({
       configured: snapshot.configured ?? false,
       baseUrl: snapshot.baseUrl ?? null,
@@ -247,20 +296,25 @@ export const bluebubblesPlugin: ChannelPlugin<ResolvedBlueBubblesAccount> = {
         password: account.config.password ?? null,
         timeoutMs,
       }),
-    buildAccountSnapshot: ({ account, runtime, probe }) => ({
-      accountId: account.accountId,
-      name: account.name,
-      enabled: account.enabled,
-      configured: account.configured,
-      baseUrl: account.baseUrl,
-      running: runtime?.running ?? false,
-      lastStartAt: runtime?.lastStartAt ?? null,
-      lastStopAt: runtime?.lastStopAt ?? null,
-      lastError: runtime?.lastError ?? null,
-      probe,
-      lastInboundAt: runtime?.lastInboundAt ?? null,
-      lastOutboundAt: runtime?.lastOutboundAt ?? null,
-    }),
+    buildAccountSnapshot: ({ account, runtime, probe }) => {
+      const running = runtime?.running ?? false;
+      const probeOk = (probe as BlueBubblesProbe | undefined)?.ok;
+      return {
+        accountId: account.accountId,
+        name: account.name,
+        enabled: account.enabled,
+        configured: account.configured,
+        baseUrl: account.baseUrl,
+        running,
+        connected: probeOk ?? running,
+        lastStartAt: runtime?.lastStartAt ?? null,
+        lastStopAt: runtime?.lastStopAt ?? null,
+        lastError: runtime?.lastError ?? null,
+        probe,
+        lastInboundAt: runtime?.lastInboundAt ?? null,
+        lastOutboundAt: runtime?.lastOutboundAt ?? null,
+      };
+    },
   },
   gateway: {
     startAccount: async (ctx) => {

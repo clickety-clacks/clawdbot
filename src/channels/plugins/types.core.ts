@@ -31,6 +31,7 @@ export type ChannelSetupInput = {
   httpUrl?: string;
   httpHost?: string;
   httpPort?: string;
+  webhookPath?: string;
   useEnv?: boolean;
   homeserver?: string;
   userId?: string;
@@ -73,10 +74,13 @@ export type ChannelMeta = {
   selectionDocsPrefix?: string;
   selectionDocsOmitLabel?: boolean;
   selectionExtras?: string[];
+  detailLabel?: string;
+  systemImage?: string;
   showConfigured?: boolean;
   quickstartAllowFrom?: boolean;
   forceAccountBinding?: boolean;
   preferSessionLookupForAnnounceTarget?: boolean;
+  preferOver?: string[];
 };
 
 export type ChannelAccountSnapshot = {
@@ -143,6 +147,11 @@ export type ChannelCapabilities = {
   chatTypes: Array<NormalizedChatType | "thread">;
   polls?: boolean;
   reactions?: boolean;
+  edit?: boolean;
+  unsend?: boolean;
+  reply?: boolean;
+  effects?: boolean;
+  groupManagement?: boolean;
   threads?: boolean;
   media?: boolean;
   nativeCommands?: boolean;

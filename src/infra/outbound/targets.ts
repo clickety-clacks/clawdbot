@@ -1,4 +1,5 @@
 import { getChannelPlugin, normalizeChannelId } from "../../channels/plugins/index.js";
+import { formatCliCommand } from "../../cli/command-format.js";
 import type { ChannelId, ChannelOutboundTargetMode } from "../../channels/plugins/types.js";
 import type { ClawdbotConfig } from "../../config/config.js";
 import type { SessionEntry } from "../../config/sessions.js";
@@ -34,16 +35,19 @@ export type SessionDeliveryTarget = {
   channel?: DeliverableMessageChannel;
   to?: string;
   accountId?: string;
+  threadId?: string | number;
   mode: ChannelOutboundTargetMode;
   lastChannel?: DeliverableMessageChannel;
   lastTo?: string;
   lastAccountId?: string;
+  lastThreadId?: string | number;
 };
 
 export function resolveSessionDeliveryTarget(params: {
   entry?: SessionEntry;
   requestedChannel?: GatewayMessageChannel | "last";
   explicitTo?: string;
+  explicitThreadId?: string | number;
   fallbackChannel?: DeliverableMessageChannel;
   allowMismatchedLastTo?: boolean;
   mode?: ChannelOutboundTargetMode;
@@ -53,6 +57,7 @@ export function resolveSessionDeliveryTarget(params: {
     context?.channel && isDeliverableMessageChannel(context.channel) ? context.channel : undefined;
   const lastTo = context?.to;
   const lastAccountId = context?.accountId;
+  const lastThreadId = context?.threadId;
 
   const rawRequested = params.requestedChannel ?? "last";
   const requested = rawRequested === "last" ? "last" : normalizeMessageChannel(rawRequested);
@@ -66,6 +71,10 @@ export function resolveSessionDeliveryTarget(params: {
   const explicitTo =
     typeof params.explicitTo === "string" && params.explicitTo.trim()
       ? params.explicitTo.trim()
+      : undefined;
+  const explicitThreadId =
+    params.explicitThreadId != null && params.explicitThreadId !== ""
+      ? params.explicitThreadId
       : undefined;
 
   let channel = requestedChannel === "last" ? lastChannel : requestedChannel;
@@ -83,16 +92,19 @@ export function resolveSessionDeliveryTarget(params: {
   }
 
   const accountId = channel && channel === lastChannel ? lastAccountId : undefined;
+  const threadId = channel && channel === lastChannel ? lastThreadId : undefined;
   const mode = params.mode ?? (explicitTo ? "explicit" : "implicit");
 
   return {
     channel,
     to,
     accountId,
+    threadId: explicitThreadId ?? threadId,
     mode,
     lastChannel,
     lastTo,
     lastAccountId,
+    lastThreadId,
   };
 }
 
@@ -109,7 +121,7 @@ export function resolveOutboundTarget(params: {
     return {
       ok: false,
       error: new Error(
-        "Delivering to WebChat is not supported via `clawdbot agent`; use WhatsApp/Telegram or run with --deliver=false.",
+        `Delivering to WebChat is not supported via \`${formatCliCommand("clawdbot agent")}\`; use WhatsApp/Telegram or run with --deliver=false.`,
       ),
     };
   }

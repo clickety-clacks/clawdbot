@@ -25,7 +25,9 @@ vi.mock("../infra/update-check.js", async () => {
   );
   return {
     ...actual,
+    checkUpdateStatus: vi.fn(),
     fetchNpmTagVersion: vi.fn(),
+    resolveNpmChannelTag: vi.fn(),
   };
 });
 
@@ -72,12 +74,42 @@ describe("update-cli", () => {
     vi.clearAllMocks();
     const { resolveClawdbotPackageRoot } = await import("../infra/clawdbot-root.js");
     const { readConfigFileSnapshot } = await import("../config/config.js");
-    const { fetchNpmTagVersion } = await import("../infra/update-check.js");
+    const { checkUpdateStatus, fetchNpmTagVersion, resolveNpmChannelTag } =
+      await import("../infra/update-check.js");
     vi.mocked(resolveClawdbotPackageRoot).mockResolvedValue(process.cwd());
     vi.mocked(readConfigFileSnapshot).mockResolvedValue(baseSnapshot);
     vi.mocked(fetchNpmTagVersion).mockResolvedValue({
       tag: "latest",
       version: "9999.0.0",
+    });
+    vi.mocked(resolveNpmChannelTag).mockResolvedValue({
+      tag: "latest",
+      version: "9999.0.0",
+    });
+    vi.mocked(checkUpdateStatus).mockResolvedValue({
+      root: "/test/path",
+      installKind: "git",
+      packageManager: "pnpm",
+      git: {
+        root: "/test/path",
+        sha: "abcdef1234567890",
+        tag: "v1.2.3",
+        branch: "main",
+        upstream: "origin/main",
+        dirty: false,
+        ahead: 0,
+        behind: 0,
+        fetchOk: true,
+      },
+      deps: {
+        manager: "pnpm",
+        status: "ok",
+        lockfilePath: "/test/path/pnpm-lock.yaml",
+        markerPath: "/test/path/node_modules",
+      },
+      registry: {
+        latestVersion: "1.2.3",
+      },
     });
     setTty(false);
     setStdoutTty(false);
@@ -120,7 +152,29 @@ describe("update-cli", () => {
     expect(defaultRuntime.log).toHaveBeenCalled();
   });
 
-  it("defaults to stable channel when unset", async () => {
+  it("updateStatusCommand prints table output", async () => {
+    const { defaultRuntime } = await import("../runtime.js");
+    const { updateStatusCommand } = await import("./update-cli.js");
+
+    await updateStatusCommand({ json: false });
+
+    const logs = vi.mocked(defaultRuntime.log).mock.calls.map((call) => call[0]);
+    expect(logs.join("\n")).toContain("Clawdbot update status");
+  });
+
+  it("updateStatusCommand emits JSON", async () => {
+    const { defaultRuntime } = await import("../runtime.js");
+    const { updateStatusCommand } = await import("./update-cli.js");
+
+    await updateStatusCommand({ json: true });
+
+    const last = vi.mocked(defaultRuntime.log).mock.calls.at(-1)?.[0];
+    expect(typeof last).toBe("string");
+    const parsed = JSON.parse(String(last));
+    expect(parsed.channel.value).toBe("stable");
+  });
+
+  it("defaults to dev channel for git installs when unset", async () => {
     const { runGatewayUpdate } = await import("../infra/update-runner.js");
     const { updateCommand } = await import("./update-cli.js");
 
@@ -134,7 +188,38 @@ describe("update-cli", () => {
     await updateCommand({});
 
     const call = vi.mocked(runGatewayUpdate).mock.calls[0]?.[0];
-    expect(call?.tag).toBe("latest");
+    expect(call?.channel).toBe("dev");
+  });
+
+  it("defaults to stable channel for package installs when unset", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-update-"));
+    try {
+      await fs.writeFile(
+        path.join(tempDir, "package.json"),
+        JSON.stringify({ name: "clawdbot", version: "1.0.0" }),
+        "utf-8",
+      );
+
+      const { resolveClawdbotPackageRoot } = await import("../infra/clawdbot-root.js");
+      const { runGatewayUpdate } = await import("../infra/update-runner.js");
+      const { updateCommand } = await import("./update-cli.js");
+
+      vi.mocked(resolveClawdbotPackageRoot).mockResolvedValue(tempDir);
+      vi.mocked(runGatewayUpdate).mockResolvedValue({
+        status: "ok",
+        mode: "npm",
+        steps: [],
+        durationMs: 100,
+      });
+
+      await updateCommand({});
+
+      const call = vi.mocked(runGatewayUpdate).mock.calls[0]?.[0];
+      expect(call?.channel).toBe("stable");
+      expect(call?.tag).toBe("latest");
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
   });
 
   it("uses stored beta channel when configured", async () => {
@@ -156,24 +241,78 @@ describe("update-cli", () => {
     await updateCommand({});
 
     const call = vi.mocked(runGatewayUpdate).mock.calls[0]?.[0];
-    expect(call?.tag).toBe("beta");
+    expect(call?.channel).toBe("beta");
+  });
+
+  it("falls back to latest when beta tag is older than release", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-update-"));
+    try {
+      await fs.writeFile(
+        path.join(tempDir, "package.json"),
+        JSON.stringify({ name: "clawdbot", version: "2026.1.18-1" }),
+        "utf-8",
+      );
+
+      const { resolveClawdbotPackageRoot } = await import("../infra/clawdbot-root.js");
+      const { readConfigFileSnapshot } = await import("../config/config.js");
+      const { resolveNpmChannelTag } = await import("../infra/update-check.js");
+      const { runGatewayUpdate } = await import("../infra/update-runner.js");
+      const { updateCommand } = await import("./update-cli.js");
+
+      vi.mocked(resolveClawdbotPackageRoot).mockResolvedValue(tempDir);
+      vi.mocked(readConfigFileSnapshot).mockResolvedValue({
+        ...baseSnapshot,
+        config: { update: { channel: "beta" } },
+      });
+      vi.mocked(resolveNpmChannelTag).mockResolvedValue({
+        tag: "latest",
+        version: "2026.1.20-1",
+      });
+      vi.mocked(runGatewayUpdate).mockResolvedValue({
+        status: "ok",
+        mode: "npm",
+        steps: [],
+        durationMs: 100,
+      });
+
+      await updateCommand({});
+
+      const call = vi.mocked(runGatewayUpdate).mock.calls[0]?.[0];
+      expect(call?.channel).toBe("beta");
+      expect(call?.tag).toBe("latest");
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
   });
 
   it("honors --tag override", async () => {
-    const { runGatewayUpdate } = await import("../infra/update-runner.js");
-    const { updateCommand } = await import("./update-cli.js");
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-update-"));
+    try {
+      await fs.writeFile(
+        path.join(tempDir, "package.json"),
+        JSON.stringify({ name: "clawdbot", version: "1.0.0" }),
+        "utf-8",
+      );
 
-    vi.mocked(runGatewayUpdate).mockResolvedValue({
-      status: "ok",
-      mode: "git",
-      steps: [],
-      durationMs: 100,
-    });
+      const { resolveClawdbotPackageRoot } = await import("../infra/clawdbot-root.js");
+      const { runGatewayUpdate } = await import("../infra/update-runner.js");
+      const { updateCommand } = await import("./update-cli.js");
 
-    await updateCommand({ tag: "next" });
+      vi.mocked(resolveClawdbotPackageRoot).mockResolvedValue(tempDir);
+      vi.mocked(runGatewayUpdate).mockResolvedValue({
+        status: "ok",
+        mode: "npm",
+        steps: [],
+        durationMs: 100,
+      });
 
-    const call = vi.mocked(runGatewayUpdate).mock.calls[0]?.[0];
-    expect(call?.tag).toBe("next");
+      await updateCommand({ tag: "next" });
+
+      const call = vi.mocked(runGatewayUpdate).mock.calls[0]?.[0];
+      expect(call?.tag).toBe("next");
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
   });
 
   it("updateCommand outputs JSON when --json is set", async () => {
@@ -315,13 +454,13 @@ describe("update-cli", () => {
       );
 
       const { resolveClawdbotPackageRoot } = await import("../infra/clawdbot-root.js");
-      const { fetchNpmTagVersion } = await import("../infra/update-check.js");
+      const { resolveNpmChannelTag } = await import("../infra/update-check.js");
       const { runGatewayUpdate } = await import("../infra/update-runner.js");
       const { defaultRuntime } = await import("../runtime.js");
       const { updateCommand } = await import("./update-cli.js");
 
       vi.mocked(resolveClawdbotPackageRoot).mockResolvedValue(tempDir);
-      vi.mocked(fetchNpmTagVersion).mockResolvedValue({
+      vi.mocked(resolveNpmChannelTag).mockResolvedValue({
         tag: "latest",
         version: "0.0.1",
       });

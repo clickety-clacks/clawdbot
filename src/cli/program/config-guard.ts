@@ -1,65 +1,61 @@
-import {
-  isNixMode,
-  loadConfig,
-  migrateLegacyConfig,
-  readConfigFileSnapshot,
-  writeConfigFile,
-} from "../../config/config.js";
-import { danger } from "../../globals.js";
-import { autoMigrateLegacyState } from "../../infra/state-migrations.js";
+import { readConfigFileSnapshot } from "../../config/config.js";
+import { loadAndMaybeMigrateDoctorConfig } from "../../commands/doctor-config-flow.js";
+import { colorize, isRich, theme } from "../../terminal/theme.js";
 import type { RuntimeEnv } from "../../runtime.js";
+import { formatCliCommand } from "../command-format.js";
+
+const ALLOWED_INVALID_COMMANDS = new Set(["doctor", "logs", "health", "help", "status", "service"]);
+let didRunDoctorConfigFlow = false;
+
+function formatConfigIssues(issues: Array<{ path: string; message: string }>): string[] {
+  return issues.map((issue) => `- ${issue.path || "<root>"}: ${issue.message}`);
+}
 
 export async function ensureConfigReady(params: {
   runtime: RuntimeEnv;
-  migrateState?: boolean;
+  commandPath?: string[];
 }): Promise<void> {
+  if (!didRunDoctorConfigFlow) {
+    didRunDoctorConfigFlow = true;
+    await loadAndMaybeMigrateDoctorConfig({
+      options: { nonInteractive: true },
+      confirm: async () => false,
+    });
+  }
+
   const snapshot = await readConfigFileSnapshot();
-  if (snapshot.legacyIssues.length > 0) {
-    if (isNixMode) {
-      params.runtime.error(
-        danger(
-          "Legacy config entries detected while running in Nix mode. Update your Nix config to the latest schema and retry.",
-        ),
-      );
-      params.runtime.exit(1);
-      return;
-    }
-    const migrated = migrateLegacyConfig(snapshot.parsed);
-    if (migrated.config) {
-      await writeConfigFile(migrated.config);
-      if (migrated.changes.length > 0) {
-        params.runtime.log(
-          `Migrated legacy config entries:\n${migrated.changes
-            .map((entry) => `- ${entry}`)
-            .join("\n")}`,
-        );
-      }
-    } else {
-      const issues = snapshot.legacyIssues
-        .map((issue) => `- ${issue.path}: ${issue.message}`)
-        .join("\n");
-      params.runtime.error(
-        danger(
-          `Legacy config entries detected. Run "clawdbot doctor" (or ask your agent) to migrate.\n${issues}`,
-        ),
-      );
-      params.runtime.exit(1);
-      return;
-    }
-  }
+  const commandName = params.commandPath?.[0];
+  const allowInvalid = commandName ? ALLOWED_INVALID_COMMANDS.has(commandName) : false;
+  const issues = snapshot.exists && !snapshot.valid ? formatConfigIssues(snapshot.issues) : [];
+  const legacyIssues =
+    snapshot.legacyIssues.length > 0
+      ? snapshot.legacyIssues.map((issue) => `- ${issue.path}: ${issue.message}`)
+      : [];
 
-  if (snapshot.exists && !snapshot.valid) {
-    params.runtime.error(`Config invalid at ${snapshot.path}.`);
-    for (const issue of snapshot.issues) {
-      params.runtime.error(`- ${issue.path || "<root>"}: ${issue.message}`);
-    }
-    params.runtime.error("Run `clawdbot doctor` to repair, then retry.");
+  const invalid = snapshot.exists && !snapshot.valid;
+  if (!invalid) return;
+
+  const rich = isRich();
+  const muted = (value: string) => colorize(rich, theme.muted, value);
+  const error = (value: string) => colorize(rich, theme.error, value);
+  const heading = (value: string) => colorize(rich, theme.heading, value);
+  const commandText = (value: string) => colorize(rich, theme.command, value);
+
+  params.runtime.error(heading("Config invalid"));
+  params.runtime.error(`${muted("File:")} ${muted(snapshot.path)}`);
+  if (issues.length > 0) {
+    params.runtime.error(muted("Problem:"));
+    params.runtime.error(issues.map((issue) => `  ${error(issue)}`).join("\n"));
+  }
+  if (legacyIssues.length > 0) {
+    params.runtime.error(muted("Legacy config keys detected:"));
+    params.runtime.error(legacyIssues.map((issue) => `  ${error(issue)}`).join("\n"));
+  }
+  params.runtime.error("");
+  params.runtime.error(
+    `${muted("Run:")} ${commandText(formatCliCommand("clawdbot doctor --fix"))}`,
+  );
+  if (!allowInvalid) {
     params.runtime.exit(1);
-    return;
-  }
-
-  if (params.migrateState !== false) {
-    const cfg = loadConfig();
-    await autoMigrateLegacyState({ cfg });
   }
 }

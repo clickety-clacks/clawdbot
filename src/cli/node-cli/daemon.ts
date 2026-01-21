@@ -18,6 +18,7 @@ import { isWSL } from "../../infra/wsl.js";
 import { loadNodeHostConfig } from "../../node-host/config.js";
 import { defaultRuntime } from "../../runtime.js";
 import { colorize, isRich, theme } from "../../terminal/theme.js";
+import { formatCliCommand } from "../command-format.js";
 import {
   buildDaemonServiceSnapshot,
   createNullWriter,
@@ -46,7 +47,10 @@ type NodeDaemonStatusOptions = {
 };
 
 function renderNodeServiceStartHints(): string[] {
-  const base = ["clawdbot node service install", "clawdbot node start"];
+  const base = [
+    formatCliCommand("clawdbot node service install"),
+    formatCliCommand("clawdbot node start"),
+  ];
   switch (process.platform) {
     case "darwin":
       return [
@@ -90,7 +94,7 @@ function resolveNodeDefaults(
   if (opts.port !== undefined && portOverride === null) {
     return { host, port: null };
   }
-  const port = portOverride ?? config?.gateway?.port ?? 18790;
+  const port = portOverride ?? config?.gateway?.port ?? 18789;
   return { host, port };
 }
 
@@ -168,7 +172,9 @@ export async function runNodeDaemonInstall(opts: NodeDaemonInstallOptions) {
     });
     if (!json) {
       defaultRuntime.log(`Node service already ${service.loadedText}.`);
-      defaultRuntime.log("Reinstall with: clawdbot node service install --force");
+      defaultRuntime.log(
+        `Reinstall with: ${formatCliCommand("clawdbot node service install --force")}`,
+      );
     }
     return;
   }
@@ -179,7 +185,7 @@ export async function runNodeDaemonInstall(opts: NodeDaemonInstallOptions) {
     await buildNodeInstallPlan({
       env: process.env,
       host,
-      port: port ?? 18790,
+      port: port ?? 18789,
       tls,
       tlsFingerprint: tlsFingerprint || undefined,
       nodeId: opts.nodeId,

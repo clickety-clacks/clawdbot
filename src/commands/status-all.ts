@@ -1,5 +1,6 @@
 import { buildWorkspaceSkillStatus } from "../agents/skills-status.js";
 import { withProgress } from "../cli/progress.js";
+import { formatCliCommand } from "../cli/command-format.js";
 import { loadConfig, readConfigFileSnapshot, resolveGatewayPort } from "../config/config.js";
 import { readLastGatewayErrorLine } from "../daemon/diagnostics.js";
 import type { GatewayService } from "../daemon/service.js";
@@ -15,6 +16,11 @@ import { inspectPortUsage } from "../infra/ports.js";
 import { readRestartSentinel } from "../infra/restart-sentinel.js";
 import { readTailscaleStatusJson } from "../infra/tailscale.js";
 import { checkUpdateStatus, compareSemverStrings } from "../infra/update-check.js";
+import {
+  formatUpdateChannelLabel,
+  normalizeUpdateChannel,
+  resolveEffectiveUpdateChannel,
+} from "../infra/update-channels.js";
 import { getRemoteSkillEligibility } from "../infra/skills-remote.js";
 import { runExec } from "../process/exec.js";
 import type { RuntimeEnv } from "../runtime.js";
@@ -86,6 +92,33 @@ export async function statusAllCommand(
       fetchGit: true,
       includeRegistry: true,
     });
+    const configChannel = normalizeUpdateChannel(cfg.update?.channel);
+    const channelInfo = resolveEffectiveUpdateChannel({
+      configChannel,
+      installKind: update.installKind,
+      git: update.git ? { tag: update.git.tag, branch: update.git.branch } : undefined,
+    });
+    const channelLabel = formatUpdateChannelLabel({
+      channel: channelInfo.channel,
+      source: channelInfo.source,
+      gitTag: update.git?.tag ?? null,
+      gitBranch: update.git?.branch ?? null,
+    });
+    const gitLabel =
+      update.installKind === "git"
+        ? (() => {
+            const shortSha = update.git?.sha ? update.git.sha.slice(0, 8) : null;
+            const branch =
+              update.git?.branch && update.git.branch !== "HEAD" ? update.git.branch : null;
+            const tag = update.git?.tag ?? null;
+            const parts = [
+              branch ?? (tag ? "detached" : "git"),
+              tag ? `tag ${tag}` : null,
+              shortSha ? `@ ${shortSha}` : null,
+            ].filter(Boolean);
+            return parts.join(" · ");
+          })()
+        : null;
     progress.tick();
 
     progress.setLabel("Probing gateway…");
@@ -332,12 +365,14 @@ export async function statusAllCommand(
               ? `${tailscaleMode} · ${tailscale.backendState ?? "unknown"} · ${tailscale.dnsName} · ${tailscaleHttpsUrl}`
               : `${tailscaleMode} · ${tailscale.backendState ?? "unknown"} · magicdns unknown`,
       },
+      { Item: "Channel", Value: channelLabel },
+      ...(gitLabel ? [{ Item: "Git", Value: gitLabel }] : []),
       { Item: "Update", Value: updateLine },
       {
         Item: "Gateway",
         Value: `${gatewayMode}${remoteUrlMissing ? " (remote.url missing)" : ""} · ${gatewayTarget} (${connection.urlSource}) · ${gatewayStatus}${gatewayAuth}`,
       },
-      { Item: "Security", Value: "Run: clawdbot security audit --deep" },
+      { Item: "Security", Value: `Run: ${formatCliCommand("clawdbot security audit --deep")}` },
       gatewaySelfLine
         ? { Item: "Gateway self", Value: gatewaySelfLine }
         : { Item: "Gateway self", Value: "unknown" },

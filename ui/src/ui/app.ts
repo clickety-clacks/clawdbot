@@ -20,6 +20,7 @@ import type {
   SessionsListResult,
   SkillStatusReport,
   StatusSummary,
+  NostrProfile,
 } from "./types";
 import { type ChatQueueItem, type CronFormState } from "./ui-types";
 import type { EventLogEntry } from "./app-events";
@@ -28,6 +29,8 @@ import type {
   ExecApprovalsFile,
   ExecApprovalsSnapshot,
 } from "./controllers/exec-approvals";
+import type { DevicePairingList } from "./controllers/devices";
+import type { ExecApprovalRequest } from "./controllers/exec-approval";
 import {
   resetToolStream as resetToolStreamInternal,
   toggleToolOutput as toggleToolOutputInternal,
@@ -62,10 +65,17 @@ import {
 import {
   handleChannelConfigReload as handleChannelConfigReloadInternal,
   handleChannelConfigSave as handleChannelConfigSaveInternal,
+  handleNostrProfileCancel as handleNostrProfileCancelInternal,
+  handleNostrProfileEdit as handleNostrProfileEditInternal,
+  handleNostrProfileFieldChange as handleNostrProfileFieldChangeInternal,
+  handleNostrProfileImport as handleNostrProfileImportInternal,
+  handleNostrProfileSave as handleNostrProfileSaveInternal,
+  handleNostrProfileToggleAdvanced as handleNostrProfileToggleAdvancedInternal,
   handleWhatsAppLogout as handleWhatsAppLogoutInternal,
   handleWhatsAppStart as handleWhatsAppStartInternal,
   handleWhatsAppWait as handleWhatsAppWaitInternal,
 } from "./app-channels";
+import type { NostrProfileFormState } from "./views/channels.nostr-profile-form";
 
 declare global {
   interface Window {
@@ -108,6 +118,9 @@ export class ClawdbotApp extends LitElement {
 
   @state() nodesLoading = false;
   @state() nodes: Array<Record<string, unknown>> = [];
+  @state() devicesLoading = false;
+  @state() devicesError: string | null = null;
+  @state() devicesList: DevicePairingList | null = null;
   @state() execApprovalsLoading = false;
   @state() execApprovalsSaving = false;
   @state() execApprovalsDirty = false;
@@ -116,6 +129,9 @@ export class ClawdbotApp extends LitElement {
   @state() execApprovalsSelectedAgent: string | null = null;
   @state() execApprovalsTarget: "gateway" | "node" = "gateway";
   @state() execApprovalsTargetNodeId: string | null = null;
+  @state() execApprovalQueue: ExecApprovalRequest[] = [];
+  @state() execApprovalBusy = false;
+  @state() execApprovalError: string | null = null;
 
   @state() configLoading = false;
   @state() configRaw = "{\n}\n";
@@ -131,8 +147,11 @@ export class ClawdbotApp extends LitElement {
   @state() configSchemaLoading = false;
   @state() configUiHints: ConfigUiHints = {};
   @state() configForm: Record<string, unknown> | null = null;
+  @state() configFormOriginal: Record<string, unknown> | null = null;
   @state() configFormDirty = false;
   @state() configFormMode: "form" | "raw" = "form";
+  @state() configSearchQuery = "";
+  @state() configActiveSection: string | null = null;
 
   @state() channelsLoading = false;
   @state() channelsSnapshot: ChannelsStatusSnapshot | null = null;
@@ -142,6 +161,8 @@ export class ClawdbotApp extends LitElement {
   @state() whatsappLoginQrDataUrl: string | null = null;
   @state() whatsappLoginConnected: boolean | null = null;
   @state() whatsappBusy = false;
+  @state() nostrProfileFormState: NostrProfileFormState | null = null;
+  @state() nostrProfileAccountId: string | null = null;
 
   @state() presenceLoading = false;
   @state() presenceEntries: PresenceEntry[] = [];
@@ -359,6 +380,48 @@ export class ClawdbotApp extends LitElement {
 
   async handleChannelConfigReload() {
     await handleChannelConfigReloadInternal(this);
+  }
+
+  handleNostrProfileEdit(accountId: string, profile: NostrProfile | null) {
+    handleNostrProfileEditInternal(this, accountId, profile);
+  }
+
+  handleNostrProfileCancel() {
+    handleNostrProfileCancelInternal(this);
+  }
+
+  handleNostrProfileFieldChange(field: keyof NostrProfile, value: string) {
+    handleNostrProfileFieldChangeInternal(this, field, value);
+  }
+
+  async handleNostrProfileSave() {
+    await handleNostrProfileSaveInternal(this);
+  }
+
+  async handleNostrProfileImport() {
+    await handleNostrProfileImportInternal(this);
+  }
+
+  handleNostrProfileToggleAdvanced() {
+    handleNostrProfileToggleAdvancedInternal(this);
+  }
+
+  async handleExecApprovalDecision(decision: "allow-once" | "allow-always" | "deny") {
+    const active = this.execApprovalQueue[0];
+    if (!active || !this.client || this.execApprovalBusy) return;
+    this.execApprovalBusy = true;
+    this.execApprovalError = null;
+    try {
+      await this.client.request("exec.approval.resolve", {
+        id: active.id,
+        decision,
+      });
+      this.execApprovalQueue = this.execApprovalQueue.filter((entry) => entry.id !== active.id);
+    } catch (err) {
+      this.execApprovalError = `Exec approval failed: ${String(err)}`;
+    } finally {
+      this.execApprovalBusy = false;
+    }
   }
 
   // Sidebar handlers for tool output viewing

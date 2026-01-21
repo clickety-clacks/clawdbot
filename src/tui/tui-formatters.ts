@@ -12,25 +12,116 @@ export function resolveFinalAssistantText(params: {
   return "(no output)";
 }
 
+export function composeThinkingAndContent(params: {
+  thinkingText?: string;
+  contentText?: string;
+  showThinking?: boolean;
+}) {
+  const thinkingText = params.thinkingText?.trim() ?? "";
+  const contentText = params.contentText?.trim() ?? "";
+  const parts: string[] = [];
+
+  if (params.showThinking && thinkingText) {
+    parts.push(`[thinking]\n${thinkingText}`);
+  }
+  if (contentText) {
+    parts.push(contentText);
+  }
+
+  return parts.join("\n\n").trim();
+}
+
+/**
+ * Extract ONLY thinking blocks from message content.
+ * Model-agnostic: returns empty string if no thinking blocks exist.
+ */
+export function extractThinkingFromMessage(message: unknown): string {
+  if (!message || typeof message !== "object") return "";
+  const record = message as Record<string, unknown>;
+  const content = record.content;
+  if (typeof content === "string") return "";
+  if (!Array.isArray(content)) return "";
+
+  const parts: string[] = [];
+  for (const block of content) {
+    if (!block || typeof block !== "object") continue;
+    const rec = block as Record<string, unknown>;
+    if (rec.type === "thinking" && typeof rec.thinking === "string") {
+      parts.push(rec.thinking);
+    }
+  }
+  return parts.join("\n").trim();
+}
+
+/**
+ * Extract ONLY text content blocks from message (excludes thinking).
+ * Model-agnostic: works for any model with text content blocks.
+ */
+export function extractContentFromMessage(message: unknown): string {
+  if (!message || typeof message !== "object") return "";
+  const record = message as Record<string, unknown>;
+  const content = record.content;
+
+  if (typeof content === "string") return content.trim();
+
+  // Check for error BEFORE returning empty for non-array content
+  if (!Array.isArray(content)) {
+    const stopReason = typeof record.stopReason === "string" ? record.stopReason : "";
+    if (stopReason === "error") {
+      const errorMessage = typeof record.errorMessage === "string" ? record.errorMessage : "";
+      return formatRawAssistantErrorForUi(errorMessage);
+    }
+    return "";
+  }
+
+  const parts: string[] = [];
+  for (const block of content) {
+    if (!block || typeof block !== "object") continue;
+    const rec = block as Record<string, unknown>;
+    if (rec.type === "text" && typeof rec.text === "string") {
+      parts.push(rec.text);
+    }
+  }
+
+  // If no text blocks found, check for error
+  if (parts.length === 0) {
+    const stopReason = typeof record.stopReason === "string" ? record.stopReason : "";
+    if (stopReason === "error") {
+      const errorMessage = typeof record.errorMessage === "string" ? record.errorMessage : "";
+      return formatRawAssistantErrorForUi(errorMessage);
+    }
+  }
+
+  return parts.join("\n").trim();
+}
+
 function extractTextBlocks(content: unknown, opts?: { includeThinking?: boolean }): string {
   if (typeof content === "string") return content.trim();
   if (!Array.isArray(content)) return "";
-  const parts: string[] = [];
+
+  const thinkingParts: string[] = [];
+  const textParts: string[] = [];
+
   for (const block of content) {
     if (!block || typeof block !== "object") continue;
     const record = block as Record<string, unknown>;
     if (record.type === "text" && typeof record.text === "string") {
-      parts.push(record.text);
+      textParts.push(record.text);
     }
     if (
       opts?.includeThinking &&
       record.type === "thinking" &&
       typeof record.thinking === "string"
     ) {
-      parts.push(`[thinking]\n${record.thinking}`);
+      thinkingParts.push(record.thinking);
     }
   }
-  return parts.join("\n").trim();
+
+  return composeThinkingAndContent({
+    thinkingText: thinkingParts.join("\n").trim(),
+    contentText: textParts.join("\n").trim(),
+    showThinking: opts?.includeThinking ?? false,
+  });
 }
 
 export function extractTextFromMessage(

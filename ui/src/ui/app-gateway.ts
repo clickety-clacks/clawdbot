@@ -1,4 +1,5 @@
 import { loadChatHistory } from "./controllers/chat";
+import { loadDevices } from "./controllers/devices";
 import { loadNodes } from "./controllers/nodes";
 import type { GatewayEventFrame, GatewayHelloOk } from "./gateway";
 import { GatewayBrowserClient } from "./gateway";
@@ -15,7 +16,14 @@ import {
   setLastActiveSessionKey,
 } from "./app-settings";
 import { handleChatEvent, type ChatEventPayload } from "./controllers/chat";
+import {
+  addExecApproval,
+  parseExecApprovalRequested,
+  parseExecApprovalResolved,
+  removeExecApproval,
+} from "./controllers/exec-approval";
 import type { ClawdbotApp } from "./app";
+import type { ExecApprovalRequest } from "./controllers/exec-approval";
 
 type GatewayHost = {
   settings: UiSettings;
@@ -33,6 +41,8 @@ type GatewayHost = {
   debugHealth: HealthSnapshot | null;
   sessionKey: string;
   chatRunId: string | null;
+  execApprovalQueue: ExecApprovalRequest[];
+  execApprovalError: string | null;
 };
 
 type SessionDefaultsSnapshot = {
@@ -93,6 +103,8 @@ export function connectGateway(host: GatewayHost) {
   host.lastError = null;
   host.hello = null;
   host.connected = false;
+  host.execApprovalQueue = [];
+  host.execApprovalError = null;
 
   host.client?.stop();
   host.client = new GatewayBrowserClient({
@@ -106,6 +118,7 @@ export function connectGateway(host: GatewayHost) {
       host.hello = hello;
       applySnapshot(host, hello);
       void loadNodes(host as unknown as ClawdbotApp, { quiet: true });
+      void loadDevices(host as unknown as ClawdbotApp, { quiet: true });
       void refreshActiveTab(host as unknown as Parameters<typeof refreshActiveTab>[0]);
     },
     onClose: ({ code, reason }) => {
@@ -168,6 +181,30 @@ export function handleGatewayEvent(host: GatewayHost, evt: GatewayEventFrame) {
 
   if (evt.event === "cron" && host.tab === "cron") {
     void loadCron(host as unknown as Parameters<typeof loadCron>[0]);
+  }
+
+  if (evt.event === "device.pair.requested" || evt.event === "device.pair.resolved") {
+    void loadDevices(host as unknown as ClawdbotApp, { quiet: true });
+  }
+
+  if (evt.event === "exec.approval.requested") {
+    const entry = parseExecApprovalRequested(evt.payload);
+    if (entry) {
+      host.execApprovalQueue = addExecApproval(host.execApprovalQueue, entry);
+      host.execApprovalError = null;
+      const delay = Math.max(0, entry.expiresAtMs - Date.now() + 500);
+      window.setTimeout(() => {
+        host.execApprovalQueue = removeExecApproval(host.execApprovalQueue, entry.id);
+      }, delay);
+    }
+    return;
+  }
+
+  if (evt.event === "exec.approval.resolved") {
+    const resolved = parseExecApprovalResolved(evt.payload);
+    if (resolved) {
+      host.execApprovalQueue = removeExecApproval(host.execApprovalQueue, resolved.id);
+    }
   }
 }
 
