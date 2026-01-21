@@ -91,31 +91,6 @@ function logSlotWarnings(warnings: string[]) {
   }
 }
 
-function applySlotSelectionForPlugin(
-  config: ClawdbotConfig,
-  pluginId: string,
-): { config: ClawdbotConfig; warnings: string[] } {
-  const report = buildPluginStatusReport({ config });
-  const plugin = report.plugins.find((entry) => entry.id === pluginId);
-  if (!plugin) {
-    return { config, warnings: [] };
-  }
-  const result = applyExclusiveSlotSelection({
-    config,
-    selectedId: plugin.id,
-    selectedKind: plugin.kind,
-    registry: report,
-  });
-  return { config: result.config, warnings: result.warnings };
-}
-
-function logSlotWarnings(warnings: string[]) {
-  if (warnings.length === 0) return;
-  for (const warning of warnings) {
-    defaultRuntime.log(chalk.yellow(warning));
-  }
-}
-
 export function registerPluginsCli(program: Command) {
   const plugins = program
     .command("plugins")
