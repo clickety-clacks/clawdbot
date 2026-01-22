@@ -57,6 +57,7 @@ type TestServerContext = {
   server: ProviderServer;
   port: number;
   allowlistPath: string;
+  pendingPath: string;
   mediaPath: string;
   alertInstructionsPath: string;
   cleanup: () => Promise<void>;
@@ -81,10 +82,8 @@ async function setupTestServer(
     allowlistPath,
     JSON.stringify({ version: 1, entries: initialAllowlist }, null, 2),
   );
-  await fs.writeFile(
-    path.join(statePath, "pending.json"),
-    JSON.stringify({ version: 1, entries: [] }, null, 2),
-  );
+  const pendingPath = path.join(statePath, "pending.json");
+  await fs.writeFile(pendingPath, JSON.stringify({ version: 1, entries: [] }, null, 2));
   await fs.writeFile(path.join(statePath, "denylist.json"), "[]");
   const alertInstructionsPath = path.join(root, "alert-instructions.md");
   if (options.alertInstructionsText !== null) {
@@ -113,13 +112,18 @@ async function setupTestServer(
     server,
     port: server.getPort(),
     allowlistPath,
+    pendingPath,
     mediaPath,
     alertInstructionsPath,
     cleanup,
   };
 }
 
-function createPairRequestPayload(deviceId: string) {
+type PairRequestOverrides = {
+  claimedName?: string;
+};
+
+function createPairRequestPayload(deviceId: string, overrides: PairRequestOverrides = {}) {
   return {
     type: "pair_request",
     protocolVersion: PROTOCOL_VERSION,
@@ -130,6 +134,7 @@ function createPairRequestPayload(deviceId: string) {
       osVersion: "17.0",
       appVersion: "1.0",
     },
+    ...(overrides.claimedName ? { claimedName: overrides.claimedName } : {}),
   };
 }
 
@@ -193,10 +198,14 @@ function waitForMessage(ws: WebSocket): Promise<any> {
   });
 }
 
-async function performPairRequest(port: number, deviceId: string) {
+async function performPairRequest(
+  port: number,
+  deviceId: string,
+  overrides: PairRequestOverrides = {},
+) {
   const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
   await waitForOpen(ws);
-  ws.send(JSON.stringify(createPairRequestPayload(deviceId)));
+  ws.send(JSON.stringify(createPairRequestPayload(deviceId, overrides)));
   try {
     return await waitForMessage(ws);
   } finally {
@@ -247,14 +256,14 @@ describe.sequential("clawline provider server", () => {
     const originalLastSeen = Date.now() - 10_000;
     const entry: AllowlistEntry = {
       deviceId,
-      claimedName: "Test Device",
+      claimedName: "Flynn",
       deviceInfo: {
         platform: "iOS",
         model: "iPhone",
         osVersion: "17.0",
         appVersion: "1.0",
       },
-      userId: "user_existing",
+      userId: "flynn",
       isAdmin: true,
       tokenDelivered: true,
       createdAt: Date.now() - 60_000,
@@ -282,11 +291,49 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("bootstraps Flynn as admin when first pairing uses that claimed name", async () => {
+    const ctx = await setupTestServer();
+    const deviceId = randomUUID();
+    try {
+      const response = await performPairRequest(ctx.port, deviceId, { claimedName: "Flynn " });
+      expect(response).toMatchObject({
+        success: true,
+        userId: "flynn",
+      });
+      const allowlist = JSON.parse(await fs.readFile(ctx.allowlistPath, "utf8")) as {
+        entries: AllowlistEntry[];
+      };
+      const entry = allowlist.entries.find((item) => item.deviceId === deviceId);
+      expect(entry?.userId).toBe("flynn");
+      expect(entry?.isAdmin).toBe(true);
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("writes pending entries for non-admin claimants when no admin exists", async () => {
+    const ctx = await setupTestServer();
+    const deviceId = randomUUID();
+    try {
+      const response = await performPairRequest(ctx.port, deviceId, { claimedName: "QA Sim" });
+      expect(response).toMatchObject({
+        success: false,
+        reason: "pair_pending",
+      });
+      const pending = JSON.parse(await fs.readFile(ctx.pendingPath, "utf8")) as {
+        entries: { deviceId: string }[];
+      };
+      expect(pending.entries.some((entry) => entry.deviceId === deviceId)).toBe(true);
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("stores uploaded assets on disk", async () => {
     const ctx = await setupTestServer();
     try {
       const deviceId = randomUUID();
-      const pairResponse = await performPairRequest(ctx.port, deviceId);
+      const pairResponse = await performPairRequest(ctx.port, deviceId, { claimedName: "Flynn" });
       expect(pairResponse.success).toBe(true);
       const token = pairResponse.token as string;
       const bytes = Buffer.from("sample-image-bytes");
@@ -319,13 +366,15 @@ describe.sequential("clawline provider server", () => {
       {
         ...baseEntry,
         deviceId: adminDeviceId,
-        userId: "user_admin",
+        claimedName: "Flynn",
+        userId: "flynn",
         isAdmin: true,
       },
       {
         ...baseEntry,
         deviceId: userDeviceId,
-        userId: "user_regular",
+        claimedName: "QA Sim",
+        userId: "qa_sim",
         isAdmin: false,
       },
     ]);
@@ -382,7 +431,7 @@ describe.sequential("clawline provider server", () => {
     const adminDeviceId = randomUUID();
     const userDeviceId = randomUUID();
     const baseEntry = {
-      claimedName: "Flagged Device",
+      claimedName: "QA Sim",
       deviceInfo: {
         platform: "iOS",
         model: "iPhone",
@@ -392,8 +441,20 @@ describe.sequential("clawline provider server", () => {
       tokenDelivered: true,
     };
     const ctx = await setupTestServer([
-      { ...baseEntry, deviceId: adminDeviceId, userId: "user_admin_flag", isAdmin: true },
-      { ...baseEntry, deviceId: userDeviceId, userId: "user_regular_flag", isAdmin: false },
+      {
+        ...baseEntry,
+        deviceId: adminDeviceId,
+        claimedName: "Flynn",
+        userId: "flynn",
+        isAdmin: true,
+      },
+      {
+        ...baseEntry,
+        deviceId: userDeviceId,
+        claimedName: "QA Sim",
+        userId: "qa_sim",
+        isAdmin: false,
+      },
     ]);
     try {
       const adminPair = await performPairRequest(ctx.port, adminDeviceId);
