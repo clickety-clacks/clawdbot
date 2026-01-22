@@ -57,6 +57,7 @@ const SHELL_ENV_EXPECTED_KEYS = [
 ];
 
 const CONFIG_BACKUP_COUNT = 5;
+const loggedInvalidConfigs = new Set<string>();
 
 export type ParseConfigJson5Result = { ok: true; parsed: unknown } | { ok: false; error: string };
 
@@ -244,8 +245,14 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
         const details = validated.issues
           .map((iss) => `- ${iss.path || "<root>"}: ${iss.message}`)
           .join("\n");
-        deps.logger.error(`Invalid config:\\n${details}`);
-        throw new Error("Invalid config");
+        if (!loggedInvalidConfigs.has(configPath)) {
+          loggedInvalidConfigs.add(configPath);
+          deps.logger.error(`Invalid config at ${configPath}:\\n${details}`);
+        }
+        const error = new Error("Invalid config");
+        (error as { code?: string; details?: string }).code = "INVALID_CONFIG";
+        (error as { code?: string; details?: string }).details = details;
+        throw error;
       }
       if (validated.warnings.length > 0) {
         const details = validated.warnings
@@ -291,6 +298,10 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
       if (err instanceof DuplicateAgentDirError) {
         deps.logger.error(err.message);
         throw err;
+      }
+      const error = err as { code?: string };
+      if (error?.code === "INVALID_CONFIG") {
+        return {};
       }
       deps.logger.error(`Failed to read config at ${configPath}`, err);
       return {};

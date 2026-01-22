@@ -3,6 +3,270 @@
     <channel>
         <title>Clawdbot</title>
         <item>
+            <title>2026.1.21</title>
+            <pubDate>Thu, 22 Jan 2026 12:22:35 +0000</pubDate>
+            <link>https://raw.githubusercontent.com/clawdbot/clawdbot/main/appcast.xml</link>
+            <sparkle:version>7374</sparkle:version>
+            <sparkle:shortVersionString>2026.1.21</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[<h2>Clawdbot 2026.1.21</h2>
+<h3>Highlights</h3>
+<ul>
+<li>Lobster optional plugin tool for typed workflows + approval gates. https://docs.clawd.bot/tools/lobster</li>
+<li>Custom assistant identity + avatars in the Control UI. https://docs.clawd.bot/cli/agents https://docs.clawd.bot/web/control-ui</li>
+<li>Cache optimizations: cache-ttl pruning + defaults reduce token spend on cold requests. https://docs.clawd.bot/concepts/session-pruning</li>
+<li>Exec approvals + elevated ask/full modes. https://docs.clawd.bot/tools/exec-approvals https://docs.clawd.bot/tools/elevated</li>
+<li>Signal typing/read receipts + MSTeams attachments. https://docs.clawd.bot/channels/signal https://docs.clawd.bot/channels/msteams</li>
+<li><code>/models</code> UX refresh + <code>clawdbot update wizard</code>. https://docs.clawd.bot/cli/models https://docs.clawd.bot/cli/update</li>
+</ul>
+<h3>Changes</h3>
+<ul>
+<li>Highlight: Lobster optional plugin tool for typed workflows + approval gates. https://docs.clawd.bot/tools/lobster (#1152) Thanks @vignesh07.</li>
+<li>Agents/UI: add identity avatar config support and Control UI avatar rendering. (#1329, #1424) Thanks @dlauer. https://docs.clawd.bot/gateway/configuration https://docs.clawd.bot/cli/agents</li>
+<li>Control UI: add custom assistant identity support and per-session identity display. (#1420) Thanks @robbyczgw-cla. https://docs.clawd.bot/web/control-ui</li>
+<li>CLI: add <code>clawdbot update wizard</code> with interactive channel selection + restart prompts, plus preflight checks before rebasing. https://docs.clawd.bot/cli/update</li>
+<li>Models/Commands: add <code>/models</code>, improve <code>/model</code> listing UX, and expand <code>clawdbot models</code> paging. (#1398) Thanks @vignesh07. https://docs.clawd.bot/cli/models</li>
+<li>CLI: move gateway service commands under <code>clawdbot gateway</code>, flatten node service commands under <code>clawdbot node</code>, and add <code>gateway probe</code> for reachability. https://docs.clawd.bot/cli/gateway https://docs.clawd.bot/cli/node</li>
+<li>Exec: add elevated ask/full modes, tighten allowlist gating, and render approvals tables on write. https://docs.clawd.bot/tools/elevated https://docs.clawd.bot/tools/exec-approvals</li>
+<li>Exec approvals: default to local host, add gateway/node targeting + target details, support wildcard agent allowlists, and tighten allowlist parsing/safe bins. https://docs.clawd.bot/cli/approvals https://docs.clawd.bot/tools/exec-approvals</li>
+<li>Heartbeat: allow explicit session keys and active hours. (#1256) Thanks @zknicker. https://docs.clawd.bot/gateway/heartbeat</li>
+<li>Sessions: add per-channel idle durations via <code>sessions.channelIdleMinutes</code>. (#1353) Thanks @cash-echo-bot.</li>
+<li>Nodes: run exec-style, expose PATH in status/describe, and bootstrap PATH for node-host execution. https://docs.clawd.bot/cli/node</li>
+<li>Cache: add <code>cache.ttlPrune</code> mode and auth-aware defaults for cache TTL behavior.</li>
+<li>Queue: add per-channel debounce overrides for auto-reply. https://docs.clawd.bot/concepts/queue</li>
+<li>Discord: add wildcard channel config support. (#1334) Thanks @pvoo. https://docs.clawd.bot/channels/discord</li>
+<li>Signal: add typing indicators and DM read receipts via signal-cli. https://docs.clawd.bot/channels/signal</li>
+<li>MSTeams: add file uploads, adaptive cards, and attachment handling improvements. (#1410) Thanks @Evizero. https://docs.clawd.bot/channels/msteams</li>
+<li>Onboarding: remove the run setup-token auth option (paste setup-token or reuse CLI creds instead).</li>
+<li>macOS: refresh Settings (location access in Permissions, connection mode in menu, remove CLI install UI).</li>
+<li>Diagnostics: add cache trace config for debugging. (#1370) Thanks @parubets.</li>
+<li>Docs: Lobster guides + org URL updates, /model allowlist troubleshooting, Gmail message search examples, gateway.mode troubleshooting, prompt injection guidance, npm prefix/node CLI notes, control UI dev gatewayUrl note, tool_use FAQ, showcase video, and sharp/node-gyp workaround. (#1427, #1220, #1405) Thanks @vignesh07, @mbelinky.</li>
+</ul>
+<h3>Breaking</h3>
+<ul>
+<li><strong>BREAKING:</strong> Control UI now rejects insecure HTTP without device identity by default. Use HTTPS (Tailscale Serve) or set <code>gateway.controlUi.allowInsecureAuth: true</code> to allow token-only auth. https://docs.clawd.bot/web/control-ui#insecure-http</li>
+<li><strong>BREAKING:</strong> Envelope and system event timestamps now default to host-local time (was UTC) so agents don’t have to constantly convert.</li>
+</ul>
+<h3>Fixes</h3>
+<ul>
+<li>Streaming/Typing/Media: keep reply tags across streamed chunks, start typing indicators at run start, and accept MEDIA paths with spaces/tilde while preferring the message tool hint for image replies.</li>
+<li>Agents/Providers: drop unsigned thinking blocks for Claude models (Google Antigravity) and enforce alphanumeric tool call ids for strict providers (Mistral/OpenRouter). (#1372) Thanks @zerone0x.</li>
+<li>Exec approvals: treat main as the default agent, align node/gateway allowlist prechecks, validate resolved paths, avoid allowlist resolve races, and avoid null optional params. (#1417, #1414, #1425) Thanks @czekaj.</li>
+<li>Exec/Windows: resolve Windows exec paths with extensions and handle safe-bin exe names.</li>
+<li>Nodes/macOS: prompt on allowlist miss for node exec approvals, persist allowlist decisions, and flatten node invoke errors. (#1394) Thanks @ngutman.</li>
+<li>Gateway: prevent multiple gateways from sharing the same config/state (singleton lock), keep auto bind loopback-first with explicit tailnet binding, and improve SSH auth handling. (#1380)</li>
+<li>Control UI: remove the chat stop button, keep the composer aligned to the bottom edge, stabilize session previews, and refresh the debug panel on route-driven tab changes. (#1373) Thanks @yazinsai.</li>
+<li>UI/config: export <code>SECTION_META</code> for config form modules. (#1418) Thanks @MaudeBot.</li>
+<li>macOS: keep chat pinned during streaming replies, include Textual resources, respect wildcard exec approvals, allow SSH agent auth, and default distribution builds to universal binaries. (#1279, #1362, #1384, #1396) Thanks @ameno-, @JustYannicc.</li>
+<li>BlueBubbles: resolve short message IDs safely, expose full IDs in templates, and harden short-id fetch wrappers. (#1369, #1387) Thanks @tyler6204.</li>
+<li>Models/Configure: inherit session model overrides in threads/topics, map OpenCode Zen models to the correct APIs, narrow Anthropic OAuth allowlist handling, seed allowlist fallbacks, list the full catalog when no allowlist is set, and limit <code>/model</code> list output. (#1376, #1416)</li>
+<li>Memory: prevent CLI hangs by deferring vector probes, add sqlite-vec/embedding timeouts, and make session memory indexing async.</li>
+<li>Cron: cap reminder context history to 10 messages and honor <code>contextMessages</code>. (#1103) Thanks @mkbehr.</li>
+<li>Cache: restore the 1h cache TTL option and reset the pruning window.</li>
+<li>Zalo Personal: tolerate ANSI/log-prefixed JSON output from <code>zca</code>. (#1379) Thanks @ptn1411.</li>
+<li>Browser: suppress Chrome restore prompts for managed profiles. (#1419) Thanks @jamesgroat.</li>
+<li>Infra: preserve fetch helper methods/preconnect when wrapping abort signals and normalize Telegram fetch aborts.</li>
+<li>Config/Doctor: avoid stack traces for invalid configs, log the config path, avoid WhatsApp config resurrection, and warn when <code>gateway.mode</code> is unset. (#900)</li>
+<li>CLI: read Codex CLI account_id for workspace billing. (#1422) Thanks @aj47.</li>
+<li>Logs/Status: align rolling log filenames with local time and report sandboxed runtime in <code>clawdbot status</code>. (#1343)</li>
+<li>Embedded runner: persist injected history images so attachments aren’t reloaded each turn. (#1374) Thanks @Nicell.</li>
+<li>Nodes/Subagents: include agent/node/gateway context in tool failure logs and ensure subagent list uses the command session.</li>
+</ul>
+<p><a href="https://github.com/clawdbot/clawdbot/blob/main/CHANGELOG.md">View full changelog</a></p>
+]]></description>
+            <enclosure url="https://github.com/clawdbot/clawdbot/releases/download/v2026.1.21/Clawdbot-2026.1.21.zip" length="22284796" type="application/octet-stream" sparkle:edSignature="pXji4NMA/cu35iMxln385d6LnsT4yIZtFtFiR7sIimKeSC2CsyeWzzSD0EhJsN98PdSoy69iEFZt4I2ZtNCECg=="/>
+        </item>
+        <item>
+            <title>2026.1.21</title>
+            <pubDate>Wed, 21 Jan 2026 08:18:22 +0000</pubDate>
+            <link>https://raw.githubusercontent.com/clawdbot/clawdbot/main/appcast.xml</link>
+            <sparkle:version>7116</sparkle:version>
+            <sparkle:shortVersionString>2026.1.21</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[<h2>Clawdbot 2026.1.21</h2>
+<h3>Changes</h3>
+<ul>
+<li>Control UI: add copy-as-markdown with error feedback. (#1345) https://docs.clawd.bot/web/control-ui</li>
+<li>Control UI: drop the legacy list view. (#1345) https://docs.clawd.bot/web/control-ui</li>
+<li>TUI: add syntax highlighting for code blocks. (#1200) https://docs.clawd.bot/tui</li>
+<li>TUI: session picker shows derived titles, fuzzy search, relative times, and last message preview. (#1271) https://docs.clawd.bot/tui</li>
+<li>TUI: add a searchable model picker for quicker model selection. (#1198) https://docs.clawd.bot/tui</li>
+<li>TUI: add input history (up/down) for submitted messages. (#1348) https://docs.clawd.bot/tui</li>
+<li>ACP: add <code>clawdbot acp</code> for IDE integrations. https://docs.clawd.bot/cli/acp</li>
+<li>ACP: add <code>clawdbot acp client</code> interactive harness for debugging. https://docs.clawd.bot/cli/acp</li>
+<li>Skills: add download installs with OS-filtered options. https://docs.clawd.bot/tools/skills</li>
+<li>Skills: add the local sherpa-onnx-tts skill. https://docs.clawd.bot/tools/skills</li>
+<li>Memory: add hybrid BM25 + vector search (FTS5) with weighted merging and fallback. https://docs.clawd.bot/concepts/memory</li>
+<li>Memory: add SQLite embedding cache to speed up reindexing and frequent updates. https://docs.clawd.bot/concepts/memory</li>
+<li>Memory: add OpenAI batch indexing for embeddings when configured. https://docs.clawd.bot/concepts/memory</li>
+<li>Memory: enable OpenAI batch indexing by default for OpenAI embeddings. https://docs.clawd.bot/concepts/memory</li>
+<li>Memory: allow parallel OpenAI batch indexing jobs (default concurrency: 2). https://docs.clawd.bot/concepts/memory</li>
+<li>Memory: render progress immediately, color batch statuses in verbose logs, and poll OpenAI batch status every 2s by default. https://docs.clawd.bot/concepts/memory</li>
+<li>Memory: add <code>--verbose</code> logging for memory status + batch indexing details. https://docs.clawd.bot/concepts/memory</li>
+<li>Memory: add native Gemini embeddings provider for memory search. (#1151) https://docs.clawd.bot/concepts/memory</li>
+<li>Browser: allow config defaults for efficient snapshots in the tool/CLI. (#1336) https://docs.clawd.bot/tools/browser</li>
+<li>Nostr: add the Nostr channel plugin with profile management + onboarding defaults. (#1323) https://docs.clawd.bot/channels/nostr</li>
+<li>Matrix: migrate to matrix-bot-sdk with E2EE support, location handling, and group allowlist upgrades. (#1298) https://docs.clawd.bot/channels/matrix</li>
+<li>Slack: add HTTP webhook mode via Bolt HTTP receiver. (#1143) https://docs.clawd.bot/channels/slack</li>
+<li>Telegram: enrich forwarded-message context with normalized origin details + legacy fallback. (#1090) https://docs.clawd.bot/channels/telegram</li>
+<li>Discord: fall back to <code>/skill</code> when native command limits are exceeded. (#1287)</li>
+<li>Discord: expose <code>/skill</code> globally. (#1287)</li>
+<li>Zalouser: add channel dock metadata, config schema, setup wiring, probe, and status issues. (#1219) https://docs.clawd.bot/plugins/zalouser</li>
+<li>Plugins: require manifest-embedded config schemas with preflight validation warnings. (#1272) https://docs.clawd.bot/plugins/manifest</li>
+<li>Plugins: move channel catalog metadata into plugin manifests. (#1290) https://docs.clawd.bot/plugins/manifest</li>
+<li>Plugins: align Nextcloud Talk policy helpers with core patterns. (#1290) https://docs.clawd.bot/plugins/manifest</li>
+<li>Plugins/UI: let channel plugin metadata drive UI labels/icons and cron channel options. (#1306) https://docs.clawd.bot/web/control-ui</li>
+<li>Plugins: add plugin slots with a dedicated memory slot selector. https://docs.clawd.bot/plugins/agent-tools</li>
+<li>Plugins: ship the bundled BlueBubbles channel plugin (disabled by default). https://docs.clawd.bot/channels/bluebubbles</li>
+<li>Plugins: migrate bundled messaging extensions to the plugin SDK and resolve plugin-sdk imports in the loader.</li>
+<li>Plugins: migrate the Zalo plugin to the shared plugin SDK runtime. https://docs.clawd.bot/channels/zalo</li>
+<li>Plugins: migrate the Zalo Personal plugin to the shared plugin SDK runtime. https://docs.clawd.bot/plugins/zalouser</li>
+<li>Plugins: allow optional agent tools with explicit allowlists and add the plugin tool authoring guide. https://docs.clawd.bot/plugins/agent-tools</li>
+<li>Plugins: auto-enable bundled channel/provider plugins when configuration is present.</li>
+<li>Plugins: sync plugin sources on channel switches and update npm-installed plugins during <code>clawdbot update</code>.</li>
+<li>Plugins: share npm plugin update logic between <code>clawdbot update</code> and <code>clawdbot plugins update</code>.</li>
+<li>Gateway/API: add <code>/v1/responses</code> (OpenResponses) with item-based input + semantic streaming events. (#1229)</li>
+<li>Gateway/API: expand <code>/v1/responses</code> to support file/image inputs, tool_choice, usage, and output limits. (#1229)</li>
+<li>Usage: add <code>/usage cost</code> summaries and macOS menu cost charts. https://docs.clawd.bot/reference/api-usage-costs</li>
+<li>Security: warn when <=300B models run without sandboxing while web tools are enabled. https://docs.clawd.bot/cli/security</li>
+<li>Exec: add host/security/ask routing for gateway + node exec. https://docs.clawd.bot/tools/exec</li>
+<li>Exec: add <code>/exec</code> directive for per-session exec defaults (host/security/ask/node). https://docs.clawd.bot/tools/exec</li>
+<li>Exec approvals: migrate approvals to <code>~/.clawdbot/exec-approvals.json</code> with per-agent allowlists + skill auto-allow toggle, and add approvals UI + node exec lifecycle events. https://docs.clawd.bot/tools/exec-approvals</li>
+<li>Nodes: add headless node host (<code>clawdbot node start</code>) for <code>system.run</code>/<code>system.which</code>. https://docs.clawd.bot/cli/node</li>
+<li>Nodes: add node daemon service install/status/start/stop/restart. https://docs.clawd.bot/cli/node</li>
+<li>Bridge: add <code>skills.bins</code> RPC to support node host auto-allow skill bins.</li>
+<li>Sessions: add daily reset policy with per-type overrides and idle windows (default 4am local), preserving legacy idle-only configs. (#1146) https://docs.clawd.bot/concepts/session</li>
+<li>Sessions: allow <code>sessions_spawn</code> to override thinking level for sub-agent runs. https://docs.clawd.bot/tools/subagents</li>
+<li>Channels: unify thread/topic allowlist matching + command/mention gating helpers across core providers. https://docs.clawd.bot/concepts/groups</li>
+<li>Models: add Qwen Portal OAuth provider support. (#1120) https://docs.clawd.bot/providers/qwen</li>
+<li>Onboarding: add allowlist prompts and username-to-id resolution across core and extension channels. https://docs.clawd.bot/start/onboarding</li>
+<li>Docs: clarify allowlist input types and onboarding behavior for messaging channels. https://docs.clawd.bot/start/onboarding</li>
+<li>Docs: refresh Android node discovery docs for the Gateway WS service type. https://docs.clawd.bot/platforms/android</li>
+<li>Docs: surface Amazon Bedrock in provider lists and clarify Bedrock auth env vars. (#1289) https://docs.clawd.bot/bedrock</li>
+<li>Docs: clarify WhatsApp voice notes. https://docs.clawd.bot/channels/whatsapp</li>
+<li>Docs: clarify Windows WSL portproxy LAN access notes. https://docs.clawd.bot/platforms/windows</li>
+<li>Docs: refresh bird skill install metadata and usage notes. (#1302) https://docs.clawd.bot/tools/browser-login</li>
+<li>Agents: add local docs path resolution and include docs/mirror/source/community pointers in the system prompt.</li>
+<li>Agents: clarify node_modules read-only guidance in agent instructions.</li>
+<li>Config: stamp last-touched metadata on write and warn if the config is newer than the running build.</li>
+<li>macOS: hide usage section when usage is unavailable instead of showing provider errors.</li>
+<li>Android: migrate node transport to the Gateway WebSocket protocol with TLS pinning support + gateway discovery naming.</li>
+<li>Android: send structured payloads in node events/invokes and include user-agent metadata in gateway connects.</li>
+<li>Android: remove legacy bridge transport code now that nodes use the gateway protocol.</li>
+<li>Android: bump okhttp + dnsjava to satisfy lint dependency checks.</li>
+<li>Build: update workspace + core/plugin deps.</li>
+<li>Build: use tsgo for dev/watch builds by default (opt out with <code>CLAWDBOT_TS_COMPILER=tsc</code>).</li>
+<li>Repo: remove the Peekaboo git submodule now that the SPM release is used.</li>
+<li>macOS: switch PeekabooBridge integration to the tagged Swift Package Manager release.</li>
+<li>macOS: stop syncing Peekaboo in postinstall.</li>
+<li>Swabble: use the tagged Commander Swift package release.</li>
+</ul>
+<h3>Breaking</h3>
+<ul>
+<li><strong>BREAKING:</strong> Reject invalid/unknown config entries and refuse to start the gateway for safety. Run <code>clawdbot doctor --fix</code> to repair, then update plugins (<code>clawdbot plugins update</code>) if you use any.</li>
+</ul>
+<h3>Fixes</h3>
+<ul>
+<li>Discovery: shorten Bonjour DNS-SD service type to <code>_clawdbot-gw._tcp</code> and update discovery clients/docs.</li>
+<li>Diagnostics: export OTLP logs, correct queue depth tracking, and document message-flow telemetry.</li>
+<li>Diagnostics: emit message-flow diagnostics across channels via shared dispatch. (#1244)</li>
+<li>Diagnostics: gate heartbeat/webhook logging. (#1244)</li>
+<li>Gateway: strip inbound envelope headers from chat history messages to keep clients clean.</li>
+<li>Gateway: clarify unauthorized handshake responses with token/password mismatch guidance.</li>
+<li>Gateway: allow mobile node client ids for iOS + Android handshake validation. (#1354)</li>
+<li>Gateway: clarify connect/validation errors for gateway params. (#1347)</li>
+<li>Gateway: preserve restart wake routing + thread replies across restarts. (#1337)</li>
+<li>Gateway: reschedule per-agent heartbeats on config hot reload without restarting the runner.</li>
+<li>Gateway: require authorized restarts for SIGUSR1 (restart/apply/update) so config gating can't be bypassed.</li>
+<li>Cron: auto-deliver isolated agent output to explicit targets without tool calls. (#1285)</li>
+<li>Agents: preserve subagent announce thread/topic routing + queued replies across channels. (#1241)</li>
+<li>Agents: propagate accountId into embedded runs so sub-agent announce routing honors the originating account. (#1058)</li>
+<li>Agents: avoid treating timeout errors with "aborted" messages as user aborts, so model fallback still runs. (#1137)</li>
+<li>Agents: sanitize oversized image payloads before send and surface image-dimension errors.</li>
+<li>Sessions: fall back to session labels when listing display names. (#1124)</li>
+<li>Compaction: include tool failure summaries in safeguard compaction to prevent retry loops. (#1084)</li>
+<li>Config: log invalid config issues once per run and keep invalid-config errors stackless.</li>
+<li>Config: allow Perplexity as a web_search provider in config validation. (#1230)</li>
+<li>Config: allow custom fields under <code>skills.entries.<name>.config</code> for skill credentials/config. (#1226)</li>
+<li>Doctor: clarify plugin auto-enable hint text in the startup banner.</li>
+<li>Doctor: canonicalize legacy session keys in session stores to prevent stale metadata. (#1169)</li>
+<li>Docs: make docs:list fail fast with a clear error if the docs directory is missing.</li>
+<li>Plugins: add Nextcloud Talk manifest for plugin config validation. (#1297)</li>
+<li>Plugins: surface plugin load/register/config errors in gateway logs with plugin/source context.</li>
+<li>CLI: preserve cron delivery settings when editing message payloads. (#1322)</li>
+<li>CLI: keep <code>clawdbot logs</code> output resilient to broken pipes while preserving progress output.</li>
+<li>CLI: avoid duplicating --profile/--dev flags when formatting commands.</li>
+<li>CLI: centralize CLI command registration to keep fast-path routing and program wiring in sync. (#1207)</li>
+<li>CLI: keep banners on routed commands, restore config guarding outside fast-path routing, and tighten fast-path flag parsing while skipping console capture for extra speed. (#1195)</li>
+<li>CLI: skip runner rebuilds when dist is fresh. (#1231)</li>
+<li>CLI: add WSL2/systemd unavailable hints in daemon status/doctor output.</li>
+<li>Status: route native <code>/status</code> to the active agent so model selection reflects the correct profile. (#1301)</li>
+<li>Status: show both usage windows with reset hints when usage data is available. (#1101)</li>
+<li>UI: keep config form enums typed, preserve empty strings, protect sensitive defaults, and deepen config search. (#1315)</li>
+<li>UI: preserve ordered list numbering in chat markdown. (#1341)</li>
+<li>UI: allow Control UI to read gatewayUrl from URL params for remote WebSocket targets. (#1342)</li>
+<li>UI: prevent double-scroll in Control UI chat by locking chat layout to the viewport. (#1283)</li>
+<li>UI: enable shell mode for sync Windows spawns to avoid <code>pnpm ui:build</code> EINVAL. (#1212)</li>
+<li>TUI: keep thinking blocks ordered before content during streaming and isolate per-run assembly. (#1202)</li>
+<li>TUI: align custom editor initialization with the latest pi-tui API. (#1298)</li>
+<li>TUI: show generic empty-state text for searchable pickers. (#1201)</li>
+<li>TUI: highlight model search matches and stabilize search ordering.</li>
+<li>Configure: hide OpenRouter auto routing model from the model picker. (#1182)</li>
+<li>Memory: show total file counts + scan issues in <code>clawdbot memory status</code>.</li>
+<li>Memory: fall back to non-batch embeddings after repeated batch failures.</li>
+<li>Memory: apply OpenAI batch defaults even without explicit remote config.</li>
+<li>Memory: index atomically so failed reindex preserves the previous memory database. (#1151)</li>
+<li>Memory: avoid sqlite-vec unique constraint failures when reindexing duplicate chunk ids. (#1151)</li>
+<li>Memory: retry transient 5xx errors (Cloudflare) during embedding indexing.</li>
+<li>Memory: parallelize embedding indexing with rate-limit retries.</li>
+<li>Memory: split overly long lines to keep embeddings under token limits.</li>
+<li>Memory: skip empty chunks to avoid invalid embedding inputs.</li>
+<li>Memory: split embedding batches to avoid OpenAI token limits during indexing.</li>
+<li>Memory: probe sqlite-vec availability in <code>clawdbot memory status</code>.</li>
+<li>Exec approvals: enforce allowlist when ask is off.</li>
+<li>Exec approvals: prefer raw command for node approvals/events.</li>
+<li>Tools: show exec elevated flag before the command and keep it outside markdown in tool summaries.</li>
+<li>Tools: return a companion-app-required message when node exec is requested with no paired node.</li>
+<li>Tools: return a companion-app-required message when <code>system.run</code> is requested without a supporting node.</li>
+<li>Exec: default gateway/node exec security to allowlist when unset (sandbox stays deny).</li>
+<li>Exec: prefer bash when fish is default shell, falling back to sh if bash is missing. (#1297)</li>
+<li>Exec: merge login-shell PATH for host=gateway exec while keeping daemon PATH minimal. (#1304)</li>
+<li>Streaming: emit assistant deltas for OpenAI-compatible SSE chunks. (#1147)</li>
+<li>Discord: make resolve warnings avoid raw JSON payloads on rate limits.</li>
+<li>Discord: process message handlers in parallel across sessions to avoid event queue blocking. (#1295)</li>
+<li>Discord: stop reconnecting the gateway after aborts to prevent duplicate listeners.</li>
+<li>Discord: only emit slow listener warnings after 30s.</li>
+<li>Discord: inherit parent channel allowlists for thread slash commands and reactions. (#1123)</li>
+<li>Telegram: honor pairing allowlists for native slash commands.</li>
+<li>Telegram: preserve hidden text_link URLs by expanding entities in inbound text. (#1118)</li>
+<li>Slack: resolve Bolt import interop for Bun + Node. (#1191)</li>
+<li>Web search: infer Perplexity base URL from API key source (direct vs OpenRouter).</li>
+<li>Web fetch: harden SSRF protection with shared hostname checks and redirect limits. (#1346)</li>
+<li>Browser: register AI snapshot refs for act commands. (#1282)</li>
+<li>Voice call: include request query in Twilio webhook verification when publicUrl is set. (#864)</li>
+<li>Anthropic: default API prompt caching to 1h with configurable TTL override.</li>
+<li>Anthropic: ignore TTL for OAuth.</li>
+<li>Auth profiles: keep auto-pinned preference while allowing rotation on failover. (#1138)</li>
+<li>Auth profiles: user pins stay locked. (#1138)</li>
+<li>Model catalog: avoid caching import failures, log transient discovery errors, and keep partial results. (#1332)</li>
+<li>Tests: stabilize Windows gateway/CLI tests by skipping sidecars, normalizing argv, and extending timeouts.</li>
+<li>Tests: stabilize plugin SDK resolution and embedded agent timeouts.</li>
+<li>Windows: install gateway scheduled task as the current user.</li>
+<li>Windows: show friendly guidance instead of failing on access denied.</li>
+<li>macOS: load menu session previews asynchronously so items populate while the menu is open.</li>
+<li>macOS: use label colors for session preview text so previews render in menu subviews.</li>
+<li>macOS: suppress usage error text in the menubar cost view.</li>
+<li>macOS: Doctor repairs LaunchAgent bootstrap issues for Gateway + Node when listed but not loaded. (#1166)</li>
+<li>macOS: avoid touching launchd in Remote over SSH so quitting the app no longer disables the remote gateway. (#1105)</li>
+<li>macOS: bundle Textual resources in packaged app builds to avoid code block crashes. (#1006)</li>
+<li>Daemon: include HOME in service environments to avoid missing HOME errors. (#1214)</li>
+</ul>
+Thanks @AlexMikhalev, @CoreyH, @John-Rood, @KrauseFx, @MaudeBot, @Nachx639, @NicholaiVogel, @RyanLisse, @ThePickle31, @VACInc, @Whoaa512, @YuriNachos, @aaronveklabs, @abdaraxus, @alauppe, @ameno-, @artuskg, @austinm911, @bradleypriest, @cheeeee, @dougvk, @fogboots, @gnarco, @gumadeiras, @jdrhyne, @joelklabo, @longmaba, @mukhtharcm, @odysseus0, @oscargavin, @rhjoh, @sebslight, @sibbl, @sleontenko, @steipete, @suminhthanh, @thewilloftheshadow, @tyler6204, @vignesh07, @visionik, @ysqander, @zerone0x.
+<p><a href="https://github.com/clawdbot/clawdbot/blob/main/CHANGELOG.md">View full changelog</a></p>
+]]></description>
+            <enclosure url="https://github.com/clawdbot/clawdbot/releases/download/v2026.1.21/Clawdbot-2026.1.21.zip" length="12208102" type="application/octet-stream" sparkle:edSignature="hU495Eii8O3qmmUnxYFhXyEGv+qan6KL+GpeuBhPIXf+7B5F/gBh5Oz9cHaqaAPoZ4/3Bo6xgvic0HTkbz6gDw=="/>
+        </item>
+        <item>
             <title>2026.1.16-2</title>
             <pubDate>Sat, 17 Jan 2026 12:46:22 +0000</pubDate>
             <link>https://raw.githubusercontent.com/clawdbot/clawdbot/main/appcast.xml</link>
@@ -17,259 +281,6 @@
 <p><a href="https://github.com/clawdbot/clawdbot/blob/main/CHANGELOG.md">View full changelog</a></p>
 ]]></description>
             <enclosure url="https://github.com/clawdbot/clawdbot/releases/download/v2026.1.16-2/Clawdbot-2026.1.16-2.zip" length="21399591" type="application/octet-stream" sparkle:edSignature="zelT+KzN32cXsihbFniPF5Heq0hkwFfL3Agrh/AaoKUkr7kJAFarkGSOZRTWZ9y+DvOluzn2wHHjVigRjMzrBA=="/>
-        </item>
-        <item>
-            <title>2026.1.15</title>
-            <pubDate>Fri, 16 Jan 2026 10:31:53 +0000</pubDate>
-            <link>https://raw.githubusercontent.com/clawdbot/clawdbot/main/appcast.xml</link>
-            <sparkle:version>5998</sparkle:version>
-            <sparkle:shortVersionString>2026.1.15</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <description><![CDATA[<h2>Clawdbot 2026.1.15</h2>
-<h3>Highlights</h3>
-<ul>
-<li>Plugins: add provider auth registry + <code>clawdbot models auth login</code> for plugin-driven OAuth/API key flows.</li>
-<li>Browser: improve remote CDP/Browserless support (auth passthrough, <code>wss</code> upgrade, timeouts, clearer errors).</li>
-<li>Heartbeat: per-agent configuration + 24h duplicate suppression. (#980) — thanks @voidserf.</li>
-<li>Security: audit warns on weak model tiers; app nodes store auth tokens encrypted (Keychain/SecurePrefs).</li>
-</ul>
-<h3>Breaking</h3>
-<ul>
-<li><strong>BREAKING:</strong> iOS minimum version is now 18.0 to support Textual markdown rendering in native chat. (#702)</li>
-<li><strong>BREAKING:</strong> Microsoft Teams is now a plugin; install <code>@clawdbot/msteams</code> via <code>clawdbot plugins install @clawdbot/msteams</code>.</li>
-</ul>
-<h3>Changes</h3>
-<ul>
-<li>CLI: set process titles to <code>clawdbot-<command></code> for clearer process listings.</li>
-<li>CLI/macOS: sync remote SSH target/identity to config and let <code>gateway status</code> auto-infer SSH targets (ssh-config aware).</li>
-<li>Heartbeat: tighten prompt guidance + suppress duplicate alerts for 24h. (#980) — thanks @voidserf.</li>
-<li>Sessions/Security: add <code>session.dmScope</code> for multi-user DM isolation and audit warnings. (#948) — thanks @Alphonse-arianee.</li>
-<li>Plugins: add provider auth registry + <code>clawdbot models auth login</code> for plugin-driven OAuth/API key flows.</li>
-<li>Onboarding: switch channels setup to a single-select loop with per-channel actions and disabled hints in the picker.</li>
-<li>TUI: show provider/model labels for the active session and default model.</li>
-<li>Heartbeat: add per-agent heartbeat configuration and multi-agent docs example.</li>
-<li>UI: show gateway auth guidance + doc link on unauthorized Control UI connections.</li>
-<li>Security: warn on weak model tiers (Haiku, below GPT-5, below Claude 4.5) in <code>clawdbot security audit</code>.</li>
-<li>Apps: store node auth tokens encrypted (Keychain/SecurePrefs).</li>
-<li>Daemon: share profile/state-dir resolution across service helpers and honor <code>CLAWDBOT_STATE_DIR</code> for Windows task scripts.</li>
-<li>Docs: clarify multi-gateway rescue bot guidance. (#969) — thanks @bjesuiter.</li>
-<li>Agents: add Current Date & Time system prompt section with configurable time format (auto/12/24).</li>
-<li>Tools: normalize Slack/Discord message timestamps with <code>timestampMs</code>/<code>timestampUtc</code> while keeping raw provider fields.</li>
-<li>macOS: add <code>system.which</code> for prompt-free remote skill discovery (with gateway fallback to <code>system.run</code>).</li>
-<li>Docs: add Date & Time guide and update prompt/timezone configuration docs.</li>
-<li>Messages: debounce rapid inbound messages across channels with per-connector overrides. (#971) — thanks @juanpablodlc.</li>
-<li>Messages: allow media-only sends (CLI/tool) and show Telegram voice recording status for voice notes. (#957) — thanks @rdev.</li>
-<li>Auth/Status: keep auth profiles sticky per session (rotate on compaction/new), surface provider usage headers in <code>/status</code> and <code>clawdbot models status</code>, and update docs.</li>
-<li>CLI: add <code>--json</code> output for <code>clawdbot daemon</code> lifecycle/install commands.</li>
-<li>Memory: make <code>node-llama-cpp</code> an optional dependency (avoid Node 25 install failures) and improve local-embeddings fallback/errors.</li>
-<li>Browser: add <code>snapshot refs=aria</code> (Playwright aria-ref ids) for self-resolving refs across <code>snapshot</code> → <code>act</code>.</li>
-<li>Browser: <code>profile="chrome"</code> now defaults to host control and returns clearer “attach a tab” errors.</li>
-<li>Browser: prefer stable Chrome for auto-detect, with Brave/Edge fallbacks and updated docs. (#983) — thanks @cpojer.</li>
-<li>Browser: increase remote CDP reachability timeouts + add <code>remoteCdpTimeoutMs</code>/<code>remoteCdpHandshakeTimeoutMs</code>.</li>
-<li>Browser: preserve auth/query tokens for remote CDP endpoints and pass Basic auth for CDP HTTP/WS. (#895) — thanks @mukhtharcm.</li>
-<li>Telegram: add bidirectional reaction support with configurable notifications and agent guidance. (#964) — thanks @bohdanpodvirnyi.</li>
-<li>Telegram: allow custom commands in the bot menu (merged with native; conflicts ignored). (#860) — thanks @nachoiacovino.</li>
-<li>Discord: allow allowlisted guilds without channel lists to receive messages when <code>groupPolicy="allowlist"</code>. — thanks @thewilloftheshadow.</li>
-<li>Discord: allow emoji/sticker uploads + channel actions in config defaults. (#870) — thanks @JDIVE.</li>
-</ul>
-<h3>Fixes</h3>
-<ul>
-<li>Fix: list model picker entries as provider/model pairs for explicit selection. (#970) — thanks @mcinteerj.</li>
-<li>Fix: align OpenAI image-gen defaults with DALL-E 3 standard quality and document output formats. (#880) — thanks @mkbehr.</li>
-<li>Fix: persist <code>gateway.mode=local</code> after selecting Local run mode in <code>clawdbot configure</code>, even if no other sections are chosen.</li>
-<li>Daemon: fix profile-aware service label resolution (env-driven) and add coverage for launchd/systemd/schtasks. (#969) — thanks @bjesuiter.</li>
-<li>Agents: avoid false positives when logging unsupported Google tool schema keywords.</li>
-<li>Agents: skip Gemini history downgrades for google-antigravity to preserve tool calls. (#894) — thanks @mukhtharcm.</li>
-<li>Status: restore usage summary line for current provider when no OAuth profiles exist.</li>
-<li>Fix: guard model fallback against undefined provider/model values. (#954) — thanks @roshanasingh4.</li>
-<li>Fix: refactor session store updates, add chat.inject, and harden subagent cleanup flow. (#944) — thanks @tyler6204.</li>
-<li>Fix: clean up suspended CLI processes across backends. (#978) — thanks @Nachx639.</li>
-<li>Fix: support MiniMax coding plan usage responses with <code>model_remains</code>/<code>current_interval_*</code> payloads.</li>
-<li>Fix: suppress WhatsApp pairing replies for historical catch-up DMs on initial link. (#904)</li>
-<li>Browser: extension mode recovers when only one tab is attached (stale targetId fallback).</li>
-<li>Browser: fix <code>tab not found</code> for extension relay snapshots/actions when Playwright blocks <code>newCDPSession</code> (use the single available Page).</li>
-<li>Browser: upgrade <code>ws</code> → <code>wss</code> when remote CDP uses <code>https</code> (fixes Browserless handshake).</li>
-<li>Telegram: skip <code>message_thread_id=1</code> for General topic sends while keeping typing indicators. (#848) — thanks @azade-c.</li>
-<li>Fix: sanitize user-facing error text + strip <code><final></code> tags across reply pipelines. (#975) — thanks @ThomsenDrake.</li>
-<li>Fix: normalize pairing CLI aliases, allow extension channels, and harden Zalo webhook payload parsing. (#991) — thanks @longmaba.</li>
-<li>Fix: allow local Tailscale Serve hostnames without treating tailnet clients as direct. (#885) — thanks @oswalpalash.</li>
-<li>Fix: reset sessions after role-ordering conflicts to recover from consecutive user turns. (#998)</li>
-</ul>
-<p><a href="https://github.com/clawdbot/clawdbot/blob/main/CHANGELOG.md">View full changelog</a></p>
-]]></description>
-            <enclosure url="https://github.com/clawdbot/clawdbot/releases/download/v2026.1.15/Clawdbot-2026.1.15.zip" length="12127276" type="application/octet-stream" sparkle:edSignature="o79vwTbtW/d91NQFRVfUDhsv6D4zIw7IkhY0N1iLImMu94BURgLcecA6z7Smy3bMobPwOyzN8yfm6mA/Rt8FCA=="/>
-        </item>
-        <item>
-            <title>2026.1.14-1</title>
-            <pubDate>Thu, 15 Jan 2026 11:14:40 +0000</pubDate>
-            <link>https://raw.githubusercontent.com/clawdbot/clawdbot/main/appcast.xml</link>
-            <sparkle:version>5825</sparkle:version>
-            <sparkle:shortVersionString>2026.1.14-1</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <description><![CDATA[<h2>Clawdbot 2026.1.14-1</h2>
-<h3>Highlights</h3>
-<ul>
-<li>Web search: <code>web_search</code>/<code>web_fetch</code> tools (Brave API) + first-time setup in onboarding/configure.</li>
-<li>Browser control: Chrome extension relay takeover mode + remote browser control via <code>clawdbot browser serve</code>.</li>
-<li>Plugins: channel plugins (gateway HTTP hooks) + Zalo plugin + onboarding install flow. (#854) — thanks @longmaba.</li>
-<li>Security: expanded <code>clawdbot security audit</code> (+ <code>--fix</code>), detect-secrets CI scan, and a <code>SECURITY.md</code> reporting policy.</li>
-</ul>
-<h3>Changes</h3>
-<h4>Web Tools</h4>
-<ul>
-<li>Tools: add <code>web_search</code>/<code>web_fetch</code> (Brave API), including helpful setup hints when the key is missing.</li>
-<li>Tools: enable <code>web_fetch</code> by default (unless explicitly disabled in config).</li>
-<li>CLI/Docs: add <code>clawdbot configure --section web</code> for storing Brave API keys and update onboarding tips.</li>
-</ul>
-<h4>Browser / Control UI</h4>
-<ul>
-<li>Browser: add Chrome extension relay takeover mode (toolbar button) + <code>clawdbot browser serve</code> remote control + <code>browser.controlToken</code>.</li>
-<li>Browser: ship a built-in <code>chrome</code> profile for extension relay and start the relay automatically when running locally.</li>
-<li>Browser: default <code>browser.defaultProfile</code> to <code>chrome</code> (existing Chrome takeover mode).</li>
-<li>Browser: add <code>clawdbot browser extension install/path</code> and copy extension path to clipboard.</li>
-<li>Browser: add <code>snapshot refs=aria</code> (Playwright aria-ref ids) for self-resolving refs across <code>snapshot</code> → <code>act</code>.</li>
-<li>Browser: <code>profile="chrome"</code> now defaults to host control and returns clearer “attach a tab” errors.</li>
-<li>Browser: extension mode recovers when only one tab is attached (stale targetId fallback).</li>
-<li>Control UI: show raw any-map entries in config views; move Docs link into the left nav.</li>
-</ul>
-<h4>Plugins</h4>
-<ul>
-<li>Plugins: add plugin HTTP hooks + loader updates to support channel plugins. (#854) — thanks @longmaba.</li>
-<li>Plugins: add onboarding plugin install flow. (#854) — thanks @longmaba.</li>
-<li>Channels: add Matrix plugin (external) with docs + onboarding hooks.</li>
-<li>Voice Call: add Plivo provider (no SDK dependency). (#846) — thanks @vrknetha.</li>
-</ul>
-<h4>Security</h4>
-<ul>
-<li>Security: expand <code>clawdbot security audit</code> checks and publish a <code>SECURITY.md</code> reporting policy.</li>
-<li>Security: extend <code>clawdbot security audit --fix</code> to tighten more sensitive state paths.</li>
-<li>Security: add detect-secrets CI scan and baseline guidance. (#227) — thanks @Hyaxia.</li>
-</ul>
-<h4>Onboarding / Daemon</h4>
-<ul>
-<li>Onboarding: add a security checkpoint prompt (docs link + sandboxing hint); require <code>--accept-risk</code> for <code>--non-interactive</code>.</li>
-<li>Daemon: support profile-aware service names for multi-gateway setups. (#671) — thanks @bjesuiter.</li>
-</ul>
-<h4>Auth / Usage / Config</h4>
-<ul>
-<li>Usage: add MiniMax coding plan usage tracking.</li>
-<li>Auth: label Claude Code CLI auth options. (#915) — thanks @SeanZoR.</li>
-<li>Agents: add optional auth-profile copy prompt on <code>agents add</code> and improve auth error messaging.</li>
-<li>Auth: add dynamic template variables to <code>messages.responsePrefix</code>. (#928) — thanks @sebslight.</li>
-<li>Config: add <code>channels.<provider>.configWrites</code> gating for channel-initiated config writes; migrate Slack channel IDs.</li>
-</ul>
-<h4>Channels</h4>
-<ul>
-<li>Telegram: add message delete action in the message tool. (#903) — thanks @sleontenko.</li>
-<li>WhatsApp: add <code>channels.whatsapp.sendReadReceipts</code> to disable auto read receipts. (#882) — thanks @chrisrodz.</li>
-</ul>
-<h4>Docs</h4>
-<ul>
-<li>Docs: clarify per-agent auth stores, sandboxed skill binaries, and elevated semantics.</li>
-<li>Docs: add FAQ entries for missing provider auth after adding agents and Gemini thinking signature errors.</li>
-<li>Docs: expand gateway security hardening guidance and incident response checklist.</li>
-<li>Docs: document DM history limits for channel DMs. (#883) — thanks @pkrmf.</li>
-<li>Docs: standardize Claude Code CLI naming across docs and prompts. (follow-up to #915)</li>
-<li>Docs: add per-command CLI doc pages and link them from <code>clawdbot <command> --help</code>.</li>
-<li>Docs: add multi-gateway guide (sidebar + nav).</li>
-</ul>
-<h3>Fixes</h3>
-<h4>Gateway / Daemon / Sessions</h4>
-<ul>
-<li>Gateway: forward termination signals to respawned CLI child processes to avoid orphaned systemd runs. (#933) — thanks @roshanasingh4.</li>
-<li>Gateway/UI: ship session defaults in the hello snapshot so the Control UI canonicalizes main session keys (no bare <code>main</code> alias).</li>
-<li>Agents: skip thinking/final tag stripping inside Markdown code spans. (#939) — thanks @ngutman.</li>
-<li>Browser: add tests for snapshot labels/efficient query params and labeled image responses.</li>
-<li>Browser: persist role snapshot refs per CDP target so <code>snapshot</code> → <code>act</code> clicks work even if Playwright returns a different Page instance.</li>
-<li>macOS: ensure launchd log directory exists with a test-only override. (#909) — thanks @roshanasingh4.</li>
-<li>macOS: format ConnectionsStore config to satisfy SwiftFormat lint. (#852) — thanks @mneves75.</li>
-<li>Packaging: run <code>pnpm build</code> on <code>prepack</code> so npm publishes include fresh <code>dist/</code> output.</li>
-<li>Telegram: register dock native commands with underscores to avoid <code>BOT_COMMAND_INVALID</code> (#929, fixes #901) — thanks @grp06.</li>
-<li>Google: downgrade unsigned thinking blocks before send to avoid missing signature errors.</li>
-<li>Agents: make user time zone and 24-hour time explicit in the system prompt. (#859) — thanks @CashWilliams.</li>
-<li>Agents: strip downgraded tool call text without eating adjacent replies and filter thinking-tag leaks. (#905) — thanks @erikpr1994.</li>
-<li>Agents: cap tool call IDs for OpenAI/OpenRouter to avoid request rejections. (#875) — thanks @j1philli.</li>
-<li>Doctor: avoid re-adding WhatsApp config when only legacy ack reactions are set. (#927, fixes #900) — thanks @grp06.</li>
-<li>Agents: scrub tuple <code>items</code> schemas for Gemini tool calls. (#926, fixes #746) — thanks @grp06.</li>
-<li>Agents: stabilize sub-agent announce status from runtime outcomes and normalize Result/Notes. (#835) — thanks @roshanasingh4.</li>
-<li>Apps: use canonical main session keys from gateway defaults across macOS/iOS/Android to avoid creating bare <code>main</code> sessions.</li>
-<li>Embedded runner: suppress raw API error payloads from replies. (#924) — thanks @grp06.</li>
-<li>Auth: normalize Claude Code CLI profile mode to oauth and auto-migrate config. (#855) — thanks @sebslight.</li>
-<li>Daemon: clear persisted launchd disabled state before bootstrap (fixes <code>daemon install</code> after uninstall). (#849) — thanks @ndraiman.</li>
-<li>Sessions: return deep clones (<code>structuredClone</code>) so cached session entries can't be mutated. (#934) — thanks @ronak-guliani.</li>
-<li>Heartbeat: keep <code>updatedAt</code> monotonic when restoring heartbeat sessions. (#934) — thanks @ronak-guliani.</li>
-<li>Agent: clear run context after CLI runs (<code>clearAgentRunContext</code>) to avoid runaway contexts. (#934) — thanks @ronak-guliani.</li>
-<li>Gateway/Dev: ensure <code>pnpm gateway:dev</code> always uses the dev profile config + state (<code>~/.clawdbot-dev</code>).</li>
-</ul>
-<h4>CLI / Onboarding</h4>
-<ul>
-<li>Onboarding: show web search setup at the end (not the beginning).</li>
-<li>Onboarding: show daemon install/restart progress (avoid “blinking cursor”) and fix daemon install output formatting.</li>
-<li>Health: colorize “not configured” provider lines for easier scanning.</li>
-</ul>
-<h4>Control UI / TUI</h4>
-<ul>
-<li>Control UI: load cron run history on job selection and clarify empty-state messaging. (#866)</li>
-<li>UI: use application-defined WebSocket close code and fix dashboard auth query items. (#918) — thanks @rahthakor.</li>
-<li>UI: always apply <code>?token=</code> from URL (fixes unauthorized after re-onboard).</li>
-<li>Browser: add tests for snapshot labels/efficient query params and labeled image responses.</li>
-<li>TUI: render picker overlays via the overlay stack so /models and /settings display. (#921) — thanks @grizzdank.</li>
-<li>TUI: add a bright spinner + elapsed time in the status line for send/stream/run states.</li>
-<li>TUI: show LLM error messages (rate limits, auth, etc.) instead of <code>(no output)</code>.</li>
-</ul>
-<h4>Agents / Auth / Tools / Sandbox</h4>
-<ul>
-<li>Agents: make user time zone and 24-hour time explicit in the system prompt. (#859) — thanks @CashWilliams.</li>
-<li>Agents: strip downgraded tool call text without eating adjacent replies and filter thinking-tag leaks. (#905) — thanks @erikpr1994.</li>
-<li>Agents: cap tool call IDs for OpenAI/OpenRouter to avoid request rejections. (#875) — thanks @j1philli.</li>
-<li>Agents: scrub tuple <code>items</code> schemas for Gemini tool calls. (#926, fixes #746) — thanks @grp06.</li>
-<li>Agents: stabilize sub-agent announce status from runtime outcomes and normalize Result/Notes. (#835) — thanks @roshanasingh4.</li>
-<li>Auth: normalize Claude Code CLI profile mode to oauth and auto-migrate config. (#855) — thanks @sebslight.</li>
-<li>Embedded runner: suppress raw API error payloads from replies. (#924) — thanks @grp06.</li>
-<li>Logging: tolerate <code>EIO</code> from console writes to avoid gateway crashes. (#925, fixes #878) — thanks @grp06.</li>
-<li>Sandbox: restore <code>docker.binds</code> config validation and preserve configured PATH for <code>docker exec</code>. (#873) — thanks @akonyer.</li>
-<li>Google: downgrade unsigned thinking blocks before send to avoid missing signature errors.</li>
-</ul>
-<h4>macOS / Apps</h4>
-<ul>
-<li>macOS: ensure launchd log directory exists with a test-only override. (#909) — thanks @roshanasingh4.</li>
-<li>macOS: format ConnectionsStore config to satisfy SwiftFormat lint. (#852) — thanks @mneves75.</li>
-<li>macOS: pass auth token/password to dashboard URL for authenticated access. (#918) — thanks @rahthakor.</li>
-<li>macOS: reuse launchd gateway auth and skip wizard when gateway config already exists. (#917)</li>
-<li>Apps: use canonical main session keys from gateway defaults across macOS/iOS/Android to avoid creating bare <code>main</code> sessions.</li>
-<li>macOS: fix cron preview/testing payload to use <code>channel</code> key. (#867) — thanks @wes-davis.</li>
-<li>macOS: update cron testing channel arg. (#896) — thanks @ngutman.</li>
-</ul>
-<h4>Channels / Messaging</h4>
-<ul>
-<li>Slack: isolate thread history and avoid inheriting channel transcripts for new threads by default. (#758)</li>
-<li>Slack: respect <code>channels.slack.requireMention</code> default when resolving channel mention gating. (#850) — thanks @evalexpr.</li>
-<li>Slack: drop Socket Mode events with mismatched <code>api_app_id</code>/<code>team_id</code>. (#889) — thanks @roshanasingh4.</li>
-<li>Commands: add native command argument menus across Discord/Slack/Telegram. (#936) — thanks @thewilloftheshadow.</li>
-<li>Discord: isolate autoThread thread context. (#856) — thanks @davidguttman.</li>
-<li>Telegram: honor <code>channels.telegram.timeoutSeconds</code> for grammY API requests. (#863) — thanks @Snaver.</li>
-<li>Telegram: aggregate split inbound messages into one prompt (reduces “one reply per fragment”).</li>
-<li>Telegram: let control commands bypass per-chat sequentialization; always allow abort triggers.</li>
-<li>Telegram: split long captions into media + follow-up text messages. (#907) — thanks @jalehman.</li>
-<li>Telegram: migrate group config when supergroups change chat IDs. (#906) — thanks @sleontenko.</li>
-<li>Telegram: register dock native commands with underscores to avoid <code>BOT_COMMAND_INVALID</code> (#929, fixes #901) — thanks @grp06.</li>
-<li>Messaging: unify markdown formatting + format-first chunking for Slack/Telegram/Signal. (#920) — thanks @TheSethRose.</li>
-<li>iMessage: prefer handle routing for direct-message replies; include imsg RPC error details. (#935)</li>
-<li>WhatsApp: fix context isolation using wrong ID (was bot's number, now conversation ID). (#911) — thanks @tristanmanchester.</li>
-<li>WhatsApp: normalize user JIDs with device suffix for allowlist checks in groups. (#838) — thanks @peschee.</li>
-<li>WhatsApp: harden owner command auth.</li>
-<li>Auto-reply: treat trailing <code>NO_REPLY</code> tokens as silent replies.</li>
-</ul>
-<h4>Config / Doctor / Packaging</h4>
-<ul>
-<li>Config: prevent partial config writes from clobbering unrelated settings (base hash guard + merge patch for connection saves).</li>
-<li>Config/Doctor: remove legacy Clawdis env fallbacks and config/service migrations (Clawdbot-only).</li>
-<li>Doctor: avoid re-adding WhatsApp config when only legacy ack reactions are set. (#927, fixes #900) — thanks @grp06.</li>
-<li>Packaging: run <code>pnpm build</code> on <code>prepack</code> so npm publishes include fresh <code>dist/</code> output.</li>
-</ul>
-<p><a href="https://github.com/clawdbot/clawdbot/blob/main/CHANGELOG.md">View full changelog</a></p>
-]]></description>
-            <enclosure url="https://github.com/clawdbot/clawdbot/releases/download/v2026.1.14-1/Clawdbot-2026.1.14-1.zip" length="19887144" type="application/octet-stream" sparkle:edSignature="1irKxBLt2eRtns34m/8JsjL/ZzhZQNjahwrxtArTvzaCnidS/MEnpD4nV2SHnhuo8g+fJZQpV9NoCAoEOAinCw=="/>
         </item>
     </channel>
 </rss>

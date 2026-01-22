@@ -1,6 +1,6 @@
 {
   "name": "clawdbot",
-  "version": "2026.1.20",
+  "version": "2026.1.22",
   "description": "WhatsApp gateway CLI (Baileys web) with Pi RPC agent",
   "type": "module",
   "main": "dist/index.js",
@@ -13,6 +13,7 @@
     "clawdbot": "dist/entry.js"
   },
   "files": [
+    "dist/acp/**",
     "dist/agents/**",
     "dist/auto-reply/**",
     "dist/browser/**",
@@ -50,6 +51,7 @@
     "extensions/**",
     "assets/**",
     "skills/**",
+    "patches/**",
     "README.md",
     "README-header.png",
     "CHANGELOG.md",
@@ -64,13 +66,14 @@
     "dist/logging/**",
     "dist/memory/**",
     "dist/markdown/**",
+    "dist/node-host/**",
     "dist/pairing/**",
     "dist/whatsapp/**"
   ],
   "scripts": {
     "dev": "node scripts/run-node.mjs",
     "postinstall": "node scripts/postinstall.js",
-    "prepack": "pnpm build",
+    "prepack": "pnpm build && pnpm ui:build",
     "docs:list": "node scripts/docs-list.js",
     "docs:bin": "node scripts/build-docs-list.mjs",
     "docs:dev": "cd docs && mint dev",
@@ -144,16 +147,16 @@
   "packageManager": "pnpm@10.23.0",
   "dependencies": {
     "@agentclientprotocol/sdk": "0.13.0",
-    "@buape/carbon": "0.0.0-beta-20260110172854",
+    "@buape/carbon": "0.14.0",
     "@clack/prompts": "^0.11.0",
     "@grammyjs/runner": "^2.0.3",
     "@grammyjs/transformer-throttler": "^1.2.1",
     "@homebridge/ciao": "^1.3.4",
     "@lydell/node-pty": "1.2.0-beta.3",
-    "@mariozechner/pi-agent-core": "0.49.2",
-    "@mariozechner/pi-ai": "0.49.2",
-    "@mariozechner/pi-coding-agent": "0.49.2",
-    "@mariozechner/pi-tui": "0.49.2",
+    "@mariozechner/pi-agent-core": "0.49.3",
+    "@mariozechner/pi-ai": "0.49.3",
+    "@mariozechner/pi-coding-agent": "0.49.3",
+    "@mariozechner/pi-tui": "0.49.3",
     "@mozilla/readability": "^0.6.0",
     "@sinclair/typebox": "0.34.47",
     "@slack/bolt": "^4.6.0",
@@ -165,7 +168,7 @@
     "busboy": "1.6.0",
     "chalk": "^5.6.2",
     "chokidar": "^5.0.0",
-    "chromium-bidi": "13.0.0",
+    "chromium-bidi": "13.0.1",
     "cli-highlight": "^2.1.11",
     "commander": "^14.0.2",
     "croner": "^9.1.0",
@@ -192,7 +195,7 @@
     "sqlite-vec": "0.1.7-alpha.2",
     "tar": "7.5.4",
     "tslog": "^4.10.2",
-    "undici": "^7.18.2",
+    "undici": "^7.19.0",
     "ws": "^8.19.0",
     "yaml": "^2.8.2",
     "zod": "^4.3.5"
@@ -212,10 +215,11 @@
     "@types/express": "^5.0.6",
     "@types/jsonwebtoken": "9.0.10",
     "@types/markdown-it": "^14.1.2",
-    "@types/node": "^25.0.9",
+    "@types/node": "^25.0.10",
     "@types/proper-lockfile": "^4.1.4",
     "@types/qrcode-terminal": "^0.12.2",
     "@types/ws": "^8.18.1",
+    "@typescript/native-preview": "7.0.0-dev.20260120.1",
     "@vitest/coverage-v8": "^4.0.17",
     "docx-preview": "^0.3.7",
     "lit": "^3.3.2",
@@ -237,10 +241,7 @@
     "overrides": {
       "@sinclair/typebox": "0.34.47",
       "hono": "4.11.4",
-      "tar": "7.5.3"
-    },
-    "patchedDependencies": {
-      "@mariozechner/pi-ai@0.49.2": "patches/@mariozechner__pi-ai@0.49.2.patch"
+      "tar": "7.5.4"
     }
   },
   "vitest": {

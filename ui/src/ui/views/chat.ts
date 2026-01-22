@@ -8,7 +8,6 @@ import {
   normalizeRoleForGrouping,
 } from "../chat/message-normalizer";
 import { extractText } from "../chat/message-extract";
-import { renderMessage, renderReadingIndicator } from "../chat/legacy-render";
 import {
   renderMessageGroup,
   renderReadingIndicatorGroup,
@@ -29,6 +28,7 @@ export type ChatProps = {
   toolMessages: unknown[];
   stream: string | null;
   streamStartedAt: number | null;
+  assistantAvatarUrl?: string | null;
   draft: string;
   queue: ChatQueueItem[];
   connected: boolean;
@@ -36,22 +36,18 @@ export type ChatProps = {
   disabledReason: string | null;
   error: string | null;
   sessions: SessionsListResult | null;
-  // Legacy tool output expand/collapse (used when useNewChatLayout is false)
-  isToolOutputExpanded: (id: string) => boolean;
-  onToolOutputToggle: (id: string, expanded: boolean) => void;
   // Focus mode
   focusMode: boolean;
-  // Feature flag for new Slack-style layout with sidebar
-  useNewChatLayout?: boolean;
-  // Sidebar state (used when useNewChatLayout is true)
+  // Sidebar state
   sidebarOpen?: boolean;
   sidebarContent?: string | null;
   sidebarError?: string | null;
   splitRatio?: number;
+  assistantName: string;
+  assistantAvatar: string | null;
   // Event handlers
   onRefresh: () => void;
   onToggleFocusMode: () => void;
-  onToggleLayout?: () => void;
   onDraftChange: (next: string) => void;
   onSend: () => void;
   onAbort?: () => void;
@@ -71,6 +67,10 @@ export function renderChat(props: ChatProps) {
   );
   const reasoningLevel = activeSession?.reasoningLevel ?? "off";
   const showReasoning = props.showThinking && reasoningLevel !== "off";
+  const assistantIdentity = {
+    name: props.assistantName,
+    avatar: props.assistantAvatar ?? props.assistantAvatarUrl ?? null,
+  };
 
   const composePlaceholder = props.connected
     ? "Message (↩ to send, Shift+↩ for line breaks)"
@@ -78,7 +78,6 @@ export function renderChat(props: ChatProps) {
 
   const splitRatio = props.splitRatio ?? 0.6;
   const sidebarOpen = Boolean(props.sidebarOpen && props.onCloseSidebar);
-  const useNewLayout = props.useNewChatLayout ?? false;
 
   return html`
     <section class="card chat">
@@ -122,42 +121,33 @@ export function renderChat(props: ChatProps) {
               : nothing}
             ${repeat(buildChatItems(props), (item) => item.key, (item) => {
               if (item.kind === "reading-indicator") {
-                return useNewLayout
-                  ? renderReadingIndicatorGroup()
-                  : renderReadingIndicator();
+                return renderReadingIndicatorGroup(assistantIdentity);
               }
 
               if (item.kind === "stream") {
-                return useNewLayout
-                  ? renderStreamingGroup(
-                      item.text,
-                      item.startedAt,
-                      props.onOpenSidebar,
-                    )
-                  : renderMessage(
-                      {
-                        role: "assistant",
-                        content: [{ type: "text", text: item.text }],
-                        timestamp: item.startedAt,
-                      },
-                      props,
-                      { streaming: true, showReasoning },
-                    );
+                return renderStreamingGroup(
+                  item.text,
+                  item.startedAt,
+                  props.onOpenSidebar,
+                  assistantIdentity,
+                );
               }
 
               if (item.kind === "group") {
                 return renderMessageGroup(item, {
                   onOpenSidebar: props.onOpenSidebar,
                   showReasoning,
+                  assistantName: props.assistantName,
+                  assistantAvatar: assistantIdentity.avatar,
                 });
               }
 
-              return renderMessage(item.message, props, { showReasoning });
+              return nothing;
             })}
           </div>
         </div>
 
-        ${useNewLayout && sidebarOpen
+        ${sidebarOpen
           ? html`
               <resizable-divider
                 .splitRatio=${splitRatio}
@@ -231,17 +221,6 @@ export function renderChat(props: ChatProps) {
           >
             New session
           </button>
-          ${props.onAbort
-            ? html`
-                <button
-                  class="btn danger"
-                  ?disabled=${!props.connected || !isBusy || props.canAbort === false}
-                  @click=${props.onAbort}
-                >
-                  Stop
-                </button>
-              `
-            : nothing}
           <button
             class="btn primary"
             ?disabled=${!props.connected}
@@ -348,8 +327,7 @@ function buildChatItems(props: ChatProps): Array<ChatItem | MessageGroup> {
     }
   }
 
-  if (props.useNewChatLayout) return groupMessages(items);
-  return items;
+  return groupMessages(items);
 }
 
 function messageKey(message: unknown, index: number): string {

@@ -77,9 +77,10 @@ export type SessionConfig = {
   identityLinks?: Record<string, string[]>;
   resetTriggers?: string[];
   idleMinutes?: number;
-  heartbeatIdleMinutes?: number;
   reset?: SessionResetConfig;
   resetByType?: SessionResetByTypeConfig;
+  /** Channel-specific reset overrides (e.g. { discord: { mode: "idle", idleMinutes: 10080 } }). */
+  resetByChannel?: Record<string, SessionResetConfig>;
   store?: string;
   typingIntervalSeconds?: number;
   typingMode?: TypingMode;
@@ -117,9 +118,18 @@ export type DiagnosticsOtelConfig = {
   flushIntervalMs?: number;
 };
 
+export type DiagnosticsCacheTraceConfig = {
+  enabled?: boolean;
+  filePath?: string;
+  includeMessages?: boolean;
+  includePrompt?: boolean;
+  includeSystem?: boolean;
+};
+
 export type DiagnosticsConfig = {
   enabled?: boolean;
   otel?: DiagnosticsOtelConfig;
+  cacheTrace?: DiagnosticsCacheTraceConfig;
 };
 
 export type WebReconnectConfig = {
@@ -144,4 +154,6 @@ export type IdentityConfig = {
   name?: string;
   theme?: string;
   emoji?: string;
+  /** Avatar image: workspace-relative path, http(s) URL, or data URI. */
+  avatar?: string;
 };

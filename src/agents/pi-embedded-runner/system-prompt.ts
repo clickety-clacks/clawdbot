@@ -20,6 +20,7 @@ export function buildEmbeddedSystemPrompt(params: {
     level: "minimal" | "extensive";
     channel: string;
   };
+  workspaceNotes?: string[];
   /** Controls which hardcoded sections to include. Defaults to "full". */
   promptMode?: PromptMode;
   runtimeInfo: {
@@ -35,6 +36,7 @@ export function buildEmbeddedSystemPrompt(params: {
     /** Supported message actions for the current channel (e.g., react, edit, unsend) */
     channelActions?: string[];
   };
+  messageToolHints?: string[];
   sandboxInfo?: EmbeddedSandboxInfo;
   tools: AgentTool[];
   modelAliasLines: string[];
@@ -53,9 +55,11 @@ export function buildEmbeddedSystemPrompt(params: {
     heartbeatPrompt: params.heartbeatPrompt,
     skillsPrompt: params.skillsPrompt,
     docsPath: params.docsPath,
+    workspaceNotes: params.workspaceNotes,
     reactionGuidance: params.reactionGuidance,
     promptMode: params.promptMode,
     runtimeInfo: params.runtimeInfo,
+    messageToolHints: params.messageToolHints,
     sandboxInfo: params.sandboxInfo,
     toolNames: params.tools.map((tool) => tool.name),
     toolSummaries: buildToolSummaryMap(params.tools),

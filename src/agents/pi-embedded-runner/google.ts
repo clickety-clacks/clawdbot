@@ -4,8 +4,6 @@ import type { SessionManager } from "@mariozechner/pi-coding-agent";
 
 import { registerUnhandledRejectionHandler } from "../../infra/unhandled-rejections.js";
 import {
-  downgradeGeminiThinkingBlocks,
-  downgradeGeminiHistory,
   isCompactionFailureError,
   isGoogleModelApi,
   sanitizeGoogleTurnOrdering,
@@ -16,6 +14,8 @@ import { log } from "./logger.js";
 import { describeUnknownError } from "./utils.js";
 import { isAntigravityClaude } from "../pi-embedded-helpers/google.js";
 import { cleanToolSchemaForGemini } from "../pi-tools.schema.js";
+import { normalizeProviderId } from "../model-selection.js";
+import type { ToolCallIdMode } from "../tool-call-id.js";
 
 const GOOGLE_TURN_ORDERING_CUSTOM_TYPE = "google-turn-ordering-bootstrap";
 const GOOGLE_SCHEMA_UNSUPPORTED_KEYWORDS = new Set([
@@ -46,46 +46,96 @@ const OPENAI_TOOL_CALL_ID_APIS = new Set([
   "openai-responses",
   "openai-codex-responses",
 ]);
+const MISTRAL_MODEL_HINTS = [
+  "mistral",
+  "mixtral",
+  "codestral",
+  "pixtral",
+  "devstral",
+  "ministral",
+  "mistralai",
+];
+const ANTIGRAVITY_SIGNATURE_RE = /^[A-Za-z0-9+/]+={0,2}$/;
+
+function isValidAntigravitySignature(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  if (trimmed.length % 4 !== 0) return false;
+  return ANTIGRAVITY_SIGNATURE_RE.test(trimmed);
+}
 
 function shouldSanitizeToolCallIds(modelApi?: string | null): boolean {
   if (!modelApi) return false;
   return isGoogleModelApi(modelApi) || OPENAI_TOOL_CALL_ID_APIS.has(modelApi);
 }
 
-function filterOpenAIReasoningOnlyMessages(
-  messages: AgentMessage[],
-  modelApi?: string | null,
-): AgentMessage[] {
-  if (modelApi !== "openai-responses") return messages;
-  return messages.filter((msg) => {
-    if (!msg || typeof msg !== "object") return true;
-    if ((msg as { role?: unknown }).role !== "assistant") return true;
+function isMistralModel(params: { provider?: string | null; modelId?: string | null }): boolean {
+  const provider = normalizeProviderId(params.provider ?? "");
+  if (provider === "mistral") return true;
+  const modelId = (params.modelId ?? "").toLowerCase();
+  if (!modelId) return false;
+  return MISTRAL_MODEL_HINTS.some((hint) => modelId.includes(hint));
+}
+
+function sanitizeAntigravityThinkingBlocks(messages: AgentMessage[]): AgentMessage[] {
+  let touched = false;
+  const out: AgentMessage[] = [];
+  for (const msg of messages) {
+    if (!msg || typeof msg !== "object" || msg.role !== "assistant") {
+      out.push(msg);
+      continue;
+    }
     const assistant = msg as Extract<AgentMessage, { role: "assistant" }>;
-    const content = assistant.content;
-    if (!Array.isArray(content) || content.length === 0) return true;
-    let hasThinking = false;
-    let hasPairedContent = false;
-    for (const block of content) {
-      if (!block || typeof block !== "object") continue;
-      const type = (block as { type?: unknown }).type;
-      if (type === "thinking") {
-        hasThinking = true;
+    if (!Array.isArray(assistant.content)) {
+      out.push(msg);
+      continue;
+    }
+    type AssistantContentBlock = Extract<AgentMessage, { role: "assistant" }>["content"][number];
+    const nextContent: AssistantContentBlock[] = [];
+    let contentChanged = false;
+    for (const block of assistant.content) {
+      if (
+        !block ||
+        typeof block !== "object" ||
+        (block as { type?: unknown }).type !== "thinking"
+      ) {
+        nextContent.push(block);
         continue;
       }
-      if (type === "toolCall" || type === "toolUse" || type === "functionCall") {
-        hasPairedContent = true;
-        break;
+      const rec = block as {
+        thinkingSignature?: unknown;
+        signature?: unknown;
+        thought_signature?: unknown;
+        thoughtSignature?: unknown;
+      };
+      const candidate =
+        rec.thinkingSignature ?? rec.signature ?? rec.thought_signature ?? rec.thoughtSignature;
+      if (!isValidAntigravitySignature(candidate)) {
+        contentChanged = true;
+        continue;
       }
-      if (type === "text") {
-        const text = (block as { text?: unknown }).text;
-        if (typeof text === "string" && text.trim().length > 0) {
-          hasPairedContent = true;
-          break;
-        }
+      if (rec.thinkingSignature !== candidate) {
+        const nextBlock = {
+          ...(block as unknown as Record<string, unknown>),
+          thinkingSignature: candidate,
+        } as AssistantContentBlock;
+        nextContent.push(nextBlock);
+        contentChanged = true;
+      } else {
+        nextContent.push(block);
       }
     }
-    return !(hasThinking && !hasPairedContent);
-  });
+    if (contentChanged) {
+      touched = true;
+    }
+    if (nextContent.length === 0) {
+      touched = true;
+      continue;
+    }
+    out.push(contentChanged ? { ...assistant, content: nextContent } : msg);
+  }
+  return touched ? out : messages;
 }
 
 function findUnsupportedSchemaKeywords(schema: unknown, path: string): string[] {
@@ -228,40 +278,34 @@ export async function sanitizeSessionHistory(params: {
   sessionManager: SessionManager;
   sessionId: string;
 }): Promise<AgentMessage[]> {
-  const isAntigravityClaudeModel = isAntigravityClaude(params.modelApi, params.modelId);
-  const provider = (params.provider ?? "").toLowerCase();
+  const isAntigravityClaudeModel = isAntigravityClaude({
+    api: params.modelApi,
+    provider: params.provider,
+    modelId: params.modelId,
+  });
+  const provider = normalizeProviderId(params.provider ?? "");
   const modelId = (params.modelId ?? "").toLowerCase();
   const isOpenRouterGemini =
     (provider === "openrouter" || provider === "opencode") && modelId.includes("gemini");
-  const isGeminiLike = isGoogleModelApi(params.modelApi) || isOpenRouterGemini;
+  const isMistral = isMistralModel({ provider, modelId });
+  const toolCallIdMode: ToolCallIdMode | undefined = isMistral ? "strict9" : undefined;
+  const sanitizeToolCallIds = shouldSanitizeToolCallIds(params.modelApi) || isMistral;
   const sanitizedImages = await sanitizeSessionMessagesImages(params.messages, "session:history", {
-    sanitizeToolCallIds: shouldSanitizeToolCallIds(params.modelApi),
+    sanitizeToolCallIds,
+    toolCallIdMode,
     enforceToolCallLast: params.modelApi === "anthropic-messages",
-    preserveSignatures: params.modelApi === "google-antigravity" && isAntigravityClaudeModel,
+    preserveSignatures: isAntigravityClaudeModel,
     sanitizeThoughtSignatures: isOpenRouterGemini
       ? { allowBase64Only: true, includeCamelCase: true }
       : undefined,
   });
-  // TODO REMOVE when https://github.com/badlogic/pi-mono/pull/838 is merged.
-  const openaiReasoningFiltered = filterOpenAIReasoningOnlyMessages(
-    sanitizedImages,
-    params.modelApi,
-  );
-  const repairedTools = sanitizeToolUseResultPairing(openaiReasoningFiltered);
-  const isAntigravityProvider =
-    provider === "google-antigravity" || params.modelApi === "google-antigravity";
-  const shouldDowngradeThinking = isGeminiLike && !isAntigravityClaudeModel;
-  // Gemini rejects unsigned thinking blocks; downgrade them before send to avoid INVALID_ARGUMENT.
-  const downgradedThinking = shouldDowngradeThinking
-    ? downgradeGeminiThinkingBlocks(repairedTools)
-    : repairedTools;
-  const shouldDowngradeHistory = shouldDowngradeThinking && !isAntigravityProvider;
-  const downgraded = shouldDowngradeHistory
-    ? downgradeGeminiHistory(downgradedThinking)
-    : downgradedThinking;
+  const sanitizedThinking = isAntigravityClaudeModel
+    ? sanitizeAntigravityThinkingBlocks(sanitizedImages)
+    : sanitizedImages;
+  const repairedTools = sanitizeToolUseResultPairing(sanitizedThinking);
 
   return applyGoogleTurnOrderingFix({
-    messages: downgraded,
+    messages: repairedTools,
     modelApi: params.modelApi,
     sessionManager: params.sessionManager,
     sessionId: params.sessionId,

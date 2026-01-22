@@ -304,10 +304,10 @@ const N = (t$7, i$10) => {
 	let n$13, l$5 = 2 === i$10 ? "<svg>" : 3 === i$10 ? "<math>" : "", c$7 = v$1;
 	for (let i$11 = 0; i$11 < s$9; i$11++) {
 		const s$10 = t$7[i$11];
-		let a$2, u$4, d$3 = -1, f$4 = 0;
-		for (; f$4 < s$10.length && (c$7.lastIndex = f$4, u$4 = c$7.exec(s$10), null !== u$4);) f$4 = c$7.lastIndex, c$7 === v$1 ? "!--" === u$4[1] ? c$7 = _ : void 0 !== u$4[1] ? c$7 = m$2 : void 0 !== u$4[2] ? (y.test(u$4[2]) && (n$13 = RegExp("</" + u$4[2], "g")), c$7 = p$1) : void 0 !== u$4[3] && (c$7 = p$1) : c$7 === p$1 ? ">" === u$4[0] ? (c$7 = n$13 ?? v$1, d$3 = -1) : void 0 === u$4[1] ? d$3 = -2 : (d$3 = c$7.lastIndex - u$4[2].length, a$2 = u$4[1], c$7 = void 0 === u$4[3] ? p$1 : "\"" === u$4[3] ? $ : g) : c$7 === $ || c$7 === g ? c$7 = p$1 : c$7 === _ || c$7 === m$2 ? c$7 = v$1 : (c$7 = p$1, n$13 = void 0);
-		const x$1 = c$7 === p$1 && t$7[i$11 + 1].startsWith("/>") ? " " : "";
-		l$5 += c$7 === v$1 ? s$10 + r$9 : d$3 >= 0 ? (e$14.push(a$2), s$10.slice(0, d$3) + h$5 + s$10.slice(d$3) + o$12 + x$1) : s$10 + o$12 + (-2 === d$3 ? i$11 : x$1);
+		let a, u$4, d$3 = -1, f$4 = 0;
+		for (; f$4 < s$10.length && (c$7.lastIndex = f$4, u$4 = c$7.exec(s$10), null !== u$4);) f$4 = c$7.lastIndex, c$7 === v$1 ? "!--" === u$4[1] ? c$7 = _ : void 0 !== u$4[1] ? c$7 = m$2 : void 0 !== u$4[2] ? (y.test(u$4[2]) && (n$13 = RegExp("</" + u$4[2], "g")), c$7 = p$1) : void 0 !== u$4[3] && (c$7 = p$1) : c$7 === p$1 ? ">" === u$4[0] ? (c$7 = n$13 ?? v$1, d$3 = -1) : void 0 === u$4[1] ? d$3 = -2 : (d$3 = c$7.lastIndex - u$4[2].length, a = u$4[1], c$7 = void 0 === u$4[3] ? p$1 : "\"" === u$4[3] ? $ : g) : c$7 === $ || c$7 === g ? c$7 = p$1 : c$7 === _ || c$7 === m$2 ? c$7 = v$1 : (c$7 = p$1, n$13 = void 0);
+		const x = c$7 === p$1 && t$7[i$11 + 1].startsWith("/>") ? " " : "";
+		l$5 += c$7 === v$1 ? s$10 + r$9 : d$3 >= 0 ? (e$14.push(a), s$10.slice(0, d$3) + h$5 + s$10.slice(d$3) + o$12 + x) : s$10 + o$12 + (-2 === d$3 ? i$11 : x);
 	}
 	return [V(t$7, l$5 + (t$7[s$9] || "<?>") + (2 === i$10 ? "</svg>" : 3 === i$10 ? "</math>" : "")), e$14];
 };
@@ -315,7 +315,7 @@ var S = class S {
 	constructor({ strings: t$7, _$litType$: i$10 }, e$14) {
 		let r$12;
 		this.parts = [];
-		let l$5 = 0, a$2 = 0;
+		let l$5 = 0, a = 0;
 		const u$4 = t$7.length - 1, d$3 = this.parts, [f$4, v$2] = N(t$7, i$10);
 		if (this.el = S.createElement(f$4, e$14), P.currentNode = this.el.content, 2 === i$10 || 3 === i$10) {
 			const t$8 = this.el.content.firstChild;
@@ -324,7 +324,7 @@ var S = class S {
 		for (; null !== (r$12 = P.nextNode()) && d$3.length < u$4;) {
 			if (1 === r$12.nodeType) {
 				if (r$12.hasAttributes()) for (const t$8 of r$12.getAttributeNames()) if (t$8.endsWith(h$5)) {
-					const i$11 = v$2[a$2++], s$9 = r$12.getAttribute(t$8).split(o$12), e$15 = /([.?@])?(.*)/.exec(i$11);
+					const i$11 = v$2[a++], s$9 = r$12.getAttribute(t$8).split(o$12), e$15 = /([.?@])?(.*)/.exec(i$11);
 					d$3.push({
 						type: 1,
 						index: l$5,
@@ -637,9 +637,9 @@ var i$5 = class {
 	SVG: 2,
 	MATHML: 3
 }, l$2 = (o$15, t$7) => void 0 === t$7 ? void 0 !== o$15?._$litType$ : o$15?._$litType$ === t$7, d = (o$15) => null != o$15?._$litType$?.h, c$3 = (o$15) => void 0 !== o$15?._$litDirective$, f$1 = (o$15) => o$15?._$litDirective$, r$8 = (o$15) => void 0 === o$15.strings, s$5 = () => document.createComment(""), v = (o$15, n$13, e$14) => {
-	const l$5 = o$15._$AA.parentNode, d$3 = void 0 === n$13 ? o$15._$AB : n$13._$AA;
+	const l$5 = o$15._$AA.parentNode, d = void 0 === n$13 ? o$15._$AB : n$13._$AA;
 	if (void 0 === e$14) {
-		const i$10 = l$5.insertBefore(s$5(), d$3), n$14 = l$5.insertBefore(s$5(), d$3);
+		const i$10 = l$5.insertBefore(s$5(), d), n$14 = l$5.insertBefore(s$5(), d);
 		e$14 = new t$3(i$10, n$14, o$15, o$15.options);
 	} else {
 		const t$7 = e$14._$AB.nextSibling, n$14 = e$14._$AM, c$7 = n$14 !== o$15;
@@ -647,11 +647,11 @@ var i$5 = class {
 			let t$8;
 			e$14._$AQ?.(o$15), e$14._$AM = o$15, void 0 !== e$14._$AP && (t$8 = o$15._$AU) !== n$14._$AU && e$14._$AP(t$8);
 		}
-		if (t$7 !== d$3 || c$7) {
+		if (t$7 !== d || c$7) {
 			let o$16 = e$14._$AA;
 			for (; o$16 !== t$7;) {
 				const t$8 = i$4(o$16).nextSibling;
-				i$4(l$5).insertBefore(o$16, d$3), o$16 = t$8;
+				i$4(l$5).insertBefore(o$16, d), o$16 = t$8;
 			}
 		}
 	}
@@ -3957,10 +3957,10 @@ function n$6(t$7) {
 * Copyright 2017 Google LLC
 * SPDX-License-Identifier: BSD-3-Clause
 */
-function t(t$7) {
+function t(t) {
 	return (n$13, o$15) => {
 		const c$7 = "function" == typeof n$13 ? n$13 : n$13[o$15];
-		Object.assign(c$7, t$7);
+		Object.assign(c$7, t);
 	};
 }
 
@@ -4233,13 +4233,13 @@ const h$1 = e$10(r$2);
 * @license
 * Copyright 2023 Google LLC
 * SPDX-License-Identifier: BSD-3-Clause
-*/ const m = (o$15) => (t$7, ...m$3) => o$15(t$7, ...m$3.map((o$16) => o$16 instanceof Signal.State || o$16 instanceof Signal.Computed ? h$1(o$16) : o$16)), l$1 = m(b), r$1 = m(w);
+*/ const m = (o$15) => (t$7, ...m) => o$15(t$7, ...m.map((o$16) => o$16 instanceof Signal.State || o$16 instanceof Signal.Computed ? h$1(o$16) : o$16)), l$1 = m(b), r$1 = m(w);
 
 /**
 * @license
 * Copyright 2023 Google LLC
 * SPDX-License-Identifier: BSD-3-Clause
-*/ const l = Signal.State, o$4 = Signal.Computed, r = (l$5, o$15) => new Signal.State(l$5, o$15), i$1 = (l$5, o$15) => new Signal.Computed(l$5, o$15);
+*/ const l = Signal.State, o$4 = Signal.Computed, r = (l, o$15) => new Signal.State(l, o$15), i$1 = (l, o$15) => new Signal.Computed(l, o$15);
 
 /**
 * @license
@@ -4384,7 +4384,7 @@ let Root = (() => {
 	let _enableCustomElements_initializers = [];
 	let _enableCustomElements_extraInitializers = [];
 	let _set_weight_decorators;
-	var Root$1 = class extends _classSuper {
+	var Root = class extends _classSuper {
 		static {
 			_classThis = this;
 		}
@@ -4514,7 +4514,7 @@ let Root = (() => {
 				name: _classThis.name,
 				metadata: _metadata
 			}, null, _classExtraInitializers);
-			Root$1 = _classThis = _classDescriptor.value;
+			Root = _classThis = _classDescriptor.value;
 			if (_metadata) Object.defineProperty(_classThis, Symbol.metadata, {
 				enumerable: true,
 				configurable: true,
@@ -4976,7 +4976,7 @@ let Root = (() => {
 			__runInitializers$19(_classThis, _classExtraInitializers);
 		}
 	};
-	return Root$1 = _classThis;
+	return Root = _classThis;
 })();
 
 /**
@@ -5087,7 +5087,7 @@ let Audio = (() => {
 	let _url_decorators;
 	let _url_initializers = [];
 	let _url_extraInitializers = [];
-	var Audio$1 = class extends _classSuper {
+	var Audio = class extends _classSuper {
 		static {
 			_classThis = this;
 		}
@@ -5113,7 +5113,7 @@ let Audio = (() => {
 				name: _classThis.name,
 				metadata: _metadata
 			}, null, _classExtraInitializers);
-			Audio$1 = _classThis = _classDescriptor.value;
+			Audio = _classThis = _classDescriptor.value;
 			if (_metadata) Object.defineProperty(_classThis, Symbol.metadata, {
 				enumerable: true,
 				configurable: true,
@@ -5188,7 +5188,7 @@ let Audio = (() => {
 			__runInitializers$18(_classThis, _classExtraInitializers);
 		}
 	};
-	return Audio$1 = _classThis;
+	return Audio = _classThis;
 })();
 
 var __esDecorate$17 = void 0 && (void 0).__esDecorate || function(ctor, descriptorIn, decorators, contextIn, initializers, extraInitializers) {
@@ -5242,7 +5242,7 @@ let Button = (() => {
 	let _action_decorators;
 	let _action_initializers = [];
 	let _action_extraInitializers = [];
-	var Button$1 = class extends _classSuper {
+	var Button = class extends _classSuper {
 		static {
 			_classThis = this;
 		}
@@ -5268,7 +5268,7 @@ let Button = (() => {
 				name: _classThis.name,
 				metadata: _metadata
 			}, null, _classExtraInitializers);
-			Button$1 = _classThis = _classDescriptor.value;
+			Button = _classThis = _classDescriptor.value;
 			if (_metadata) Object.defineProperty(_classThis, Symbol.metadata, {
 				enumerable: true,
 				configurable: true,
@@ -5321,7 +5321,7 @@ let Button = (() => {
 			__runInitializers$17(_classThis, _classExtraInitializers);
 		}
 	};
-	return Button$1 = _classThis;
+	return Button = _classThis;
 })();
 
 var __esDecorate$16 = void 0 && (void 0).__esDecorate || function(ctor, descriptorIn, decorators, contextIn, initializers, extraInitializers) {
@@ -5372,7 +5372,7 @@ let Card = (() => {
 	let _classExtraInitializers = [];
 	let _classThis;
 	let _classSuper = Root;
-	var Card$1 = class extends _classSuper {
+	var Card = class extends _classSuper {
 		static {
 			_classThis = this;
 		}
@@ -5383,7 +5383,7 @@ let Card = (() => {
 				name: _classThis.name,
 				metadata: _metadata
 			}, null, _classExtraInitializers);
-			Card$1 = _classThis = _classDescriptor.value;
+			Card = _classThis = _classDescriptor.value;
 			if (_metadata) Object.defineProperty(_classThis, Symbol.metadata, {
 				enumerable: true,
 				configurable: true,
@@ -5429,7 +5429,7 @@ let Card = (() => {
 			__runInitializers$16(_classThis, _classExtraInitializers);
 		}
 	};
-	return Card$1 = _classThis;
+	return Card = _classThis;
 })();
 
 var __esDecorate$15 = void 0 && (void 0).__esDecorate || function(ctor, descriptorIn, decorators, contextIn, initializers, extraInitializers) {
@@ -5486,7 +5486,7 @@ let Checkbox = (() => {
 	let _label_decorators;
 	let _label_initializers = [];
 	let _label_extraInitializers = [];
-	var Checkbox$1 = class extends _classSuper {
+	var Checkbox = class extends _classSuper {
 		static {
 			_classThis = this;
 		}
@@ -5527,7 +5527,7 @@ let Checkbox = (() => {
 				name: _classThis.name,
 				metadata: _metadata
 			}, null, _classExtraInitializers);
-			Checkbox$1 = _classThis = _classDescriptor.value;
+			Checkbox = _classThis = _classDescriptor.value;
 			if (_metadata) Object.defineProperty(_classThis, Symbol.metadata, {
 				enumerable: true,
 				configurable: true,
@@ -5638,7 +5638,7 @@ let Checkbox = (() => {
 			__runInitializers$15(_classThis, _classExtraInitializers);
 		}
 	};
-	return Checkbox$1 = _classThis;
+	return Checkbox = _classThis;
 })();
 
 var __esDecorate$14 = void 0 && (void 0).__esDecorate || function(ctor, descriptorIn, decorators, contextIn, initializers, extraInitializers) {
@@ -5695,7 +5695,7 @@ let Column = (() => {
 	let _distribution_decorators;
 	let _distribution_initializers = [];
 	let _distribution_extraInitializers = [];
-	var Column$1 = class extends _classSuper {
+	var Column = class extends _classSuper {
 		static {
 			_classThis = this;
 		}
@@ -5742,7 +5742,7 @@ let Column = (() => {
 				name: _classThis.name,
 				metadata: _metadata
 			}, null, _classExtraInitializers);
-			Column$1 = _classThis = _classDescriptor.value;
+			Column = _classThis = _classDescriptor.value;
 			if (_metadata) Object.defineProperty(_classThis, Symbol.metadata, {
 				enumerable: true,
 				configurable: true,
@@ -5839,7 +5839,7 @@ let Column = (() => {
 			__runInitializers$14(_classThis, _classExtraInitializers);
 		}
 	};
-	return Column$1 = _classThis;
+	return Column = _classThis;
 })();
 
 var __esDecorate$13 = void 0 && (void 0).__esDecorate || function(ctor, descriptorIn, decorators, contextIn, initializers, extraInitializers) {
@@ -5902,7 +5902,7 @@ let DateTimeInput = (() => {
 	let _enableTime_decorators;
 	let _enableTime_initializers = [];
 	let _enableTime_extraInitializers = [];
-	var DateTimeInput$1 = class extends _classSuper {
+	var DateTimeInput = class extends _classSuper {
 		static {
 			_classThis = this;
 		}
@@ -5979,7 +5979,7 @@ let DateTimeInput = (() => {
 				name: _classThis.name,
 				metadata: _metadata
 			}, null, _classExtraInitializers);
-			DateTimeInput$1 = _classThis = _classDescriptor.value;
+			DateTimeInput = _classThis = _classDescriptor.value;
 			if (_metadata) Object.defineProperty(_classThis, Symbol.metadata, {
 				enumerable: true,
 				configurable: true,
@@ -6143,7 +6143,7 @@ let DateTimeInput = (() => {
 			__runInitializers$13(_classThis, _classExtraInitializers);
 		}
 	};
-	return DateTimeInput$1 = _classThis;
+	return DateTimeInput = _classThis;
 })();
 
 var __esDecorate$12 = void 0 && (void 0).__esDecorate || function(ctor, descriptorIn, decorators, contextIn, initializers, extraInitializers) {
@@ -6194,7 +6194,7 @@ let Divider = (() => {
 	let _classExtraInitializers = [];
 	let _classThis;
 	let _classSuper = Root;
-	var Divider$1 = class extends _classSuper {
+	var Divider = class extends _classSuper {
 		static {
 			_classThis = this;
 		}
@@ -6205,7 +6205,7 @@ let Divider = (() => {
 				name: _classThis.name,
 				metadata: _metadata
 			}, null, _classExtraInitializers);
-			Divider$1 = _classThis = _classDescriptor.value;
+			Divider = _classThis = _classDescriptor.value;
 			if (_metadata) Object.defineProperty(_classThis, Symbol.metadata, {
 				enumerable: true,
 				configurable: true,
@@ -6238,7 +6238,7 @@ let Divider = (() => {
 			__runInitializers$12(_classThis, _classExtraInitializers);
 		}
 	};
-	return Divider$1 = _classThis;
+	return Divider = _classThis;
 })();
 
 var __esDecorate$11 = void 0 && (void 0).__esDecorate || function(ctor, descriptorIn, decorators, contextIn, initializers, extraInitializers) {
@@ -6292,7 +6292,7 @@ let Icon = (() => {
 	let _name_decorators;
 	let _name_initializers = [];
 	let _name_extraInitializers = [];
-	var Icon$1 = class extends _classSuper {
+	var Icon = class extends _classSuper {
 		static {
 			_classThis = this;
 		}
@@ -6318,7 +6318,7 @@ let Icon = (() => {
 				name: _classThis.name,
 				metadata: _metadata
 			}, null, _classExtraInitializers);
-			Icon$1 = _classThis = _classDescriptor.value;
+			Icon = _classThis = _classDescriptor.value;
 			if (_metadata) Object.defineProperty(_classThis, Symbol.metadata, {
 				enumerable: true,
 				configurable: true,
@@ -6394,7 +6394,7 @@ let Icon = (() => {
 			__runInitializers$11(_classThis, _classExtraInitializers);
 		}
 	};
-	return Icon$1 = _classThis;
+	return Icon = _classThis;
 })();
 
 var __esDecorate$10 = void 0 && (void 0).__esDecorate || function(ctor, descriptorIn, decorators, contextIn, initializers, extraInitializers) {
@@ -6454,7 +6454,7 @@ let Image = (() => {
 	let _fit_decorators;
 	let _fit_initializers = [];
 	let _fit_extraInitializers = [];
-	var Image$1 = class extends _classSuper {
+	var Image = class extends _classSuper {
 		static {
 			_classThis = this;
 		}
@@ -6510,7 +6510,7 @@ let Image = (() => {
 				name: _classThis.name,
 				metadata: _metadata
 			}, null, _classExtraInitializers);
-			Image$1 = _classThis = _classDescriptor.value;
+			Image = _classThis = _classDescriptor.value;
 			if (_metadata) Object.defineProperty(_classThis, Symbol.metadata, {
 				enumerable: true,
 				configurable: true,
@@ -6610,7 +6610,7 @@ let Image = (() => {
 			__runInitializers$10(_classThis, _classExtraInitializers);
 		}
 	};
-	return Image$1 = _classThis;
+	return Image = _classThis;
 })();
 
 var __esDecorate$9 = void 0 && (void 0).__esDecorate || function(ctor, descriptorIn, decorators, contextIn, initializers, extraInitializers) {
@@ -6664,7 +6664,7 @@ let List = (() => {
 	let _direction_decorators;
 	let _direction_initializers = [];
 	let _direction_extraInitializers = [];
-	var List$1 = class extends _classSuper {
+	var List = class extends _classSuper {
 		static {
 			_classThis = this;
 		}
@@ -6693,7 +6693,7 @@ let List = (() => {
 				name: _classThis.name,
 				metadata: _metadata
 			}, null, _classExtraInitializers);
-			List$1 = _classThis = _classDescriptor.value;
+			List = _classThis = _classDescriptor.value;
 			if (_metadata) Object.defineProperty(_classThis, Symbol.metadata, {
 				enumerable: true,
 				configurable: true,
@@ -6755,7 +6755,7 @@ let List = (() => {
 			__runInitializers$9(_classThis, _classExtraInitializers);
 		}
 	};
-	return List$1 = _classThis;
+	return List = _classThis;
 })();
 
 function extractStringValue(val, component, processor, surfaceId) {
@@ -6860,7 +6860,7 @@ let MultipleChoice = (() => {
 	let _selections_decorators;
 	let _selections_initializers = [];
 	let _selections_extraInitializers = [];
-	var MultipleChoice$1 = class extends _classSuper {
+	var MultipleChoice = class extends _classSuper {
 		static {
 			_classThis = this;
 		}
@@ -6916,7 +6916,7 @@ let MultipleChoice = (() => {
 				name: _classThis.name,
 				metadata: _metadata
 			}, null, _classExtraInitializers);
-			MultipleChoice$1 = _classThis = _classDescriptor.value;
+			MultipleChoice = _classThis = _classDescriptor.value;
 			if (_metadata) Object.defineProperty(_classThis, Symbol.metadata, {
 				enumerable: true,
 				configurable: true,
@@ -7024,7 +7024,7 @@ let MultipleChoice = (() => {
 			__runInitializers$8(_classThis, _classExtraInitializers);
 		}
 	};
-	return MultipleChoice$1 = _classThis;
+	return MultipleChoice = _classThis;
 })();
 
 /**
@@ -7122,7 +7122,7 @@ let Modal = (() => {
 	let _private_modalRef_initializers = [];
 	let _private_modalRef_extraInitializers = [];
 	let _private_modalRef_descriptor;
-	var Modal$1 = class extends _classSuper {
+	var Modal = class extends _classSuper {
 		static {
 			_classThis = this;
 		}
@@ -7177,7 +7177,7 @@ let Modal = (() => {
 				name: _classThis.name,
 				metadata: _metadata
 			}, null, _classExtraInitializers);
-			Modal$1 = _classThis = _classDescriptor.value;
+			Modal = _classThis = _classDescriptor.value;
 			if (_metadata) Object.defineProperty(_classThis, Symbol.metadata, {
 				enumerable: true,
 				configurable: true,
@@ -7294,7 +7294,7 @@ let Modal = (() => {
 			__runInitializers$7(_classThis, _classExtraInitializers);
 		}
 	};
-	return Modal$1 = _classThis;
+	return Modal = _classThis;
 })();
 
 var __esDecorate$6 = void 0 && (void 0).__esDecorate || function(ctor, descriptorIn, decorators, contextIn, initializers, extraInitializers) {
@@ -7351,7 +7351,7 @@ let Row = (() => {
 	let _distribution_decorators;
 	let _distribution_initializers = [];
 	let _distribution_extraInitializers = [];
-	var Row$1 = class extends _classSuper {
+	var Row = class extends _classSuper {
 		static {
 			_classThis = this;
 		}
@@ -7398,7 +7398,7 @@ let Row = (() => {
 				name: _classThis.name,
 				metadata: _metadata
 			}, null, _classExtraInitializers);
-			Row$1 = _classThis = _classDescriptor.value;
+			Row = _classThis = _classDescriptor.value;
 			if (_metadata) Object.defineProperty(_classThis, Symbol.metadata, {
 				enumerable: true,
 				configurable: true,
@@ -7495,7 +7495,7 @@ let Row = (() => {
 			__runInitializers$6(_classThis, _classExtraInitializers);
 		}
 	};
-	return Row$1 = _classThis;
+	return Row = _classThis;
 })();
 
 var __esDecorate$5 = void 0 && (void 0).__esDecorate || function(ctor, descriptorIn, decorators, contextIn, initializers, extraInitializers) {
@@ -7561,7 +7561,7 @@ let Slider = (() => {
 	let _inputType_decorators;
 	let _inputType_initializers = [];
 	let _inputType_extraInitializers = [];
-	var Slider$1 = class extends _classSuper {
+	var Slider = class extends _classSuper {
 		static {
 			_classThis = this;
 		}
@@ -7647,7 +7647,7 @@ let Slider = (() => {
 				name: _classThis.name,
 				metadata: _metadata
 			}, null, _classExtraInitializers);
-			Slider$1 = _classThis = _classDescriptor.value;
+			Slider = _classThis = _classDescriptor.value;
 			if (_metadata) Object.defineProperty(_classThis, Symbol.metadata, {
 				enumerable: true,
 				configurable: true,
@@ -7781,7 +7781,7 @@ let Slider = (() => {
 			__runInitializers$5(_classThis, _classExtraInitializers);
 		}
 	};
-	return Slider$1 = _classThis;
+	return Slider = _classThis;
 })();
 
 var __esDecorate$4 = void 0 && (void 0).__esDecorate || function(ctor, descriptorIn, decorators, contextIn, initializers, extraInitializers) {
@@ -7841,7 +7841,7 @@ let Surface = (() => {
 	let _processor_decorators;
 	let _processor_initializers = [];
 	let _processor_extraInitializers = [];
-	var Surface$1 = class extends _classSuper {
+	var Surface = class extends _classSuper {
 		static {
 			_classThis = this;
 		}
@@ -7897,7 +7897,7 @@ let Surface = (() => {
 				name: _classThis.name,
 				metadata: _metadata
 			}, null, _classExtraInitializers);
-			Surface$1 = _classThis = _classDescriptor.value;
+			Surface = _classThis = _classDescriptor.value;
 			if (_metadata) Object.defineProperty(_classThis, Symbol.metadata, {
 				enumerable: true,
 				configurable: true,
@@ -8014,7 +8014,7 @@ let Surface = (() => {
 			__runInitializers$4(_classThis, _classExtraInitializers);
 		}
 	};
-	return Surface$1 = _classThis;
+	return Surface = _classThis;
 })();
 
 var __esDecorate$3 = void 0 && (void 0).__esDecorate || function(ctor, descriptorIn, decorators, contextIn, initializers, extraInitializers) {
@@ -8071,7 +8071,7 @@ let Tabs = (() => {
 	let _selected_decorators;
 	let _selected_initializers = [];
 	let _selected_extraInitializers = [];
-	var Tabs$1 = class extends _classSuper {
+	var Tabs = class extends _classSuper {
 		static {
 			_classThis = this;
 		}
@@ -8112,7 +8112,7 @@ let Tabs = (() => {
 				name: _classThis.name,
 				metadata: _metadata
 			}, null, _classExtraInitializers);
-			Tabs$1 = _classThis = _classDescriptor.value;
+			Tabs = _classThis = _classDescriptor.value;
 			if (_metadata) Object.defineProperty(_classThis, Symbol.metadata, {
 				enumerable: true,
 				configurable: true,
@@ -8216,7 +8216,7 @@ let Tabs = (() => {
 			__runInitializers$3(_classThis, _classExtraInitializers);
 		}
 	};
-	return Tabs$1 = _classThis;
+	return Tabs = _classThis;
 })();
 
 var __esDecorate$2 = void 0 && (void 0).__esDecorate || function(ctor, descriptorIn, decorators, contextIn, initializers, extraInitializers) {
@@ -8276,7 +8276,7 @@ let TextField = (() => {
 	let _inputType_decorators;
 	let _inputType_initializers = [];
 	let _inputType_extraInitializers = [];
-	var TextField$1 = class extends _classSuper {
+	var TextField = class extends _classSuper {
 		static {
 			_classThis = this;
 		}
@@ -8332,7 +8332,7 @@ let TextField = (() => {
 				name: _classThis.name,
 				metadata: _metadata
 			}, null, _classExtraInitializers);
-			TextField$1 = _classThis = _classDescriptor.value;
+			TextField = _classThis = _classDescriptor.value;
 			if (_metadata) Object.defineProperty(_classThis, Symbol.metadata, {
 				enumerable: true,
 				configurable: true,
@@ -8435,7 +8435,7 @@ let TextField = (() => {
 			__runInitializers$2(_classThis, _classExtraInitializers);
 		}
 	};
-	return TextField$1 = _classThis;
+	return TextField = _classThis;
 })();
 
 /**
@@ -8915,11 +8915,11 @@ const fromCodePoint$1 = (_a = String.fromCodePoint) !== null && _a !== void 0 ? 
 * point unchanged.
 */
 function replaceCodePoint(codePoint) {
-	var _a$1;
+	var _a;
 	if (codePoint >= 55296 && codePoint <= 57343 || codePoint > 1114111) {
 		return 65533;
 	}
-	return (_a$1 = decodeMap.get(codePoint)) !== null && _a$1 !== void 0 ? _a$1 : codePoint;
+	return (_a = decodeMap.get(codePoint)) !== null && _a !== void 0 ? _a : codePoint;
 }
 /**
 * Replace the code point if relevant, then convert it to a string.
@@ -8933,27 +8933,27 @@ function decodeCodePoint(codePoint) {
 }
 
 var CharCodes;
-(function(CharCodes$1) {
-	CharCodes$1[CharCodes$1["NUM"] = 35] = "NUM";
-	CharCodes$1[CharCodes$1["SEMI"] = 59] = "SEMI";
-	CharCodes$1[CharCodes$1["EQUALS"] = 61] = "EQUALS";
-	CharCodes$1[CharCodes$1["ZERO"] = 48] = "ZERO";
-	CharCodes$1[CharCodes$1["NINE"] = 57] = "NINE";
-	CharCodes$1[CharCodes$1["LOWER_A"] = 97] = "LOWER_A";
-	CharCodes$1[CharCodes$1["LOWER_F"] = 102] = "LOWER_F";
-	CharCodes$1[CharCodes$1["LOWER_X"] = 120] = "LOWER_X";
-	CharCodes$1[CharCodes$1["LOWER_Z"] = 122] = "LOWER_Z";
-	CharCodes$1[CharCodes$1["UPPER_A"] = 65] = "UPPER_A";
-	CharCodes$1[CharCodes$1["UPPER_F"] = 70] = "UPPER_F";
-	CharCodes$1[CharCodes$1["UPPER_Z"] = 90] = "UPPER_Z";
+(function(CharCodes) {
+	CharCodes[CharCodes["NUM"] = 35] = "NUM";
+	CharCodes[CharCodes["SEMI"] = 59] = "SEMI";
+	CharCodes[CharCodes["EQUALS"] = 61] = "EQUALS";
+	CharCodes[CharCodes["ZERO"] = 48] = "ZERO";
+	CharCodes[CharCodes["NINE"] = 57] = "NINE";
+	CharCodes[CharCodes["LOWER_A"] = 97] = "LOWER_A";
+	CharCodes[CharCodes["LOWER_F"] = 102] = "LOWER_F";
+	CharCodes[CharCodes["LOWER_X"] = 120] = "LOWER_X";
+	CharCodes[CharCodes["LOWER_Z"] = 122] = "LOWER_Z";
+	CharCodes[CharCodes["UPPER_A"] = 65] = "UPPER_A";
+	CharCodes[CharCodes["UPPER_F"] = 70] = "UPPER_F";
+	CharCodes[CharCodes["UPPER_Z"] = 90] = "UPPER_Z";
 })(CharCodes || (CharCodes = {}));
 /** Bit that needs to be set to convert an upper case ASCII character to lower case */
 const TO_LOWER_BIT = 32;
 var BinTrieFlags;
-(function(BinTrieFlags$1) {
-	BinTrieFlags$1[BinTrieFlags$1["VALUE_LENGTH"] = 49152] = "VALUE_LENGTH";
-	BinTrieFlags$1[BinTrieFlags$1["BRANCH_LENGTH"] = 16256] = "BRANCH_LENGTH";
-	BinTrieFlags$1[BinTrieFlags$1["JUMP_TABLE"] = 127] = "JUMP_TABLE";
+(function(BinTrieFlags) {
+	BinTrieFlags[BinTrieFlags["VALUE_LENGTH"] = 49152] = "VALUE_LENGTH";
+	BinTrieFlags[BinTrieFlags["BRANCH_LENGTH"] = 16256] = "BRANCH_LENGTH";
+	BinTrieFlags[BinTrieFlags["JUMP_TABLE"] = 127] = "JUMP_TABLE";
 })(BinTrieFlags || (BinTrieFlags = {}));
 function isNumber(code$1) {
 	return code$1 >= CharCodes.ZERO && code$1 <= CharCodes.NINE;
@@ -8974,21 +8974,21 @@ function isEntityInAttributeInvalidEnd(code$1) {
 	return code$1 === CharCodes.EQUALS || isAsciiAlphaNumeric(code$1);
 }
 var EntityDecoderState;
-(function(EntityDecoderState$1) {
-	EntityDecoderState$1[EntityDecoderState$1["EntityStart"] = 0] = "EntityStart";
-	EntityDecoderState$1[EntityDecoderState$1["NumericStart"] = 1] = "NumericStart";
-	EntityDecoderState$1[EntityDecoderState$1["NumericDecimal"] = 2] = "NumericDecimal";
-	EntityDecoderState$1[EntityDecoderState$1["NumericHex"] = 3] = "NumericHex";
-	EntityDecoderState$1[EntityDecoderState$1["NamedEntity"] = 4] = "NamedEntity";
+(function(EntityDecoderState) {
+	EntityDecoderState[EntityDecoderState["EntityStart"] = 0] = "EntityStart";
+	EntityDecoderState[EntityDecoderState["NumericStart"] = 1] = "NumericStart";
+	EntityDecoderState[EntityDecoderState["NumericDecimal"] = 2] = "NumericDecimal";
+	EntityDecoderState[EntityDecoderState["NumericHex"] = 3] = "NumericHex";
+	EntityDecoderState[EntityDecoderState["NamedEntity"] = 4] = "NamedEntity";
 })(EntityDecoderState || (EntityDecoderState = {}));
 var DecodingMode;
-(function(DecodingMode$1) {
+(function(DecodingMode) {
 	/** Entities in text nodes that can end with any character. */
-	DecodingMode$1[DecodingMode$1["Legacy"] = 0] = "Legacy";
+	DecodingMode[DecodingMode["Legacy"] = 0] = "Legacy";
 	/** Only allow entities terminated with a semicolon. */
-	DecodingMode$1[DecodingMode$1["Strict"] = 1] = "Strict";
+	DecodingMode[DecodingMode["Strict"] = 1] = "Strict";
 	/** Entities in attributes have limitations on ending characters. */
-	DecodingMode$1[DecodingMode$1["Attribute"] = 2] = "Attribute";
+	DecodingMode[DecodingMode["Attribute"] = 2] = "Attribute";
 })(DecodingMode || (DecodingMode = {}));
 /**
 * Token decoder with support of writing partial entities.
@@ -11233,40 +11233,40 @@ function encodeHTMLTrieRe(regExp, str) {
 
 /** The level of entities to support. */
 var EntityLevel;
-(function(EntityLevel$1) {
+(function(EntityLevel) {
 	/** Support only XML entities. */
-	EntityLevel$1[EntityLevel$1["XML"] = 0] = "XML";
+	EntityLevel[EntityLevel["XML"] = 0] = "XML";
 	/** Support HTML entities, which are a superset of XML entities. */
-	EntityLevel$1[EntityLevel$1["HTML"] = 1] = "HTML";
+	EntityLevel[EntityLevel["HTML"] = 1] = "HTML";
 })(EntityLevel || (EntityLevel = {}));
 var EncodingMode;
-(function(EncodingMode$1) {
+(function(EncodingMode) {
 	/**
 	* The output is UTF-8 encoded. Only characters that need escaping within
 	* XML will be escaped.
 	*/
-	EncodingMode$1[EncodingMode$1["UTF8"] = 0] = "UTF8";
+	EncodingMode[EncodingMode["UTF8"] = 0] = "UTF8";
 	/**
 	* The output consists only of ASCII characters. Characters that need
 	* escaping within HTML, and characters that aren't ASCII characters will
 	* be escaped.
 	*/
-	EncodingMode$1[EncodingMode$1["ASCII"] = 1] = "ASCII";
+	EncodingMode[EncodingMode["ASCII"] = 1] = "ASCII";
 	/**
 	* Encode all characters that have an equivalent entity, as well as all
 	* characters that are not ASCII characters.
 	*/
-	EncodingMode$1[EncodingMode$1["Extensive"] = 2] = "Extensive";
+	EncodingMode[EncodingMode["Extensive"] = 2] = "Extensive";
 	/**
 	* Encode all characters that have to be escaped in HTML attributes,
 	* following {@link https://html.spec.whatwg.org/multipage/parsing.html#escapingString}.
 	*/
-	EncodingMode$1[EncodingMode$1["Attribute"] = 3] = "Attribute";
+	EncodingMode[EncodingMode["Attribute"] = 3] = "Attribute";
 	/**
 	* Encode all characters that have to be escaped in HTML text,
 	* following {@link https://html.spec.whatwg.org/multipage/parsing.html#escapingString}.
 	*/
-	EncodingMode$1[EncodingMode$1["Text"] = 4] = "Text";
+	EncodingMode[EncodingMode["Text"] = 4] = "Text";
 })(EncodingMode || (EncodingMode = {}));
 /**
 * Decodes a string with entities.
@@ -16904,7 +16904,7 @@ let Text = (() => {
 	let _usageHint_decorators;
 	let _usageHint_initializers = [];
 	let _usageHint_extraInitializers = [];
-	var Text$1 = class extends _classSuper {
+	var Text = class extends _classSuper {
 		static {
 			_classThis = this;
 		}
@@ -16948,7 +16948,7 @@ let Text = (() => {
 				name: _classThis.name,
 				metadata: _metadata
 			}, null, _classExtraInitializers);
-			Text$1 = _classThis = _classDescriptor.value;
+			Text = _classThis = _classDescriptor.value;
 			if (_metadata) Object.defineProperty(_classThis, Symbol.metadata, {
 				enumerable: true,
 				configurable: true,
@@ -17080,7 +17080,7 @@ let Text = (() => {
 			__runInitializers$1(_classThis, _classExtraInitializers);
 		}
 	};
-	return Text$1 = _classThis;
+	return Text = _classThis;
 })();
 
 var __esDecorate = void 0 && (void 0).__esDecorate || function(ctor, descriptorIn, decorators, contextIn, initializers, extraInitializers) {
@@ -17134,7 +17134,7 @@ let Video = (() => {
 	let _url_decorators;
 	let _url_initializers = [];
 	let _url_extraInitializers = [];
-	var Video$1 = class extends _classSuper {
+	var Video = class extends _classSuper {
 		static {
 			_classThis = this;
 		}
@@ -17160,7 +17160,7 @@ let Video = (() => {
 				name: _classThis.name,
 				metadata: _metadata
 			}, null, _classExtraInitializers);
-			Video$1 = _classThis = _classDescriptor.value;
+			Video = _classThis = _classDescriptor.value;
 			if (_metadata) Object.defineProperty(_classThis, Symbol.metadata, {
 				enumerable: true,
 				configurable: true,
@@ -17235,7 +17235,7 @@ let Video = (() => {
 			__runInitializers(_classThis, _classExtraInitializers);
 		}
 	};
-	return Video$1 = _classThis;
+	return Video = _classThis;
 })();
 
 function registerCustomComponents() {}

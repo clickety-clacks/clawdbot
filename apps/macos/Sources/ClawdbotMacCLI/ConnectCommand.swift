@@ -1,13 +1,16 @@
 import ClawdbotKit
 import ClawdbotProtocol
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#endif
 
 struct ConnectOptions {
     var url: String?
     var token: String?
     var password: String?
     var mode: String?
-    var timeoutMs: Int = 15_000
+    var timeoutMs: Int = 15000
     var json: Bool = false
     var probe: Bool = false
     var clientId: String = "clawdbot-macos"
@@ -19,53 +22,43 @@ struct ConnectOptions {
 
     static func parse(_ args: [String]) -> ConnectOptions {
         var opts = ConnectOptions()
+        let flagHandlers: [String: (inout ConnectOptions) -> Void] = [
+            "-h": { $0.help = true },
+            "--help": { $0.help = true },
+            "--json": { $0.json = true },
+            "--probe": { $0.probe = true },
+        ]
+        let valueHandlers: [String: (inout ConnectOptions, String) -> Void] = [
+            "--url": { $0.url = $1 },
+            "--token": { $0.token = $1 },
+            "--password": { $0.password = $1 },
+            "--mode": { $0.mode = $1 },
+            "--timeout": { opts, raw in
+                if let parsed = Int(raw.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                    opts.timeoutMs = max(250, parsed)
+                }
+            },
+            "--client-id": { $0.clientId = $1 },
+            "--client-mode": { $0.clientMode = $1 },
+            "--display-name": { $0.displayName = $1 },
+            "--role": { $0.role = $1 },
+            "--scopes": { opts, raw in
+                opts.scopes = raw.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+            },
+        ]
         var i = 0
         while i < args.count {
             let arg = args[i]
-            switch arg {
-            case "-h", "--help":
-                opts.help = true
-            case "--json":
-                opts.json = true
-            case "--probe":
-                opts.probe = true
-            case "--url":
-                opts.url = self.nextValue(args, index: &i)
-            case "--token":
-                opts.token = self.nextValue(args, index: &i)
-            case "--password":
-                opts.password = self.nextValue(args, index: &i)
-            case "--mode":
-                if let value = self.nextValue(args, index: &i) {
-                    opts.mode = value
-                }
-            case "--timeout":
-                if let raw = self.nextValue(args, index: &i),
-                   let parsed = Int(raw.trimmingCharacters(in: .whitespacesAndNewlines))
-                {
-                    opts.timeoutMs = max(250, parsed)
-                }
-            case "--client-id":
-                if let value = self.nextValue(args, index: &i) {
-                    opts.clientId = value
-                }
-            case "--client-mode":
-                if let value = self.nextValue(args, index: &i) {
-                    opts.clientMode = value
-                }
-            case "--display-name":
-                opts.displayName = self.nextValue(args, index: &i)
-            case "--role":
-                if let value = self.nextValue(args, index: &i) {
-                    opts.role = value
-                }
-            case "--scopes":
-                if let value = self.nextValue(args, index: &i) {
-                    opts.scopes = value.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                        .filter { !$0.isEmpty }
-                }
-            default:
-                break
+            if let handler = flagHandlers[arg] {
+                handler(&opts)
+                i += 1
+                continue
+            }
+            if let handler = valueHandlers[arg], let value = self.nextValue(args, index: &i) {
+                handler(&opts, value)
+                i += 1
+                continue
             }
             i += 1
         }
@@ -254,8 +247,12 @@ private func resolveGatewayEndpoint(opts: ConnectOptions, config: GatewayConfig)
 
     if resolvedMode == "remote" {
         guard let raw = config.remoteUrl?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !raw.isEmpty else {
-            throw NSError(domain: "Gateway", code: 1, userInfo: [NSLocalizedDescriptionKey: "gateway.remote.url is missing"])
+              !raw.isEmpty
+        else {
+            throw NSError(
+                domain: "Gateway",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "gateway.remote.url is missing"])
         }
         guard let url = URL(string: raw) else {
             throw NSError(domain: "Gateway", code: 1, userInfo: [NSLocalizedDescriptionKey: "invalid url: \(raw)"])
@@ -268,9 +265,12 @@ private func resolveGatewayEndpoint(opts: ConnectOptions, config: GatewayConfig)
     }
 
     let port = config.port ?? 18789
-    let host = "127.0.0.1"
+    let host = resolveLocalHost(bind: config.bind)
     guard let url = URL(string: "ws://\(host):\(port)") else {
-        throw NSError(domain: "Gateway", code: 1, userInfo: [NSLocalizedDescriptionKey: "invalid url: ws://\(host):\(port)"])
+        throw NSError(
+            domain: "Gateway",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "invalid url: ws://\(host):\(port)"])
     }
     return GatewayEndpoint(
         url: url,
@@ -280,7 +280,7 @@ private func resolveGatewayEndpoint(opts: ConnectOptions, config: GatewayConfig)
 }
 
 private func bestEffortEndpoint(opts: ConnectOptions, config: GatewayConfig) -> GatewayEndpoint? {
-    return try? resolveGatewayEndpoint(opts: opts, config: config)
+    try? resolveGatewayEndpoint(opts: opts, config: config)
 }
 
 private func resolvedToken(opts: ConnectOptions, mode: String, config: GatewayConfig) -> String? {
@@ -303,4 +303,57 @@ private func resolvedPassword(opts: ConnectOptions, mode: String, config: Gatewa
         return config.remotePassword
     }
     return config.password
+}
+
+private func resolveLocalHost(bind: String?) -> String {
+    let normalized = (bind ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    let tailnetIP = detectTailnetIPv4()
+    switch normalized {
+    case "tailnet":
+        return tailnetIP ?? "127.0.0.1"
+    default:
+        return "127.0.0.1"
+    }
+}
+
+private func detectTailnetIPv4() -> String? {
+    var addrList: UnsafeMutablePointer<ifaddrs>?
+    guard getifaddrs(&addrList) == 0, let first = addrList else { return nil }
+    defer { freeifaddrs(addrList) }
+
+    for ptr in sequence(first: first, next: { $0.pointee.ifa_next }) {
+        let flags = Int32(ptr.pointee.ifa_flags)
+        let isUp = (flags & IFF_UP) != 0
+        let isLoopback = (flags & IFF_LOOPBACK) != 0
+        let family = ptr.pointee.ifa_addr.pointee.sa_family
+        if !isUp || isLoopback || family != UInt8(AF_INET) { continue }
+
+        var addr = ptr.pointee.ifa_addr.pointee
+        var buffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+        let result = getnameinfo(
+            &addr,
+            socklen_t(ptr.pointee.ifa_addr.pointee.sa_len),
+            &buffer,
+            socklen_t(buffer.count),
+            nil,
+            0,
+            NI_NUMERICHOST)
+        guard result == 0 else { continue }
+        let len = buffer.prefix { $0 != 0 }
+        let bytes = len.map { UInt8(bitPattern: $0) }
+        guard let ip = String(bytes: bytes, encoding: .utf8) else { continue }
+        if isTailnetIPv4(ip) { return ip }
+    }
+
+    return nil
+}
+
+private func isTailnetIPv4(_ address: String) -> Bool {
+    let parts = address.split(separator: ".")
+    guard parts.count == 4 else { return false }
+    let octets = parts.compactMap { Int($0) }
+    guard octets.count == 4 else { return false }
+    let a = octets[0]
+    let b = octets[1]
+    return a == 100 && b >= 64 && b <= 127
 }

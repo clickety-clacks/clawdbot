@@ -173,7 +173,7 @@ describe("cron cli", () => {
     expect(clearPatch?.patch?.agentId).toBeNull();
   });
 
-  it("does not include model/thinking when no payload change is requested", async () => {
+  it("allows model/thinking updates without --message", async () => {
     callGatewayFromCli.mockClear();
 
     const { registerCronCli } = await import("./cron-cli.js");
@@ -186,8 +186,188 @@ describe("cron cli", () => {
     });
 
     const updateCall = callGatewayFromCli.mock.calls.find((call) => call[0] === "cron.update");
-    const patch = updateCall?.[2] as { patch?: { payload?: unknown } };
+    const patch = updateCall?.[2] as {
+      patch?: { payload?: { kind?: string; model?: string; thinking?: string } };
+    };
 
-    expect(patch?.patch?.payload).toBeUndefined();
+    expect(patch?.patch?.payload?.kind).toBe("agentTurn");
+    expect(patch?.patch?.payload?.model).toBe("opus");
+    expect(patch?.patch?.payload?.thinking).toBe("low");
+  });
+
+  it("updates delivery settings without requiring --message", async () => {
+    callGatewayFromCli.mockClear();
+
+    const { registerCronCli } = await import("./cron-cli.js");
+    const program = new Command();
+    program.exitOverride();
+    registerCronCli(program);
+
+    await program.parseAsync(
+      ["cron", "edit", "job-1", "--deliver", "--channel", "telegram", "--to", "19098680"],
+      { from: "user" },
+    );
+
+    const updateCall = callGatewayFromCli.mock.calls.find((call) => call[0] === "cron.update");
+    const patch = updateCall?.[2] as {
+      patch?: {
+        payload?: {
+          kind?: string;
+          message?: string;
+          deliver?: boolean;
+          channel?: string;
+          to?: string;
+        };
+      };
+    };
+
+    expect(patch?.patch?.payload?.kind).toBe("agentTurn");
+    expect(patch?.patch?.payload?.deliver).toBe(true);
+    expect(patch?.patch?.payload?.channel).toBe("telegram");
+    expect(patch?.patch?.payload?.to).toBe("19098680");
+    expect(patch?.patch?.payload?.message).toBeUndefined();
+  });
+
+  it("supports --no-deliver on cron edit", async () => {
+    callGatewayFromCli.mockClear();
+
+    const { registerCronCli } = await import("./cron-cli.js");
+    const program = new Command();
+    program.exitOverride();
+    registerCronCli(program);
+
+    await program.parseAsync(["cron", "edit", "job-1", "--no-deliver"], { from: "user" });
+
+    const updateCall = callGatewayFromCli.mock.calls.find((call) => call[0] === "cron.update");
+    const patch = updateCall?.[2] as {
+      patch?: { payload?: { kind?: string; deliver?: boolean } };
+    };
+
+    expect(patch?.patch?.payload?.kind).toBe("agentTurn");
+    expect(patch?.patch?.payload?.deliver).toBe(false);
+  });
+
+  it("does not include undefined delivery fields when updating message", async () => {
+    callGatewayFromCli.mockClear();
+
+    const { registerCronCli } = await import("./cron-cli.js");
+    const program = new Command();
+    program.exitOverride();
+    registerCronCli(program);
+
+    // Update message without delivery flags - should NOT include undefined delivery fields
+    await program.parseAsync(["cron", "edit", "job-1", "--message", "Updated message"], {
+      from: "user",
+    });
+
+    const updateCall = callGatewayFromCli.mock.calls.find((call) => call[0] === "cron.update");
+    const patch = updateCall?.[2] as {
+      patch?: {
+        payload?: {
+          message?: string;
+          deliver?: boolean;
+          channel?: string;
+          to?: string;
+          bestEffortDeliver?: boolean;
+        };
+      };
+    };
+
+    // Should include the new message
+    expect(patch?.patch?.payload?.message).toBe("Updated message");
+
+    // Should NOT include delivery fields at all (to preserve existing values)
+    expect(patch?.patch?.payload).not.toHaveProperty("deliver");
+    expect(patch?.patch?.payload).not.toHaveProperty("channel");
+    expect(patch?.patch?.payload).not.toHaveProperty("to");
+    expect(patch?.patch?.payload).not.toHaveProperty("bestEffortDeliver");
+  });
+
+  it("includes delivery fields when explicitly provided with message", async () => {
+    callGatewayFromCli.mockClear();
+
+    const { registerCronCli } = await import("./cron-cli.js");
+    const program = new Command();
+    program.exitOverride();
+    registerCronCli(program);
+
+    // Update message AND delivery - should include both
+    await program.parseAsync(
+      [
+        "cron",
+        "edit",
+        "job-1",
+        "--message",
+        "Updated message",
+        "--deliver",
+        "--channel",
+        "telegram",
+        "--to",
+        "19098680",
+      ],
+      { from: "user" },
+    );
+
+    const updateCall = callGatewayFromCli.mock.calls.find((call) => call[0] === "cron.update");
+    const patch = updateCall?.[2] as {
+      patch?: {
+        payload?: {
+          message?: string;
+          deliver?: boolean;
+          channel?: string;
+          to?: string;
+        };
+      };
+    };
+
+    // Should include everything
+    expect(patch?.patch?.payload?.message).toBe("Updated message");
+    expect(patch?.patch?.payload?.deliver).toBe(true);
+    expect(patch?.patch?.payload?.channel).toBe("telegram");
+    expect(patch?.patch?.payload?.to).toBe("19098680");
+  });
+
+  it("includes best-effort delivery when provided with message", async () => {
+    callGatewayFromCli.mockClear();
+
+    const { registerCronCli } = await import("./cron-cli.js");
+    const program = new Command();
+    program.exitOverride();
+    registerCronCli(program);
+
+    await program.parseAsync(
+      ["cron", "edit", "job-1", "--message", "Updated message", "--best-effort-deliver"],
+      { from: "user" },
+    );
+
+    const updateCall = callGatewayFromCli.mock.calls.find((call) => call[0] === "cron.update");
+    const patch = updateCall?.[2] as {
+      patch?: { payload?: { message?: string; bestEffortDeliver?: boolean } };
+    };
+
+    expect(patch?.patch?.payload?.message).toBe("Updated message");
+    expect(patch?.patch?.payload?.bestEffortDeliver).toBe(true);
+  });
+
+  it("includes no-best-effort delivery when provided with message", async () => {
+    callGatewayFromCli.mockClear();
+
+    const { registerCronCli } = await import("./cron-cli.js");
+    const program = new Command();
+    program.exitOverride();
+    registerCronCli(program);
+
+    await program.parseAsync(
+      ["cron", "edit", "job-1", "--message", "Updated message", "--no-best-effort-deliver"],
+      { from: "user" },
+    );
+
+    const updateCall = callGatewayFromCli.mock.calls.find((call) => call[0] === "cron.update");
+    const patch = updateCall?.[2] as {
+      patch?: { payload?: { message?: string; bestEffortDeliver?: boolean } };
+    };
+
+    expect(patch?.patch?.payload?.message).toBe("Updated message");
+    expect(patch?.patch?.payload?.bestEffortDeliver).toBe(false);
   });
 });

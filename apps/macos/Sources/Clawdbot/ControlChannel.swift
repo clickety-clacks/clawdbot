@@ -74,6 +74,7 @@ final class ControlChannel {
     }
 
     private(set) var lastPingMs: Double?
+    private(set) var authSourceLabel: String?
 
     private let logger = Logger(subsystem: "com.clawdbot", category: "control")
 
@@ -87,15 +88,7 @@ final class ControlChannel {
 
     func configure() async {
         self.logger.info("control channel configure mode=local")
-        self.state = .connecting
-        do {
-            try await GatewayConnection.shared.refresh()
-            self.state = .connected
-            PresenceReporter.shared.sendImmediate(reason: "connect")
-        } catch {
-            let message = self.friendlyGatewayMessage(error)
-            self.state = .degraded(message)
-        }
+        await self.refreshEndpoint(reason: "configure")
     }
 
     func configure(mode: Mode = .local) async throws {
@@ -111,7 +104,7 @@ final class ControlChannel {
                         "target=\(target, privacy: .public) identitySet=\(idSet, privacy: .public)")
                 self.state = .connecting
                 _ = try await GatewayEndpointStore.shared.ensureRemoteControlTunnel()
-                await self.configure()
+                await self.refreshEndpoint(reason: "configure")
             } catch {
                 self.state = .degraded(error.localizedDescription)
                 throw error
@@ -119,10 +112,24 @@ final class ControlChannel {
         }
     }
 
+    func refreshEndpoint(reason: String) async {
+        self.logger.info("control channel refresh endpoint reason=\(reason, privacy: .public)")
+        self.state = .connecting
+        do {
+            try await self.establishGatewayConnection()
+            self.state = .connected
+            PresenceReporter.shared.sendImmediate(reason: "connect")
+        } catch {
+            let message = self.friendlyGatewayMessage(error)
+            self.state = .degraded(message)
+        }
+    }
+
     func disconnect() async {
         await GatewayConnection.shared.shutdown()
         self.state = .disconnected
         self.lastPingMs = nil
+        self.authSourceLabel = nil
     }
 
     func health(timeout: TimeInterval? = nil) async throws -> Data {
@@ -183,8 +190,11 @@ final class ControlChannel {
            urlErr.code == .dataNotAllowed // used for WS close 1008 auth failures
         {
             let reason = urlErr.failureURLString ?? urlErr.localizedDescription
+            let tokenKey = CommandResolver.connectionModeIsRemote()
+                ? "gateway.remote.token"
+                : "gateway.auth.token"
             return
-                "Gateway rejected token; set gateway.auth.token (or CLAWDBOT_GATEWAY_TOKEN) " +
+                "Gateway rejected token; set \(tokenKey) (or CLAWDBOT_GATEWAY_TOKEN) " +
                 "or clear it on the gateway. " +
                 "Reason: \(reason)"
         }
@@ -275,15 +285,46 @@ final class ControlChannel {
                 }
             }
 
-            do {
-                try await GatewayConnection.shared.refresh()
+            await self.refreshEndpoint(reason: "recovery:\(reasonText)")
+            if case .connected = self.state {
                 self.logger.info("control channel recovery finished")
-            } catch {
-                self.logger.error(
-                    "control channel recovery failed \(error.localizedDescription, privacy: .public)")
+            } else if case let .degraded(message) = self.state {
+                self.logger.error("control channel recovery failed \(message, privacy: .public)")
             }
 
             self.recoveryTask = nil
+        }
+    }
+
+    private func establishGatewayConnection(timeoutMs: Int = 5000) async throws {
+        try await GatewayConnection.shared.refresh()
+        let ok = try await GatewayConnection.shared.healthOK(timeoutMs: timeoutMs)
+        if ok == false {
+            throw NSError(
+                domain: "Gateway",
+                code: 0,
+                userInfo: [NSLocalizedDescriptionKey: "gateway health not ok"])
+        }
+        await self.refreshAuthSourceLabel()
+    }
+
+    private func refreshAuthSourceLabel() async {
+        let isRemote = CommandResolver.connectionModeIsRemote()
+        let authSource = await GatewayConnection.shared.authSource()
+        self.authSourceLabel = Self.formatAuthSource(authSource, isRemote: isRemote)
+    }
+
+    private static func formatAuthSource(_ source: GatewayAuthSource?, isRemote: Bool) -> String? {
+        guard let source else { return nil }
+        switch source {
+        case .deviceToken:
+            return "Auth: device token (paired device)"
+        case .sharedToken:
+            return "Auth: shared token (\(isRemote ? "gateway.remote.token" : "gateway.auth.token"))"
+        case .password:
+            return "Auth: password (\(isRemote ? "gateway.remote.password" : "gateway.auth.password"))"
+        case .none:
+            return "Auth: none"
         }
     }
 

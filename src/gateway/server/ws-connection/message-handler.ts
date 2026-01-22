@@ -15,6 +15,7 @@ import {
   updatePairedDeviceMetadata,
   verifyDeviceToken,
 } from "../../../infra/device-pairing.js";
+import { updatePairedNodeMetadata } from "../../../infra/node-pairing.js";
 import { recordRemoteNodeInfo, refreshRemoteNodeBins } from "../../../infra/skills-remote.js";
 import { loadVoiceWakeConfig } from "../../../infra/voicewake.js";
 import { upsertPresence } from "../../../infra/system-presence.js";
@@ -38,6 +39,7 @@ import {
   validateConnectParams,
   validateRequestFrame,
 } from "../../protocol/index.js";
+import { GATEWAY_CLIENT_IDS } from "../../protocol/client-info.js";
 import { MAX_BUFFERED_BYTES, MAX_PAYLOAD_BYTES, TICK_INTERVAL_MS } from "../../server-constants.js";
 import type { GatewayRequestContext, GatewayRequestHandlers } from "../../server-methods/types.js";
 import { handleGatewayRequest } from "../../server-methods.js";
@@ -292,22 +294,53 @@ export function attachGatewayWsMessageHandler(params: {
 
         const device = connectParams.device;
         let devicePublicKey: string | null = null;
+        const hasTokenAuth = Boolean(connectParams.auth?.token);
+        const hasPasswordAuth = Boolean(connectParams.auth?.password);
+        const isControlUi = connectParams.client.id === GATEWAY_CLIENT_IDS.CONTROL_UI;
+
         if (!device) {
-          setHandshakeState("failed");
-          setCloseCause("device-required", {
-            client: connectParams.client.id,
-            clientDisplayName: connectParams.client.displayName,
-            mode: connectParams.client.mode,
-            version: connectParams.client.version,
-          });
-          send({
-            type: "res",
-            id: frame.id,
-            ok: false,
-            error: errorShape(ErrorCodes.NOT_PAIRED, "device identity required"),
-          });
-          close(1008, "device identity required");
-          return;
+          const allowInsecureControlUi =
+            isControlUi && loadConfig().gateway?.controlUi?.allowInsecureAuth === true;
+          const canSkipDevice =
+            isControlUi && allowInsecureControlUi ? hasTokenAuth || hasPasswordAuth : hasTokenAuth;
+
+          if (isControlUi && !allowInsecureControlUi) {
+            const errorMessage = "control ui requires HTTPS or localhost (secure context)";
+            setHandshakeState("failed");
+            setCloseCause("control-ui-insecure-auth", {
+              client: connectParams.client.id,
+              clientDisplayName: connectParams.client.displayName,
+              mode: connectParams.client.mode,
+              version: connectParams.client.version,
+            });
+            send({
+              type: "res",
+              id: frame.id,
+              ok: false,
+              error: errorShape(ErrorCodes.INVALID_REQUEST, errorMessage),
+            });
+            close(1008, errorMessage);
+            return;
+          }
+
+          // Allow token-authenticated connections (e.g., control-ui) to skip device identity
+          if (!canSkipDevice) {
+            setHandshakeState("failed");
+            setCloseCause("device-required", {
+              client: connectParams.client.id,
+              clientDisplayName: connectParams.client.displayName,
+              mode: connectParams.client.mode,
+              version: connectParams.client.version,
+            });
+            send({
+              type: "res",
+              id: frame.id,
+              ok: false,
+              error: errorShape(ErrorCodes.NOT_PAIRED, "device identity required"),
+            });
+            close(1008, "device identity required");
+            return;
+          }
         }
         if (device) {
           const derivedId = deriveDeviceIdFromPublicKey(device.publicKey);
@@ -465,7 +498,7 @@ export function attachGatewayWsMessageHandler(params: {
         });
         let authOk = authResult.ok;
         let authMethod = authResult.method ?? "none";
-        if (!authOk && connectParams.auth?.token) {
+        if (!authOk && connectParams.auth?.token && device) {
           const tokenCheck = await verifyDeviceToken({
             deviceId: device.id,
             token: connectParams.auth.token,
@@ -716,6 +749,17 @@ export function attachGatewayWsMessageHandler(params: {
         if (role === "node") {
           const context = buildRequestContext();
           const nodeSession = context.nodeRegistry.register(nextClient, { remoteIp: remoteAddr });
+          const instanceIdRaw = connectParams.client.instanceId;
+          const instanceId = typeof instanceIdRaw === "string" ? instanceIdRaw.trim() : "";
+          const nodeIdsForPairing = new Set<string>([nodeSession.nodeId]);
+          if (instanceId) nodeIdsForPairing.add(instanceId);
+          for (const nodeId of nodeIdsForPairing) {
+            void updatePairedNodeMetadata(nodeId, {
+              lastConnectedAtMs: nodeSession.connectedAtMs,
+            }).catch((err) =>
+              logGateway.warn(`failed to record last connect for ${nodeId}: ${formatForLog(err)}`),
+            );
+          }
           recordRemoteNodeInfo({
             nodeId: nodeSession.nodeId,
             displayName: nodeSession.displayName,

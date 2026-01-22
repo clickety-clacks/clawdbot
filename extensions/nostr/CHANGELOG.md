@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026.1.22
+
+### Changes
+- Version alignment with core Clawdbot release numbers.
+
+## 2026.1.21
+
+### Changes
+- Version alignment with core Clawdbot release numbers.
+
+## 2026.1.20
+
+### Changes
+- Version alignment with core Clawdbot release numbers.
+
 ## 2026.1.19-1
 
 Initial release.

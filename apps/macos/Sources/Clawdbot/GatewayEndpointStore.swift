@@ -68,6 +68,7 @@ actor GatewayEndpointStore {
                     env: ProcessInfo.processInfo.environment)
                 let customBindHost = GatewayEndpointStore.resolveGatewayCustomBindHost(root: root)
                 let tailscaleIP = await MainActor.run { TailscaleService.shared.tailscaleIP }
+                    ?? TailscaleService.fallbackTailnetIPv4()
                 return GatewayEndpointStore.resolveLocalGatewayHost(
                     bindMode: bind,
                     customBindHost: customBindHost,
@@ -170,6 +171,10 @@ actor GatewayEndpointStore {
            !configToken.isEmpty
         {
             return configToken
+        }
+
+        if isRemote {
+            return nil
         }
 
         if let token = launchdSnapshot?.token?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -477,12 +482,13 @@ actor GatewayEndpointStore {
         let bind = GatewayEndpointStore.resolveGatewayBindMode(
             root: root,
             env: ProcessInfo.processInfo.environment)
-        guard bind == "auto" else { return nil }
+        guard bind == "tailnet" else { return nil }
 
         let currentHost = currentURL.host?.lowercased() ?? ""
         guard currentHost == "127.0.0.1" || currentHost == "localhost" else { return nil }
 
         let tailscaleIP = await MainActor.run { TailscaleService.shared.tailscaleIP }
+            ?? TailscaleService.fallbackTailnetIPv4()
         guard let tailscaleIP, !tailscaleIP.isEmpty else { return nil }
 
         let scheme = GatewayEndpointStore.resolveGatewayScheme(
@@ -631,11 +637,12 @@ extension GatewayEndpointStore {
 
     static func _testResolveLocalGatewayHost(
         bindMode: String?,
-        tailscaleIP: String?) -> String
+        tailscaleIP: String?,
+        customBindHost: String? = nil) -> String
     {
         self.resolveLocalGatewayHost(
             bindMode: bindMode,
-            customBindHost: nil,
+            customBindHost: customBindHost,
             tailscaleIP: tailscaleIP)
     }
 }

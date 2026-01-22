@@ -23,6 +23,7 @@ import {
   resolveAuthProfileOrder,
   type ResolvedProviderAuth,
 } from "../model-auth.js";
+import { normalizeProviderId } from "../model-selection.js";
 import { ensureClawdbotModelsJson } from "../models-config.js";
 import {
   classifyFailoverReason,
@@ -49,6 +50,18 @@ import type { EmbeddedPiAgentMeta, EmbeddedPiRunResult } from "./types.js";
 import { describeUnknownError } from "./utils.js";
 
 type ApiKeyInfo = ResolvedProviderAuth;
+
+// Avoid Anthropic's refusal test token poisoning session transcripts.
+const ANTHROPIC_MAGIC_STRING_TRIGGER_REFUSAL = "ANTHROPIC_MAGIC_STRING_TRIGGER_REFUSAL";
+const ANTHROPIC_MAGIC_STRING_REPLACEMENT = "ANTHROPIC MAGIC STRING TRIGGER REFUSAL (redacted)";
+
+function scrubAnthropicRefusalMagic(prompt: string): string {
+  if (!prompt.includes(ANTHROPIC_MAGIC_STRING_TRIGGER_REFUSAL)) return prompt;
+  return prompt.replaceAll(
+    ANTHROPIC_MAGIC_STRING_TRIGGER_REFUSAL,
+    ANTHROPIC_MAGIC_STRING_REPLACEMENT,
+  );
+}
 
 export async function runEmbeddedPiAgent(
   params: RunEmbeddedPiAgentParams,
@@ -116,8 +129,16 @@ export async function runEmbeddedPiAgent(
 
       const authStore = ensureAuthProfileStore(agentDir, { allowKeychainPrompt: false });
       const preferredProfileId = params.authProfileId?.trim();
-      const lockedProfileId =
-        params.authProfileIdSource === "user" ? preferredProfileId : undefined;
+      let lockedProfileId = params.authProfileIdSource === "user" ? preferredProfileId : undefined;
+      if (lockedProfileId) {
+        const lockedProfile = authStore.profiles[lockedProfileId];
+        if (
+          !lockedProfile ||
+          normalizeProviderId(lockedProfile.provider) !== normalizeProviderId(provider)
+        ) {
+          lockedProfileId = undefined;
+        }
+      }
       const profileOrder = resolveAuthProfileOrder({
         cfg: params.config,
         store: authStore,
@@ -202,6 +223,9 @@ export async function runEmbeddedPiAgent(
           attemptedThinking.add(thinkLevel);
           await fs.mkdir(resolvedWorkspace, { recursive: true });
 
+          const prompt =
+            provider === "anthropic" ? scrubAnthropicRefusalMagic(params.prompt) : params.prompt;
+
           const attempt = await runEmbeddedAttempt({
             sessionId: params.sessionId,
             sessionKey: params.sessionKey,
@@ -219,7 +243,7 @@ export async function runEmbeddedPiAgent(
             agentDir,
             config: params.config,
             skillsSnapshot: params.skillsSnapshot,
-            prompt: params.prompt,
+            prompt,
             images: params.images,
             provider,
             modelId,

@@ -17,8 +17,9 @@ function buildSkillsSection(params: {
   isMinimal: boolean;
   readToolName: string;
 }) {
+  if (params.isMinimal) return [];
   const trimmed = params.skillsPrompt?.trim();
-  if (!trimmed || params.isMinimal) return [];
+  if (!trimmed) return [];
   return [
     "## Skills (mandatory)",
     "Before replying: scan <available_skills> <description> entries.",
@@ -85,6 +86,7 @@ function buildMessagingSection(params: {
   messageChannelOptions: string;
   inlineButtonsEnabled: boolean;
   runtimeChannel?: string;
+  messageToolHints?: string[];
 }) {
   if (params.isMinimal) return [];
   return [
@@ -105,6 +107,7 @@ function buildMessagingSection(params: {
             : params.runtimeChannel
               ? `- Inline buttons not enabled for ${params.runtimeChannel}. If you need them, ask to set ${params.runtimeChannel}.capabilities.inlineButtons ("dm"|"group"|"all"|"allowlist").`
               : "",
+          ...(params.messageToolHints ?? []),
         ]
           .filter(Boolean)
           .join("\n")
@@ -146,6 +149,7 @@ export function buildAgentSystemPrompt(params: {
   skillsPrompt?: string;
   heartbeatPrompt?: string;
   docsPath?: string;
+  workspaceNotes?: string[];
   /** Controls which hardcoded sections to include. Defaults to "full". */
   promptMode?: PromptMode;
   runtimeInfo?: {
@@ -158,7 +162,9 @@ export function buildAgentSystemPrompt(params: {
     defaultModel?: string;
     channel?: string;
     capabilities?: string[];
+    repoRoot?: string;
   };
+  messageToolHints?: string[];
   sandboxInfo?: {
     enabled: boolean;
     workspaceDir?: string;
@@ -172,7 +178,7 @@ export function buildAgentSystemPrompt(params: {
     allowedControlPorts?: number[];
     elevated?: {
       allowed: boolean;
-      defaultLevel: "on" | "off";
+      defaultLevel: "on" | "off" | "ask" | "full";
     };
   };
   /** Reaction guidance for the agent (for Telegram minimal/extensive modes). */
@@ -197,7 +203,7 @@ export function buildAgentSystemPrompt(params: {
     browser: "Control web browser",
     canvas: "Present/eval/snapshot the Canvas",
     nodes: "List/describe/notify/camera/screen on paired nodes",
-    cron: "Manage cron jobs and wake events (use for reminders; include recent context in reminder text if appropriate)",
+    cron: "Manage cron jobs and wake events (use for reminders; when scheduling a reminder, write the systemEvent text as something that will read like a reminder when it fires, and mention that it is a reminder depending on the time gap between setting and firing; include recent context in reminder text if appropriate)",
     message: "Send messages and channel actions",
     gateway: "Restart, apply config, or run updates on the running Clawdbot process",
     agents_list: "List agent ids allowed for sessions_spawn",
@@ -206,7 +212,7 @@ export function buildAgentSystemPrompt(params: {
     sessions_send: "Send a message to another session/sub-agent",
     sessions_spawn: "Spawn a sub-agent session",
     session_status:
-      "Show a /status-equivalent status card (usage + Reasoning/Verbose/Elevated); optional per-session model override",
+      "Show a /status-equivalent status card (usage + Reasoning/Verbose/Elevated); use for model-use questions (📊 session_status); optional per-session model override",
     image: "Analyze an image with the configured image model",
   };
 
@@ -323,6 +329,7 @@ export function buildAgentSystemPrompt(params: {
     isMinimal,
     readToolName,
   });
+  const workspaceNotes = (params.workspaceNotes ?? []).map((note) => note.trim()).filter(Boolean);
 
   // For "none" mode, return just the basic identity line
   if (promptMode === "none") {
@@ -348,7 +355,7 @@ export function buildAgentSystemPrompt(params: {
           "- browser: control clawd's dedicated browser",
           "- canvas: present/eval/snapshot the Canvas",
           "- nodes: list/describe/notify/camera/screen on paired nodes",
-          "- cron: manage cron jobs and wake events (use for reminders; include recent context in reminder text if appropriate)",
+          "- cron: manage cron jobs and wake events (use for reminders; when scheduling a reminder, write the systemEvent text as something that will read like a reminder when it fires, and mention that it is a reminder depending on the time gap between setting and firing; include recent context in reminder text if appropriate)",
           "- sessions_list: list sessions",
           "- sessions_history: fetch session history",
           "- sessions_send: send to another session",
@@ -365,11 +372,11 @@ export function buildAgentSystemPrompt(params: {
     "## Clawdbot CLI Quick Reference",
     "Clawdbot is controlled via subcommands. Do not invent commands.",
     "To manage the Gateway daemon service (start/stop/restart):",
-    "- clawdbot daemon status",
-    "- clawdbot daemon start",
-    "- clawdbot daemon stop",
-    "- clawdbot daemon restart",
-    "If unsure, ask the user to run `clawdbot help` (or `clawdbot daemon --help`) and paste the output.",
+    "- clawdbot gateway status",
+    "- clawdbot gateway start",
+    "- clawdbot gateway stop",
+    "- clawdbot gateway restart",
+    "If unsure, ask the user to run `clawdbot help` (or `clawdbot gateway --help`) and paste the output.",
     "",
     ...skillsSection,
     ...memorySection,
@@ -399,6 +406,7 @@ export function buildAgentSystemPrompt(params: {
     "## Workspace",
     `Your working directory is: ${params.workspaceDir}`,
     "Treat this directory as the single global workspace for file operations unless explicitly instructed otherwise.",
+    ...workspaceNotes,
     "",
     ...docsSection,
     params.sandboxInfo?.enabled ? "## Sandbox" : "",
@@ -440,12 +448,14 @@ export function buildAgentSystemPrompt(params: {
           params.sandboxInfo.elevated?.allowed
             ? "Elevated exec is available for this session."
             : "",
-          params.sandboxInfo.elevated?.allowed ? "User can toggle with /elevated on|off." : "",
           params.sandboxInfo.elevated?.allowed
-            ? "You may also send /elevated on|off when needed."
+            ? "User can toggle with /elevated on|off|ask|full."
             : "",
           params.sandboxInfo.elevated?.allowed
-            ? `Current elevated level: ${params.sandboxInfo.elevated.defaultLevel} (on runs exec on host; off runs in sandbox).`
+            ? "You may also send /elevated on|off|ask|full when needed."
+            : "",
+          params.sandboxInfo.elevated?.allowed
+            ? `Current elevated level: ${params.sandboxInfo.elevated.defaultLevel} (ask runs exec on host with approvals; full auto-approves).`
             : "",
         ]
           .filter(Boolean)
@@ -468,6 +478,7 @@ export function buildAgentSystemPrompt(params: {
       messageChannelOptions,
       inlineButtonsEnabled,
       runtimeChannel,
+      messageToolHints: params.messageToolHints,
     }),
   ];
 
@@ -566,6 +577,7 @@ export function buildRuntimeLine(
     node?: string;
     model?: string;
     defaultModel?: string;
+    repoRoot?: string;
   },
   runtimeChannel?: string,
   runtimeCapabilities: string[] = [],
@@ -574,6 +586,7 @@ export function buildRuntimeLine(
   return `Runtime: ${[
     runtimeInfo?.agentId ? `agent=${runtimeInfo.agentId}` : "",
     runtimeInfo?.host ? `host=${runtimeInfo.host}` : "",
+    runtimeInfo?.repoRoot ? `repo=${runtimeInfo.repoRoot}` : "",
     runtimeInfo?.os
       ? `os=${runtimeInfo.os}${runtimeInfo?.arch ? ` (${runtimeInfo.arch})` : ""}`
       : runtimeInfo?.arch

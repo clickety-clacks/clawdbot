@@ -1,10 +1,11 @@
-import os from "node:os";
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 
 import { type CommandOptions, runCommandWithTimeout } from "../process/exec.js";
 import { compareSemverStrings } from "./update-check.js";
 import { DEV_BRANCH, isBetaTag, isStableTag, type UpdateChannel } from "./update-channels.js";
+import { detectGlobalInstallManagerForRoot, globalInstallArgs } from "./update-global.js";
 import { trimLogTail } from "./restart-sentinel.js";
 
 export type UpdateStepResult = {
@@ -63,6 +64,7 @@ type UpdateRunnerOptions = {
 
 const DEFAULT_TIMEOUT_MS = 20 * 60_000;
 const MAX_LOG_CHARS = 8000;
+const PREFLIGHT_MAX_COMMITS = 10;
 const START_DIRS = ["cwd", "argv1", "process"];
 
 function normalizeDir(value?: string | null) {
@@ -210,52 +212,6 @@ async function detectPackageManager(root: string) {
   return "npm";
 }
 
-async function tryRealpath(value: string): Promise<string> {
-  try {
-    return await fs.realpath(value);
-  } catch {
-    return path.resolve(value);
-  }
-}
-
-async function detectGlobalInstallManager(
-  runCommand: CommandRunner,
-  pkgRoot: string,
-  timeoutMs: number,
-): Promise<"npm" | "pnpm" | "bun" | null> {
-  const pkgReal = await tryRealpath(pkgRoot);
-
-  const candidates: Array<{
-    manager: "npm" | "pnpm";
-    argv: string[];
-  }> = [
-    { manager: "npm", argv: ["npm", "root", "-g"] },
-    { manager: "pnpm", argv: ["pnpm", "root", "-g"] },
-  ];
-
-  for (const { manager, argv } of candidates) {
-    const res = await runCommand(argv, { timeoutMs }).catch(() => null);
-    if (!res) continue;
-    if (res.code !== 0) continue;
-    const globalRoot = res.stdout.trim();
-    if (!globalRoot) continue;
-
-    const globalReal = await tryRealpath(globalRoot);
-    const expected = path.join(globalReal, "clawdbot");
-    if (path.resolve(expected) === path.resolve(pkgReal)) return manager;
-  }
-
-  // Bun doesn't have an officially stable "global root" command across versions,
-  // so we check the common global install path (best-effort).
-  const bunInstall = process.env.BUN_INSTALL?.trim() || path.join(os.homedir(), ".bun");
-  const bunGlobalRoot = path.join(bunInstall, "install", "global", "node_modules");
-  const bunGlobalReal = await tryRealpath(bunGlobalRoot);
-  const bunExpected = path.join(bunGlobalReal, "clawdbot");
-  if (path.resolve(bunExpected) === path.resolve(pkgReal)) return "bun";
-
-  return null;
-}
-
 type RunStepOptions = {
   runCommand: CommandRunner;
   name: string;
@@ -322,13 +278,6 @@ function normalizeTag(tag?: string) {
   const trimmed = tag?.trim();
   if (!trimmed) return "latest";
   return trimmed.startsWith("clawdbot@") ? trimmed.slice("clawdbot@".length) : trimmed;
-}
-
-function globalUpdateArgs(manager: "pnpm" | "npm" | "bun", tag?: string) {
-  const spec = `clawdbot@${normalizeTag(tag)}`;
-  if (manager === "pnpm") return ["pnpm", "add", "-g", spec];
-  if (manager === "bun") return ["bun", "add", "-g", spec];
-  return ["npm", "i", "-g", spec];
 }
 
 export async function runGatewayUpdate(opts: UpdateRunnerOptions = {}): Promise<UpdateRunResult> {
@@ -473,8 +422,152 @@ export async function runGatewayUpdate(opts: UpdateRunnerOptions = {}): Promise<
       );
       steps.push(fetchStep);
 
+      const upstreamShaStep = await runStep(
+        step(
+          "git rev-parse @{upstream}",
+          ["git", "-C", gitRoot, "rev-parse", "@{upstream}"],
+          gitRoot,
+        ),
+      );
+      steps.push(upstreamShaStep);
+      const upstreamSha = upstreamShaStep.stdoutTail?.trim();
+      if (!upstreamShaStep.stdoutTail || !upstreamSha) {
+        return {
+          status: "error",
+          mode: "git",
+          root: gitRoot,
+          reason: "no-upstream-sha",
+          before: { sha: beforeSha, version: beforeVersion },
+          steps,
+          durationMs: Date.now() - startedAt,
+        };
+      }
+
+      const revListStep = await runStep(
+        step(
+          "git rev-list",
+          ["git", "-C", gitRoot, "rev-list", `--max-count=${PREFLIGHT_MAX_COMMITS}`, upstreamSha],
+          gitRoot,
+        ),
+      );
+      steps.push(revListStep);
+      if (revListStep.exitCode !== 0) {
+        return {
+          status: "error",
+          mode: "git",
+          root: gitRoot,
+          reason: "preflight-revlist-failed",
+          before: { sha: beforeSha, version: beforeVersion },
+          steps,
+          durationMs: Date.now() - startedAt,
+        };
+      }
+
+      const candidates = (revListStep.stdoutTail ?? "")
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean);
+      if (candidates.length === 0) {
+        return {
+          status: "error",
+          mode: "git",
+          root: gitRoot,
+          reason: "preflight-no-candidates",
+          before: { sha: beforeSha, version: beforeVersion },
+          steps,
+          durationMs: Date.now() - startedAt,
+        };
+      }
+
+      const manager = await detectPackageManager(gitRoot);
+      const preflightRoot = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-update-preflight-"));
+      const worktreeDir = path.join(preflightRoot, "worktree");
+      const worktreeStep = await runStep(
+        step(
+          "preflight worktree",
+          ["git", "-C", gitRoot, "worktree", "add", "--detach", worktreeDir, upstreamSha],
+          gitRoot,
+        ),
+      );
+      steps.push(worktreeStep);
+      if (worktreeStep.exitCode !== 0) {
+        await fs.rm(preflightRoot, { recursive: true, force: true }).catch(() => {});
+        return {
+          status: "error",
+          mode: "git",
+          root: gitRoot,
+          reason: "preflight-worktree-failed",
+          before: { sha: beforeSha, version: beforeVersion },
+          steps,
+          durationMs: Date.now() - startedAt,
+        };
+      }
+
+      let selectedSha: string | null = null;
+      try {
+        for (const sha of candidates) {
+          const shortSha = sha.slice(0, 8);
+          const checkoutStep = await runStep(
+            step(
+              `preflight checkout (${shortSha})`,
+              ["git", "-C", worktreeDir, "checkout", "--detach", sha],
+              worktreeDir,
+            ),
+          );
+          steps.push(checkoutStep);
+          if (checkoutStep.exitCode !== 0) continue;
+
+          const depsStep = await runStep(
+            step(`preflight deps install (${shortSha})`, managerInstallArgs(manager), worktreeDir),
+          );
+          steps.push(depsStep);
+          if (depsStep.exitCode !== 0) continue;
+
+          const lintStep = await runStep(
+            step(`preflight lint (${shortSha})`, managerScriptArgs(manager, "lint"), worktreeDir),
+          );
+          steps.push(lintStep);
+          if (lintStep.exitCode !== 0) continue;
+
+          const buildStep = await runStep(
+            step(`preflight build (${shortSha})`, managerScriptArgs(manager, "build"), worktreeDir),
+          );
+          steps.push(buildStep);
+          if (buildStep.exitCode !== 0) continue;
+
+          selectedSha = sha;
+          break;
+        }
+      } finally {
+        const removeStep = await runStep(
+          step(
+            "preflight cleanup",
+            ["git", "-C", gitRoot, "worktree", "remove", "--force", worktreeDir],
+            gitRoot,
+          ),
+        );
+        steps.push(removeStep);
+        await runCommand(["git", "-C", gitRoot, "worktree", "prune"], {
+          cwd: gitRoot,
+          timeoutMs,
+        }).catch(() => null);
+        await fs.rm(preflightRoot, { recursive: true, force: true }).catch(() => {});
+      }
+
+      if (!selectedSha) {
+        return {
+          status: "error",
+          mode: "git",
+          root: gitRoot,
+          reason: "preflight-no-good-commit",
+          before: { sha: beforeSha, version: beforeVersion },
+          steps,
+          durationMs: Date.now() - startedAt,
+        };
+      }
+
       const rebaseStep = await runStep(
-        step("git rebase", ["git", "-C", gitRoot, "rebase", "@{upstream}"], gitRoot),
+        step("git rebase", ["git", "-C", gitRoot, "rebase", selectedSha], gitRoot),
       );
       steps.push(rebaseStep);
       if (rebaseStep.exitCode !== 0) {
@@ -604,12 +697,13 @@ export async function runGatewayUpdate(opts: UpdateRunnerOptions = {}): Promise<
   }
 
   const beforeVersion = await readPackageVersion(pkgRoot);
-  const globalManager = await detectGlobalInstallManager(runCommand, pkgRoot, timeoutMs);
+  const globalManager = await detectGlobalInstallManagerForRoot(runCommand, pkgRoot, timeoutMs);
   if (globalManager) {
+    const spec = `clawdbot@${normalizeTag(opts.tag)}`;
     const updateStep = await runStep({
       runCommand,
       name: "global update",
-      argv: globalUpdateArgs(globalManager, opts.tag),
+      argv: globalInstallArgs(globalManager, spec),
       cwd: pkgRoot,
       timeoutMs,
       progress,

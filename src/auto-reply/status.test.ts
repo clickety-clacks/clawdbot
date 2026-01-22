@@ -74,6 +74,25 @@ describe("buildStatusMessage", () => {
     expect(normalized).toContain("Queue: collect");
   });
 
+  it("uses per-agent sandbox config when config and session key are provided", () => {
+    const text = buildStatusMessage({
+      config: {
+        agents: {
+          list: [
+            { id: "main", default: true },
+            { id: "discord", sandbox: { mode: "all" } },
+          ],
+        },
+      } as ClawdbotConfig,
+      agent: {},
+      sessionKey: "agent:discord:discord:channel:1456350065223270435",
+      sessionScope: "per-sender",
+      queue: { mode: "collect", depth: 0 },
+    });
+
+    expect(normalizeTestText(text)).toContain("Runtime: docker/all");
+  });
+
   it("shows verbose/elevated labels only when enabled", () => {
     const text = buildStatusMessage({
       agent: { model: "anthropic/claude-opus-4-5" },
@@ -141,6 +160,22 @@ describe("buildStatusMessage", () => {
 
     const normalized = normalizeTestText(text);
     expect(normalized).toContain("Media: image ok (openai/gpt-5.2) · audio skipped (maxBytes)");
+  });
+
+  it("omits media line when all decisions are none", () => {
+    const text = buildStatusMessage({
+      agent: { model: "anthropic/claude-opus-4-5" },
+      sessionEntry: { sessionId: "media-none", updatedAt: 0 },
+      sessionKey: "agent:main:main",
+      queue: { mode: "none" },
+      mediaDecisions: [
+        { capability: "image", outcome: "no-attachment", attachments: [] },
+        { capability: "audio", outcome: "no-attachment", attachments: [] },
+        { capability: "video", outcome: "no-attachment", attachments: [] },
+      ],
+    });
+
+    expect(normalizeTestText(text)).not.toContain("Media:");
   });
 
   it("does not show elevated label when session explicitly disables it", () => {

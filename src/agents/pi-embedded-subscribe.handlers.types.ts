@@ -1,6 +1,7 @@
 import type { AgentEvent, AgentMessage } from "@mariozechner/pi-agent-core";
 
 import type { ReasoningLevel } from "../auto-reply/thinking.js";
+import type { ReplyDirectiveParseResult } from "../auto-reply/reply/reply-directives.js";
 import type { InlineCodeState } from "../markdown/code-spans.js";
 import type { EmbeddedBlockChunker } from "./pi-embedded-block-chunker.js";
 import type { MessagingToolSend } from "./pi-embedded-messaging.js";
@@ -39,6 +40,10 @@ export type EmbeddedPiSubscribeState = {
   lastStreamedAssistant?: string;
   lastStreamedReasoning?: string;
   lastBlockReplyText?: string;
+  assistantMessageIndex: number;
+  lastAssistantTextMessageIndex: number;
+  lastAssistantTextNormalized?: string;
+  lastAssistantTextTrimmed?: string;
   assistantTextBaseline: number;
   suppressBlockChunks: boolean;
   lastReasoningSent?: string;
@@ -73,6 +78,10 @@ export type EmbeddedPiSubscribeContext = {
   emitBlockChunk: (text: string) => void;
   flushBlockReplyBuffer: () => void;
   emitReasoningStream: (text: string) => void;
+  consumeReplyDirectives: (
+    text: string,
+    options?: { final?: boolean },
+  ) => ReplyDirectiveParseResult | null;
   resetAssistantMessageState: (nextAssistantTextBaseline: number) => void;
   resetForCompactionRetry: () => void;
   finalizeAssistantTexts: (args: {

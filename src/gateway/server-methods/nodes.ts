@@ -38,6 +38,24 @@ function isNodeEntry(entry: { role?: string; roles?: string[] }) {
   return false;
 }
 
+function normalizeNodeInvokeResultParams(params: unknown): unknown {
+  if (!params || typeof params !== "object") return params;
+  const raw = params as Record<string, unknown>;
+  const normalized: Record<string, unknown> = { ...raw };
+  if (normalized.payloadJSON === null) {
+    delete normalized.payloadJSON;
+  } else if (normalized.payloadJSON !== undefined && typeof normalized.payloadJSON !== "string") {
+    if (normalized.payload === undefined) {
+      normalized.payload = normalized.payloadJSON;
+    }
+    delete normalized.payloadJSON;
+  }
+  if (normalized.error === null) {
+    delete normalized.error;
+  }
+  return normalized;
+}
+
 export const nodeHandlers: GatewayRequestHandlers = {
   "node.pair.request": async ({ params, respond, context }) => {
     if (!validateNodePairRequestParams(params)) {
@@ -257,7 +275,9 @@ export const nodeHandlers: GatewayRequestHandlers = {
           remoteIp: live?.remoteIp ?? paired?.remoteIp,
           caps,
           commands,
+          pathEnv: live?.pathEnv,
           permissions: live?.permissions ?? paired?.permissions,
+          connectedAtMs: live?.connectedAtMs,
           paired: Boolean(paired),
           connected: Boolean(live),
         };
@@ -319,7 +339,9 @@ export const nodeHandlers: GatewayRequestHandlers = {
           remoteIp: live?.remoteIp ?? paired?.remoteIp,
           caps,
           commands,
+          pathEnv: live?.pathEnv,
           permissions: live?.permissions,
+          connectedAtMs: live?.connectedAtMs,
           paired: Boolean(paired),
           connected: Boolean(live),
         },
@@ -415,7 +437,8 @@ export const nodeHandlers: GatewayRequestHandlers = {
     });
   },
   "node.invoke.result": async ({ params, respond, context, client }) => {
-    if (!validateNodeInvokeResultParams(params)) {
+    const normalizedParams = normalizeNodeInvokeResultParams(params);
+    if (!validateNodeInvokeResultParams(normalizedParams)) {
       respondInvalidParams({
         respond,
         method: "node.invoke.result",
@@ -423,7 +446,7 @@ export const nodeHandlers: GatewayRequestHandlers = {
       });
       return;
     }
-    const p = params as {
+    const p = normalizedParams as {
       id: string;
       nodeId: string;
       ok: boolean;

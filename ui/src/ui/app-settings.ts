@@ -14,7 +14,7 @@ import { saveSettings, type UiSettings } from "./storage";
 import { resolveTheme, type ResolvedTheme, type ThemeMode } from "./theme";
 import { startThemeTransition, type ThemeTransitionContext } from "./theme-transition";
 import { scheduleChatScroll, scheduleLogsScroll } from "./app-scroll";
-import { startLogsPolling, stopLogsPolling } from "./app-polling";
+import { startLogsPolling, stopLogsPolling, startDebugPolling, stopDebugPolling } from "./app-polling";
 import { refreshChat } from "./app-chat";
 import type { ClawdbotApp } from "./app";
 
@@ -62,6 +62,7 @@ export function applySettingsFromUrl(host: SettingsHost) {
   const tokenRaw = params.get("token");
   const passwordRaw = params.get("password");
   const sessionRaw = params.get("session");
+  const gatewayUrlRaw = params.get("gatewayUrl");
   let shouldCleanUrl = false;
 
   if (tokenRaw != null) {
@@ -94,6 +95,15 @@ export function applySettingsFromUrl(host: SettingsHost) {
     }
   }
 
+  if (gatewayUrlRaw != null) {
+    const gatewayUrl = gatewayUrlRaw.trim();
+    if (gatewayUrl && gatewayUrl !== host.settings.gatewayUrl) {
+      applySettings(host, { ...host.settings, gatewayUrl });
+    }
+    params.delete("gatewayUrl");
+    shouldCleanUrl = true;
+  }
+
   if (!shouldCleanUrl) return;
   const url = new URL(window.location.href);
   url.search = params.toString();
@@ -106,6 +116,9 @@ export function setTab(host: SettingsHost, next: Tab) {
   if (next === "logs")
     startLogsPolling(host as unknown as Parameters<typeof startLogsPolling>[0]);
   else stopLogsPolling(host as unknown as Parameters<typeof stopLogsPolling>[0]);
+  if (next === "debug")
+    startDebugPolling(host as unknown as Parameters<typeof startDebugPolling>[0]);
+  else stopDebugPolling(host as unknown as Parameters<typeof stopDebugPolling>[0]);
   void refreshActiveTab(host);
   syncUrlWithTab(host, next, false);
 }
@@ -251,6 +264,9 @@ export function setTabFromRoute(host: SettingsHost, next: Tab) {
   if (next === "logs")
     startLogsPolling(host as unknown as Parameters<typeof startLogsPolling>[0]);
   else stopLogsPolling(host as unknown as Parameters<typeof stopLogsPolling>[0]);
+  if (next === "debug")
+    startDebugPolling(host as unknown as Parameters<typeof startDebugPolling>[0]);
+  else stopDebugPolling(host as unknown as Parameters<typeof stopDebugPolling>[0]);
   if (host.connected) void refreshActiveTab(host);
 }
 
