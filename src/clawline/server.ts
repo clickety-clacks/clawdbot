@@ -12,7 +12,8 @@ import BetterSqlite3 from "better-sqlite3";
 import type { Database as SqliteDatabase, Statement as SqliteStatement } from "better-sqlite3";
 import { finalizeInboundContext } from "../auto-reply/reply/inbound-context.js";
 import { dispatchReplyFromConfig } from "../auto-reply/reply/dispatch-from-config.js";
-import { createReplyDispatcher } from "../auto-reply/reply/reply-dispatcher.js";
+import { createReplyDispatcherWithTyping } from "../auto-reply/reply/reply-dispatcher.js";
+import { getFollowupQueueDepth } from "../auto-reply/reply/queue.js";
 import { extractShortModelName } from "../auto-reply/reply/response-prefix-template.js";
 import type { ResponsePrefixContext } from "../auto-reply/reply/response-prefix-template.js";
 import type { ReplyPayload } from "../auto-reply/types.js";
@@ -373,6 +374,7 @@ enum MessageStreamingState {
   Finalized = 0,
   Active = 1,
   Failed = 2,
+  Queued = 3,
 }
 
 export const DEFAULT_ALERT_INSTRUCTIONS_TEXT = `After handling this alert, evaluate: would Flynn want to know what happened? If yes, report to him. Don't just process silently.`;
@@ -2051,11 +2053,26 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           identityName: resolveIdentityName(clawdbotCfg, route.agentId),
         };
 
-        const dispatcher = createReplyDispatcher({
+        // Track activity state for typing indicator
+        let activitySignaled = false;
+        const sendActivitySignal = async (isActive: boolean) => {
+          await sendJson(session.socket, {
+            type: "activity",
+            isActive,
+            messageId: payload.id,
+          });
+        };
+
+        const { dispatcher, replyOptions, markDispatchIdle } = createReplyDispatcherWithTyping({
           responsePrefix: resolveEffectiveMessagesConfig(clawdbotCfg, route.agentId).responsePrefix,
           responsePrefixContextProvider: () => prefixContext,
           humanDelay: resolveHumanDelayConfig(clawdbotCfg, route.agentId),
           deliver: async (replyPayload) => {
+            // Stop activity signal when first content arrives (streaming begins)
+            if (activitySignaled) {
+              activitySignaled = false;
+              void sendActivitySignal(false);
+            }
             const assistantText = buildAssistantTextFromPayload(replyPayload, fallbackText);
             if (!assistantText) {
               return;
@@ -2074,6 +2091,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               error: err instanceof Error ? err.message : String(err),
             });
           },
+          onReplyStart: async () => {
+            // Signal that processing has started (for typing indicator)
+            if (!activitySignaled) {
+              activitySignaled = true;
+              await sendActivitySignal(true);
+            }
+          },
         });
 
         let queuedFinal = false;
@@ -2083,6 +2107,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             cfg: clawdbotCfg,
             dispatcher,
             replyOptions: {
+              ...replyOptions,
               onModelSelected: (ctx) => {
                 prefixContext.provider = ctx.provider;
                 prefixContext.model = extractShortModelName(ctx.model);
@@ -2097,9 +2122,23 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           logger.error?.("[clawline] dispatch_failed", err);
           queuedFinal = false;
         }
+        markDispatchIdle();
         await dispatcher.waitForIdle();
 
-        if (!queuedFinal) {
+        // Always send activity=false when done
+        if (activitySignaled) {
+          activitySignaled = false;
+          void sendActivitySignal(false);
+        }
+
+        // Check if message was queued (not failed) using existing queue system
+        // If queuedFinal is false but there are items in the queue, the message
+        // was successfully queued for later processing - this is not an error.
+        const queueKey = route.sessionKey;
+        const queueDepth = getFollowupQueueDepth(queueKey);
+        const wasQueued = !queuedFinal && queueDepth > 0;
+
+        if (!queuedFinal && !wasQueued) {
           updateMessageStreamingStmt.run(
             MessageStreamingState.Failed,
             session.deviceId,
@@ -2113,8 +2152,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           });
           return;
         }
+
+        // Message was either delivered or queued successfully
         updateMessageStreamingStmt.run(
-          MessageStreamingState.Finalized,
+          wasQueued ? MessageStreamingState.Queued : MessageStreamingState.Finalized,
           session.deviceId,
           payload.id,
         );
