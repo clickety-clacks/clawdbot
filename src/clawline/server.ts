@@ -2392,7 +2392,23 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
 
     if (entry && entry.tokenDelivered) {
-      logger.info?.("[clawline:http] pair_request_token_redispatch", { deviceId });
+      // Check if user is switching accounts (different claimedName → different userId)
+      const newUserId = normalizedUserId ?? entry.userId;
+      const isSwitchingAccount = newUserId !== entry.userId;
+      if (isSwitchingAccount) {
+        logger.info?.("[clawline:http] pair_request_account_switch", {
+          deviceId,
+          oldUserId: entry.userId,
+          newUserId,
+        });
+        // Update entry with new account info
+        entry.userId = newUserId;
+        entry.claimedName = sanitizedClaimedName;
+        entry.isAdmin = newUserId === ADMIN_USER_ID;
+        await persistAllowlist();
+      } else {
+        logger.info?.("[clawline:http] pair_request_token_redispatch", { deviceId });
+      }
       const token = issueToken(entry);
       const delivered = await sendJson(ws, {
         type: "pair_result",
