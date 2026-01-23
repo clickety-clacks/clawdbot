@@ -28,9 +28,12 @@ Clawline is a WebSocket-based local gateway connecting devices to Clawdbot.
 ## Key Constants
 
 ```typescript
-ADMIN_CHANNEL_TYPE = "admin"  // grants access to DM channel (main session)
-DEFAULT_CHANNEL_TYPE = "personal"
+ADMIN_CHANNEL_TYPE = "admin"  // DM channel (routes to main session)
+DEFAULT_CHANNEL_TYPE = "personal"  // per-user session
 ```
+
+Messages and assets are stored under the real user's ID for all channel types.
+Channel type only affects session routing (main vs isolated).
 
 ## Files
 

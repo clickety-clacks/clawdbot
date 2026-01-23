@@ -64,9 +64,11 @@ No special handling for DM channel - it works like any other channel, just route
 
 ## Important Constants
 
-- `ADMIN_TRANSCRIPT_USER_ID = "__clawline_admin__"` - Synthetic user ID for admin channel
-- `ADMIN_CHANNEL_TYPE = "admin"` - Channel type marker
-- `DEFAULT_CHANNEL_TYPE = "personal"` - Default channel for regular users
+- `ADMIN_CHANNEL_TYPE = "admin"` - DM channel type (routes to main session)
+- `DEFAULT_CHANNEL_TYPE = "personal"` - Personal channel type (routes to per-user session)
+
+Messages and assets are stored under the real user's ID for both channel types.
+The channel type only affects session routing, not storage.
 
 ---
 
