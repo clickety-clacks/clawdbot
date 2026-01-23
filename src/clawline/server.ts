@@ -2412,11 +2412,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           existingSession.socket.close();
           removeSession(existingSession);
         }
-        // Update entry with new account info
-        // Preserve isAdmin - don't allow privilege escalation via account switch
+        // Update entry with new account info (isAdmin based on new userId)
         entry.userId = newUserId;
         entry.claimedName = sanitizedClaimedName;
         entry.deviceInfo = sanitizedInfo;
+        entry.isAdmin = newUserId === ADMIN_USER_ID;
         await persistAllowlist();
       } else {
         logger.info?.("[clawline:http] pair_request_token_redispatch", { deviceId });
