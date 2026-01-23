@@ -1965,12 +1965,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               sessionKey: string;
               mainSessionKey: string;
             };
-        let peerId: string;
+        // Use canonical userId (from allowlist) for routing - this is the lowercase value.
+        // peerId (from claimedName) is used for display only.
+        const canonicalUserId = session.userId;
+        const displayName = session.peerId;
         let channelLabel = "clawline";
-
-        // Both channel types use the actual user ID for reply routing.
-        // The difference is only session routing (main vs per-user).
-        peerId = session.peerId;
 
         if (channelType === ADMIN_CHANNEL_TYPE) {
           // DM channel: routes to main session (like Discord/Telegram DMs)
@@ -1988,7 +1987,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           const personalSessionKey = buildAgentSessionKey({
             agentId: mainSessionAgentId,
             channel: "clawline",
-            peer: { kind: "dm", id: peerId },
+            peer: { kind: "dm", id: canonicalUserId },
             dmScope: "per-channel-peer",
           });
           route = {
@@ -2004,18 +2003,18 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           Body: inboundBody,
           RawBody: payload.content,
           CommandBody: payload.content,
-          From: `${channelLabel}:${peerId}`,
+          From: `${channelLabel}:${canonicalUserId}`,
           To: `device:${session.deviceId}`,
           SessionKey: route.sessionKey,
           AccountId: route.accountId,
           MessageSid: payload.id,
           ChatType: "direct",
-          SenderName: session.claimedName ?? session.deviceInfo?.model ?? peerId,
-          SenderId: peerId,
+          SenderName: session.claimedName ?? session.deviceInfo?.model ?? displayName,
+          SenderId: canonicalUserId,
           Provider: "clawline",
           Surface: "clawline",
           OriginatingChannel: channelLabel,
-          OriginatingTo: peerId,
+          OriginatingTo: canonicalUserId,
           CommandAuthorized: true,
         });
 
@@ -2023,7 +2022,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           storePath: sessionStorePath,
           sessionKey: route.mainSessionKey,
           channel: channelLabel,
-          to: peerId,
+          to: canonicalUserId,
           accountId: route.accountId,
         });
 
