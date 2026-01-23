@@ -4,42 +4,56 @@ Clawline is a first-party local gateway provider that connects devices (iOS, mac
 
 ## Clawline to Clawdbot Channel Mapping
 
-Clawline maps to Clawdbot's session/routing model as follows:
+Clawline maps to Clawdbot's session/routing model. Understanding this mapping is key:
 
-### Admin Channel → Main Session
+**Core concept**: SESSION = conversation memory, CHANNEL = delivery pipe.
 
-The Clawline **admin channel** maps to Clawdbot's **main session** (`agent:main:main`).
+Conversation continuity comes from the SESSION, not the channel. The channel just determines where replies get delivered.
 
-- This is the admin's direct line to the agent, shared across all providers
-- Same conversation whether you DM via Discord, Telegram, or Clawline admin channel
-- Only users marked `isAdmin: true` in the allowlist can access this channel
-- Replies broadcast to all connected admin sessions via `broadcastToAdmins()`
-- Uses `ADMIN_TRANSCRIPT_USER_ID` (`__clawline_admin__`) as the synthetic user ID for routing
+### Clawline DM → Main Session
 
-This matches Clawdbot's default `dmScope: "main"` behavior where all DMs share a single conversation.
+The Clawline **DM channel** (accessed by `isAdmin: true` users) maps to Clawdbot's **main session** (`agent:main:main`).
+
+- Equivalent to DMing the Discord bot or Telegram bot
+- Same conversation memory whether you DM via Discord, Telegram, or Clawline
+- Only `isAdmin: true` allowlist users can access this channel
+- Replies go back to the originating user (all their devices), NOT broadcast to all admins
+- Continuity comes from the shared session, not from broadcasting
+
+This matches Clawdbot's default `dmScope: "main"` behavior where all DMs share conversation context.
 
 ### Personal Channels → Per-User Sessions
 
-Non-admin users get **personal channels** that map to Clawdbot's **per-user sessions**.
+Non-admin users get **personal channels** that map to isolated **per-user sessions**.
 
 - Each registered user (family member, etc.) gets their own isolated conversation
-- Similar to how Telegram/Discord groups get isolated sessions (`agent:main:clawline:dm:userId`)
-- The admin also has a personal channel separate from the admin channel
-- Routing uses the user's `userId` from the allowlist
+- Similar to Discord channels - each has separate memory (`agent:main:clawline:dm:{userId}`)
+- Admin users also have access to personal channels (separate from the DM channel)
+- Agent doesn't mix conversations between users
 
 ### Session Routing Summary
 
-| Clawline Concept | Clawdbot Concept | Session Key Pattern |
-|------------------|------------------|---------------------|
-| Admin channel | Main session (DM) | `agent:main:main` |
-| Personal channel | Per-user session | `agent:main:clawline:dm:{userId}` |
+| Clawline | Clawdbot Equivalent | Session Key | Memory |
+|----------|---------------------|-------------|--------|
+| DM channel | Discord/Telegram DM | `agent:main:main` | Shared (main) |
+| Personal channel | Discord channel | `agent:main:clawline:dm:{userId}` | Isolated |
+
+### Comparison with Other Providers
+
+| Source | Session | Reply Goes To |
+|--------|---------|---------------|
+| Discord DM | `agent:main:main` | That Discord user |
+| Telegram DM | `agent:main:main` | That Telegram chat |
+| Clawline DM | `agent:main:main` | That Clawline user's devices |
+| Discord `#channel` | `agent:main:discord:channel:id` | That Discord channel |
+| Clawline personal | `agent:main:clawline:dm:userId` | That user's devices |
 
 ### Reply Routing
 
-- **Admin channel**: `OriginatingTo: "__clawline_admin__"` → `broadcastToAdmins()`
-- **Personal channel**: `OriginatingTo: "{userId}"` → `broadcastToUser(userId)`
+All channels use the same pattern:
+- `OriginatingTo: "{userId}"` → `broadcastToUser(userId)` (all user's devices)
 
-Both broadcast to all connected devices for that user/admin group, which is consistent with Clawline's multi-device model.
+No special handling for DM channel - it works like any other channel, just routes to main session.
 
 ## Key Files
 
