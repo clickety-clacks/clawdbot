@@ -16,7 +16,11 @@ import { createReplyDispatcher } from "../auto-reply/reply/reply-dispatcher.js";
 import { extractShortModelName } from "../auto-reply/reply/response-prefix-template.js";
 import type { ResponsePrefixContext } from "../auto-reply/reply/response-prefix-template.js";
 import type { ReplyPayload } from "../auto-reply/types.js";
-import { resolveAgentRoute, DEFAULT_ACCOUNT_ID } from "../routing/resolve-route.js";
+import {
+  resolveAgentRoute,
+  buildAgentSessionKey,
+  DEFAULT_ACCOUNT_ID,
+} from "../routing/resolve-route.js";
 import {
   resolveEffectiveMessagesConfig,
   resolveHumanDelayConfig,
@@ -1979,12 +1983,21 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             mainSessionKey,
           };
         } else {
-          // Personal channel: routes to per-user session (like Discord channels)
-          route = resolveAgentRoute({
-            cfg: clawdbotCfg,
+          // Personal channel: routes to per-user session (isolated conversation)
+          // Use dmScope "per-channel-peer" to get: agent:main:clawline:dm:{userId}
+          const personalSessionKey = buildAgentSessionKey({
+            agentId: mainSessionAgentId,
             channel: "clawline",
             peer: { kind: "dm", id: peerId },
+            dmScope: "per-channel-peer",
           });
+          route = {
+            agentId: mainSessionAgentId,
+            channel: "clawline",
+            accountId: DEFAULT_ACCOUNT_ID,
+            sessionKey: personalSessionKey,
+            mainSessionKey,
+          };
         }
 
         const ctxPayload = finalizeInboundContext({
