@@ -2031,7 +2031,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           SenderName: session.claimedName ?? session.deviceInfo?.model ?? peerId,
           SenderId: peerId,
           Provider: "clawline",
-          Surface: "clawline",
+          Surface: channelLabel,
           OriginatingChannel: channelLabel,
           OriginatingTo: peerId,
           CommandAuthorized: true,
