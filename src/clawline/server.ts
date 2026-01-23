@@ -26,7 +26,11 @@ import {
   resolveHumanDelayConfig,
   resolveIdentityName,
 } from "../agents/identity.js";
-import { resolveAgentIdFromSessionKey, updateLastRoute } from "../config/sessions.js";
+import {
+  loadSessionStore,
+  resolveAgentIdFromSessionKey,
+  updateLastRoute,
+} from "../config/sessions.js";
 import { rawDataToString } from "../infra/ws.js";
 import { recordClawlineSessionActivity } from "./session-store.js";
 import type { ClawlineAdapterOverrides } from "./config.js";
@@ -1787,6 +1791,20 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       throw new Error("Clawline message exceeds max size");
     }
     const target = resolveSendTarget(targetInput);
+
+    // Derive channelType from the stored route for this user.
+    // clawline-dm → admin channel, clawline → personal channel.
+    let channelType: ChannelType = DEFAULT_CHANNEL_TYPE;
+    try {
+      const store = loadSessionStore(sessionStorePath);
+      const mainEntry = store[mainSessionKey];
+      if (mainEntry?.lastTo === target.userId && mainEntry.lastChannel === "clawline-dm") {
+        channelType = ADMIN_CHANNEL_TYPE;
+      }
+    } catch {
+      // Fall back to default on error
+    }
+
     const event: ServerMessage = {
       type: "message",
       id: generateServerMessageId(),
@@ -1794,7 +1812,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       content: text,
       timestamp: nowMs(),
       streaming: false,
-      channelType: DEFAULT_CHANNEL_TYPE,
+      channelType,
     };
     await runPerUserTask(target.userId, async () => {
       await appendEvent(event, target.userId);
