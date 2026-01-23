@@ -61,7 +61,14 @@ Each pending entry looks like:
 
 ## Approve a Device
 
-Move the entry from `pending.json` to `allowlist.json`. The helper below runs entirely on the gateway host (tars):
+**Important:** approving a pending device always requires choosing the correct `userId` and `isAdmin`.
+- **User/account naming convention:** by default, set `userId` to match the `claimedName` in a normalized form (e.g. `"QA Sim" → "qa_sim"`).
+- `claimedName` is *not* the account mechanically, but operationally we treat it as the intended account label.
+- **Different claimed names → different `userId`s** unless you explicitly want them to share an account.
+- **Admin policy:** there should be **exactly one admin user** (Flynn). All other devices/users should have `isAdmin: false`.
+- When in doubt, ask which `userId` to assign (and confirm `isAdmin` should remain false) before approving.
+
+Move the entry from `pending.json` to `allowlist.json`. The helper below runs locally:
 
 ```bash
 ssh -i ~/.ssh/id_ed25519_tars -o IdentitiesOnly=yes tars 'python3 - <<\"PY\"
