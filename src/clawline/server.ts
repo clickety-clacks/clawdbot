@@ -2101,6 +2101,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         });
 
         let queuedFinal = false;
+        let deliveredCount = 0;
         try {
           const result = await dispatchReplyFromConfig({
             ctx: ctxPayload,
@@ -2118,6 +2119,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             replyResolver: options.replyResolver,
           });
           queuedFinal = result.queuedFinal;
+          // Count all delivered content (streaming blocks, tool results, and final replies)
+          deliveredCount = result.counts.block + result.counts.tool + result.counts.final;
         } catch (err) {
           logger.error?.("[clawline] dispatch_failed", err);
           queuedFinal = false;
@@ -2131,14 +2134,16 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           void sendActivitySignal(false);
         }
 
-        // Check if message was queued (not failed) using existing queue system
-        // If queuedFinal is false but there are items in the queue, the message
-        // was successfully queued for later processing - this is not an error.
+        // Check if message was successfully handled:
+        // 1. queuedFinal = true means a final reply was sent
+        // 2. deliveredCount > 0 means content was streamed (blocks/tools)
+        // 3. queueDepth > 0 means message was queued for later processing
         const queueKey = route.sessionKey;
         const queueDepth = getFollowupQueueDepth(queueKey);
-        const wasQueued = !queuedFinal && queueDepth > 0;
+        const wasDelivered = queuedFinal || deliveredCount > 0;
+        const wasQueued = !wasDelivered && queueDepth > 0;
 
-        if (!queuedFinal && !wasQueued) {
+        if (!wasDelivered && !wasQueued) {
           updateMessageStreamingStmt.run(
             MessageStreamingState.Failed,
             session.deviceId,
