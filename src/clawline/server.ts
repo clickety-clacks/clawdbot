@@ -72,7 +72,6 @@ const MAX_ALERT_BODY_BYTES = 4 * 1024;
 type ChannelType = "personal" | "admin";
 const DEFAULT_CHANNEL_TYPE: ChannelType = "personal";
 const ADMIN_CHANNEL_TYPE: ChannelType = "admin";
-const ADMIN_TRANSCRIPT_USER_ID = "__clawline_admin__";
 const DEFAULT_ALERT_SOURCE = "notify";
 const ADMIN_USER_ID = "flynn";
 const USER_ID_MAX_LENGTH = 48;
@@ -734,7 +733,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       nowMs,
       assetIdRegex: ASSET_ID_REGEX,
       canAccessAsset: ({ assetOwnerId, auth }) =>
-        assetOwnerId === ADMIN_TRANSCRIPT_USER_ID && auth.isAdmin === true,
+        // Admins can access any asset; users can access their own
+        auth.isAdmin === true || assetOwnerId === auth.userId,
     }));
 
     insertUserMessageTx = newDb.transaction(
@@ -756,10 +756,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           if (!asset) {
             throw new ClientMessageError("asset_not_found", "Asset not found");
           }
-          const allowedOwners =
-            channelType === ADMIN_CHANNEL_TYPE
-              ? new Set([session.userId, ADMIN_TRANSCRIPT_USER_ID])
-              : new Set([session.userId]);
+          // All channel types: assets must be owned by the session user
+          const allowedOwners = new Set([session.userId]);
           if (!allowedOwners.has(asset.userId)) {
             throw new ClientMessageError("asset_not_found", "Asset not found");
           }
@@ -900,41 +898,17 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     return { attachments: updated, inlineAssetIds };
   }
 
-  async function ensureAdminSharedAsset(assetId: string, session: Session): Promise<string> {
-    const asset = selectAssetStmt.get(assetId) as
-      | { assetId: string; userId: string; mimeType: string; size: number }
-      | undefined;
+  async function ensureAssetOwnership(assetId: string, session: Session): Promise<string> {
+    // Verify the asset exists and is owned by this user (no copying needed;
+    // admins can access any asset via canAccessAsset)
+    const asset = selectAssetStmt.get(assetId) as { assetId: string; userId: string } | undefined;
     if (!asset) {
       throw new ClientMessageError("asset_not_found", "Asset not found");
-    }
-    if (asset.userId === ADMIN_TRANSCRIPT_USER_ID) {
-      return assetId;
     }
     if (asset.userId !== session.userId) {
       throw new ClientMessageError("asset_not_found", "Asset not found");
     }
-    const sourcePath = path.join(assetsDir, asset.assetId);
-    const newAssetId = `a_${randomUUID()}`;
-    const destPath = path.join(assetsDir, newAssetId);
-    try {
-      await fs.copyFile(sourcePath, destPath);
-    } catch (err: any) {
-      if (err && err.code === "ENOENT") {
-        throw new ClientMessageError("asset_not_found", "Asset not found");
-      }
-      throw err;
-    }
-    await enqueueWriteTask(() =>
-      insertAssetStmt.run(
-        newAssetId,
-        ADMIN_TRANSCRIPT_USER_ID,
-        asset.mimeType,
-        asset.size,
-        nowMs(),
-        session.deviceId,
-      ),
-    );
-    return newAssetId;
+    return assetId;
   }
 
   async function ensureChannelAttachmentOwnership(params: {
@@ -943,30 +917,14 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     session: Session;
     channelType: ChannelType;
   }): Promise<{ attachments: NormalizedAttachment[]; assetIds: string[] }> {
-    if (params.channelType !== ADMIN_CHANNEL_TYPE) {
-      return { attachments: params.attachments, assetIds: params.assetIds };
-    }
-    const replacements = new Map<string, string>();
-    const cache = new Map<string, string>();
-    const updatedAttachments = params.attachments.map((attachment) => ({ ...attachment }));
-    for (let index = 0; index < updatedAttachments.length; index += 1) {
-      const attachment = updatedAttachments[index];
-      if (attachment.type !== "asset" || typeof attachment.assetId !== "string") {
-        continue;
+    // All channel types work the same: verify assets are owned by the session user.
+    // (Ownership is also checked in insertUserMessageTx; this is an early validation.)
+    for (const attachment of params.attachments) {
+      if (attachment.type === "asset" && typeof attachment.assetId === "string") {
+        await ensureAssetOwnership(attachment.assetId, params.session);
       }
-      if (!cache.has(attachment.assetId)) {
-        const sharedId = await ensureAdminSharedAsset(attachment.assetId, params.session);
-        cache.set(attachment.assetId, sharedId);
-      }
-      const ensuredId = cache.get(attachment.assetId)!;
-      updatedAttachments[index] = { ...attachment, assetId: ensuredId };
-      replacements.set(attachment.assetId, ensuredId);
     }
-    if (replacements.size === 0) {
-      return { attachments: updatedAttachments, assetIds: params.assetIds };
-    }
-    const updatedAssetIds = params.assetIds.map((assetId) => replacements.get(assetId) ?? assetId);
-    return { attachments: updatedAttachments, assetIds: updatedAssetIds };
+    return { attachments: params.attachments, assetIds: params.assetIds };
   }
 
   type EventRow = { id: string; payloadJson: string };
@@ -1610,12 +1568,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   }
 
   async function sendReplay(session: Session, lastMessageId: string | null) {
+    // All messages (both personal and DM channel) are stored under the real userId.
+    // Query once to get all messages for this user.
     const transcriptTargets: Array<{ userId: string; channelType: ChannelType }> = [
       { userId: session.userId, channelType: DEFAULT_CHANNEL_TYPE },
     ];
-    if (sessionHasAdminAccess(session)) {
-      transcriptTargets.push({ userId: ADMIN_TRANSCRIPT_USER_ID, channelType: ADMIN_CHANNEL_TYPE });
-    }
     let anchor: { userId: string; sequence: number; timestamp: number } | null = null;
     if (lastMessageId) {
       const anchorRow = selectEventByIdStmt.get(lastMessageId) as
@@ -1743,8 +1700,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     broadcastToUser(session.userId, payload);
   }
 
-  function getTranscriptUserId(session: Session, channelType: ChannelType): string {
-    return channelType === ADMIN_CHANNEL_TYPE ? ADMIN_TRANSCRIPT_USER_ID : session.userId;
+  function getTranscriptUserId(session: Session, _channelType: ChannelType): string {
+    // All channel types use the real user ID for transcript storage.
+    // The DM channel (admin) differs only in session routing (main vs per-user).
+    return session.userId;
   }
 
   async function appendEvent(event: ServerMessage, userId: string, originatingDeviceId?: string) {
