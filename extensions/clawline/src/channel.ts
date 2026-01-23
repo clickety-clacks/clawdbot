@@ -9,7 +9,16 @@ type ResolvedClawlineAccount = {
   configured: boolean;
 };
 
-const meta = getChatChannelMeta("clawline");
+const meta = {
+  id: "clawline",
+  label: "Clawline",
+  selectionLabel: "Clawline (local devices)",
+  docsPath: "/providers/clawline",
+  docsLabel: "clawline",
+  blurb: "first-party local gateway; enable via config/onboarding.",
+  aliases: ["clawline-admin"],
+  order: 10,
+} as const;
 
 function resolveClawlineAccount(params: {
   cfg: ClawdbotConfig;
