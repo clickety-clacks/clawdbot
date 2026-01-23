@@ -1831,19 +1831,22 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       content: text,
       timestamp: nowMs(),
       streaming: false,
-      channelType: DEFAULT_CHANNEL_TYPE,
+      channelType: target.kind === "admin" ? ADMIN_CHANNEL_TYPE : DEFAULT_CHANNEL_TYPE,
     };
-    await runPerUserTask(target.userId, async () => {
-      await appendEvent(event, target.userId);
+    const transcriptUserId = target.kind === "admin" ? ADMIN_TRANSCRIPT_USER_ID : target.userId;
+    await runPerUserTask(transcriptUserId, async () => {
+      await appendEvent(event, transcriptUserId);
     });
-    if (target.kind === "device") {
+    if (target.kind === "admin") {
+      broadcastToAdmins(event);
+    } else if (target.kind === "device") {
       deliverToDevice(target.deviceId, event);
     } else {
       broadcastToUser(target.userId, event);
     }
     return {
       messageId: event.id,
-      userId: target.userId,
+      userId: transcriptUserId,
       deviceId: target.kind === "device" ? target.deviceId : undefined,
     };
   }
@@ -2193,12 +2196,17 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
   type ResolvedSendTarget =
     | { kind: "user"; userId: string }
-    | { kind: "device"; userId: string; deviceId: string };
+    | { kind: "device"; userId: string; deviceId: string }
+    | { kind: "admin" };
 
   function resolveSendTarget(raw: string): ResolvedSendTarget {
     const trimmed = raw.trim();
     if (!trimmed) {
       throw new Error("Delivering to clawline requires --to <userId|deviceId>");
+    }
+    // Admin channel responses use this special marker
+    if (trimmed === ADMIN_TRANSCRIPT_USER_ID) {
+      return { kind: "admin" };
     }
     const lower = trimmed.toLowerCase();
     if (lower.startsWith("user:")) {
