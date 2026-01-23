@@ -1623,6 +1623,14 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         };
       }
     }
+    // Debug logging for duplicate investigation
+    logger.info("replay_start", {
+      deviceId: session.deviceId,
+      userId: session.userId,
+      lastMessageId: lastMessageId ?? "(null)",
+      anchorFound: !!anchor,
+      anchorSequence: anchor?.sequence,
+    });
     const combined: ServerMessage[] = [];
     for (const target of transcriptTargets) {
       let rows: EventRow[] = [];
@@ -1661,6 +1669,14 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       replayTruncated: combined.length > limited.length,
       historyReset: lastMessageId ? false : true,
     };
+    // Debug logging for duplicate investigation
+    logger.info("replay_complete", {
+      deviceId: session.deviceId,
+      replayCount: limited.length,
+      historyReset: payload.historyReset,
+      firstEventId: limited[0]?.id,
+      lastEventId: limited[limited.length - 1]?.id,
+    });
     await sendJson(session.socket, payload);
     for (const event of limited) {
       if (!event.channelType) {
