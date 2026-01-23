@@ -2314,7 +2314,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       });
       return;
     }
-    const sanitizedClaimedName = sanitizeLabel(payload.claimedName);
+    // Lowercase the claimed name for consistent routing (case-insensitive login)
+    const sanitizedClaimedName = sanitizeLabel(payload.claimedName)?.toLowerCase();
     const normalizedUserId = normalizeUserIdFromClaimedName(sanitizedClaimedName);
     const deviceId = payload.deviceId;
     await refreshAllowlistFromDisk();
