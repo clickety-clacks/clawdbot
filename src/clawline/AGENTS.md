@@ -4,31 +4,31 @@ Clawline is a WebSocket-based local gateway connecting devices to Clawdbot.
 
 ## Channel Mapping
 
-Clawline channels map to Clawdbot's session model:
+**Core concept**: SESSION = conversation memory, CHANNEL = delivery pipe.
 
-| Clawline | Clawdbot | Session Key | Reply Mechanism |
-|----------|----------|-------------|-----------------|
-| Admin channel | Main session | `agent:main:main` | `broadcastToAdmins()` |
-| Personal channel | Per-user session | `agent:main:clawline:dm:{userId}` | `broadcastToUser(userId)` |
+| Clawline | Clawdbot Equivalent | Session Key | Reply Goes To |
+|----------|---------------------|-------------|---------------|
+| DM channel | Discord/Telegram DM | `agent:main:main` | User's devices |
+| Personal channel | Discord channel | `agent:main:clawline:dm:{userId}` | User's devices |
 
-### Admin Channel
+### DM Channel (Main Session)
 
-- Maps to Clawdbot's **main session** (same as Discord/Telegram DMs with `dmScope: "main"`)
+- Maps to Clawdbot's **main session** (same as Discord/Telegram DMs)
 - Only `isAdmin: true` allowlist users can access
-- Uses `ADMIN_TRANSCRIPT_USER_ID` (`__clawline_admin__`) for reply routing
-- Provides conversation continuity with other providers (Discord DM, Telegram DM, etc.)
+- Provides conversation continuity with other providers
+- Replies go to originating user, not broadcast to all admins
+- Continuity comes from shared SESSION, not from broadcasting
 
-### Personal Channels
+### Personal Channels (Per-User Sessions)
 
-- Each registered user gets isolated conversation (like Clawdbot groups)
-- Uses user's `userId` from allowlist for routing
-- Admin users also have a personal channel separate from admin channel
+- Each registered user gets isolated conversation
+- Similar to Discord channels - separate memory per user
+- Admin users also have personal channel access
 
 ## Key Constants
 
 ```typescript
-ADMIN_TRANSCRIPT_USER_ID = "__clawline_admin__"
-ADMIN_CHANNEL_TYPE = "admin"
+ADMIN_CHANNEL_TYPE = "admin"  // grants access to DM channel (main session)
 DEFAULT_CHANNEL_TYPE = "personal"
 ```
 

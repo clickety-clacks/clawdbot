@@ -1831,22 +1831,19 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       content: text,
       timestamp: nowMs(),
       streaming: false,
-      channelType: target.kind === "admin" ? ADMIN_CHANNEL_TYPE : DEFAULT_CHANNEL_TYPE,
+      channelType: DEFAULT_CHANNEL_TYPE,
     };
-    const transcriptUserId = target.kind === "admin" ? ADMIN_TRANSCRIPT_USER_ID : target.userId;
-    await runPerUserTask(transcriptUserId, async () => {
-      await appendEvent(event, transcriptUserId);
+    await runPerUserTask(target.userId, async () => {
+      await appendEvent(event, target.userId);
     });
-    if (target.kind === "admin") {
-      broadcastToAdmins(event);
-    } else if (target.kind === "device") {
+    if (target.kind === "device") {
       deliverToDevice(target.deviceId, event);
     } else {
       broadcastToUser(target.userId, event);
     }
     return {
       messageId: event.id,
-      userId: transcriptUserId,
+      userId: target.userId,
       deviceId: target.kind === "device" ? target.deviceId : undefined,
     };
   }
@@ -2008,9 +2005,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         let peerId: string;
         let channelLabel = "clawline";
 
+        // Both channel types use the actual user ID for reply routing.
+        // The difference is only session routing (main vs per-user).
+        peerId = session.peerId;
+
         if (channelType === ADMIN_CHANNEL_TYPE) {
-          peerId = ADMIN_TRANSCRIPT_USER_ID;
-          channelLabel = "clawline-admin";
+          // DM channel: routes to main session (like Discord/Telegram DMs)
+          channelLabel = "clawline-dm";
           route = {
             agentId: mainSessionAgentId,
             channel: "clawline",
@@ -2019,7 +2020,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             mainSessionKey,
           };
         } else {
-          peerId = session.peerId;
+          // Personal channel: routes to per-user session (like Discord channels)
           route = resolveAgentRoute({
             cfg: clawdbotCfg,
             channel: "clawline",
@@ -2196,17 +2197,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
   type ResolvedSendTarget =
     | { kind: "user"; userId: string }
-    | { kind: "device"; userId: string; deviceId: string }
-    | { kind: "admin" };
+    | { kind: "device"; userId: string; deviceId: string };
 
   function resolveSendTarget(raw: string): ResolvedSendTarget {
     const trimmed = raw.trim();
     if (!trimmed) {
       throw new Error("Delivering to clawline requires --to <userId|deviceId>");
-    }
-    // Admin channel responses use this special marker
-    if (trimmed === ADMIN_TRANSCRIPT_USER_ID) {
-      return { kind: "admin" };
     }
     const lower = trimmed.toLowerCase();
     if (lower.startsWith("user:")) {

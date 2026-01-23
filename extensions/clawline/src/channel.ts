@@ -16,7 +16,7 @@ const meta = {
   docsPath: "/providers/clawline",
   docsLabel: "clawline",
   blurb: "first-party local gateway; enable via config/onboarding.",
-  aliases: ["clawline-admin"],
+  aliases: ["clawline-dm"],
   order: 10,
 } as const;
 
