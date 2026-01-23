@@ -97,6 +97,8 @@ export type SessionEntry = {
   lastTo?: string;
   lastAccountId?: string;
   lastThreadId?: string | number;
+  /** Clawline-specific: "admin" for DM channel, "personal" for per-user channel. */
+  clawlineChannelType?: "admin" | "personal";
   skillsSnapshot?: SessionSkillSnapshot;
   systemPromptReport?: SessionSystemPromptReport;
 };

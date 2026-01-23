@@ -1792,13 +1792,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
     const target = resolveSendTarget(targetInput);
 
-    // Derive channelType from the stored route for this user.
-    // clawline-dm → admin channel, clawline → personal channel.
+    // Derive channelType from the stored clawlineChannelType field.
+    // This field is set when messages are received, storing "admin" or "personal".
     let channelType: ChannelType = DEFAULT_CHANNEL_TYPE;
     try {
       const store = loadSessionStore(sessionStorePath);
       const mainEntry = store[mainSessionKey];
-      if (mainEntry?.lastTo === target.userId && mainEntry.lastChannel === "clawline-dm") {
+      if (mainEntry?.lastTo === target.userId && mainEntry.clawlineChannelType === "admin") {
         channelType = ADMIN_CHANNEL_TYPE;
       }
     } catch {
@@ -2043,6 +2043,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           channel: channelLabel,
           to: peerId,
           accountId: route.accountId,
+          clawlineChannelType: channelType,
         });
 
         const fallbackText = adapterOverrides.responseFallback?.trim() ?? "";
