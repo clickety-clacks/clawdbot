@@ -2401,10 +2401,22 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           oldUserId: entry.userId,
           newUserId,
         });
+        // Terminate any active sessions for this device (they have the old userId)
+        const existingSession = sessionsByDevice.get(deviceId);
+        if (existingSession) {
+          sendJson(existingSession.socket, {
+            type: "error",
+            code: "session_invalidated",
+            message: "Account switched",
+          }).catch(() => {});
+          existingSession.socket.close();
+          removeSession(existingSession);
+        }
         // Update entry with new account info
+        // Preserve isAdmin - don't allow privilege escalation via account switch
         entry.userId = newUserId;
         entry.claimedName = sanitizedClaimedName;
-        entry.isAdmin = newUserId === ADMIN_USER_ID;
+        entry.deviceInfo = sanitizedInfo;
         await persistAllowlist();
       } else {
         logger.info?.("[clawline:http] pair_request_token_redispatch", { deviceId });
