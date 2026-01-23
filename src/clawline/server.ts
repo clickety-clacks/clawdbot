@@ -46,7 +46,6 @@ import { ClientMessageError, HttpError } from "./errors.js";
 import { SlidingWindowRateLimiter } from "./rate-limiter.js";
 import { createAssetHandlers } from "./http-assets.js";
 import { callGateway } from "../gateway/call.js";
-import { sendMessage } from "../infra/outbound/message.js";
 import { GATEWAY_CLIENT_MODES, GATEWAY_CLIENT_NAMES } from "../gateway/protocol/client-info.js";
 
 export const PROTOCOL_VERSION = 1;

@@ -41,6 +41,22 @@ const testClawdbotConfig = {
   bindings: [],
 } as ClawdbotConfig;
 
+const decodeRawData = (data: WebSocket.RawData): string => {
+  if (typeof data === "string") {
+    return data;
+  }
+
+  if (Buffer.isBuffer(data)) {
+    return data.toString("utf8");
+  }
+
+  if (Array.isArray(data)) {
+    return Buffer.concat(data).toString("utf8");
+  }
+
+  return Buffer.from(data).toString("utf8");
+};
+
 beforeEach(() => {
   gatewayCallMock.mockReset();
   gatewayCallMock.mockResolvedValue({ ok: true });
@@ -175,7 +191,7 @@ function waitForMessage(ws: WebSocket): Promise<any> {
       resolved = true;
       cleanup();
       try {
-        resolve(JSON.parse(data.toString()));
+        resolve(JSON.parse(decodeRawData(data)));
       } catch (err) {
         reject(err);
       }
@@ -403,7 +419,7 @@ describe.sequential("clawline provider server", () => {
 
       const received: any[] = [];
       const listener = (data: WebSocket.RawData) => {
-        received.push(JSON.parse(data.toString()));
+        received.push(JSON.parse(decodeRawData(data)));
       };
       userWs.on("message", listener);
       await new Promise((resolve) => setTimeout(resolve, 20));
