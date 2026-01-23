@@ -2193,11 +2193,15 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   }
 
   function resolveUserTarget(userId: string): ResolvedSendTarget {
-    const entries = allowlist.entries.filter((entry) => entry.userId === userId);
+    const normalizedId = userId.toLowerCase();
+    const entries = allowlist.entries.filter(
+      (entry) => entry.userId.toLowerCase() === normalizedId,
+    );
     if (entries.length === 0) {
       throw new Error(`Unknown clawline user: ${userId}`);
     }
-    return { kind: "user", userId };
+    // Return the canonical userId from the allowlist (preserves original casing)
+    return { kind: "user", userId: entries[0].userId };
   }
 
   wss.on("connection", (ws, req) => {
