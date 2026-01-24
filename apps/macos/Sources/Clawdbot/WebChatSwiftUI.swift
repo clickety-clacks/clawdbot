@@ -133,7 +133,10 @@ struct MacGatewayChatTransport: ClawdbotChatTransport, Sendable {
                 else {
                     return nil
                 }
-                return .activity(isActive: activity.isActive, messageId: activity.messageId)
+                return .activity(
+                    isActive: activity.isActive,
+                    messageId: activity.messageId,
+                    sessionKey: activity.sessionKey)
             default:
                 return nil
             }
