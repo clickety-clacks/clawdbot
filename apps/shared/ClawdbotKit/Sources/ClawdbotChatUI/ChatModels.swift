@@ -278,6 +278,11 @@ public struct ClawdbotAgentEventPayload: Codable, Sendable, Identifiable {
     public let data: [String: AnyCodable]
 }
 
+public struct ClawdbotActivityEventPayload: Codable, Sendable {
+    public let isActive: Bool
+    public let messageId: String?
+}
+
 public struct ClawdbotChatPendingToolCall: Identifiable, Hashable, Sendable {
     public var id: String { self.toolCallId }
     public let toolCallId: String

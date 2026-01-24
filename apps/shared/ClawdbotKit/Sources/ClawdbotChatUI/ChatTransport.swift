@@ -6,6 +6,7 @@ public enum ClawdbotChatTransportEvent: Sendable {
     case chat(ClawdbotChatEventPayload)
     case agent(ClawdbotAgentEventPayload)
     case seqGap
+    case activity(isActive: Bool, messageId: String?)
 }
 
 public protocol ClawdbotChatTransport: Sendable {

@@ -165,7 +165,7 @@ public struct ClawdbotChatView: View {
                     alignment: msg.role.lowercased() == "user" ? .trailing : .leading)
         }
 
-        if self.viewModel.pendingRunCount > 0 {
+        if self.viewModel.pendingRunCount > 0 || self.viewModel.isAssistantTyping {
             HStack {
                 ChatTypingIndicatorBubble(style: self.style)
                     .equatable()
