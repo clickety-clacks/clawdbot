@@ -2182,7 +2182,18 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         await sendJson(session.socket, { type: "error", code: err.code, message: err.message });
         return;
       }
-      throw err;
+      // Log unexpected errors and notify client so UI can show failure
+      logger.error?.("[clawline] processClientMessage_unexpected_error", {
+        error: err instanceof Error ? err.message : String(err),
+        messageId: payload?.id,
+        userId: session.userId,
+      });
+      await sendJson(session.socket, {
+        type: "error",
+        code: "server_error",
+        message: "Message processing failed",
+        messageId: payload?.id,
+      });
     }
   }
 
