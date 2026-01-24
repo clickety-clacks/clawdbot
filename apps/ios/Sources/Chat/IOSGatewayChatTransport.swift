@@ -115,6 +115,16 @@ struct IOSGatewayChatTransport: OpenClawChatTransport, Sendable {
                         {
                             continuation.yield(.agent(agentPayload))
                         }
+                    case "activity":
+                        guard let payload = evt.payload else { break }
+                        if let activityPayload = try? GatewayPayloadDecoding.decode(
+                            payload,
+                            as: ClawdbotActivityEventPayload.self)
+                        {
+                            continuation.yield(.activity(
+                                isActive: activityPayload.isActive,
+                                messageId: activityPayload.messageId))
+                        }
                     default:
                         break
                     }

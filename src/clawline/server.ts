@@ -2058,9 +2058,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         const sendActivitySignal = async (isActive: boolean) => {
           logger.info?.("[clawline] activity_signal", { isActive, messageId: payload.id });
           await sendJson(session.socket, {
-            type: "activity",
-            isActive,
-            messageId: payload.id,
+            type: "event",
+            event: "activity",
+            payload: {
+              isActive,
+              messageId: payload.id,
+            },
           });
         };
 
