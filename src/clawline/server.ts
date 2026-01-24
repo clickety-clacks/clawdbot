@@ -2056,13 +2056,20 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         // Track activity state for typing indicator
         let activitySignaled = false;
         const sendActivitySignal = async (isActive: boolean) => {
-          logger.info?.("[clawline] activity_signal", { isActive, messageId: payload.id });
+          logger.info?.("[clawline] activity_signal", {
+            isActive,
+            messageId: payload.id,
+            sessionKey: route.sessionKey,
+            channelType,
+          });
           await sendJson(session.socket, {
             type: "event",
             event: "activity",
             payload: {
               isActive,
               messageId: payload.id,
+              sessionKey: route.sessionKey,
+              channelType,
             },
           });
         };

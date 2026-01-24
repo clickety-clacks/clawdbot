@@ -369,7 +369,11 @@ public final class OpenClawChatViewModel {
         case .seqGap:
             self.errorText = "Event stream interrupted; try refreshing."
             self.clearPendingRuns(reason: nil)
-        case let .activity(isActive, _):
+        case let .activity(isActive, _, sessionKey):
+            // Only show typing indicator for the current session
+            if let sessionKey, sessionKey != self.sessionKey {
+                return
+            }
             self.isAssistantTyping = isActive
         }
     }

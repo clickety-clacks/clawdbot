@@ -123,7 +123,8 @@ struct IOSGatewayChatTransport: OpenClawChatTransport, Sendable {
                         {
                             continuation.yield(.activity(
                                 isActive: activityPayload.isActive,
-                                messageId: activityPayload.messageId))
+                                messageId: activityPayload.messageId,
+                                sessionKey: activityPayload.sessionKey))
                         }
                     default:
                         break
