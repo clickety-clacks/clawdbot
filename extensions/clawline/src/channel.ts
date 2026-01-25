@@ -43,7 +43,7 @@ export const clawlinePlugin: ChannelPlugin<ResolvedClawlineAccount> = {
   onboarding: clawlineOnboardingAdapter,
   capabilities: {
     chatTypes: ["direct"],
-    media: false,
+    media: true,
   },
   reload: { configPrefixes: ["clawline"] },
   config: {
