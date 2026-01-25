@@ -30,6 +30,7 @@ import {
 import {
   loadSessionStore,
   resolveAgentIdFromSessionKey,
+  resolveMainSessionKeyFromConfig,
   updateLastRoute,
 } from "../config/sessions.js";
 import { rawDataToString } from "../infra/ws.js";
@@ -1290,6 +1291,21 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
   async function wakeGatewayForAlert(text: string) {
     try {
+      const sessionKey = resolveMainSessionKeyFromConfig();
+      await callGateway({
+        method: "agent",
+        params: {
+          message: `System Alert: ${text}`,
+          sessionKey,
+          channel: "webchat",
+          deliver: false,
+          idempotencyKey: randomUUID(),
+        },
+        clientName: GATEWAY_CLIENT_NAMES.CLI,
+        clientDisplayName: "clawline-alert",
+        clientVersion: "clawline",
+        mode: GATEWAY_CLIENT_MODES.BACKEND,
+      });
       await callGateway({
         method: "system-event",
         params: { text },
