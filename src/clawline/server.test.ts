@@ -505,13 +505,20 @@ describe.sequential("clawline provider server", () => {
       expect(response.status).toBe(200);
       const payload = await response.json();
       expect(payload).toEqual({ ok: true });
-      expect(gatewayCallMock).toHaveBeenCalledTimes(2);
-      const queueCall = gatewayCallMock.mock.calls[0]?.[0] as {
+      expect(gatewayCallMock).toHaveBeenCalledTimes(3);
+      const agentCall = gatewayCallMock.mock.calls[0]?.[0] as {
+        params?: { message?: string; sessionKey?: string };
+        method?: string;
+      };
+      const queueCall = gatewayCallMock.mock.calls[1]?.[0] as {
         params?: { text?: string };
       };
-      const wakeCall = gatewayCallMock.mock.calls[1]?.[0] as {
+      const wakeCall = gatewayCallMock.mock.calls[2]?.[0] as {
         params?: { text?: string; mode?: string };
       };
+      expect(agentCall?.method).toBe("agent");
+      expect(agentCall?.params?.message).toBe("System Alert: [codex] Check on Flynn");
+      expect(agentCall?.params?.sessionKey).toBe("agent:main:main");
       expect(queueCall?.params?.text).toBe("[codex] Check on Flynn");
       expect(wakeCall?.params?.text).toBe("[codex] Check on Flynn");
       expect(wakeCall?.params?.mode).toBe("now");
@@ -532,9 +539,13 @@ describe.sequential("clawline provider server", () => {
       const payload = await response.json();
       expect(payload).toEqual({ ok: true });
       const expected = "[codex] Check on Flynn\n\nFollow up with Flynn ASAP.";
-      const wakeCall = gatewayCallMock.mock.calls[1]?.[0] as
+      const agentCall = gatewayCallMock.mock.calls[0]?.[0] as
+        | { params?: { message?: string } }
+        | undefined;
+      const wakeCall = gatewayCallMock.mock.calls[2]?.[0] as
         | { params?: { text?: string } }
         | undefined;
+      expect(agentCall?.params?.message).toBe(`System Alert: ${expected}`);
       expect(wakeCall?.params?.text).toBe(expected);
     } finally {
       await ctx.cleanup();
@@ -553,9 +564,13 @@ describe.sequential("clawline provider server", () => {
       });
       expect(response.status).toBe(200);
       const expected = `[codex] Check on Flynn\n\n${DEFAULT_ALERT_INSTRUCTIONS_TEXT}`;
-      const wakeCall = gatewayCallMock.mock.calls[1]?.[0] as
+      const agentCall = gatewayCallMock.mock.calls[0]?.[0] as
+        | { params?: { message?: string } }
+        | undefined;
+      const wakeCall = gatewayCallMock.mock.calls[2]?.[0] as
         | { params?: { text?: string } }
         | undefined;
+      expect(agentCall?.params?.message).toBe(`System Alert: ${expected}`);
       expect(wakeCall?.params?.text).toBe(expected);
     } finally {
       await ctx.cleanup();
