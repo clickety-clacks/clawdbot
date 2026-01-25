@@ -76,8 +76,6 @@ const INLINE_IMAGE_MIME_TYPES = new Set([
   "image/webp",
   "image/heic",
 ]);
-// Hard ceiling for a single client payload: 64 KB text budget + 256 KB inline assets + JSON overhead.
-const MAX_TOTAL_PAYLOAD_BYTES = 320 * 1024;
 const MAX_ALERT_BODY_BYTES = 4 * 1024;
 type ChannelType = "personal" | "admin";
 const DEFAULT_CHANNEL_TYPE: ChannelType = "personal";
@@ -227,9 +225,6 @@ function normalizeAttachmentsInput(
       if (decoded.length === 0) {
         throw new ClientMessageError("invalid_message", "Empty attachment data");
       }
-      if (decoded.length > mediaConfig.maxInlineBytes) {
-        throw new ClientMessageError("payload_too_large", "Inline attachment too large");
-      }
       inlineBytes += decoded.length;
       attachments.push({ type: "image", mimeType: mime, data: typed.data });
     } else if (typed.type === "asset") {
@@ -241,9 +236,6 @@ function normalizeAttachmentsInput(
     } else {
       throw new ClientMessageError("invalid_message", "Unknown attachment type");
     }
-  }
-  if (inlineBytes > mediaConfig.maxInlineBytes) {
-    throw new ClientMessageError("payload_too_large", "Inline attachments exceed limit");
   }
   return { attachments, inlineBytes, assetIds };
 }
@@ -883,18 +875,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     attachments: ClawlineOutboundAttachmentInput[];
     ownerUserId: string;
     uploaderDeviceId: string;
-    allowedInlineBytes?: number;
   }): Promise<{ attachments: NormalizedAttachment[]; assetIds: string[] }> {
     if (params.attachments.length === 0) {
       return { attachments: [], assetIds: [] };
     }
     const resolved: NormalizedAttachment[] = [];
     const assetIds: string[] = [];
-    const inlineLimit =
-      typeof params.allowedInlineBytes === "number"
-        ? Math.max(0, Math.min(params.allowedInlineBytes, config.media.maxInlineBytes))
-        : config.media.maxInlineBytes;
-    let inlineBytes = 0;
     for (const attachment of params.attachments) {
       if (!attachment || typeof attachment !== "object") {
         throw new Error("Clawline outbound attachment must be an object");
@@ -908,13 +894,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         throw new Error("Clawline outbound attachment exceeds max upload size");
       }
       const isInlineImage = INLINE_IMAGE_MIME_TYPES.has(mimeType);
-      if (
-        isInlineImage &&
-        buffer.length <= inlineLimit &&
-        inlineBytes + buffer.length <= inlineLimit
-      ) {
+      if (isInlineImage) {
         resolved.push({ type: "image", mimeType, data });
-        inlineBytes += buffer.length;
         continue;
       }
       const assetId = `a_${randomUUID()}`;
@@ -940,18 +921,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     mediaUrls: string[];
     ownerUserId: string;
     uploaderDeviceId: string;
-    allowedInlineBytes?: number;
   }): Promise<{ attachments: NormalizedAttachment[]; assetIds: string[] }> {
     if (params.mediaUrls.length === 0) {
       return { attachments: [], assetIds: [] };
     }
     const resolved: NormalizedAttachment[] = [];
     const assetIds: string[] = [];
-    const inlineLimit =
-      typeof params.allowedInlineBytes === "number"
-        ? Math.max(0, Math.min(params.allowedInlineBytes, config.media.maxInlineBytes))
-        : config.media.maxInlineBytes;
-    let inlineBytes = 0;
     const trimmedUrls = params.mediaUrls
       .map((url) => (typeof url === "string" ? url.trim() : ""))
       .filter((url) => url.length > 0);
@@ -963,13 +938,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         continue;
       }
       const isInlineImage = INLINE_IMAGE_MIME_TYPES.has(mimeType);
-      if (
-        isInlineImage &&
-        buffer.length <= inlineLimit &&
-        inlineBytes + buffer.length <= inlineLimit
-      ) {
+      if (isInlineImage) {
         resolved.push({ type: "image", mimeType, data: buffer.toString("base64") });
-        inlineBytes += buffer.length;
         continue;
       }
       const assetId = `a_${randomUUID()}`;
@@ -1924,7 +1894,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     if (bytes > config.sessions.maxMessageBytes) {
       throw new Error("Clawline message exceeds max size");
     }
-    const allowedInlineBytes = Math.max(0, MAX_TOTAL_PAYLOAD_BYTES - bytes);
     const target = resolveSendTarget(targetInput);
 
     // Derive channelType from the stored clawlineChannelType field.
@@ -1949,14 +1918,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         attachments: rawAttachments,
         ownerUserId: target.userId,
         uploaderDeviceId: target.kind === "device" ? target.deviceId : "server",
-        allowedInlineBytes,
       });
     } else if (mediaUrl) {
       outboundAttachments = await materializeOutboundMediaUrls({
         mediaUrls: [mediaUrl],
         ownerUserId: target.userId,
         uploaderDeviceId: target.kind === "device" ? target.deviceId : "server",
-        allowedInlineBytes,
       });
     }
 
@@ -2048,9 +2015,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         throw new ClientMessageError("payload_too_large", "Message too large");
       }
       const attachmentsInfo = normalizeAttachmentsInput(payload.attachments, config.media);
-      if (contentBytes + attachmentsInfo.inlineBytes > MAX_TOTAL_PAYLOAD_BYTES) {
-        throw new ClientMessageError("payload_too_large", "Message too large");
-      }
       const attachmentsHash = hashAttachments(attachmentsInfo.attachments);
       const channelType = normalizeChannelType(payload.channelType);
       if (channelType === ADMIN_CHANNEL_TYPE && !sessionHasAdminAccess(session)) {
@@ -2248,15 +2212,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
                 : [];
             let attachments: NormalizedAttachment[] = [];
             const trimmedText = replyPayload.text?.trim();
-            const contentBytes = trimmedText ? Buffer.byteLength(trimmedText, "utf8") : 0;
-            const allowedInlineBytes = Math.max(0, MAX_TOTAL_PAYLOAD_BYTES - contentBytes);
             if (mediaUrls.length > 0) {
               try {
                 const materialized = await materializeOutboundMediaUrls({
                   mediaUrls,
                   ownerUserId: targetUserId,
                   uploaderDeviceId: session.deviceId,
-                  allowedInlineBytes,
                 });
                 attachments = materialized.attachments;
               } catch (err) {
