@@ -76,7 +76,6 @@ const INLINE_IMAGE_MIME_TYPES = new Set([
   "image/webp",
   "image/heic",
 ]);
-const MAX_ATTACHMENTS_COUNT = 4;
 // Hard ceiling for a single client payload: 64 KB text budget + 256 KB inline assets + JSON overhead.
 const MAX_TOTAL_PAYLOAD_BYTES = 320 * 1024;
 const MAX_ALERT_BODY_BYTES = 4 * 1024;
@@ -202,9 +201,6 @@ function normalizeAttachmentsInput(
   }
   if (!Array.isArray(raw)) {
     throw new ClientMessageError("invalid_message", "attachments must be an array");
-  }
-  if (raw.length > MAX_ATTACHMENTS_COUNT) {
-    throw new ClientMessageError("payload_too_large", "Too many attachments");
   }
   let inlineBytes = 0;
   const attachments: NormalizedAttachment[] = [];
@@ -959,14 +955,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     const trimmedUrls = params.mediaUrls
       .map((url) => (typeof url === "string" ? url.trim() : ""))
       .filter((url) => url.length > 0);
-    if (trimmedUrls.length > MAX_ATTACHMENTS_COUNT) {
-      logger.warn?.("[clawline] outbound_attachments_trimmed", {
-        requested: trimmedUrls.length,
-        allowed: MAX_ATTACHMENTS_COUNT,
-      });
-    }
-    const urls = trimmedUrls.slice(0, MAX_ATTACHMENTS_COUNT);
-    for (const url of urls) {
+    for (const url of trimmedUrls) {
       const media = await loadWebMedia(url, config.media.maxUploadBytes);
       const mimeType = (media.contentType ?? "application/octet-stream").toLowerCase();
       const buffer = media.buffer;
@@ -1951,9 +1940,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       // Fall back to default on error
     }
 
-    if (rawAttachments.length > MAX_ATTACHMENTS_COUNT) {
-      throw new Error("Too many attachments");
-    }
     let outboundAttachments = {
       attachments: [] as NormalizedAttachment[],
       assetIds: [] as string[],
