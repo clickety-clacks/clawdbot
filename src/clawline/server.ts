@@ -1297,8 +1297,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         params: {
           message: `System Alert: ${text}`,
           sessionKey,
-          channel: "webchat",
-          deliver: false,
+          deliver: true,
           idempotencyKey: randomUUID(),
         },
         clientName: GATEWAY_CLIENT_NAMES.CLI,
