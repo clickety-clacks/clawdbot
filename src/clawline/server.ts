@@ -1130,7 +1130,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       const payload = await parseAlertPayload(req);
       let text = buildAlertText(payload.message, payload.source);
       text = await applyAlertInstructions(text);
-      await wakeGatewayForAlert(text);
+      await wakeGatewayForAlert(text, payload.sessionKey);
       res.setHeader("Content-Type", "application/json");
       res.writeHead(200);
       res.end(JSON.stringify({ ok: true }));
@@ -1148,7 +1148,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
   async function parseAlertPayload(
     req: http.IncomingMessage,
-  ): Promise<{ message: string; source?: string }> {
+  ): Promise<{ message: string; source?: string; sessionKey?: string }> {
     const raw = await readRequestBody(req, MAX_ALERT_BODY_BYTES);
     if (raw.length === 0) {
       throw new HttpError(400, "invalid_request", "Empty alert payload");
@@ -1164,10 +1164,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
     const message = typeof (parsed as any).message === "string" ? (parsed as any).message : "";
     const source = typeof (parsed as any).source === "string" ? (parsed as any).source : undefined;
+    const sessionKey =
+      typeof (parsed as any).sessionKey === "string" ? (parsed as any).sessionKey : undefined;
     if (!message.trim()) {
       throw new HttpError(400, "invalid_message", "Alert message is required");
     }
-    return { message, source };
+    return { message, source, sessionKey };
   }
 
   async function readRequestBody(req: http.IncomingMessage, limit: number): Promise<Buffer> {
@@ -1289,14 +1291,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
   }
 
-  async function wakeGatewayForAlert(text: string) {
+  async function wakeGatewayForAlert(text: string, sessionKey?: string) {
     try {
-      const sessionKey = resolveMainSessionKeyFromConfig();
       await callGateway({
         method: "agent",
         params: {
           message: `System Alert: ${text}`,
-          sessionKey,
+          sessionKey: sessionKey ?? resolveMainSessionKeyFromConfig(),
           deliver: true,
           idempotencyKey: randomUUID(),
         },
@@ -2030,14 +2031,16 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       if (typeof payload.id !== "string" || !payload.id.startsWith("c_")) {
         throw new ClientMessageError("invalid_message", "Invalid id");
       }
-      if (typeof payload.content !== "string" || payload.content.length === 0) {
+      const rawContent = typeof payload.content === "string" ? payload.content : "";
+      const attachmentsInfo = normalizeAttachmentsInput(payload.attachments, config.media);
+      const hasContent = rawContent.trim().length > 0;
+      if (!hasContent && attachmentsInfo.attachments.length === 0) {
         throw new ClientMessageError("invalid_message", "Missing content");
       }
-      const contentBytes = Buffer.byteLength(payload.content, "utf8");
+      const contentBytes = Buffer.byteLength(rawContent, "utf8");
       if (contentBytes > config.sessions.maxMessageBytes) {
         throw new ClientMessageError("payload_too_large", "Message too large");
       }
-      const attachmentsInfo = normalizeAttachmentsInput(payload.attachments, config.media);
       const attachmentsHash = hashAttachments(attachmentsInfo.attachments);
       const channelType = normalizeChannelType(payload.channelType);
       if (channelType === ADMIN_CHANNEL_TYPE && !sessionHasAdminAccess(session)) {
@@ -2055,7 +2058,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               ackSent: number;
             }
           | undefined;
-        const incomingHash = sha256(payload.content);
+        const incomingHash = sha256(rawContent);
         if (existing) {
           if (
             existing.contentHash !== incomingHash ||
@@ -2099,7 +2102,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           session,
           targetUserId,
           payload.id,
-          payload.content,
+          rawContent,
           ownership.attachments,
           attachmentsHash,
           ownership.assetIds,
@@ -2117,8 +2120,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
         const attachmentSummary = describeClawlineAttachments(ownership.attachments, assetsDir);
         const inboundBody = attachmentSummary
-          ? `${payload.content}\n\n${attachmentSummary}`
-          : payload.content;
+          ? `${rawContent}\n\n${attachmentSummary}`
+          : rawContent;
 
         let route:
           | ReturnType<typeof resolveAgentRoute>
@@ -2166,8 +2169,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
         const ctxPayload = finalizeInboundContext({
           Body: inboundBody,
-          RawBody: payload.content,
-          CommandBody: payload.content,
+          RawBody: rawContent,
+          CommandBody: rawContent,
           From: `${channelLabel}:${peerId}`,
           To: `device:${session.deviceId}`,
           SessionKey: route.sessionKey,
