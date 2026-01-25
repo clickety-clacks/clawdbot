@@ -505,10 +505,14 @@ describe.sequential("clawline provider server", () => {
       expect(response.status).toBe(200);
       const payload = await response.json();
       expect(payload).toEqual({ ok: true });
-      expect(gatewayCallMock).toHaveBeenCalledTimes(1);
-      const wakeCall = gatewayCallMock.mock.calls[0]?.[0] as {
+      expect(gatewayCallMock).toHaveBeenCalledTimes(2);
+      const queueCall = gatewayCallMock.mock.calls[0]?.[0] as {
+        params?: { text?: string };
+      };
+      const wakeCall = gatewayCallMock.mock.calls[1]?.[0] as {
         params?: { text?: string; mode?: string };
       };
+      expect(queueCall?.params?.text).toBe("[codex] Check on Flynn");
       expect(wakeCall?.params?.text).toBe("[codex] Check on Flynn");
       expect(wakeCall?.params?.mode).toBe("now");
     } finally {
@@ -528,7 +532,7 @@ describe.sequential("clawline provider server", () => {
       const payload = await response.json();
       expect(payload).toEqual({ ok: true });
       const expected = "[codex] Check on Flynn\n\nFollow up with Flynn ASAP.";
-      const wakeCall = gatewayCallMock.mock.calls[0]?.[0] as
+      const wakeCall = gatewayCallMock.mock.calls[1]?.[0] as
         | { params?: { text?: string } }
         | undefined;
       expect(wakeCall?.params?.text).toBe(expected);
@@ -549,7 +553,7 @@ describe.sequential("clawline provider server", () => {
       });
       expect(response.status).toBe(200);
       const expected = `[codex] Check on Flynn\n\n${DEFAULT_ALERT_INSTRUCTIONS_TEXT}`;
-      const wakeCall = gatewayCallMock.mock.calls[0]?.[0] as
+      const wakeCall = gatewayCallMock.mock.calls[1]?.[0] as
         | { params?: { text?: string } }
         | undefined;
       expect(wakeCall?.params?.text).toBe(expected);
