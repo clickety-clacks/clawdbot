@@ -1131,10 +1131,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     logHttpRequest("alert_request_start");
     try {
       const payload = await parseAlertPayload(req);
-      logger.info?.("alert_payload_received", {
-        raw: payload.raw,
-        sessionKey: payload.sessionKey ?? "undefined",
-      });
+      logger.info?.(
+        `[clawline] alert_payload_received raw=${JSON.stringify(
+          payload.raw,
+        )} sessionKey=${payload.sessionKey ?? "undefined"}`,
+      );
       let text = buildAlertText(payload.message, payload.source);
       text = await applyAlertInstructions(text);
       await wakeGatewayForAlert(text, payload.sessionKey);
@@ -1302,10 +1303,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   async function wakeGatewayForAlert(text: string, sessionKey?: string) {
     try {
       const resolvedSessionKey = sessionKey ?? resolveMainSessionKeyFromConfig();
-      logger.info?.("alert_session_key", {
-        sessionKey: sessionKey ?? "undefined",
-        resolvedSessionKey,
-      });
+      logger.info?.(
+        `[clawline] alert_session_key sessionKey=${sessionKey ?? "undefined"} resolved=${resolvedSessionKey}`,
+      );
       await callGateway({
         method: "agent",
         params: {
