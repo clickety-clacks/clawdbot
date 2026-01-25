@@ -507,7 +507,12 @@ describe.sequential("clawline provider server", () => {
       expect(payload).toEqual({ ok: true });
       expect(gatewayCallMock).toHaveBeenCalledTimes(3);
       const agentCall = gatewayCallMock.mock.calls[0]?.[0] as {
-        params?: { message?: string; sessionKey?: string };
+        params?: {
+          message?: string;
+          sessionKey?: string;
+          deliver?: boolean;
+          channel?: string;
+        };
         method?: string;
       };
       const queueCall = gatewayCallMock.mock.calls[1]?.[0] as {
@@ -519,6 +524,8 @@ describe.sequential("clawline provider server", () => {
       expect(agentCall?.method).toBe("agent");
       expect(agentCall?.params?.message).toBe("System Alert: [codex] Check on Flynn");
       expect(agentCall?.params?.sessionKey).toBe("agent:main:main");
+      expect(agentCall?.params?.deliver).toBe(true);
+      expect(agentCall?.params?.channel).toBeUndefined();
       expect(queueCall?.params?.text).toBe("[codex] Check on Flynn");
       expect(wakeCall?.params?.text).toBe("[codex] Check on Flynn");
       expect(wakeCall?.params?.mode).toBe("now");
