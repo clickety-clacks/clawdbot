@@ -1131,6 +1131,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     logHttpRequest("alert_request_start");
     try {
       const payload = await parseAlertPayload(req);
+      logger.info?.("alert_payload_received", {
+        raw: payload.raw,
+        sessionKey: payload.sessionKey ?? "undefined",
+      });
       let text = buildAlertText(payload.message, payload.source);
       text = await applyAlertInstructions(text);
       await wakeGatewayForAlert(text, payload.sessionKey);
@@ -1151,14 +1155,15 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
   async function parseAlertPayload(
     req: http.IncomingMessage,
-  ): Promise<{ message: string; source?: string; sessionKey?: string }> {
+  ): Promise<{ raw: string; message: string; source?: string; sessionKey?: string }> {
     const raw = await readRequestBody(req, MAX_ALERT_BODY_BYTES);
     if (raw.length === 0) {
       throw new HttpError(400, "invalid_request", "Empty alert payload");
     }
+    const rawText = raw.toString("utf8");
     let parsed: unknown;
     try {
-      parsed = JSON.parse(raw.toString("utf8"));
+      parsed = JSON.parse(rawText);
     } catch {
       throw new HttpError(400, "invalid_json", "Alert payload must be valid JSON");
     }
@@ -1172,7 +1177,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     if (!message.trim()) {
       throw new HttpError(400, "invalid_message", "Alert message is required");
     }
-    return { message, source, sessionKey };
+    return { raw: rawText, message, source, sessionKey };
   }
 
   async function readRequestBody(req: http.IncomingMessage, limit: number): Promise<Buffer> {
@@ -1296,11 +1301,16 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
   async function wakeGatewayForAlert(text: string, sessionKey?: string) {
     try {
+      const resolvedSessionKey = sessionKey ?? resolveMainSessionKeyFromConfig();
+      logger.info?.("alert_session_key", {
+        sessionKey: sessionKey ?? "undefined",
+        resolvedSessionKey,
+      });
       await callGateway({
         method: "agent",
         params: {
           message: `System Alert: ${text}`,
-          sessionKey: sessionKey ?? resolveMainSessionKeyFromConfig(),
+          sessionKey: resolvedSessionKey,
           deliver: true,
           idempotencyKey: randomUUID(),
         },
