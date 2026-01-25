@@ -25,6 +25,10 @@ export type AllowlistFile = { version: 1; entries: AllowlistEntry[] };
 export type NormalizedAttachment =
   | { type: "image"; mimeType: string; data: string; assetId?: string }
   | { type: "asset"; assetId: string };
+export type ClawlineOutboundAttachmentInput = {
+  data: string;
+  mimeType?: string;
+};
 export type PendingEntry = {
   deviceId: string;
   claimedName?: string;
@@ -102,10 +106,13 @@ export type ClawlineOutboundSendParams = {
   target: string;
   text: string;
   mediaUrl?: string;
+  attachments?: ClawlineOutboundAttachmentInput[];
 };
 
 export type ClawlineOutboundSendResult = {
   messageId: string;
   userId: string;
   deviceId?: string;
+  attachments?: NormalizedAttachment[];
+  assetIds?: string[];
 };

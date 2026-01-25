@@ -41,7 +41,7 @@ export const clawlinePlugin: ChannelPlugin<ResolvedClawlineAccount> = {
   },
   capabilities: {
     chatTypes: ["direct"],
-    media: false,
+    media: true,
   },
   reload: { configPrefixes: ["clawline"] },
   config: {

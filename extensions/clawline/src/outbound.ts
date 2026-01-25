@@ -1,4 +1,8 @@
-import { sendClawlineOutboundMessage, type ChannelOutboundAdapter } from "clawdbot/plugin-sdk";
+import {
+  loadWebMedia,
+  sendClawlineOutboundMessage,
+  type ChannelOutboundAdapter,
+} from "clawdbot/plugin-sdk";
 
 function chunkTextForClawline(text: string, limit: number): string[] {
   if (!text) return [];
@@ -49,7 +53,31 @@ export const clawlineOutbound: ChannelOutboundAdapter = {
       },
     };
   },
-  sendMedia: async () => {
-    throw new Error("Clawline outbound media delivery is not supported yet");
+  sendMedia: async ({ cfg, to, text, mediaUrl }) => {
+    if (!mediaUrl) {
+      throw new Error("Clawline outbound media delivery requires mediaUrl");
+    }
+    const maxBytes = cfg.clawline?.media?.maxUploadBytes;
+    const media = await loadWebMedia(mediaUrl, maxBytes);
+    const attachments = [
+      {
+        data: media.buffer.toString("base64"),
+        mimeType: media.contentType ?? "application/octet-stream",
+      },
+    ];
+    const result = await sendClawlineOutboundMessage({
+      target: to,
+      text: text ?? "",
+      attachments,
+    });
+    return {
+      channel: "clawline",
+      messageId: result.messageId,
+      meta: {
+        userId: result.userId,
+        deviceId: result.deviceId,
+        assetIds: result.assetIds,
+      },
+    };
   },
 };

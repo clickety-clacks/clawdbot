@@ -48,6 +48,7 @@ import type {
   ProviderOptions,
   ProviderServer,
   Logger,
+  ClawlineOutboundAttachmentInput,
   ClawlineOutboundSendParams,
   ClawlineOutboundSendResult,
 } from "./domain.js";
@@ -56,6 +57,7 @@ import { SlidingWindowRateLimiter } from "./rate-limiter.js";
 import { createAssetHandlers } from "./http-assets.js";
 import { callGateway } from "../gateway/call.js";
 import { GATEWAY_CLIENT_MODES, GATEWAY_CLIENT_NAMES } from "../gateway/protocol/client-info.js";
+import { loadWebMedia } from "../web/media.js";
 
 export const PROTOCOL_VERSION = 1;
 
@@ -248,6 +250,27 @@ function normalizeAttachmentsInput(
     throw new ClientMessageError("payload_too_large", "Inline attachments exceed limit");
   }
   return { attachments, inlineBytes, assetIds };
+}
+
+function normalizeOutboundAttachmentData(input: ClawlineOutboundAttachmentInput): {
+  data: string;
+  mimeType: string;
+} {
+  const rawData = typeof input.data === "string" ? input.data.trim() : "";
+  if (!rawData) {
+    throw new Error("Clawline outbound attachment missing data");
+  }
+  let mimeType = typeof input.mimeType === "string" ? input.mimeType.trim() : "";
+  let data = rawData;
+  const match = /^data:([^;]+);base64,(.*)$/i.exec(rawData);
+  if (match) {
+    mimeType = mimeType || match[1].trim();
+    data = match[2].trim();
+  }
+  if (!mimeType) {
+    mimeType = "application/octet-stream";
+  }
+  return { data, mimeType: mimeType.toLowerCase() };
 }
 
 function normalizeChannelType(value: unknown): ChannelType {
@@ -860,6 +883,125 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     await cleanupOrphanedAssetFiles();
   }
 
+  async function materializeOutboundAttachments(params: {
+    attachments: ClawlineOutboundAttachmentInput[];
+    ownerUserId: string;
+    uploaderDeviceId: string;
+    allowedInlineBytes?: number;
+  }): Promise<{ attachments: NormalizedAttachment[]; assetIds: string[] }> {
+    if (params.attachments.length === 0) {
+      return { attachments: [], assetIds: [] };
+    }
+    const resolved: NormalizedAttachment[] = [];
+    const assetIds: string[] = [];
+    const inlineLimit =
+      typeof params.allowedInlineBytes === "number"
+        ? Math.max(0, Math.min(params.allowedInlineBytes, config.media.maxInlineBytes))
+        : config.media.maxInlineBytes;
+    let inlineBytes = 0;
+    for (const attachment of params.attachments) {
+      if (!attachment || typeof attachment !== "object") {
+        throw new Error("Clawline outbound attachment must be an object");
+      }
+      const { data, mimeType } = normalizeOutboundAttachmentData(attachment);
+      const buffer = Buffer.from(data, "base64");
+      if (buffer.length === 0) {
+        throw new Error("Clawline outbound attachment is empty");
+      }
+      if (buffer.length > config.media.maxUploadBytes) {
+        throw new Error("Clawline outbound attachment exceeds max upload size");
+      }
+      const isInlineImage = INLINE_IMAGE_MIME_TYPES.has(mimeType);
+      if (
+        isInlineImage &&
+        buffer.length <= inlineLimit &&
+        inlineBytes + buffer.length <= inlineLimit
+      ) {
+        resolved.push({ type: "image", mimeType, data });
+        inlineBytes += buffer.length;
+        continue;
+      }
+      const assetId = `a_${randomUUID()}`;
+      const assetPath = path.join(assetsDir, assetId);
+      await fs.writeFile(assetPath, buffer);
+      await enqueueWriteTask(() =>
+        insertAssetStmt.run(
+          assetId,
+          params.ownerUserId,
+          mimeType,
+          buffer.length,
+          nowMs(),
+          params.uploaderDeviceId,
+        ),
+      );
+      resolved.push({ type: "asset", assetId });
+      assetIds.push(assetId);
+    }
+    return { attachments: resolved, assetIds };
+  }
+
+  async function materializeOutboundMediaUrls(params: {
+    mediaUrls: string[];
+    ownerUserId: string;
+    uploaderDeviceId: string;
+    allowedInlineBytes?: number;
+  }): Promise<{ attachments: NormalizedAttachment[]; assetIds: string[] }> {
+    if (params.mediaUrls.length === 0) {
+      return { attachments: [], assetIds: [] };
+    }
+    const resolved: NormalizedAttachment[] = [];
+    const assetIds: string[] = [];
+    const inlineLimit =
+      typeof params.allowedInlineBytes === "number"
+        ? Math.max(0, Math.min(params.allowedInlineBytes, config.media.maxInlineBytes))
+        : config.media.maxInlineBytes;
+    let inlineBytes = 0;
+    const trimmedUrls = params.mediaUrls
+      .map((url) => (typeof url === "string" ? url.trim() : ""))
+      .filter((url) => url.length > 0);
+    if (trimmedUrls.length > MAX_ATTACHMENTS_COUNT) {
+      logger.warn?.("[clawline] outbound_attachments_trimmed", {
+        requested: trimmedUrls.length,
+        allowed: MAX_ATTACHMENTS_COUNT,
+      });
+    }
+    const urls = trimmedUrls.slice(0, MAX_ATTACHMENTS_COUNT);
+    for (const url of urls) {
+      const media = await loadWebMedia(url, config.media.maxUploadBytes);
+      const mimeType = (media.contentType ?? "application/octet-stream").toLowerCase();
+      const buffer = media.buffer;
+      if (buffer.length === 0) {
+        continue;
+      }
+      const isInlineImage = INLINE_IMAGE_MIME_TYPES.has(mimeType);
+      if (
+        isInlineImage &&
+        buffer.length <= inlineLimit &&
+        inlineBytes + buffer.length <= inlineLimit
+      ) {
+        resolved.push({ type: "image", mimeType, data: buffer.toString("base64") });
+        inlineBytes += buffer.length;
+        continue;
+      }
+      const assetId = `a_${randomUUID()}`;
+      const assetPath = path.join(assetsDir, assetId);
+      await fs.writeFile(assetPath, buffer);
+      await enqueueWriteTask(() =>
+        insertAssetStmt.run(
+          assetId,
+          params.ownerUserId,
+          mimeType,
+          buffer.length,
+          nowMs(),
+          params.uploaderDeviceId,
+        ),
+      );
+      resolved.push({ type: "asset", assetId });
+      assetIds.push(assetId);
+    }
+    return { attachments: resolved, assetIds };
+  }
+
   async function materializeInlineAttachments(params: {
     attachments: NormalizedAttachment[];
     ownerUserId: string;
@@ -1190,8 +1332,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   async function wakeGatewayForAlert(text: string) {
     try {
       await callGateway({
-        method: "wake",
-        params: { text, mode: "now" },
+        method: "system-event",
+        params: { text },
         clientName: GATEWAY_CLIENT_NAMES.CLI,
         clientDisplayName: "clawline-alert",
         clientVersion: "clawline",
@@ -1759,6 +1901,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     targetUserId: string,
     content: string,
     channelType: ChannelType,
+    attachments?: NormalizedAttachment[],
   ): Promise<ServerMessage> {
     const timestamp = nowMs();
     const event: ServerMessage = {
@@ -1769,6 +1912,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       timestamp,
       streaming: false,
       channelType,
+      attachments: attachments && attachments.length > 0 ? attachments : undefined,
     };
     await appendEvent(event, targetUserId);
     return event;
@@ -1782,16 +1926,16 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       throw new Error("Delivering to clawline requires --to <userId|deviceId>");
     }
     const text = typeof params.text === "string" ? params.text : "";
-    if (!text.trim()) {
-      throw new Error("Delivering to clawline requires --message <text>");
-    }
-    if (params.mediaUrl) {
-      throw new Error("Clawline outbound media delivery is not supported yet");
+    const rawAttachments = Array.isArray(params.attachments) ? params.attachments : [];
+    const mediaUrl = typeof params.mediaUrl === "string" ? params.mediaUrl.trim() : "";
+    if (!text.trim() && rawAttachments.length === 0 && !mediaUrl) {
+      throw new Error("Delivering to clawline requires --message <text> or attachments");
     }
     const bytes = Buffer.byteLength(text, "utf8");
     if (bytes > config.sessions.maxMessageBytes) {
       throw new Error("Clawline message exceeds max size");
     }
+    const allowedInlineBytes = Math.max(0, MAX_TOTAL_PAYLOAD_BYTES - bytes);
     const target = resolveSendTarget(targetInput);
 
     // Derive channelType from the stored clawlineChannelType field.
@@ -1807,6 +1951,29 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       // Fall back to default on error
     }
 
+    if (rawAttachments.length > MAX_ATTACHMENTS_COUNT) {
+      throw new Error("Too many attachments");
+    }
+    let outboundAttachments = {
+      attachments: [] as NormalizedAttachment[],
+      assetIds: [] as string[],
+    };
+    if (rawAttachments.length > 0) {
+      outboundAttachments = await materializeOutboundAttachments({
+        attachments: rawAttachments,
+        ownerUserId: target.userId,
+        uploaderDeviceId: target.kind === "device" ? target.deviceId : "server",
+        allowedInlineBytes,
+      });
+    } else if (mediaUrl) {
+      outboundAttachments = await materializeOutboundMediaUrls({
+        mediaUrls: [mediaUrl],
+        ownerUserId: target.userId,
+        uploaderDeviceId: target.kind === "device" ? target.deviceId : "server",
+        allowedInlineBytes,
+      });
+    }
+
     const event: ServerMessage = {
       type: "message",
       id: generateServerMessageId(),
@@ -1815,6 +1982,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       timestamp: nowMs(),
       streaming: false,
       channelType,
+      attachments:
+        outboundAttachments.attachments.length > 0 ? outboundAttachments.attachments : undefined,
     };
     await runPerUserTask(target.userId, async () => {
       await appendEvent(event, target.userId);
@@ -1828,6 +1997,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       messageId: event.id,
       userId: target.userId,
       deviceId: target.kind === "device" ? target.deviceId : undefined,
+      attachments: outboundAttachments.attachments,
+      assetIds: outboundAttachments.assetIds,
     };
   }
 
@@ -2084,8 +2255,35 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               activitySignaled = false;
               void sendActivitySignal(false);
             }
-            const assistantText = buildAssistantTextFromPayload(replyPayload, fallbackText);
-            if (!assistantText) {
+            const mediaUrls = replyPayload.mediaUrls?.length
+              ? replyPayload.mediaUrls
+              : replyPayload.mediaUrl
+                ? [replyPayload.mediaUrl]
+                : [];
+            let attachments: NormalizedAttachment[] = [];
+            const trimmedText = replyPayload.text?.trim();
+            const contentBytes = trimmedText ? Buffer.byteLength(trimmedText, "utf8") : 0;
+            const allowedInlineBytes = Math.max(0, MAX_TOTAL_PAYLOAD_BYTES - contentBytes);
+            if (mediaUrls.length > 0) {
+              try {
+                const materialized = await materializeOutboundMediaUrls({
+                  mediaUrls,
+                  ownerUserId: targetUserId,
+                  uploaderDeviceId: session.deviceId,
+                  allowedInlineBytes,
+                });
+                attachments = materialized.attachments;
+              } catch (err) {
+                logger.warn?.("[clawline] reply_media_attachment_failed", err);
+              }
+            }
+            const assistantText =
+              trimmedText && trimmedText.length > 0
+                ? trimmedText
+                : attachments.length > 0
+                  ? ""
+                  : buildAssistantTextFromPayload(replyPayload, fallbackText);
+            if (assistantText === null) {
               return;
             }
             const assistantEvent = await persistAssistantMessage(
@@ -2093,6 +2291,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               targetUserId,
               assistantText,
               channelType,
+              attachments,
             );
             broadcastToChannelSessions(channelType, session, assistantEvent);
           },
