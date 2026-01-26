@@ -137,27 +137,6 @@ export { isWSLSync, isWSL2Sync, isWSLEnv } from "../infra/wsl.js";
 export { isTruthyEnvValue } from "../infra/env.js";
 export { resolveToolsBySender } from "../config/group-policy.js";
 export {
-  sendHelmRequest,
-  createVisualizeRequestFromMessage,
-  type HelmOutboundSendParams,
-  type HelmOutboundSendResult,
-} from "../helm/outbound.js";
-export type {
-  HelmRequest,
-  HelmResponse,
-  VisualizeRequest,
-  CreatedResponse,
-  InteractionResponse,
-  ErrorResponse,
-} from "../helm/protocol.js";
-export {
-  setHelmResponseCallback,
-  hasHelmResponseCallback,
-  formatHelmResponseForSession,
-  shouldInjectResponse,
-  type HelmResponseCallback,
-} from "../helm/session-routing.js";
-export {
   buildPendingHistoryContextFromMap,
   clearHistoryEntries,
   clearHistoryEntriesIfEnabled,

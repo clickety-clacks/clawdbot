@@ -490,12 +490,6 @@ const DiscordDmSchema = z
   })
   .optional();
 
-const HelmConfigSchema = z
-  .object({
-    enabled: z.boolean().optional(),
-  })
-  .optional();
-
 export const ClawdbotSchema = z
   .object({
     mode: z.literal("efficient").optional(),
@@ -818,7 +812,6 @@ export const OpenClawSchema = z
       .strict()
       .optional(),
     clawline: ClawlineConfigSchema,
-    helm: HelmConfigSchema,
     channels: ChannelsSchema,
     discovery: z
       .object({
