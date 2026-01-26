@@ -170,7 +170,10 @@ export const clawlineMessageActions: ChannelMessageActionAdapter = {
 
   handleAction: async ({ action, params, cfg }): Promise<AgentToolResult<unknown>> => {
     if (action === "read") {
-      const userId = typeof params.userId === "string" ? params.userId : undefined;
+      // Accept both userId param and to param (standard message tool target)
+      const userId =
+        (typeof params.userId === "string" ? params.userId : undefined) ??
+        (typeof params.to === "string" ? params.to : undefined);
       const channelType = typeof params.channelType === "string" ? params.channelType : undefined;
       const limit =
         typeof params.limit === "number" && Number.isFinite(params.limit)
