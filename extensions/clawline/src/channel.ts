@@ -47,6 +47,14 @@ export const clawlinePlugin: ChannelPlugin<ResolvedClawlineAccount> = {
   },
   reload: { configPrefixes: ["clawline"] },
   actions: clawlineMessageActions,
+  // Accept any target as valid - Clawline actions do their own filtering
+  // via userId/channelType params, not standard target resolution.
+  messaging: {
+    targetResolver: {
+      looksLikeId: () => true,
+      hint: "Clawline targets are user IDs or device IDs",
+    },
+  },
   config: {
     listAccountIds: () => [DEFAULT_ACCOUNT_ID],
     resolveAccount: (cfg, accountId) => resolveClawlineAccount({ cfg, accountId }),
