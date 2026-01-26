@@ -526,6 +526,7 @@ describe.sequential("clawline provider server", () => {
       expect(agentCall?.params?.sessionKey).toBe("agent:main:main");
       expect(agentCall?.params?.deliver).toBe(true);
       expect(agentCall?.params?.channel).toBeUndefined();
+      expect(agentCall?.params?.channelType).toBe("admin");
       expect(queueCall?.params?.text).toBe("[codex] Check on Flynn");
       expect(wakeCall?.params?.text).toBe("[codex] Check on Flynn");
       expect(wakeCall?.params?.mode).toBe("now");
