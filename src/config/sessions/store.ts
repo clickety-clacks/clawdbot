@@ -879,9 +879,17 @@ export async function updateLastRoute(params: {
       lastThreadId: normalized.lastThreadId,
       ...(clawlineChannelType ? { clawlineChannelType } : {}),
     };
+    // Debug: log what's being written
+    const patchHasClawlineChannelType = "clawlineChannelType" in basePatch;
+    console.log(
+      `[sessions] updateLastRoute: sessionKey=${sessionKey} clawlineChannelType param=${clawlineChannelType ?? "undefined"} patchHasField=${patchHasClawlineChannelType} patchValue=${basePatch.clawlineChannelType ?? "undefined"} existingValue=${existing?.clawlineChannelType ?? "undefined"}`,
+    );
     const next = mergeSessionEntry(
       existing,
       metaPatch ? { ...basePatch, ...metaPatch } : basePatch,
+    );
+    console.log(
+      `[sessions] updateLastRoute merged: next.clawlineChannelType=${next.clawlineChannelType ?? "undefined"}`,
     );
     store[sessionKey] = next;
     await saveSessionStoreUnlocked(storePath, store, { activeSessionKey: sessionKey });
