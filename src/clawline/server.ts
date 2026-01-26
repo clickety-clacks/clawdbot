@@ -1970,11 +1970,19 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
     // Derive channelType from the stored clawlineChannelType field.
     // This field is set when messages are received, storing "admin" or "personal".
+    // Use case-insensitive comparison: updateLastRoute now stores canonical userId,
+    // but existing session data may have peerId (from bindingId) with different casing.
     let channelType: ChannelType = DEFAULT_CHANNEL_TYPE;
     try {
       const store = loadSessionStore(sessionStorePath);
       const mainEntry = store[mainSessionKey];
-      if (mainEntry?.lastTo === target.userId && mainEntry.clawlineChannelType === "admin") {
+      const lastToLower = mainEntry?.lastTo?.toLowerCase();
+      const targetLower = target.userId.toLowerCase();
+      const userMatch = lastToLower === targetLower;
+      logger.info?.(
+        `[clawline] sendOutboundMessage channelType check: mainEntry.lastTo=${mainEntry?.lastTo ?? "undefined"} target.userId=${target.userId} mainEntry.clawlineChannelType=${mainEntry?.clawlineChannelType ?? "undefined"} match=${userMatch}`,
+      );
+      if (userMatch && mainEntry?.clawlineChannelType === "admin") {
         channelType = ADMIN_CHANNEL_TYPE;
       }
     } catch {
@@ -2200,10 +2208,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         } else {
           // Personal channel: routes to per-user session (isolated conversation)
           // Use dmScope "per-channel-peer" to get: agent:main:clawline:dm:{userId}
+          // Use canonical userId for session key, not peerId (which may have different casing)
           const personalSessionKey = buildAgentSessionKey({
             agentId: mainSessionAgentId,
             channel: "clawline",
-            peer: { kind: "dm", id: peerId },
+            peer: { kind: "dm", id: session.userId },
             dmScope: "per-channel-peer",
           });
           route = {
@@ -2238,7 +2247,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           storePath: sessionStorePath,
           sessionKey: route.mainSessionKey,
           channel: channelLabel,
-          to: peerId,
+          // Use canonical userId for routing, not peerId (which may be bindingId with different casing)
+          to: session.userId,
           accountId: route.accountId,
           clawlineChannelType: channelType,
         });
