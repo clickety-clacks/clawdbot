@@ -1302,13 +1302,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     const trimmed = value.trim();
     if (!trimmed) return false;
     if (trimmed === "global") return true;
-    if (!/^agent:[^:]+:[^:]+/.test(trimmed)) return false;
-    try {
-      const store = loadSessionStore(sessionStorePath);
-      return Boolean(store[trimmed]);
-    } catch {
-      return false;
-    }
+    return /^agent:[^:]+:[^:]+/.test(trimmed);
   }
 
   async function wakeGatewayForAlert(text: string, sessionKey?: string) {
