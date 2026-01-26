@@ -1,5 +1,5 @@
-import type { SessionEntry, SessionProviderId } from "../config/sessions.js";
-import { upsertSessionStoreEntry } from "../config/sessions.js";
+import type { SessionChannelId, SessionEntry } from "../config/sessions.js";
+import { mergeSessionEntry, updateSessionStore } from "../config/sessions.js";
 
 export const CLAWLINE_SESSION_PROVIDER = "clawline" as SessionProviderId;
 
@@ -16,18 +16,20 @@ export async function recordClawlineSessionActivity(params: {
   const { storePath, sessionKey, sessionId, sessionFile, displayName } = params;
   const label = displayName?.trim() ? displayName.trim() : undefined;
   try {
-    await upsertSessionStoreEntry({
-      storePath,
-      sessionKey,
-      patch: {
+    // Use updateSessionStore to atomically load-modify-write under lock.
+    // This prevents race conditions with concurrent updateLastRoute writes.
+    await updateSessionStore(storePath, (store) => {
+      const existing = store[sessionKey];
+      const patch: Partial<SessionEntry> = {
         sessionId,
-        provider: CLAWLINE_SESSION_PROVIDER,
+        channel: CLAWLINE_SESSION_CHANNEL,
         chatType: "direct",
         displayName: label,
         label,
         sessionFile,
-        lastProvider: CLAWLINE_SESSION_PROVIDER,
-      } satisfies Partial<SessionEntry>,
+        lastChannel: CLAWLINE_SESSION_CHANNEL,
+      };
+      store[sessionKey] = mergeSessionEntry(existing, patch);
     });
   } catch (err) {
     params.logger?.warn?.("[clawline] failed to update session store", err);
