@@ -1336,7 +1336,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
       const params: Record<string, unknown> = {
         message: `System Alert: ${text}`,
-        deliver: true,
+        // deliver: false keeps the response in the targeted session without
+        // attempting to route it via lastTo (which causes context fragmentation)
+        deliver: false,
         idempotencyKey: randomUUID(),
       };
       params.sessionKey = resolvedSessionKey;
