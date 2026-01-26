@@ -1,4 +1,5 @@
 import type { AgentToolResult, ClawdbotConfig } from "clawdbot/plugin-sdk";
+import { jsonResult } from "clawdbot/plugin-sdk";
 import type {
   ChannelMessageActionAdapter,
   ChannelMessageActionName,
@@ -181,12 +182,12 @@ export const clawlineMessageActions: ChannelMessageActionAdapter = {
           : 20;
 
       const result = await readClawlineMessages({ cfg, userId, limit, channelType });
-      return { type: "success", data: result };
+      return jsonResult(result);
     }
 
     if (action === "list-users") {
       const result = await listClawlineUsers({ cfg });
-      return { type: "success", data: result };
+      return jsonResult(result);
     }
 
     throw new Error(`Action ${action} is not supported for Clawline.`);
