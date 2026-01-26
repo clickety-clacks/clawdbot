@@ -1985,11 +1985,26 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           `[clawline] sendOutboundMessage mainEntry fields: lastTo=${mainEntry.lastTo ?? "undefined"} lastChannel=${mainEntry.lastChannel ?? "undefined"} clawlineChannelType=${mainEntry.clawlineChannelType ?? "undefined"} deliveryContext=${JSON.stringify(mainEntry.deliveryContext ?? null)}`,
         );
       }
+      const isTargetAdmin = isAdminUserId(target.userId);
       logger.info?.(
-        `[clawline] sendOutboundMessage channelType check: mainEntry.lastTo=${mainEntry?.lastTo ?? "undefined"} target.userId=${target.userId} mainEntry.clawlineChannelType=${mainEntry?.clawlineChannelType ?? "undefined"} match=${userMatch}`,
+        `[clawline] sendOutboundMessage channelType check: mainEntry.lastTo=${mainEntry?.lastTo ?? "undefined"} target.userId=${target.userId} mainEntry.clawlineChannelType=${mainEntry?.clawlineChannelType ?? "undefined"} match=${userMatch} isTargetAdmin=${isTargetAdmin}`,
       );
-      if (userMatch && mainEntry?.clawlineChannelType === "admin") {
-        channelType = ADMIN_CHANNEL_TYPE;
+      // Use admin channel if:
+      // 1. clawlineChannelType is explicitly "admin", OR
+      // 2. clawlineChannelType is not set (null/undefined) AND target is an admin user
+      // This ensures admin users get notifications on the admin channel by default,
+      // even for sessions created before clawlineChannelType tracking was added.
+      const storedChannelType = mainEntry?.clawlineChannelType;
+      if (userMatch) {
+        if (storedChannelType === "admin") {
+          channelType = ADMIN_CHANNEL_TYPE;
+        } else if (storedChannelType == null && isTargetAdmin) {
+          // Default to admin channel for admin users when not explicitly set
+          channelType = ADMIN_CHANNEL_TYPE;
+          logger.info?.(
+            `[clawline] sendOutboundMessage defaulting to admin channel for admin user (clawlineChannelType was null/undefined)`,
+          );
+        }
       }
     } catch (err) {
       logger.error?.(`[clawline] sendOutboundMessage failed to load session store: ${String(err)}`);
