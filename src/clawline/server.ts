@@ -1968,18 +1968,31 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     // but existing session data may have peerId (from bindingId) with different casing.
     let channelType: ChannelType = DEFAULT_CHANNEL_TYPE;
     try {
+      logger.info?.(
+        `[clawline] sendOutboundMessage loading session store: path=${sessionStorePath} mainSessionKey=${mainSessionKey}`,
+      );
       const store = loadSessionStore(sessionStorePath);
+      const storeKeys = Object.keys(store);
       const mainEntry = store[mainSessionKey];
       const lastToLower = mainEntry?.lastTo?.toLowerCase();
       const targetLower = target.userId.toLowerCase();
       const userMatch = lastToLower === targetLower;
+      logger.info?.(
+        `[clawline] sendOutboundMessage store loaded: keys=[${storeKeys.join(",")}] hasMainEntry=${!!mainEntry}`,
+      );
+      if (mainEntry) {
+        logger.info?.(
+          `[clawline] sendOutboundMessage mainEntry fields: lastTo=${mainEntry.lastTo ?? "undefined"} lastChannel=${mainEntry.lastChannel ?? "undefined"} clawlineChannelType=${mainEntry.clawlineChannelType ?? "undefined"} deliveryContext=${JSON.stringify(mainEntry.deliveryContext ?? null)}`,
+        );
+      }
       logger.info?.(
         `[clawline] sendOutboundMessage channelType check: mainEntry.lastTo=${mainEntry?.lastTo ?? "undefined"} target.userId=${target.userId} mainEntry.clawlineChannelType=${mainEntry?.clawlineChannelType ?? "undefined"} match=${userMatch}`,
       );
       if (userMatch && mainEntry?.clawlineChannelType === "admin") {
         channelType = ADMIN_CHANNEL_TYPE;
       }
-    } catch {
+    } catch (err) {
+      logger.error?.(`[clawline] sendOutboundMessage failed to load session store: ${String(err)}`);
       // Fall back to default on error
     }
 
@@ -2237,6 +2250,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           CommandAuthorized: true,
         });
 
+        logger.info?.(
+          `[clawline] updateLastRoute call: sessionStorePath=${sessionStorePath} sessionKey=${route.mainSessionKey} channel=${channelLabel} to=${session.userId} clawlineChannelType=${channelType}`,
+        );
         await updateLastRoute({
           storePath: sessionStorePath,
           sessionKey: route.mainSessionKey,
