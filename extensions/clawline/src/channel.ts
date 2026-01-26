@@ -1,6 +1,7 @@
 import type { ChannelPlugin, ClawdbotConfig } from "clawdbot/plugin-sdk";
 import { DEFAULT_ACCOUNT_ID } from "clawdbot/plugin-sdk";
 
+import { clawlineMessageActions } from "./actions.js";
 import { clawlineOnboardingAdapter } from "./onboarding.js";
 import { clawlineOutbound } from "./outbound.js";
 
@@ -46,6 +47,7 @@ export const clawlinePlugin: ChannelPlugin<ResolvedClawlineAccount> = {
     media: true,
   },
   reload: { configPrefixes: ["clawline"] },
+  actions: clawlineMessageActions,
   config: {
     listAccountIds: () => [DEFAULT_ACCOUNT_ID],
     resolveAccount: (cfg, accountId) => resolveClawlineAccount({ cfg, accountId }),
