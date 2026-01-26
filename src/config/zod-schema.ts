@@ -82,6 +82,12 @@ const ClawlineConfigSchema = z
   })
   .optional();
 
+const HelmConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+  })
+  .optional();
+
 export const ClawdbotSchema = z
   .object({
     meta: z
@@ -316,6 +322,7 @@ export const ClawdbotSchema = z
       .strict()
       .optional(),
     clawline: ClawlineConfigSchema,
+    helm: HelmConfigSchema,
     channels: ChannelsSchema,
     discovery: z
       .object({

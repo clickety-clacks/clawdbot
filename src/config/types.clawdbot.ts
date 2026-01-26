@@ -11,6 +11,7 @@ import type {
   TalkConfig,
 } from "./types.gateway.js";
 import type { ClawlineConfig } from "./types.clawline.js";
+import type { HelmConfig } from "./types.helm.js";
 import type { HooksConfig } from "./types.hooks.js";
 import type {
   AudioConfig,
@@ -93,6 +94,7 @@ export type ClawdbotConfig = {
   talk?: TalkConfig;
   gateway?: GatewayConfig;
   clawline?: ClawlineConfig;
+  helm?: HelmConfig;
 };
 
 export type ConfigValidationIssue = {

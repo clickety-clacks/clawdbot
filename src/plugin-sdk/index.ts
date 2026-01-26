@@ -104,6 +104,27 @@ export { SILENT_REPLY_TOKEN, isSilentReplyText } from "../auto-reply/tokens.js";
 export { sendClawlineOutboundMessage } from "../clawline/outbound.js";
 export { startClawlineService, type ClawlineServiceHandle } from "../clawline/service.js";
 export {
+  sendHelmRequest,
+  createVisualizeRequestFromMessage,
+  type HelmOutboundSendParams,
+  type HelmOutboundSendResult,
+} from "../helm/outbound.js";
+export type {
+  HelmRequest,
+  HelmResponse,
+  VisualizeRequest,
+  CreatedResponse,
+  InteractionResponse,
+  ErrorResponse,
+} from "../helm/protocol.js";
+export {
+  setHelmResponseCallback,
+  hasHelmResponseCallback,
+  formatHelmResponseForSession,
+  shouldInjectResponse,
+  type HelmResponseCallback,
+} from "../helm/session-routing.js";
+export {
   buildPendingHistoryContextFromMap,
   clearHistoryEntries,
   DEFAULT_GROUP_HISTORY_LIMIT,
