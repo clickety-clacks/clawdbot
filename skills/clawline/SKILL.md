@@ -31,10 +31,30 @@ Updates propagate immediately (the watcher reacts as soon as the file write comp
 
 - File path: `~/.clawdbot/clawline/alert-instructions.md` (overridable via `clawline.alertInstructionsPath`).
 - Format: free-form Markdown/plain text; the provider reads it fresh on each alert and appends it to the alert body separated by a blank line.
-- Default text (auto-created if the file is missing):  
-  `After handling this alert, evaluate: would Flynn want to know what happened? If yes, report to him. Don't just process silently.`
-- Operators (or CLU) can edit the file at runtime—no restart needed. Empty/whitespace-only contents disable the overlay temporarily.
-- Keep the text short enough to stay under `sessions.maxMessageBytes` (~64 KB). If it’s too long, the provider logs `alert_instructions_skipped` and sends the alert without the overlay.
+- Default text (auto-created if the file is missing):
+  `After handling this alert, decide whether the operator should be notified. If yes, report it. Don't just process silently.`
+- Operators (or automation) can edit the file at runtime—no restart needed. Empty/whitespace-only contents disable the overlay temporarily.
+- Keep the text short enough to stay under `sessions.maxMessageBytes` (~64 KB). If it's too long, the provider logs `alert_instructions_skipped` and sends the alert without the overlay.
+
+## Identity Fields & Pairing Policy
+
+### Identity Fields
+
+| Field | Description |
+|-------|-------------|
+| **deviceId** | Stable device identifier (per device/app install) for pairing and reconnects. |
+| **claimedName** | Human-friendly label the device claims (e.g., "QA Sim"). NOT an account binding—treat as display/UX metadata only. |
+| **userId** | Server-assigned identifier for routing sessions, grouping devices, and authorization. Returned in pairing response. **Authoritative.** |
+| **isAdmin** | Server-assigned boolean for admin privileges. Returned in pairing response. |
+
+### Pairing Policy
+
+1. **Default userId = normalized claimedName** (lowercase, trim, whitespace→underscore, collapse punctuation).
+   Example: `"QA Sim"` → `"qa_sim"`
+2. **Different claimedNames → different userIds** unless explicitly intended to share identity.
+3. **Exactly one admin user: Flynn** (`userId: flynn`, `isAdmin: true`). All others get `isAdmin: false`.
+4. **Never grant admin based on claimedName** containing "Flynn" or similar—only the canonical `userId: flynn` gets admin.
+5. **When approving, always confirm** the userId assignment and isAdmin status before writing to allowlist.
 
 ## Inspect Pending & Allowlist
 
@@ -61,12 +81,7 @@ Each pending entry looks like:
 
 ## Approve a Device
 
-**Important:** approving a pending device always requires choosing the correct `userId` and `isAdmin`.
-- **User/account naming convention:** by default, set `userId` to match the `claimedName` in a normalized form (e.g. `"QA Sim" → "qa_sim"`).
-- `claimedName` is *not* the account mechanically, but operationally we treat it as the intended account label.
-- **Different claimed names → different `userId`s** unless you explicitly want them to share an account.
-- **Admin policy:** there should be **exactly one admin user** (Flynn). All other devices/users should have `isAdmin: false`.
-- When in doubt, ask which `userId` to assign (and confirm `isAdmin` should remain false) before approving.
+**Important:** Follow the [Pairing Policy](#pairing-policy) when approving devices. Always confirm `userId` and `isAdmin` before writing to allowlist.
 
 Move the entry from `pending.json` to `allowlist.json`. The helper below runs locally:
 
