@@ -1302,7 +1302,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     const trimmed = value.trim();
     if (!trimmed) return false;
     if (trimmed === "global") return true;
-    return /^agent:[^:]+:[^:]+/.test(trimmed);
+    if (!/^agent:[^:]+:[^:]+/.test(trimmed)) return false;
+    try {
+      const store = loadSessionStore(sessionStorePath);
+      return Boolean(store[trimmed]);
+    } catch {
+      return false;
+    }
   }
 
   async function wakeGatewayForAlert(text: string, sessionKey?: string) {
@@ -1311,9 +1317,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       const trimmedSessionKey = rawSessionKey?.trim() ?? "";
       const hasSessionKey = typeof rawSessionKey === "string";
       const isValid = isValidAlertSessionKey(trimmedSessionKey);
-      let resolvedSessionKey: string | undefined;
+      let resolvedSessionKey = resolveMainSessionKeyFromConfig();
       let decisionReason = "missing_session_key";
-      let decisionAction = "fallback_no_session_key";
+      let decisionAction = "fallback_main_session";
 
       if (hasSessionKey) {
         if (trimmedSessionKey.length === 0) {
@@ -1328,7 +1334,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       }
 
       logger.info?.(
-        `[clawline] alert_session_key_decision raw=${rawSessionKey ?? "undefined"} trimmed=${trimmedSessionKey || "undefined"} valid=${isValid} action=${decisionAction} reason=${decisionReason} resolved=${resolvedSessionKey ?? "implicit"}`,
+        `[clawline] alert_session_key_decision raw=${rawSessionKey ?? "undefined"} trimmed=${trimmedSessionKey || "undefined"} valid=${isValid} action=${decisionAction} reason=${decisionReason} resolved=${resolvedSessionKey}`,
       );
       if (decisionReason === "invalid_session_key") {
         logger.warn?.("alert_session_key_invalid", { sessionKey: rawSessionKey });
@@ -1339,9 +1345,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         deliver: true,
         idempotencyKey: randomUUID(),
       };
-      if (resolvedSessionKey) {
-        params.sessionKey = resolvedSessionKey;
-      }
+      params.sessionKey = resolvedSessionKey;
       await callGateway({
         method: "agent",
         params,
