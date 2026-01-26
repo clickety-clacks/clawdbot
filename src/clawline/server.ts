@@ -1971,7 +1971,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       logger.info?.(
         `[clawline] sendOutboundMessage loading session store: path=${sessionStorePath} mainSessionKey=${mainSessionKey}`,
       );
-      const store = loadSessionStore(sessionStorePath);
+      // Use skipCache to ensure we read the latest data - the session may have been
+      // updated very recently by an inbound message and the cache might be stale.
+      const store = loadSessionStore(sessionStorePath, { skipCache: true });
       const storeKeys = Object.keys(store);
       const mainEntry = store[mainSessionKey];
       const lastToLower = mainEntry?.lastTo?.toLowerCase();
@@ -2277,6 +2279,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           accountId: route.accountId,
           clawlineChannelType: channelType,
         });
+        logger.info?.(`[clawline] updateLastRoute completed: clawlineChannelType=${channelType}`);
 
         const fallbackText = adapterOverrides.responseFallback?.trim() ?? "";
         const prefixContext: ResponsePrefixContext = {
