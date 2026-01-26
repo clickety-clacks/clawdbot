@@ -2099,6 +2099,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         `${clawlineSessionFileName(session.sessionKey)}.jsonl`,
       ),
       displayName: session.claimedName ?? session.deviceInfo?.model ?? null,
+      userId: session.userId,
       logger,
     });
   }
@@ -2280,6 +2281,23 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           clawlineChannelType: channelType,
         });
         logger.info?.(`[clawline] updateLastRoute completed: clawlineChannelType=${channelType}`);
+
+        // For personal channels, also update lastTo on the personal session key.
+        // This ensures responses from the personal session can route back to the user
+        // even when alerts are delivered directly to the session (without going through
+        // the normal inbound flow that updates mainSessionKey).
+        if (route.sessionKey !== route.mainSessionKey) {
+          logger.info?.(
+            `[clawline] updateLastRoute for personal session: sessionKey=${route.sessionKey} to=${session.userId}`,
+          );
+          await updateLastRoute({
+            storePath: sessionStorePath,
+            sessionKey: route.sessionKey,
+            channel: channelLabel,
+            to: session.userId,
+            accountId: route.accountId,
+          });
+        }
 
         const fallbackText = adapterOverrides.responseFallback?.trim() ?? "";
         const prefixContext: ResponsePrefixContext = {

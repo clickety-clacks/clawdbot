@@ -11,9 +11,10 @@ export async function recordClawlineSessionActivity(params: {
   sessionId: string;
   sessionFile?: string;
   displayName?: string | null;
+  userId?: string;
   logger?: LoggerLike;
 }): Promise<void> {
-  const { storePath, sessionKey, sessionId, sessionFile, displayName } = params;
+  const { storePath, sessionKey, sessionId, sessionFile, displayName, userId } = params;
   const label = displayName?.trim() ? displayName.trim() : undefined;
   try {
     // Use updateSessionStore to atomically load-modify-write under lock.
@@ -28,6 +29,8 @@ export async function recordClawlineSessionActivity(params: {
         label,
         sessionFile,
         lastChannel: CLAWLINE_SESSION_CHANNEL,
+        // Set lastTo to userId if provided, enabling responses even without prior messages
+        ...(userId ? { lastTo: userId } : {}),
       };
       store[sessionKey] = mergeSessionEntry(existing, patch);
     });
