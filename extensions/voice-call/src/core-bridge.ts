@@ -45,10 +45,10 @@ type CoreAgentDeps = {
   ensureAgentWorkspace: (params?: { dir: string }) => Promise<void>;
   resolveStorePath: (store?: string, opts?: { agentId?: string }) => string;
   loadSessionStore: (storePath: string) => Record<string, unknown>;
-  saveSessionStore: (
+  updateSessionStore: <T>(
     storePath: string,
-    store: Record<string, unknown>,
-  ) => Promise<void>;
+    mutator: (store: Record<string, unknown>) => T | Promise<T>,
+  ) => Promise<T>;
   resolveSessionFilePath: (
     sessionId: string,
     entry: unknown,
@@ -164,7 +164,7 @@ export async function loadCoreAgentDeps(): Promise<CoreAgentDeps> {
       importCoreModule<{
         resolveStorePath: CoreAgentDeps["resolveStorePath"];
         loadSessionStore: CoreAgentDeps["loadSessionStore"];
-        saveSessionStore: CoreAgentDeps["saveSessionStore"];
+        updateSessionStore: CoreAgentDeps["updateSessionStore"];
         resolveSessionFilePath: CoreAgentDeps["resolveSessionFilePath"];
       }>("config/sessions.js"),
     ]);
@@ -179,7 +179,7 @@ export async function loadCoreAgentDeps(): Promise<CoreAgentDeps> {
       ensureAgentWorkspace: workspace.ensureAgentWorkspace,
       resolveStorePath: sessions.resolveStorePath,
       loadSessionStore: sessions.loadSessionStore,
-      saveSessionStore: sessions.saveSessionStore,
+      updateSessionStore: sessions.updateSessionStore,
       resolveSessionFilePath: sessions.resolveSessionFilePath,
       DEFAULT_MODEL: defaults.DEFAULT_MODEL,
       DEFAULT_PROVIDER: defaults.DEFAULT_PROVIDER,
