@@ -523,7 +523,7 @@ describe.sequential("clawline provider server", () => {
       };
       expect(agentCall?.method).toBe("agent");
       expect(agentCall?.params?.message).toBe("System Alert: [codex] Check on Flynn");
-      expect(agentCall?.params?.sessionKey).toBeUndefined();
+      expect(agentCall?.params?.sessionKey).toBe("agent:main:main");
       expect(agentCall?.params?.deliver).toBe(true);
       expect(agentCall?.params?.channel).toBeUndefined();
       expect(queueCall?.params?.text).toBe("[codex] Check on Flynn");
