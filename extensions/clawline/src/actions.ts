@@ -54,21 +54,17 @@ function parseEventPayload(row: EventRow): ParsedMessage {
 
   try {
     const payload = JSON.parse(row.payloadJson);
-    if (payload.type === "user_message") {
+    // Events have type="message" with role="user" or role="assistant"
+    if (payload.type === "message") {
+      const role = payload.role as string | undefined;
+      const isFromUser = role === "user";
       return {
         ...base,
-        type: "user_message",
+        type: isFromUser ? "user_message" : "server_message",
         content: payload.content ?? "",
+        fromServer: !isFromUser,
         channelType: payload.channelType,
-      };
-    }
-    if (payload.type === "server_message") {
-      return {
-        ...base,
-        type: "server_message",
-        content: payload.content ?? "",
-        fromServer: true,
-        channelType: payload.channelType,
+        deviceId: payload.deviceId ?? row.originatingDeviceId,
       };
     }
     return { ...base, type: payload.type ?? "unknown" };
