@@ -1312,6 +1312,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       const hasSessionKey = typeof rawSessionKey === "string";
       const isValid = isValidAlertSessionKey(trimmedSessionKey);
       let resolvedSessionKey = resolveMainSessionKeyFromConfig();
+      const mainSessionTarget = resolvedSessionKey === mainSessionKey;
       let decisionReason = "missing_session_key";
       let decisionAction = "fallback_main_session";
 
@@ -1334,12 +1335,26 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         logger.warn?.("alert_session_key_invalid", { sessionKey: rawSessionKey });
       }
 
+      if (mainSessionTarget) {
+        await updateLastRoute({
+          storePath: sessionStorePath,
+          sessionKey: mainSessionKey,
+          channel: "clawline-dm",
+          to: ADMIN_USER_ID,
+          accountId: DEFAULT_ACCOUNT_ID,
+          clawlineChannelType: ADMIN_CHANNEL_TYPE,
+        });
+      }
+
       const params: Record<string, unknown> = {
         message: `System Alert: ${text}`,
         deliver: true,
         idempotencyKey: randomUUID(),
       };
       params.sessionKey = resolvedSessionKey;
+      if (mainSessionTarget) {
+        params.channelType = ADMIN_CHANNEL_TYPE;
+      }
       await callGateway({
         method: "agent",
         params,
