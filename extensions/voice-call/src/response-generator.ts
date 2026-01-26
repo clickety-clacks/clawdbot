@@ -69,19 +69,17 @@ export async function generateVoiceResponse(
   // Ensure workspace exists
   await deps.ensureAgentWorkspace({ dir: workspaceDir });
 
-  // Load or create session entry
-  const sessionStore = deps.loadSessionStore(storePath);
-  const now = Date.now();
-  let sessionEntry = sessionStore[sessionKey] as SessionEntry | undefined;
-
-  if (!sessionEntry) {
-    sessionEntry = {
+  // Load or create session entry atomically to avoid race conditions.
+  const sessionEntry = await deps.updateSessionStore(storePath, (store) => {
+    const existing = store[sessionKey] as SessionEntry | undefined;
+    if (existing) return existing;
+    const newEntry: SessionEntry = {
       sessionId: crypto.randomUUID(),
-      updatedAt: now,
+      updatedAt: Date.now(),
     };
-    sessionStore[sessionKey] = sessionEntry;
-    await deps.saveSessionStore(storePath, sessionStore);
-  }
+    store[sessionKey] = newEntry;
+    return newEntry;
+  });
 
   const sessionId = sessionEntry.sessionId;
   const sessionFile = deps.resolveSessionFilePath(sessionId, sessionEntry, {

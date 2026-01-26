@@ -13,7 +13,6 @@ import {
   loadSessionStore,
   resolveSessionKey,
   resolveStorePath,
-  saveSessionStore,
 } from "./config/sessions.js";
 import { ensureBinary } from "./infra/binaries.js";
 import { loadDotEnv } from "./infra/dotenv.js";
@@ -67,7 +66,6 @@ export {
   resolveStorePath,
   runCommandWithTimeout,
   runExec,
-  saveSessionStore,
   toWhatsappJid,
   waitForever,
 };

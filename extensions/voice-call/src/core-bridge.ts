@@ -50,7 +50,10 @@ type CoreAgentDeps = {
   ensureAgentWorkspace: (params?: { dir: string }) => Promise<void>;
   resolveStorePath: (store?: string, opts?: { agentId?: string }) => string;
   loadSessionStore: (storePath: string) => Record<string, unknown>;
-  saveSessionStore: (storePath: string, store: Record<string, unknown>) => Promise<void>;
+  updateSessionStore: <T>(
+    storePath: string,
+    mutator: (store: Record<string, unknown>) => T | Promise<T>,
+  ) => Promise<T>;
   resolveSessionFilePath: (
     sessionId: string,
     entry: unknown,
@@ -152,7 +155,62 @@ export async function loadCoreAgentDeps(): Promise<CoreAgentDeps> {
   }
 
   coreDepsPromise = (async () => {
-    return await importCoreExtensionAPI();
+    const [
+      agentScope,
+      defaults,
+      identity,
+      modelSelection,
+      piEmbedded,
+      timeout,
+      workspace,
+      sessions,
+    ] = await Promise.all([
+      importCoreModule<{
+        resolveAgentDir: CoreAgentDeps["resolveAgentDir"];
+        resolveAgentWorkspaceDir: CoreAgentDeps["resolveAgentWorkspaceDir"];
+      }>("agents/agent-scope.js"),
+      importCoreModule<{
+        DEFAULT_MODEL: string;
+        DEFAULT_PROVIDER: string;
+      }>("agents/defaults.js"),
+      importCoreModule<{
+        resolveAgentIdentity: CoreAgentDeps["resolveAgentIdentity"];
+      }>("agents/identity.js"),
+      importCoreModule<{
+        resolveThinkingDefault: CoreAgentDeps["resolveThinkingDefault"];
+      }>("agents/model-selection.js"),
+      importCoreModule<{
+        runEmbeddedPiAgent: CoreAgentDeps["runEmbeddedPiAgent"];
+      }>("agents/pi-embedded.js"),
+      importCoreModule<{
+        resolveAgentTimeoutMs: CoreAgentDeps["resolveAgentTimeoutMs"];
+      }>("agents/timeout.js"),
+      importCoreModule<{
+        ensureAgentWorkspace: CoreAgentDeps["ensureAgentWorkspace"];
+      }>("agents/workspace.js"),
+      importCoreModule<{
+        resolveStorePath: CoreAgentDeps["resolveStorePath"];
+        loadSessionStore: CoreAgentDeps["loadSessionStore"];
+        updateSessionStore: CoreAgentDeps["updateSessionStore"];
+        resolveSessionFilePath: CoreAgentDeps["resolveSessionFilePath"];
+      }>("config/sessions.js"),
+    ]);
+
+    return {
+      resolveAgentDir: agentScope.resolveAgentDir,
+      resolveAgentWorkspaceDir: agentScope.resolveAgentWorkspaceDir,
+      resolveAgentIdentity: identity.resolveAgentIdentity,
+      resolveThinkingDefault: modelSelection.resolveThinkingDefault,
+      runEmbeddedPiAgent: piEmbedded.runEmbeddedPiAgent,
+      resolveAgentTimeoutMs: timeout.resolveAgentTimeoutMs,
+      ensureAgentWorkspace: workspace.ensureAgentWorkspace,
+      resolveStorePath: sessions.resolveStorePath,
+      loadSessionStore: sessions.loadSessionStore,
+      updateSessionStore: sessions.updateSessionStore,
+      resolveSessionFilePath: sessions.resolveSessionFilePath,
+      DEFAULT_MODEL: defaults.DEFAULT_MODEL,
+      DEFAULT_PROVIDER: defaults.DEFAULT_PROVIDER,
+    };
   })();
 
   return coreDepsPromise;
