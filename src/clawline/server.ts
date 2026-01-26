@@ -1297,20 +1297,54 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
   }
 
+  function isValidAlertSessionKey(value?: string) {
+    if (!value) return false;
+    const trimmed = value.trim();
+    if (!trimmed) return false;
+    if (trimmed === "global") return true;
+    return /^agent:[^:]+:[^:]+/.test(trimmed);
+  }
+
   async function wakeGatewayForAlert(text: string, sessionKey?: string) {
     try {
-      const resolvedSessionKey = sessionKey ?? resolveMainSessionKeyFromConfig();
+      const rawSessionKey = typeof sessionKey === "string" ? sessionKey : undefined;
+      const trimmedSessionKey = rawSessionKey?.trim() ?? "";
+      const hasSessionKey = typeof rawSessionKey === "string";
+      const isValid = isValidAlertSessionKey(trimmedSessionKey);
+      let resolvedSessionKey: string | undefined;
+      let decisionReason = "missing_session_key";
+      let decisionAction = "fallback_no_session_key";
+
+      if (hasSessionKey) {
+        if (trimmedSessionKey.length === 0) {
+          decisionReason = "empty_session_key";
+        } else if (isValid) {
+          resolvedSessionKey = trimmedSessionKey;
+          decisionReason = "valid_session_key";
+          decisionAction = "use_provided_session_key";
+        } else {
+          decisionReason = "invalid_session_key";
+        }
+      }
+
       logger.info?.(
-        `[clawline] alert_session_key sessionKey=${sessionKey ?? "undefined"} resolved=${resolvedSessionKey}`,
+        `[clawline] alert_session_key_decision raw=${rawSessionKey ?? "undefined"} trimmed=${trimmedSessionKey || "undefined"} valid=${isValid} action=${decisionAction} reason=${decisionReason} resolved=${resolvedSessionKey ?? "implicit"}`,
       );
+      if (decisionReason === "invalid_session_key") {
+        logger.warn?.("alert_session_key_invalid", { sessionKey: rawSessionKey });
+      }
+
+      const params: Record<string, unknown> = {
+        message: `System Alert: ${text}`,
+        deliver: true,
+        idempotencyKey: randomUUID(),
+      };
+      if (resolvedSessionKey) {
+        params.sessionKey = resolvedSessionKey;
+      }
       await callGateway({
         method: "agent",
-        params: {
-          message: `System Alert: ${text}`,
-          sessionKey: resolvedSessionKey,
-          deliver: true,
-          idempotencyKey: randomUUID(),
-        },
+        params,
         clientName: GATEWAY_CLIENT_NAMES.CLI,
         clientDisplayName: "clawline-alert",
         clientVersion: "clawline",
