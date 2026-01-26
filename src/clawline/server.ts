@@ -36,7 +36,7 @@ import {
 import { rawDataToString } from "../infra/ws.js";
 import { recordClawlineSessionActivity } from "./session-store.js";
 import type { ClawlineAdapterOverrides } from "./config.js";
-import { buildClawlineSessionKey, clawlineSessionFileName } from "./session-key.js";
+import { clawlineSessionFileName } from "./session-key.js";
 import { deepMerge } from "./utils/deep-merge.js";
 import type {
   AllowlistEntry,
@@ -2284,8 +2284,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
         // For personal channels, also update lastTo on the personal session key.
         // This ensures responses from the personal session can route back to the user
-        // even when alerts are delivered directly to the session (without going through
-        // the normal inbound flow that updates mainSessionKey).
+        // even when alerts are delivered directly to the session.
         if (route.sessionKey !== route.mainSessionKey) {
           logger.info?.(
             `[clawline] updateLastRoute for personal session: sessionKey=${route.sessionKey} to=${session.userId}`,
@@ -2911,7 +2910,14 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       ws.close();
       return;
     }
-    const sessionKey = buildClawlineSessionKey(entry.userId);
+    // Use standard agent session key format: agent:main:clawline:dm:{userId}
+    // This matches the routing format used by buildAgentSessionKey with dmScope: "per-channel-peer"
+    const sessionKey = buildAgentSessionKey({
+      agentId: mainSessionAgentId,
+      channel: "clawline",
+      peer: { kind: "dm", id: entry.userId },
+      dmScope: "per-channel-peer",
+    });
     const peerId = derivePeerId(entry);
     const session: Session = {
       socket: ws,
