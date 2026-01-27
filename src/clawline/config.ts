@@ -100,7 +100,7 @@ const DEFAULTS: ResolvedClawlineConfig = {
 };
 
 export function resolveClawlineConfig(cfg: ClawdbotConfig): ResolvedClawlineConfig {
-  const input = (cfg.clawline ?? {}) as ClawlineConfigInput;
+  const input = (cfg.channels?.clawline ?? {}) as ClawlineConfigInput;
   const merged = deepMerge(
     structuredClone(DEFAULTS) as ResolvedClawlineConfig,
     input as Partial<ResolvedClawlineConfig>,

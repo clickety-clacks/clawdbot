@@ -15,6 +15,27 @@ import {
 
 export const LEGACY_CONFIG_MIGRATIONS_PART_3: LegacyConfigMigration[] = [
   {
+    id: "clawline->channels.clawline",
+    describe: "Move clawline config under channels.clawline",
+    apply: (raw, changes) => {
+      const clawline = getRecord(raw.clawline);
+      if (!clawline) return;
+      const channels = ensureRecord(raw, "channels");
+      const existing = getRecord(channels.clawline);
+      if (existing) {
+        mergeMissing(existing, clawline);
+        changes.push("Merged clawline → channels.clawline.");
+      } else if (channels.clawline === undefined) {
+        channels.clawline = clawline;
+        changes.push("Moved clawline → channels.clawline.");
+      } else {
+        channels.clawline = clawline;
+        changes.push("Replaced channels.clawline with clawline config.");
+      }
+      delete raw.clawline;
+    },
+  },
+  {
     id: "auth.anthropic-claude-cli-mode-oauth",
     describe: "Switch anthropic:claude-cli auth profile mode to oauth",
     apply: (raw, changes) => {

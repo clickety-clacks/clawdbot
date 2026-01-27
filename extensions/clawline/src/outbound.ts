@@ -57,7 +57,7 @@ export const clawlineOutbound: ChannelOutboundAdapter = {
     if (!mediaUrl) {
       throw new Error("Clawline outbound media delivery requires mediaUrl");
     }
-    const maxBytes = cfg.clawline?.media?.maxUploadBytes;
+    const maxBytes = cfg.channels?.clawline?.media?.maxUploadBytes;
     const media = await loadWebMedia(mediaUrl, maxBytes);
     const attachments = [
       {
