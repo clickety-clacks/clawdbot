@@ -118,6 +118,7 @@ export async function routeReply(params: RouteReplyParams): Promise<RouteReplyRe
       replyToId: resolvedReplyToId ?? null,
       threadId: resolvedThreadId,
       abortSignal,
+      sessionKey: params.sessionKey,
       mirror: params.sessionKey
         ? {
             sessionKey: params.sessionKey,

@@ -126,6 +126,10 @@ export const sendHandlers: GatewayRequestHandlers = {
           };
         }
         const outboundDeps = context.deps ? createOutboundSendDeps(context.deps) : undefined;
+        const sessionKeyTrimmed =
+          typeof request.sessionKey === "string" && request.sessionKey.trim()
+            ? request.sessionKey.trim()
+            : undefined;
         const results = await deliverOutboundPayloads({
           cfg,
           channel: outboundChannel,
@@ -134,18 +138,18 @@ export const sendHandlers: GatewayRequestHandlers = {
           payloads: [{ text: message, mediaUrl: request.mediaUrl }],
           gifPlayback: request.gifPlayback,
           deps: outboundDeps,
-          mirror:
-            typeof request.sessionKey === "string" && request.sessionKey.trim()
-              ? {
-                  sessionKey: request.sessionKey.trim(),
-                  agentId: resolveSessionAgentId({
-                    sessionKey: request.sessionKey.trim(),
-                    config: cfg,
-                  }),
-                  text: message,
-                  mediaUrls: request.mediaUrl ? [request.mediaUrl] : undefined,
-                }
-              : undefined,
+          sessionKey: sessionKeyTrimmed,
+          mirror: sessionKeyTrimmed
+            ? {
+                sessionKey: sessionKeyTrimmed,
+                agentId: resolveSessionAgentId({
+                  sessionKey: sessionKeyTrimmed,
+                  config: cfg,
+                }),
+                text: message,
+                mediaUrls: request.mediaUrl ? [request.mediaUrl] : undefined,
+              }
+            : undefined,
         });
 
         const result = results.at(-1);
