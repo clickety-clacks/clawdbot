@@ -1,3 +1,8 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type {
   ChannelId,
@@ -47,8 +52,10 @@ import {
   shouldApplyCrossContextMarker,
 } from "./outbound-policy.js";
 import { executePollAction, executeSendAction } from "./outbound-send-service.js";
-import { ensureOutboundSessionEntry, resolveOutboundSessionRoute } from "./outbound-session.js";
-import { resolveChannelTarget, type ResolvedMessagingTarget } from "./target-resolver.js";
+import { actionHasTarget, actionRequiresTarget } from "./message-action-spec.js";
+import { resolveChannelTarget } from "./target-resolver.js";
+import { loadWebMedia } from "../../web/media.js";
+import { detectMime, extensionForMime } from "../../media/mime.js";
 
 export type MessageActionRunnerGateway = {
   url?: string;
@@ -244,6 +251,66 @@ async function resolveChannel(cfg: OpenClawConfig, params: Record<string, unknow
   return selection.channel;
 }
 
+async function materializeInlineMedia(params: {
+  args: Record<string, unknown>;
+  dryRun: boolean;
+}): Promise<{ mediaUrl?: string; cleanup?: () => Promise<void> }> {
+  const mediaRaw = readStringParam(params.args, "media", { trim: false }) ?? "";
+  const dataUrlMatch = /^data:[^;]+;base64,/i.test(mediaRaw) ? mediaRaw : undefined;
+
+  const rawBuffer = readStringParam(params.args, "buffer", { trim: false });
+  if (!rawBuffer && !dataUrlMatch) {
+    return {};
+  }
+
+  const contentTypeParam =
+    readStringParam(params.args, "contentType") ?? readStringParam(params.args, "mimeType");
+  const normalized = normalizeBase64Payload({
+    base64: dataUrlMatch ?? rawBuffer ?? undefined,
+    contentType: contentTypeParam ?? undefined,
+  });
+
+  const base64 = normalized.base64?.replace(/\s+/g, "");
+  if (!base64) {
+    return {};
+  }
+
+  if (params.dryRun) {
+    return { mediaUrl: "inline://base64" };
+  }
+
+  const buffer = Buffer.from(base64, "base64");
+  if (buffer.length === 0) {
+    throw new Error("Attachment buffer is empty");
+  }
+
+  let mimeType = normalized.contentType?.trim() || "";
+  if (!mimeType) {
+    const detected = await detectMime({ buffer });
+    if (detected) {
+      mimeType = detected;
+      params.args.contentType = detected;
+    }
+  }
+
+  const filenameRaw = readStringParam(params.args, "filename");
+  const safeName = filenameRaw?.trim() ? path.basename(filenameRaw.trim()) : "attachment";
+  const currentExt = path.extname(safeName);
+  const derivedExt = mimeType ? extensionForMime(mimeType) : undefined;
+  const filename = currentExt || !derivedExt ? safeName : `${safeName}${derivedExt}`;
+
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-attachment-"));
+  const filePath = path.join(tmpDir, filename);
+  await fs.writeFile(filePath, buffer);
+
+  return {
+    mediaUrl: filePath,
+    cleanup: async () => {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    },
+  };
+}
+
 async function resolveActionTarget(params: {
   cfg: OpenClawConfig;
   channel: ChannelId;
@@ -418,10 +485,10 @@ async function handleSendAction(ctx: ResolvedActionContext): Promise<MessageActi
     readStringParam(params, "path", { trim: false }) ??
     readStringParam(params, "filePath", { trim: false });
   const hasCard = params.card != null && typeof params.card === "object";
-  const caption = readStringParam(params, "caption", { allowEmpty: true }) ?? "";
+  const hasInlineBuffer = Boolean(readStringParam(params, "buffer", { trim: false })?.trim());
   let message =
     readStringParam(params, "message", {
-      required: !mediaHint && !hasCard,
+      required: !mediaHint && !hasCard && !hasInlineBuffer,
       allowEmpty: true,
     }) ?? "";
   if (message.includes("\\n")) {
@@ -468,6 +535,21 @@ async function handleSendAction(ctx: ResolvedActionContext): Promise<MessageActi
     params.media = mergedMediaUrls[0] || undefined;
   }
 
+  let cleanupInlineMedia: (() => Promise<void>) | undefined;
+  if (!params.media) {
+    const inlineMedia = await materializeInlineMedia({ args: params, dryRun });
+    if (inlineMedia.mediaUrl) {
+      params.media = inlineMedia.mediaUrl;
+      cleanupInlineMedia = inlineMedia.cleanup;
+    }
+  } else {
+    const inlineMedia = await materializeInlineMedia({ args: params, dryRun });
+    if (inlineMedia.mediaUrl) {
+      params.media = inlineMedia.mediaUrl;
+      cleanupInlineMedia = inlineMedia.cleanup;
+    }
+  }
+
   message = await maybeApplyCrossContextMarker({
     cfg,
     channel,
@@ -493,83 +575,48 @@ async function handleSendAction(ctx: ResolvedActionContext): Promise<MessageActi
   params.message = message;
   const gifPlayback = readBooleanParam(params, "gifPlayback") ?? false;
   const bestEffort = readBooleanParam(params, "bestEffort");
-  const silent = readBooleanParam(params, "silent");
-
-  const replyToId = readStringParam(params, "replyTo");
-  const resolvedThreadId = resolveAndApplyOutboundThreadId(params, {
-    channel,
-    to,
-    toolContext: input.toolContext,
-    allowSlackAutoThread: channel === "slack" && !replyToId,
-  });
-  const outboundRoute =
-    agentId && !dryRun
-      ? await resolveOutboundSessionRoute({
-          cfg,
-          channel,
-          agentId,
-          accountId,
-          target: to,
-          resolvedTarget,
-          replyToId,
-          threadId: resolvedThreadId,
-        })
-      : null;
-  if (outboundRoute && agentId && !dryRun) {
-    await ensureOutboundSessionEntry({
-      cfg,
-      agentId,
-      channel,
-      accountId,
-      route: outboundRoute,
+  try {
+    const send = await executeSendAction({
+      ctx: {
+        cfg,
+        channel,
+        params,
+        accountId: accountId ?? undefined,
+        gateway,
+        toolContext: input.toolContext,
+        deps: input.deps,
+        dryRun,
+        mirror:
+          input.sessionKey && !dryRun
+            ? {
+                sessionKey: input.sessionKey,
+                agentId: input.agentId,
+              }
+            : undefined,
+      },
+      to,
+      message,
+      mediaUrl: mediaUrl || undefined,
+      gifPlayback,
+      bestEffort: bestEffort ?? undefined,
     });
-  }
-  const mirrorMediaUrls =
-    mergedMediaUrls.length > 0 ? mergedMediaUrls : mediaUrl ? [mediaUrl] : undefined;
-  throwIfAborted(abortSignal);
-  const send = await executeSendAction({
-    ctx: {
-      cfg,
-      channel,
-      params,
-      accountId: accountId ?? undefined,
-      gateway,
-      toolContext: input.toolContext,
-      deps: input.deps,
-      dryRun,
-      mirror:
-        outboundRoute && !dryRun
-          ? {
-              sessionKey: outboundRoute.sessionKey,
-              agentId,
-              text: message,
-              mediaUrls: mirrorMediaUrls,
-            }
-          : undefined,
-      abortSignal,
-      silent: silent ?? undefined,
-    },
-    to,
-    message,
-    mediaUrl: mediaUrl || undefined,
-    mediaUrls: mergedMediaUrls.length ? mergedMediaUrls : undefined,
-    gifPlayback,
-    bestEffort: bestEffort ?? undefined,
-    replyToId: replyToId ?? undefined,
-    threadId: resolvedThreadId ?? undefined,
-  });
 
-  return {
-    kind: "send",
-    channel,
-    action,
-    to,
-    handledBy: send.handledBy,
-    payload: send.payload,
-    toolResult: send.toolResult,
-    sendResult: send.sendResult,
-    dryRun,
-  };
+    return {
+      kind: "send",
+      channel,
+      action,
+      to,
+      handledBy: send.handledBy,
+      payload: send.payload,
+      toolResult: send.toolResult,
+      sendResult: send.sendResult,
+      dryRun,
+    };
+  } finally {
+    if (cleanupInlineMedia) {
+      await cleanupInlineMedia();
+    }
+  }
 }
 
 async function handlePollAction(ctx: ResolvedActionContext): Promise<MessageActionRunResult> {
