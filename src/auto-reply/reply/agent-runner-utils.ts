@@ -28,9 +28,20 @@ export function buildThreadingToolContext(params: {
     return {};
   }
   const provider = normalizeChannelId(rawProvider) ?? normalizeAnyChannelId(rawProvider);
+  const isClawline = rawProvider === "clawline" || provider === "clawline";
   // Fallback for unrecognized/plugin channels (e.g., BlueBubbles before plugin registry init)
   const dock = provider ? getChannelDock(provider) : undefined;
   if (!dock?.threading?.buildToolContext) {
+    if (isClawline) {
+      const originTo =
+        typeof sessionCtx.OriginatingTo === "string" ? sessionCtx.OriginatingTo.trim() : undefined;
+      const fallbackTo = sessionCtx.To?.trim() || undefined;
+      return {
+        currentChannelId: originTo || fallbackTo,
+        currentChannelProvider: provider,
+        hasRepliedRef,
+      };
+    }
     return {
       currentChannelId: sessionCtx.To?.trim() || undefined,
       currentChannelProvider: provider ?? (rawProvider as ChannelId),
