@@ -19,6 +19,7 @@ vi.mock("../web/media.js", () => ({
 vi.mock("grammy", () => ({
   Bot: class {
     api = botApi;
+    catch = vi.fn();
     constructor(
       public token: string,
       public options?: {
@@ -87,8 +88,10 @@ describe("sendMessageTelegram caption splitting", () => {
     expect(sendPhoto).toHaveBeenCalledWith(chatId, expect.anything(), {
       caption: undefined,
     });
-    // Then text sent as separate message (plain text, matching caption behavior)
-    expect(sendMessage).toHaveBeenCalledWith(chatId, longText);
+    // Then text sent as separate message (HTML formatting)
+    expect(sendMessage).toHaveBeenCalledWith(chatId, longText, {
+      parse_mode: "HTML",
+    });
     // Returns the text message ID (the "main" content)
     expect(res.messageId).toBe("71");
   });
@@ -123,10 +126,41 @@ describe("sendMessageTelegram caption splitting", () => {
     // Caption should be included with media
     expect(sendPhoto).toHaveBeenCalledWith(chatId, expect.anything(), {
       caption: shortText,
+      parse_mode: "HTML",
     });
     // No separate text message needed
     expect(sendMessage).not.toHaveBeenCalled();
     expect(res.messageId).toBe("72");
+  });
+
+  it("renders markdown in media captions", async () => {
+    const chatId = "123";
+    const caption = "hi **boss**";
+
+    const sendPhoto = vi.fn().mockResolvedValue({
+      message_id: 90,
+      chat: { id: chatId },
+    });
+    const api = { sendPhoto } as unknown as {
+      sendPhoto: typeof sendPhoto;
+    };
+
+    loadWebMedia.mockResolvedValueOnce({
+      buffer: Buffer.from("fake-image"),
+      contentType: "image/jpeg",
+      fileName: "photo.jpg",
+    });
+
+    await sendMessageTelegram(chatId, caption, {
+      token: "tok",
+      api,
+      mediaUrl: "https://example.com/photo.jpg",
+    });
+
+    expect(sendPhoto).toHaveBeenCalledWith(chatId, expect.anything(), {
+      caption: "hi <b>boss</b>",
+      parse_mode: "HTML",
+    });
   });
 
   it("preserves thread params when splitting long captions", async () => {
@@ -166,8 +200,9 @@ describe("sendMessageTelegram caption splitting", () => {
       message_thread_id: 271,
       reply_to_message_id: 500,
     });
-    // Text message also includes thread params (plain text, matching caption behavior)
+    // Text message also includes thread params (HTML formatting)
     expect(sendMessage).toHaveBeenCalledWith(chatId, longText, {
+      parse_mode: "HTML",
       message_thread_id: 271,
       reply_to_message_id: 500,
     });
@@ -209,6 +244,7 @@ describe("sendMessageTelegram caption splitting", () => {
     });
     // Follow-up text has the reply_markup
     expect(sendMessage).toHaveBeenCalledWith(chatId, longText, {
+      parse_mode: "HTML",
       reply_markup: {
         inline_keyboard: [[{ text: "Click me", callback_data: "action:click" }]],
       },
@@ -253,6 +289,7 @@ describe("sendMessageTelegram caption splitting", () => {
       reply_to_message_id: 500,
     });
     expect(sendMessage).toHaveBeenCalledWith(chatId, longText, {
+      parse_mode: "HTML",
       message_thread_id: 271,
       reply_to_message_id: 500,
       reply_markup: {
@@ -353,6 +390,7 @@ describe("sendMessageTelegram caption splitting", () => {
     // Media sent WITH reply_markup when not splitting
     expect(sendPhoto).toHaveBeenCalledWith(chatId, expect.anything(), {
       caption: shortText,
+      parse_mode: "HTML",
       reply_markup: {
         inline_keyboard: [[{ text: "Click me", callback_data: "action:click" }]],
       },

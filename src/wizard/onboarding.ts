@@ -29,12 +29,12 @@ import type {
 import { formatCliCommand } from "../cli/command-format.js";
 import type { ClawdbotConfig } from "../config/config.js";
 import {
-  CONFIG_PATH_CLAWDBOT,
   DEFAULT_GATEWAY_PORT,
   readConfigFileSnapshot,
   resolveGatewayPort,
   writeConfigFile,
 } from "../config/config.js";
+import { logConfigUpdated } from "../config/logging.js";
 import type { RuntimeEnv } from "../runtime.js";
 import { defaultRuntime } from "../runtime.js";
 import { resolveUserPath } from "../utils.js";
@@ -51,12 +51,26 @@ async function requireRiskAcknowledgement(params: {
 
   await params.prompter.note(
     [
-      "Please read: https://docs.clawd.bot/security",
+      "Security warning — please read.",
       "",
-      "Clawdbot agents can run commands, read/write files, and act through any tools you enable. They can only send messages on channels you configure (for example, an account you log in on this machine, or a bot account like Slack/Discord).",
+      "Clawdbot is a hobby project and still in beta. Expect sharp edges.",
+      "This bot can read files and run actions if tools are enabled.",
+      "A bad prompt can trick it into doing unsafe things.",
       "",
-      "If you’re new to this, start with the sandbox and least privilege. It helps limit what an agent can do if it’s tricked or makes a mistake.",
-      "Learn more: https://docs.clawd.bot/sandboxing",
+      "If you’re not comfortable with basic security and access control, don’t run Clawdbot.",
+      "Ask someone experienced to help before enabling tools or exposing it to the internet.",
+      "",
+      "Recommended baseline:",
+      "- Pairing/allowlists + mention gating.",
+      "- Sandbox + least-privilege tools.",
+      "- Keep secrets out of the agent’s reachable filesystem.",
+      "- Use the strongest available model for any bot with tools or untrusted inboxes.",
+      "",
+      "Run regularly:",
+      "clawdbot security audit --deep",
+      "clawdbot security audit --fix",
+      "",
+      "Must read: https://docs.clawd.bot/gateway/security",
     ].join("\n"),
     "Security",
   );
@@ -82,10 +96,9 @@ export async function runOnboardingWizard(
   const snapshot = await readConfigFileSnapshot();
   let baseConfig: ClawdbotConfig = snapshot.valid ? snapshot.config : {};
 
-  if (snapshot.exists) {
-    const title = snapshot.valid ? "Existing config detected" : "Invalid config";
-    await prompter.note(summarizeExistingConfig(baseConfig), title);
-    if (!snapshot.valid && snapshot.issues.length > 0) {
+  if (snapshot.exists && !snapshot.valid) {
+    await prompter.note(summarizeExistingConfig(baseConfig), "Invalid config");
+    if (snapshot.issues.length > 0) {
       await prompter.note(
         [
           ...snapshot.issues.map((iss) => `- ${iss.path}: ${iss.message}`),
@@ -95,14 +108,51 @@ export async function runOnboardingWizard(
         "Config issues",
       );
     }
+    await prompter.outro(
+      `Config invalid. Run \`${formatCliCommand("clawdbot doctor")}\` to repair it, then re-run onboarding.`,
+    );
+    runtime.exit(1);
+    return;
+  }
 
-    if (!snapshot.valid) {
-      await prompter.outro(
-        `Config invalid. Run \`${formatCliCommand("clawdbot doctor")}\` to repair it, then re-run onboarding.`,
-      );
-      runtime.exit(1);
-      return;
-    }
+  const quickstartHint = `Configure details later via ${formatCliCommand("clawdbot configure")}.`;
+  const manualHint = "Configure port, network, Tailscale, and auth options.";
+  const explicitFlowRaw = opts.flow?.trim();
+  const normalizedExplicitFlow = explicitFlowRaw === "manual" ? "advanced" : explicitFlowRaw;
+  if (
+    normalizedExplicitFlow &&
+    normalizedExplicitFlow !== "quickstart" &&
+    normalizedExplicitFlow !== "advanced"
+  ) {
+    runtime.error("Invalid --flow (use quickstart, manual, or advanced).");
+    runtime.exit(1);
+    return;
+  }
+  const explicitFlow: WizardFlow | undefined =
+    normalizedExplicitFlow === "quickstart" || normalizedExplicitFlow === "advanced"
+      ? normalizedExplicitFlow
+      : undefined;
+  let flow: WizardFlow =
+    explicitFlow ??
+    ((await prompter.select({
+      message: "Onboarding mode",
+      options: [
+        { value: "quickstart", label: "QuickStart", hint: quickstartHint },
+        { value: "advanced", label: "Manual", hint: manualHint },
+      ],
+      initialValue: "quickstart",
+    })) as "quickstart" | "advanced");
+
+  if (opts.mode === "remote" && flow === "quickstart") {
+    await prompter.note(
+      "QuickStart only supports local gateways. Switching to Manual mode.",
+      "QuickStart",
+    );
+    flow = "advanced";
+  }
+
+  if (snapshot.exists) {
+    await prompter.note(summarizeExistingConfig(baseConfig), "Existing config detected");
 
     const action = (await prompter.select({
       message: "Config handling",
@@ -132,37 +182,6 @@ export async function runOnboardingWizard(
       await handleReset(resetScope, resolveUserPath(workspaceDefault), runtime);
       baseConfig = {};
     }
-  }
-
-  const quickstartHint = `Configure details later via ${formatCliCommand("clawdbot configure")}.`;
-  const advancedHint = "Configure port, network, Tailscale, and auth options.";
-  const explicitFlowRaw = opts.flow?.trim();
-  if (explicitFlowRaw && explicitFlowRaw !== "quickstart" && explicitFlowRaw !== "advanced") {
-    runtime.error("Invalid --flow (use quickstart or advanced).");
-    runtime.exit(1);
-    return;
-  }
-  const explicitFlow: WizardFlow | undefined =
-    explicitFlowRaw === "quickstart" || explicitFlowRaw === "advanced"
-      ? explicitFlowRaw
-      : undefined;
-  let flow: WizardFlow =
-    explicitFlow ??
-    ((await prompter.select({
-      message: "Onboarding mode",
-      options: [
-        { value: "quickstart", label: "QuickStart", hint: quickstartHint },
-        { value: "advanced", label: "Advanced", hint: advancedHint },
-      ],
-      initialValue: "quickstart",
-    })) as "quickstart" | "advanced");
-
-  if (opts.mode === "remote" && flow === "quickstart") {
-    await prompter.note(
-      "QuickStart only supports local gateways. Switching to Advanced mode.",
-      "QuickStart",
-    );
-    flow = "advanced";
   }
 
   const quickstartGateway: QuickstartGatewayDefaults = (() => {
@@ -225,7 +244,6 @@ export async function runOnboardingWizard(
       return "Auto";
     };
     const formatAuth = (value: GatewayAuthChoice) => {
-      if (value === "off") return "Off (loopback only)";
       if (value === "token") return "Token (default)";
       return "Password";
     };
@@ -301,7 +319,7 @@ export async function runOnboardingWizard(
     let nextConfig = await promptRemoteGatewayConfig(baseConfig, prompter);
     nextConfig = applyWizardMetadata(nextConfig, { command: "onboard", mode });
     await writeConfigFile(nextConfig);
-    runtime.log(`Updated ${CONFIG_PATH_CLAWDBOT}`);
+    logConfigUpdated(runtime);
     await prompter.outro("Remote gateway configured.");
     return;
   }
@@ -342,7 +360,6 @@ export async function runOnboardingWizard(
       prompter,
       store: authStore,
       includeSkip: true,
-      includeClaudeCliIfMissing: true,
     }));
 
   const authResult = await applyAuthChoice({
@@ -351,6 +368,10 @@ export async function runOnboardingWizard(
     prompter,
     runtime,
     setDefaultModel: true,
+    opts: {
+      tokenProvider: opts.tokenProvider,
+      token: opts.authChoice === "apiKey" && opts.token ? opts.token : undefined,
+    },
   });
   nextConfig = authResult.config;
 
@@ -400,7 +421,7 @@ export async function runOnboardingWizard(
   }
 
   await writeConfigFile(nextConfig);
-  runtime.log(`Updated ${CONFIG_PATH_CLAWDBOT}`);
+  logConfigUpdated(runtime);
   await ensureWorkspaceAndSessions(workspaceDir, runtime, {
     skipBootstrap: Boolean(nextConfig.agents?.defaults?.skipBootstrap),
   });

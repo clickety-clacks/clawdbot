@@ -3,6 +3,26 @@ import { CURRENT_MESSAGE_MARKER } from "./mentions.js";
 export const HISTORY_CONTEXT_MARKER = "[Chat messages since your last reply - for context]";
 export const DEFAULT_GROUP_HISTORY_LIMIT = 50;
 
+/** Maximum number of group history keys to retain (LRU eviction when exceeded). */
+export const MAX_HISTORY_KEYS = 1000;
+
+/**
+ * Evict oldest keys from a history map when it exceeds MAX_HISTORY_KEYS.
+ * Uses Map's insertion order for LRU-like behavior.
+ */
+export function evictOldHistoryKeys<T>(
+  historyMap: Map<string, T[]>,
+  maxKeys: number = MAX_HISTORY_KEYS,
+): void {
+  if (historyMap.size <= maxKeys) return;
+  const keysToDelete = historyMap.size - maxKeys;
+  const iterator = historyMap.keys();
+  for (let i = 0; i < keysToDelete; i++) {
+    const key = iterator.next().value;
+    if (key !== undefined) historyMap.delete(key);
+  }
+}
+
 export type HistoryEntry = {
   sender: string;
   body: string;
@@ -34,7 +54,13 @@ export function appendHistoryEntry<T extends HistoryEntry>(params: {
   const history = historyMap.get(historyKey) ?? [];
   history.push(entry);
   while (history.length > params.limit) history.shift();
+  if (historyMap.has(historyKey)) {
+    // Refresh insertion order so eviction keeps recently used histories.
+    historyMap.delete(historyKey);
+  }
   historyMap.set(historyKey, history);
+  // Evict oldest keys if map exceeds max size to prevent unbounded memory growth
+  evictOldHistoryKeys(historyMap);
   return history;
 }
 
@@ -45,6 +71,22 @@ export function recordPendingHistoryEntry<T extends HistoryEntry>(params: {
   limit: number;
 }): T[] {
   return appendHistoryEntry(params);
+}
+
+export function recordPendingHistoryEntryIfEnabled<T extends HistoryEntry>(params: {
+  historyMap: Map<string, T[]>;
+  historyKey: string;
+  entry?: T | null;
+  limit: number;
+}): T[] {
+  if (!params.entry) return [];
+  if (params.limit <= 0) return [];
+  return recordPendingHistoryEntry({
+    historyMap: params.historyMap,
+    historyKey: params.historyKey,
+    entry: params.entry,
+    limit: params.limit,
+  });
 }
 
 export function buildPendingHistoryContextFromMap(params: {
@@ -99,6 +141,15 @@ export function clearHistoryEntries(params: {
   historyKey: string;
 }): void {
   params.historyMap.set(params.historyKey, []);
+}
+
+export function clearHistoryEntriesIfEnabled(params: {
+  historyMap: Map<string, HistoryEntry[]>;
+  historyKey: string;
+  limit: number;
+}): void {
+  if (params.limit <= 0) return;
+  clearHistoryEntries({ historyMap: params.historyMap, historyKey: params.historyKey });
 }
 
 export function buildHistoryContextFromEntries(params: {

@@ -19,6 +19,7 @@ vi.mock("../web/media.js", () => ({
 vi.mock("grammy", () => ({
   Bot: class {
     api = botApi;
+    catch = vi.fn();
     constructor(
       public token: string,
       public options?: {
@@ -150,6 +151,62 @@ describe("sendMessageTelegram", () => {
     expect(sendMessage).toHaveBeenNthCalledWith(2, chatId, "_oops_");
     expect(res.chatId).toBe(chatId);
     expect(res.messageId).toBe("42");
+  });
+
+  it("adds link_preview_options when previews are disabled in config", async () => {
+    const chatId = "123";
+    const sendMessage = vi.fn().mockResolvedValue({
+      message_id: 7,
+      chat: { id: chatId },
+    });
+    const api = { sendMessage } as unknown as {
+      sendMessage: typeof sendMessage;
+    };
+
+    loadConfig.mockReturnValue({
+      channels: { telegram: { linkPreview: false } },
+    });
+
+    await sendMessageTelegram(chatId, "hi", { token: "tok", api });
+
+    expect(sendMessage).toHaveBeenCalledWith(chatId, "hi", {
+      parse_mode: "HTML",
+      link_preview_options: { is_disabled: true },
+    });
+  });
+
+  it("keeps link_preview_options on plain-text fallback when disabled", async () => {
+    const chatId = "123";
+    const parseErr = new Error(
+      "400: Bad Request: can't parse entities: Can't find end of the entity starting at byte offset 9",
+    );
+    const sendMessage = vi
+      .fn()
+      .mockRejectedValueOnce(parseErr)
+      .mockResolvedValueOnce({
+        message_id: 42,
+        chat: { id: chatId },
+      });
+    const api = { sendMessage } as unknown as {
+      sendMessage: typeof sendMessage;
+    };
+
+    loadConfig.mockReturnValue({
+      channels: { telegram: { linkPreview: false } },
+    });
+
+    await sendMessageTelegram(chatId, "_oops_", {
+      token: "tok",
+      api,
+    });
+
+    expect(sendMessage).toHaveBeenNthCalledWith(1, chatId, "<i>oops</i>", {
+      parse_mode: "HTML",
+      link_preview_options: { is_disabled: true },
+    });
+    expect(sendMessage).toHaveBeenNthCalledWith(2, chatId, "_oops_", {
+      link_preview_options: { is_disabled: true },
+    });
   });
 
   it("uses native fetch for BAN compatibility when api is omitted", async () => {
@@ -285,6 +342,7 @@ describe("sendMessageTelegram", () => {
     expect(sendAnimation).toHaveBeenCalledTimes(1);
     expect(sendAnimation).toHaveBeenCalledWith(chatId, expect.anything(), {
       caption: "caption",
+      parse_mode: "HTML",
     });
     expect(res.messageId).toBe("9");
   });
@@ -318,6 +376,7 @@ describe("sendMessageTelegram", () => {
 
     expect(sendAudio).toHaveBeenCalledWith(chatId, expect.anything(), {
       caption: "caption",
+      parse_mode: "HTML",
     });
     expect(sendVoice).not.toHaveBeenCalled();
   });
@@ -354,6 +413,7 @@ describe("sendMessageTelegram", () => {
 
     expect(sendVoice).toHaveBeenCalledWith(chatId, expect.anything(), {
       caption: "voice note",
+      parse_mode: "HTML",
       message_thread_id: 271,
       reply_to_message_id: 500,
     });
@@ -390,6 +450,7 @@ describe("sendMessageTelegram", () => {
 
     expect(sendAudio).toHaveBeenCalledWith(chatId, expect.anything(), {
       caption: "caption",
+      parse_mode: "HTML",
     });
     expect(sendVoice).not.toHaveBeenCalled();
   });
@@ -413,6 +474,28 @@ describe("sendMessageTelegram", () => {
     expect(sendMessage).toHaveBeenCalledWith(chatId, "hello forum", {
       parse_mode: "HTML",
       message_thread_id: 271,
+    });
+  });
+
+  it("sets disable_notification when silent is true", async () => {
+    const chatId = "123";
+    const sendMessage = vi.fn().mockResolvedValue({
+      message_id: 1,
+      chat: { id: chatId },
+    });
+    const api = { sendMessage } as unknown as {
+      sendMessage: typeof sendMessage;
+    };
+
+    await sendMessageTelegram(chatId, "hi", {
+      token: "tok",
+      api,
+      silent: true,
+    });
+
+    expect(sendMessage).toHaveBeenCalledWith(chatId, "hi", {
+      parse_mode: "HTML",
+      disable_notification: true,
     });
   });
 

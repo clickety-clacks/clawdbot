@@ -21,7 +21,11 @@ export async function prependSystemEvents(params: {
     if (!trimmed) return null;
     const lower = trimmed.toLowerCase();
     if (lower.includes("reason periodic")) return null;
-    if (lower.includes("heartbeat")) return null;
+    // Filter out the actual heartbeat prompt, but not cron jobs that mention "heartbeat"
+    // The heartbeat prompt starts with "Read HEARTBEAT.md" - cron payloads won't match this
+    if (lower.startsWith("read heartbeat.md")) return null;
+    // Also filter heartbeat poll/wake noise
+    if (lower.includes("heartbeat poll") || lower.includes("heartbeat wake")) return null;
     if (trimmed.startsWith("Node:")) {
       return trimmed.replace(/ · last input [^·]+/i, "").trim();
     }
@@ -237,23 +241,42 @@ export async function incrementCompactionCount(params: {
   sessionKey?: string;
   storePath?: string;
   now?: number;
+  /** Token count after compaction - if provided, updates session token counts */
+  tokensAfter?: number;
 }): Promise<number | undefined> {
-  const { sessionEntry, sessionStore, sessionKey, storePath, now = Date.now() } = params;
+  const {
+    sessionEntry,
+    sessionStore,
+    sessionKey,
+    storePath,
+    now = Date.now(),
+    tokensAfter,
+  } = params;
   if (!sessionStore || !sessionKey) return undefined;
   const entry = sessionStore[sessionKey] ?? sessionEntry;
   if (!entry) return undefined;
   const nextCount = (entry.compactionCount ?? 0) + 1;
-  sessionStore[sessionKey] = {
-    ...entry,
+  // Build update payload with compaction count and optionally updated token counts
+  const updates: Partial<SessionEntry> = {
     compactionCount: nextCount,
     updatedAt: now,
+  };
+  // If tokensAfter is provided, update the cached token counts to reflect post-compaction state
+  if (tokensAfter != null && tokensAfter > 0) {
+    updates.totalTokens = tokensAfter;
+    // Clear input/output breakdown since we only have the total estimate after compaction
+    updates.inputTokens = undefined;
+    updates.outputTokens = undefined;
+  }
+  sessionStore[sessionKey] = {
+    ...entry,
+    ...updates,
   };
   if (storePath) {
     await updateSessionStore(storePath, (store) => {
       store[sessionKey] = {
         ...store[sessionKey],
-        compactionCount: nextCount,
-        updatedAt: now,
+        ...updates,
       };
     });
   }

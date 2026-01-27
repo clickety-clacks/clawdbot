@@ -60,14 +60,18 @@ export type MsgContext = {
   MediaPath?: string;
   MediaUrl?: string;
   MediaType?: string;
+  MediaDir?: string;
   MediaPaths?: string[];
   MediaUrls?: string[];
   MediaTypes?: string[];
+  OutputDir?: string;
+  OutputBase?: string;
   /** Remote host for SCP when media lives on a different machine (e.g., clawdbot@192.168.64.3). */
   MediaRemoteHost?: string;
   Transcript?: string;
   MediaUnderstanding?: MediaUnderstandingOutput[];
   MediaUnderstandingDecisions?: MediaUnderstandingDecision[];
+  LinkUnderstanding?: string[];
   Prompt?: string;
   MaxChars?: number;
   ChatType?: string;
@@ -84,6 +88,7 @@ export type MsgContext = {
   SenderUsername?: string;
   SenderTag?: string;
   SenderE164?: string;
+  Timestamp?: number;
   /** Provider label (e.g. whatsapp, telegram). */
   Provider?: string;
   /** Provider surface label (e.g. discord, slack). Prefer this over `Provider` when available. */

@@ -7,6 +7,7 @@ import type { SessionManager } from "@mariozechner/pi-coding-agent";
 import type { ClawdbotConfig } from "../../config/config.js";
 import { resolveContextWindowInfo } from "../context-window-guard.js";
 import { DEFAULT_CONTEXT_TOKENS } from "../defaults.js";
+import { setCompactionSafeguardRuntime } from "../pi-extensions/compaction-safeguard-runtime.js";
 import { setContextPruningRuntime } from "../pi-extensions/context-pruning/runtime.js";
 import { computeEffectiveSettings } from "../pi-extensions/context-pruning/settings.js";
 import { makeToolPrunablePredicate } from "../pi-extensions/context-pruning/tools.js";
@@ -73,8 +74,12 @@ export function buildEmbeddedExtensionPaths(params: {
   modelId: string;
   model: Model<Api> | undefined;
 }): string[] {
-  const paths = [resolvePiExtensionPath("transcript-sanitize")];
+  const paths: string[] = [];
   if (resolveCompactionMode(params.cfg) === "safeguard") {
+    const compactionCfg = params.cfg?.agents?.defaults?.compaction;
+    setCompactionSafeguardRuntime(params.sessionManager, {
+      maxHistoryShare: compactionCfg?.maxHistoryShare,
+    });
     paths.push(resolvePiExtensionPath("compaction-safeguard"));
   }
   const pruning = buildContextPruningExtension(params);

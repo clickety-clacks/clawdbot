@@ -1,9 +1,12 @@
+import { EventEmitter } from "node:events";
+
 import type { AgentMessage, AgentTool } from "@mariozechner/pi-agent-core";
 import type { TSchema } from "@sinclair/typebox";
 import type { SessionManager } from "@mariozechner/pi-coding-agent";
 
 import { registerUnhandledRejectionHandler } from "../../infra/unhandled-rejections.js";
 import {
+  downgradeOpenAIReasoningBlocks,
   isCompactionFailureError,
   isGoogleModelApi,
   sanitizeGoogleTurnOrdering,
@@ -12,10 +15,9 @@ import {
 import { sanitizeToolUseResultPairing } from "../session-transcript-repair.js";
 import { log } from "./logger.js";
 import { describeUnknownError } from "./utils.js";
-import { isAntigravityClaude } from "../pi-embedded-helpers/google.js";
 import { cleanToolSchemaForGemini } from "../pi-tools.schema.js";
-import { normalizeProviderId } from "../model-selection.js";
-import type { ToolCallIdMode } from "../tool-call-id.js";
+import type { TranscriptPolicy } from "../transcript-policy.js";
+import { resolveTranscriptPolicy } from "../transcript-policy.js";
 
 const GOOGLE_TURN_ORDERING_CUSTOM_TYPE = "google-turn-ordering-bootstrap";
 const GOOGLE_SCHEMA_UNSUPPORTED_KEYWORDS = new Set([
@@ -40,21 +42,6 @@ const GOOGLE_SCHEMA_UNSUPPORTED_KEYWORDS = new Set([
   "minProperties",
   "maxProperties",
 ]);
-const OPENAI_TOOL_CALL_ID_APIS = new Set([
-  "openai",
-  "openai-completions",
-  "openai-responses",
-  "openai-codex-responses",
-]);
-const MISTRAL_MODEL_HINTS = [
-  "mistral",
-  "mixtral",
-  "codestral",
-  "pixtral",
-  "devstral",
-  "ministral",
-  "mistralai",
-];
 const ANTIGRAVITY_SIGNATURE_RE = /^[A-Za-z0-9+/]+={0,2}$/;
 
 function isValidAntigravitySignature(value: unknown): value is string {
@@ -63,19 +50,6 @@ function isValidAntigravitySignature(value: unknown): value is string {
   if (!trimmed) return false;
   if (trimmed.length % 4 !== 0) return false;
   return ANTIGRAVITY_SIGNATURE_RE.test(trimmed);
-}
-
-function shouldSanitizeToolCallIds(modelApi?: string | null): boolean {
-  if (!modelApi) return false;
-  return isGoogleModelApi(modelApi) || OPENAI_TOOL_CALL_ID_APIS.has(modelApi);
-}
-
-function isMistralModel(params: { provider?: string | null; modelId?: string | null }): boolean {
-  const provider = normalizeProviderId(params.provider ?? "");
-  if (provider === "mistral") return true;
-  const modelId = (params.modelId ?? "").toLowerCase();
-  if (!modelId) return false;
-  return MISTRAL_MODEL_HINTS.some((hint) => modelId.includes(hint));
 }
 
 function sanitizeAntigravityThinkingBlocks(messages: AgentMessage[]): AgentMessage[] {
@@ -213,14 +187,75 @@ export function logToolSchemasForGoogle(params: { tools: AgentTool[]; provider: 
   }
 }
 
+// Event emitter for unhandled compaction failures that escape try-catch blocks.
+// Listeners can use this to trigger session recovery with retry.
+const compactionFailureEmitter = new EventEmitter();
+
+export type CompactionFailureListener = (reason: string) => void;
+
+/**
+ * Register a listener for unhandled compaction failures.
+ * Called when auto-compaction fails in a way that escapes the normal try-catch,
+ * e.g., when the summarization request itself exceeds the model's token limit.
+ * Returns an unsubscribe function.
+ */
+export function onUnhandledCompactionFailure(cb: CompactionFailureListener): () => void {
+  compactionFailureEmitter.on("failure", cb);
+  return () => compactionFailureEmitter.off("failure", cb);
+}
+
 registerUnhandledRejectionHandler((reason) => {
   const message = describeUnknownError(reason);
   if (!isCompactionFailureError(message)) return false;
   log.error(`Auto-compaction failed (unhandled): ${message}`);
+  compactionFailureEmitter.emit("failure", message);
   return true;
 });
 
-type CustomEntryLike = { type?: unknown; customType?: unknown };
+type CustomEntryLike = { type?: unknown; customType?: unknown; data?: unknown };
+
+type ModelSnapshotEntry = {
+  timestamp: number;
+  provider?: string;
+  modelApi?: string | null;
+  modelId?: string;
+};
+
+const MODEL_SNAPSHOT_CUSTOM_TYPE = "model-snapshot";
+
+function readLastModelSnapshot(sessionManager: SessionManager): ModelSnapshotEntry | null {
+  try {
+    const entries = sessionManager.getEntries();
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const entry = entries[i] as CustomEntryLike;
+      if (entry?.type !== "custom" || entry?.customType !== MODEL_SNAPSHOT_CUSTOM_TYPE) continue;
+      const data = entry?.data as ModelSnapshotEntry | undefined;
+      if (data && typeof data === "object") {
+        return data;
+      }
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function appendModelSnapshot(sessionManager: SessionManager, data: ModelSnapshotEntry): void {
+  try {
+    sessionManager.appendCustomEntry(MODEL_SNAPSHOT_CUSTOM_TYPE, data);
+  } catch {
+    // ignore persistence failures
+  }
+}
+
+function isSameModelSnapshot(a: ModelSnapshotEntry, b: ModelSnapshotEntry): boolean {
+  const normalize = (value?: string | null) => value ?? "";
+  return (
+    normalize(a.provider) === normalize(b.provider) &&
+    normalize(a.modelApi) === normalize(b.modelApi) &&
+    normalize(a.modelId) === normalize(b.modelId)
+  );
+}
 
 function hasGoogleTurnOrderingMarker(sessionManager: SessionManager): boolean {
   try {
@@ -277,35 +312,62 @@ export async function sanitizeSessionHistory(params: {
   provider?: string;
   sessionManager: SessionManager;
   sessionId: string;
+  policy?: TranscriptPolicy;
 }): Promise<AgentMessage[]> {
-  const isAntigravityClaudeModel = isAntigravityClaude({
-    api: params.modelApi,
-    provider: params.provider,
-    modelId: params.modelId,
-  });
-  const provider = normalizeProviderId(params.provider ?? "");
-  const modelId = (params.modelId ?? "").toLowerCase();
-  const isOpenRouterGemini =
-    (provider === "openrouter" || provider === "opencode") && modelId.includes("gemini");
-  const isMistral = isMistralModel({ provider, modelId });
-  const toolCallIdMode: ToolCallIdMode | undefined = isMistral ? "strict9" : undefined;
-  const sanitizeToolCallIds = shouldSanitizeToolCallIds(params.modelApi) || isMistral;
+  // Keep docs/reference/transcript-hygiene.md in sync with any logic changes here.
+  const policy =
+    params.policy ??
+    resolveTranscriptPolicy({
+      modelApi: params.modelApi,
+      provider: params.provider,
+      modelId: params.modelId,
+    });
   const sanitizedImages = await sanitizeSessionMessagesImages(params.messages, "session:history", {
-    sanitizeToolCallIds,
-    toolCallIdMode,
-    enforceToolCallLast: params.modelApi === "anthropic-messages",
-    preserveSignatures: isAntigravityClaudeModel,
-    sanitizeThoughtSignatures: isOpenRouterGemini
-      ? { allowBase64Only: true, includeCamelCase: true }
-      : undefined,
+    sanitizeMode: policy.sanitizeMode,
+    sanitizeToolCallIds: policy.sanitizeToolCallIds,
+    toolCallIdMode: policy.toolCallIdMode,
+    preserveSignatures: policy.preserveSignatures,
+    sanitizeThoughtSignatures: policy.sanitizeThoughtSignatures,
   });
-  const sanitizedThinking = isAntigravityClaudeModel
+  const sanitizedThinking = policy.normalizeAntigravityThinkingBlocks
     ? sanitizeAntigravityThinkingBlocks(sanitizedImages)
     : sanitizedImages;
-  const repairedTools = sanitizeToolUseResultPairing(sanitizedThinking);
+  const repairedTools = policy.repairToolUseResultPairing
+    ? sanitizeToolUseResultPairing(sanitizedThinking)
+    : sanitizedThinking;
+
+  const isOpenAIResponsesApi =
+    params.modelApi === "openai-responses" || params.modelApi === "openai-codex-responses";
+  const hasSnapshot = Boolean(params.provider || params.modelApi || params.modelId);
+  const priorSnapshot = hasSnapshot ? readLastModelSnapshot(params.sessionManager) : null;
+  const modelChanged = priorSnapshot
+    ? !isSameModelSnapshot(priorSnapshot, {
+        timestamp: 0,
+        provider: params.provider,
+        modelApi: params.modelApi,
+        modelId: params.modelId,
+      })
+    : false;
+  const sanitizedOpenAI =
+    isOpenAIResponsesApi && modelChanged
+      ? downgradeOpenAIReasoningBlocks(repairedTools)
+      : repairedTools;
+
+  if (hasSnapshot && (!priorSnapshot || modelChanged)) {
+    appendModelSnapshot(params.sessionManager, {
+      timestamp: Date.now(),
+      provider: params.provider,
+      modelApi: params.modelApi,
+      modelId: params.modelId,
+    });
+  }
+
+  if (!policy.applyGoogleTurnOrdering) {
+    return sanitizedOpenAI;
+  }
 
   return applyGoogleTurnOrderingFix({
-    messages: repairedTools,
+    messages: sanitizedOpenAI,
     modelApi: params.modelApi,
     sessionManager: params.sessionManager,
     sessionId: params.sessionId,

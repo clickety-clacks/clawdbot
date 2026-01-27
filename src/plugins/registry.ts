@@ -11,7 +11,9 @@ import type {
   ClawdbotPluginApi,
   ClawdbotPluginChannelRegistration,
   ClawdbotPluginCliRegistrar,
+  ClawdbotPluginCommandDefinition,
   ClawdbotPluginHttpHandler,
+  ClawdbotPluginHttpRouteHandler,
   ClawdbotPluginHookOptions,
   ProviderPlugin,
   ClawdbotPluginService,
@@ -26,9 +28,11 @@ import type {
   PluginHookHandlerMap,
   PluginHookRegistration as TypedPluginHookRegistration,
 } from "./types.js";
+import { registerPluginCommand } from "./commands.js";
 import type { PluginRuntime } from "./runtime/types.js";
 import type { HookEntry } from "../hooks/types.js";
 import path from "node:path";
+import { normalizePluginHttpPath } from "./http-path.js";
 
 export type PluginToolRegistration = {
   pluginId: string;
@@ -49,6 +53,13 @@ export type PluginHttpRegistration = {
   pluginId: string;
   handler: ClawdbotPluginHttpHandler;
   source: string;
+};
+
+export type PluginHttpRouteRegistration = {
+  pluginId?: string;
+  path: string;
+  handler: ClawdbotPluginHttpRouteHandler;
+  source?: string;
 };
 
 export type PluginChannelRegistration = {
@@ -77,6 +88,12 @@ export type PluginServiceRegistration = {
   source: string;
 };
 
+export type PluginCommandRegistration = {
+  pluginId: string;
+  command: ClawdbotPluginCommandDefinition;
+  source: string;
+};
+
 export type PluginRecord = {
   id: string;
   name: string;
@@ -96,6 +113,7 @@ export type PluginRecord = {
   gatewayMethods: string[];
   cliCommands: string[];
   services: string[];
+  commands: string[];
   httpHandlers: number;
   hookCount: number;
   configSchema: boolean;
@@ -112,8 +130,10 @@ export type PluginRegistry = {
   providers: PluginProviderRegistration[];
   gatewayHandlers: GatewayRequestHandlers;
   httpHandlers: PluginHttpRegistration[];
+  httpRoutes: PluginHttpRouteRegistration[];
   cliRegistrars: PluginCliRegistration[];
   services: PluginServiceRegistration[];
+  commands: PluginCommandRegistration[];
   diagnostics: PluginDiagnostic[];
 };
 
@@ -133,8 +153,10 @@ export function createPluginRegistry(registryParams: PluginRegistryParams) {
     providers: [],
     gatewayHandlers: {},
     httpHandlers: [],
+    httpRoutes: [],
     cliRegistrars: [],
     services: [],
+    commands: [],
     diagnostics: [],
   };
   const coreGatewayMethods = new Set(Object.keys(registryParams.coreGatewayHandlers ?? {}));
@@ -269,6 +291,38 @@ export function createPluginRegistry(registryParams: PluginRegistryParams) {
     });
   };
 
+  const registerHttpRoute = (
+    record: PluginRecord,
+    params: { path: string; handler: ClawdbotPluginHttpRouteHandler },
+  ) => {
+    const normalizedPath = normalizePluginHttpPath(params.path);
+    if (!normalizedPath) {
+      pushDiagnostic({
+        level: "warn",
+        pluginId: record.id,
+        source: record.source,
+        message: "http route registration missing path",
+      });
+      return;
+    }
+    if (registry.httpRoutes.some((entry) => entry.path === normalizedPath)) {
+      pushDiagnostic({
+        level: "error",
+        pluginId: record.id,
+        source: record.source,
+        message: `http route already registered: ${normalizedPath}`,
+      });
+      return;
+    }
+    record.httpHandlers += 1;
+    registry.httpRoutes.push({
+      pluginId: record.id,
+      path: normalizedPath,
+      handler: params.handler,
+      source: record.source,
+    });
+  };
+
   const registerChannel = (
     record: PluginRecord,
     registration: ClawdbotPluginChannelRegistration | ChannelPlugin,
@@ -352,6 +406,38 @@ export function createPluginRegistry(registryParams: PluginRegistryParams) {
     });
   };
 
+  const registerCommand = (record: PluginRecord, command: ClawdbotPluginCommandDefinition) => {
+    const name = command.name.trim();
+    if (!name) {
+      pushDiagnostic({
+        level: "error",
+        pluginId: record.id,
+        source: record.source,
+        message: "command registration missing name",
+      });
+      return;
+    }
+
+    // Register with the plugin command system (validates name and checks for duplicates)
+    const result = registerPluginCommand(record.id, command);
+    if (!result.ok) {
+      pushDiagnostic({
+        level: "error",
+        pluginId: record.id,
+        source: record.source,
+        message: `command registration failed: ${result.error}`,
+      });
+      return;
+    }
+
+    record.commands.push(name);
+    registry.commands.push({
+      pluginId: record.id,
+      command,
+      source: record.source,
+    });
+  };
+
   const registerTypedHook = <K extends PluginHookName>(
     record: PluginRecord,
     hookName: K,
@@ -396,11 +482,13 @@ export function createPluginRegistry(registryParams: PluginRegistryParams) {
       registerHook: (events, handler, opts) =>
         registerHook(record, events, handler, opts, params.config),
       registerHttpHandler: (handler) => registerHttpHandler(record, handler),
+      registerHttpRoute: (params) => registerHttpRoute(record, params),
       registerChannel: (registration) => registerChannel(record, registration),
       registerProvider: (provider) => registerProvider(record, provider),
       registerGatewayMethod: (method, handler) => registerGatewayMethod(record, method, handler),
       registerCli: (registrar, opts) => registerCli(record, registrar, opts),
       registerService: (service) => registerService(record, service),
+      registerCommand: (command) => registerCommand(record, command),
       resolvePath: (input: string) => resolveUserPath(input),
       on: (hookName, handler, opts) => registerTypedHook(record, hookName, handler, opts),
     };
@@ -416,6 +504,7 @@ export function createPluginRegistry(registryParams: PluginRegistryParams) {
     registerGatewayMethod,
     registerCli,
     registerService,
+    registerCommand,
     registerHook,
     registerTypedHook,
   };

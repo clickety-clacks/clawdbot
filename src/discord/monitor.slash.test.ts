@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createReplyDispatcherWithTyping } from "../auto-reply/reply/reply-dispatcher.js";
 
 const dispatchMock = vi.fn();
 
@@ -15,25 +16,43 @@ vi.mock("@buape/carbon", () => ({
   MessageCreateListener: class {},
   MessageReactionAddListener: class {},
   MessageReactionRemoveListener: class {},
+  PresenceUpdateListener: class {},
   Row: class {
     constructor(_components: unknown[]) {}
   },
 }));
 
-vi.mock("../auto-reply/reply/dispatch-from-config.js", () => ({
-  dispatchReplyFromConfig: (...args: unknown[]) => dispatchMock(...args),
-}));
+vi.mock("../auto-reply/dispatch.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../auto-reply/dispatch.js")>();
+  return {
+    ...actual,
+    dispatchInboundMessage: (...args: unknown[]) => dispatchMock(...args),
+    dispatchInboundMessageWithDispatcher: (...args: unknown[]) => dispatchMock(...args),
+    dispatchInboundMessageWithBufferedDispatcher: (...args: unknown[]) => dispatchMock(...args),
+  };
+});
 
 beforeEach(() => {
-  dispatchMock.mockReset().mockImplementation(async ({ dispatcher }) => {
-    dispatcher.sendToolResult({ text: "tool update" });
-    dispatcher.sendFinalReply({ text: "final reply" });
-    return { queuedFinal: true, counts: { tool: 1, block: 0, final: 1 } };
+  dispatchMock.mockReset().mockImplementation(async (params) => {
+    if ("dispatcher" in params && params.dispatcher) {
+      params.dispatcher.sendFinalReply({ text: "final reply" });
+      return { queuedFinal: true, counts: { tool: 0, block: 0, final: 1 } };
+    }
+    if ("dispatcherOptions" in params && params.dispatcherOptions) {
+      const { dispatcher, markDispatchIdle } = createReplyDispatcherWithTyping(
+        params.dispatcherOptions,
+      );
+      dispatcher.sendFinalReply({ text: "final reply" });
+      await dispatcher.waitForIdle();
+      markDispatchIdle();
+      return { queuedFinal: true, counts: dispatcher.getQueuedCounts() };
+    }
+    return { queuedFinal: false, counts: { tool: 0, block: 0, final: 0 } };
   });
 });
 
 describe("discord native commands", () => {
-  it("streams tool results for native slash commands", { timeout: 60_000 }, async () => {
+  it("skips tool results for native slash commands", { timeout: 60_000 }, async () => {
     const { ChannelType } = await import("@buape/carbon");
     const { createDiscordNativeCommand } = await import("./monitor.js");
 
@@ -77,8 +96,7 @@ describe("discord native commands", () => {
 
     expect(dispatchMock).toHaveBeenCalledTimes(1);
     expect(reply).toHaveBeenCalledTimes(1);
-    expect(followUp).toHaveBeenCalledTimes(1);
-    expect(reply.mock.calls[0]?.[0]?.content).toContain("tool");
-    expect(followUp.mock.calls[0]?.[0]?.content).toContain("final");
+    expect(followUp).toHaveBeenCalledTimes(0);
+    expect(reply.mock.calls[0]?.[0]?.content).toContain("final");
   });
 });

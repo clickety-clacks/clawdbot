@@ -129,7 +129,7 @@ Save to `~/.clawdbot/clawdbot.json` and you can DM the bot from that number.
         enabled: true,
         maxBytes: 20971520,
         models: [
-          { provider: "openai", model: "whisper-1" },
+          { provider: "openai", model: "gpt-4o-mini-transcribe" },
           // Optional CLI fallback (Whisper binary):
           // { type: "cli", command: "whisper", args: ["--model", "base", "{{MediaPath}}"] }
         ],
@@ -568,5 +568,5 @@ Save to `~/.clawdbot/clawdbot.json` and you can DM the bot from that number.
 
 - If you set `dmPolicy: "open"`, the matching `allowFrom` list must include `"*"`.
 - Provider IDs differ (phone numbers, user IDs, channel IDs). Use the provider docs to confirm the format.
-- Optional sections to add later: `web`, `browser`, `ui`, `bridge`, `discovery`, `canvasHost`, `talk`, `signal`, `imessage`.
+- Optional sections to add later: `web`, `browser`, `ui`, `discovery`, `canvasHost`, `talk`, `signal`, `imessage`.
 - See [Providers](/channels/whatsapp) and [Troubleshooting](/gateway/troubleshooting) for deeper setup notes.

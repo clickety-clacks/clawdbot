@@ -1,6 +1,14 @@
 import { createRequire } from "node:module";
 
-import { chunkMarkdownText, chunkText, resolveTextChunkLimit } from "../../auto-reply/chunk.js";
+import {
+  chunkByNewline,
+  chunkMarkdownText,
+  chunkMarkdownTextWithMode,
+  chunkText,
+  chunkTextWithMode,
+  resolveChunkMode,
+  resolveTextChunkLimit,
+} from "../../auto-reply/chunk.js";
 import {
   hasControlCommand,
   isControlCommandMessage,
@@ -17,7 +25,11 @@ import {
   resolveEnvelopeFormatOptions,
 } from "../../auto-reply/envelope.js";
 import { dispatchReplyFromConfig } from "../../auto-reply/reply/dispatch-from-config.js";
-import { buildMentionRegexes, matchesMentionPatterns } from "../../auto-reply/reply/mentions.js";
+import {
+  buildMentionRegexes,
+  matchesMentionPatterns,
+  matchesMentionWithExplicit,
+} from "../../auto-reply/reply/mentions.js";
 import { dispatchReplyWithBufferedBlockDispatcher } from "../../auto-reply/reply/provider-dispatcher.js";
 import { createReplyDispatcherWithTyping } from "../../auto-reply/reply/reply-dispatcher.js";
 import { finalizeInboundContext } from "../../auto-reply/reply/inbound-context.js";
@@ -25,8 +37,11 @@ import { resolveEffectiveMessagesConfig, resolveHumanDelayConfig } from "../../a
 import { createMemoryGetTool, createMemorySearchTool } from "../../agents/tools/memory-tool.js";
 import { handleSlackAction } from "../../agents/tools/slack-actions.js";
 import { handleWhatsAppAction } from "../../agents/tools/whatsapp-actions.js";
+import { removeAckReactionAfterReply, shouldAckReaction } from "../../channels/ack-reactions.js";
 import { resolveCommandAuthorizedFromAuthorizers } from "../../channels/command-gating.js";
+import { recordInboundSession } from "../../channels/session.js";
 import { discordMessageActions } from "../../channels/plugins/actions/discord.js";
+import { signalMessageActions } from "../../channels/plugins/actions/signal.js";
 import { telegramMessageActions } from "../../channels/plugins/actions/telegram.js";
 import { createWhatsAppLoginTool } from "../../channels/plugins/agent-tools/whatsapp-login.js";
 import { monitorWebChannel } from "../../channels/web/index.js";
@@ -34,6 +49,7 @@ import {
   resolveChannelGroupPolicy,
   resolveChannelGroupRequireMention,
 } from "../../config/group-policy.js";
+import { resolveMarkdownTableMode } from "../../config/markdown-tables.js";
 import { resolveStateDir } from "../../config/paths.js";
 import { loadConfig, writeConfigFile } from "../../config/config.js";
 import {
@@ -58,6 +74,7 @@ import { monitorIMessageProvider } from "../../imessage/monitor.js";
 import { probeIMessage } from "../../imessage/probe.js";
 import { sendMessageIMessage } from "../../imessage/send.js";
 import { shouldLogVerbose } from "../../globals.js";
+import { convertMarkdownTables } from "../../markdown/tables.js";
 import { getChildLogger } from "../../logging.js";
 import { normalizeLogLevel } from "../../logging/levels.js";
 import { isVoiceCompatibleAudio } from "../../media/audio.js";
@@ -107,6 +124,26 @@ import { startWebLoginWithQr, waitForWebLogin } from "../../web/login-qr.js";
 import { sendMessageWhatsApp, sendPollWhatsApp } from "../../web/outbound.js";
 import { registerMemoryCli } from "../../cli/memory-cli.js";
 import { formatNativeDependencyHint } from "./native-deps.js";
+import { textToSpeechTelephony } from "../../tts/tts.js";
+import {
+  listLineAccountIds,
+  normalizeAccountId as normalizeLineAccountId,
+  resolveDefaultLineAccountId,
+  resolveLineAccount,
+} from "../../line/accounts.js";
+import { probeLineBot } from "../../line/probe.js";
+import {
+  createQuickReplyItems,
+  pushMessageLine,
+  pushMessagesLine,
+  pushFlexMessage,
+  pushTemplateMessage,
+  pushLocationMessage,
+  pushTextMessageWithQuickReplies,
+  sendMessageLine,
+} from "../../line/send.js";
+import { monitorLineProvider } from "../../line/monitor.js";
+import { buildTemplateMessageFromPayload } from "../../line/template-messages.js";
 
 import type { PluginRuntime } from "./types.js";
 
@@ -145,6 +182,9 @@ export function createPluginRuntime(): PluginRuntime {
       getImageMetadata,
       resizeToJpeg,
     },
+    tts: {
+      textToSpeechTelephony,
+    },
     tools: {
       createMemoryGetTool,
       createMemorySearchTool,
@@ -152,10 +192,16 @@ export function createPluginRuntime(): PluginRuntime {
     },
     channel: {
       text: {
+        chunkByNewline,
         chunkMarkdownText,
+        chunkMarkdownTextWithMode,
         chunkText,
+        chunkTextWithMode,
+        resolveChunkMode,
         resolveTextChunkLimit,
         hasControlCommand,
+        resolveMarkdownTableMode,
+        convertMarkdownTables,
       },
       reply: {
         dispatchReplyWithBufferedBlockDispatcher,
@@ -188,11 +234,17 @@ export function createPluginRuntime(): PluginRuntime {
         resolveStorePath,
         readSessionUpdatedAt,
         recordSessionMetaFromInbound,
+        recordInboundSession,
         updateLastRoute,
       },
       mentions: {
         buildMentionRegexes,
         matchesMentionPatterns,
+        matchesMentionWithExplicit,
+      },
+      reactions: {
+        shouldAckReaction,
+        removeAckReactionAfterReply,
       },
       groups: {
         resolveGroupPolicy: resolveChannelGroupPolicy,
@@ -243,6 +295,7 @@ export function createPluginRuntime(): PluginRuntime {
         probeSignal,
         sendMessageSignal,
         monitorSignalProvider,
+        messageActions: signalMessageActions,
       },
       imessage: {
         monitorIMessageProvider,
@@ -264,6 +317,23 @@ export function createPluginRuntime(): PluginRuntime {
         monitorWebChannel,
         handleWhatsAppAction,
         createLoginTool: createWhatsAppLoginTool,
+      },
+      line: {
+        listLineAccountIds,
+        resolveDefaultLineAccountId,
+        resolveLineAccount,
+        normalizeAccountId: normalizeLineAccountId,
+        probeLineBot,
+        sendMessageLine,
+        pushMessageLine,
+        pushMessagesLine,
+        pushFlexMessage,
+        pushTemplateMessage,
+        pushLocationMessage,
+        pushTextMessageWithQuickReplies,
+        createQuickReplyItems,
+        buildTemplateMessageFromPayload,
+        monitorLineProvider,
       },
     },
     logging: {

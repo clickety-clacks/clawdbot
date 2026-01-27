@@ -12,6 +12,7 @@ import type { InternalHookHandler } from "../hooks/internal-hooks.js";
 import type { HookEntry } from "../hooks/types.js";
 import type { ModelProviderConfig } from "../config/types.js";
 import type { RuntimeEnv } from "../runtime.js";
+import type { ReplyPayload } from "../auto-reply/types.js";
 import type { WizardPrompter } from "../wizard/prompts.js";
 import type { createVpsAwareOAuthHandlers } from "../commands/oauth-flow.js";
 import type { GatewayRequestHandler } from "../gateway/server-methods/types.js";
@@ -129,10 +130,65 @@ export type ClawdbotPluginGatewayMethod = {
   handler: GatewayRequestHandler;
 };
 
+// =============================================================================
+// Plugin Commands
+// =============================================================================
+
+/**
+ * Context passed to plugin command handlers.
+ */
+export type PluginCommandContext = {
+  /** The sender's identifier (e.g., Telegram user ID) */
+  senderId?: string;
+  /** The channel/surface (e.g., "telegram", "discord") */
+  channel: string;
+  /** Whether the sender is on the allowlist */
+  isAuthorizedSender: boolean;
+  /** Raw command arguments after the command name */
+  args?: string;
+  /** The full normalized command body */
+  commandBody: string;
+  /** Current clawdbot configuration */
+  config: ClawdbotConfig;
+};
+
+/**
+ * Result returned by a plugin command handler.
+ */
+export type PluginCommandResult = ReplyPayload;
+
+/**
+ * Handler function for plugin commands.
+ */
+export type PluginCommandHandler = (
+  ctx: PluginCommandContext,
+) => PluginCommandResult | Promise<PluginCommandResult>;
+
+/**
+ * Definition for a plugin-registered command.
+ */
+export type ClawdbotPluginCommandDefinition = {
+  /** Command name without leading slash (e.g., "tts") */
+  name: string;
+  /** Description shown in /help and command menus */
+  description: string;
+  /** Whether this command accepts arguments */
+  acceptsArgs?: boolean;
+  /** Whether only authorized senders can use this command (default: true) */
+  requireAuth?: boolean;
+  /** The handler function */
+  handler: PluginCommandHandler;
+};
+
 export type ClawdbotPluginHttpHandler = (
   req: IncomingMessage,
   res: ServerResponse,
 ) => Promise<boolean> | boolean;
+
+export type ClawdbotPluginHttpRouteHandler = (
+  req: IncomingMessage,
+  res: ServerResponse,
+) => Promise<void> | void;
 
 export type ClawdbotPluginCliContext = {
   program: Command;
@@ -196,11 +252,18 @@ export type ClawdbotPluginApi = {
     opts?: ClawdbotPluginHookOptions,
   ) => void;
   registerHttpHandler: (handler: ClawdbotPluginHttpHandler) => void;
+  registerHttpRoute: (params: { path: string; handler: ClawdbotPluginHttpRouteHandler }) => void;
   registerChannel: (registration: ClawdbotPluginChannelRegistration | ChannelPlugin) => void;
   registerGatewayMethod: (method: string, handler: GatewayRequestHandler) => void;
   registerCli: (registrar: ClawdbotPluginCliRegistrar, opts?: { commands?: string[] }) => void;
   registerService: (service: ClawdbotPluginService) => void;
   registerProvider: (provider: ProviderPlugin) => void;
+  /**
+   * Register a custom command that bypasses the LLM agent.
+   * Plugin commands are processed before built-in commands and before agent invocation.
+   * Use this for simple state-toggling or status commands that don't need AI reasoning.
+   */
+  registerCommand: (command: ClawdbotPluginCommandDefinition) => void;
   resolvePath: (input: string) => string;
   /** Register a lifecycle hook handler */
   on: <K extends PluginHookName>(

@@ -127,7 +127,7 @@ describe("buildEmbeddedRunPayloads", () => {
 
     expect(payloads).toHaveLength(1);
     expect(payloads[0]?.isError).toBe(true);
-    expect(payloads[0]?.text).toContain("browser");
+    expect(payloads[0]?.text).toContain("Browser");
     expect(payloads[0]?.text).toContain("tab not found");
   });
 
@@ -146,6 +146,35 @@ describe("buildEmbeddedRunPayloads", () => {
 
     expect(payloads).toHaveLength(1);
     expect(payloads[0]?.text).toBe("All good");
+  });
+
+  it("adds tool error fallback when the assistant only invoked tools", () => {
+    const payloads = buildEmbeddedRunPayloads({
+      assistantTexts: [],
+      toolMetas: [],
+      lastAssistant: {
+        stopReason: "toolUse",
+        content: [
+          {
+            type: "toolCall",
+            id: "toolu_01",
+            name: "exec",
+            arguments: { command: "echo hi" },
+          },
+        ],
+      } as AssistantMessage,
+      lastToolError: { toolName: "exec", error: "Command exited with code 1" },
+      sessionKey: "session:telegram",
+      inlineToolResultsAllowed: false,
+      verboseLevel: "off",
+      reasoningLevel: "off",
+      toolResultFormat: "plain",
+    });
+
+    expect(payloads).toHaveLength(1);
+    expect(payloads[0]?.isError).toBe(true);
+    expect(payloads[0]?.text).toContain("Exec");
+    expect(payloads[0]?.text).toContain("code 1");
   });
 
   it("suppresses recoverable tool errors containing 'required'", () => {

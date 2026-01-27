@@ -9,10 +9,14 @@ read_when:
 
 Goal: go from **zero** → **first working chat** (with sane defaults) as quickly as possible.
 
+Fastest chat: open the Control UI (no channel setup needed). Run `clawdbot dashboard`
+and chat in the browser, or open `http://127.0.0.1:18789/` on the gateway host.
+Docs: [Dashboard](/web/dashboard) and [Control UI](/web/control-ui).
+
 Recommended path: use the **CLI onboarding wizard** (`clawdbot onboard`). It sets up:
 - model/auth (OAuth recommended)
 - gateway settings
-- channels (WhatsApp/Telegram/Discord/…)
+- channels (WhatsApp/Telegram/Discord/Mattermost (plugin)/...)
 - pairing defaults (secure DMs)
 - workspace bootstrap + skills
 - optional background service
@@ -45,7 +49,7 @@ run on host, set an explicit per-agent override:
   See [Web tools](/tools/web).
 
 macOS: if you plan to build the apps, install Xcode / CLT. For the CLI + gateway only, Node is enough.
-Windows: use **WSL2** (Ubuntu recommended). WSL2 is strongly recommended; native Windows is untested and more problematic. Install WSL2 first, then run the Linux steps inside WSL. See [Windows (WSL2)](/platforms/windows).
+Windows: use **WSL2** (Ubuntu recommended). WSL2 is strongly recommended; native Windows is untested, more problematic, and has poorer tool compatibility. Install WSL2 first, then run the Linux steps inside WSL. See [Windows (WSL2)](/platforms/windows).
 
 ## 1) Install the CLI (recommended)
 
@@ -80,7 +84,7 @@ clawdbot onboard --install-daemon
 What you’ll choose:
 - **Local vs Remote** gateway
 - **Auth**: OpenAI Code (Codex) subscription (OAuth) or API keys. For Anthropic we recommend an API key; `claude setup-token` is also supported.
-- **Providers**: WhatsApp QR login, Telegram/Discord bot tokens, etc.
+- **Providers**: WhatsApp QR login, Telegram/Discord bot tokens, Mattermost plugin tokens, etc.
 - **Daemon**: background install (launchd/systemd; WSL2 uses systemd)
   - **Runtime**: Node (recommended; required for WhatsApp/Telegram). Bun is **not recommended**.
 - **Gateway token**: the wizard generates one by default (even on loopback) and stores it in `gateway.auth.token`.
@@ -121,6 +125,7 @@ channels. If you use WhatsApp or Telegram, run the Gateway with **Node**.
 ```bash
 clawdbot status
 clawdbot health
+clawdbot security audit --deep
 ```
 
 ## 4) Pair + connect your first chat surface
@@ -140,6 +145,7 @@ WhatsApp doc: [WhatsApp](/channels/whatsapp)
 The wizard can write tokens/config for you. If you prefer manual config, start with:
 - Telegram: [Telegram](/channels/telegram)
 - Discord: [Discord](/channels/discord)
+- Mattermost (plugin): [Mattermost](/channels/mattermost)
 
 **Telegram DM tip:** your first DM returns a pairing code. Approve it (see next step) or the bot won’t respond.
 

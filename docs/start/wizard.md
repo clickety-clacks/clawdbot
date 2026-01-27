@@ -18,6 +18,9 @@ Primary entrypoint:
 clawdbot onboard
 ```
 
+Fastest first chat: open the Control UI (no channel setup needed). Run
+`clawdbot dashboard` and chat in the browser. Docs: [Dashboard](/web/dashboard).
+
 Follow‑up reconfiguration:
 
 ```bash
@@ -48,7 +51,7 @@ The wizard starts with **QuickStart** (defaults) vs **Advanced** (full control).
   - Model/auth (OpenAI Code (Codex) subscription OAuth, Anthropic API key (recommended) or setup-token (paste), plus MiniMax/GLM/Moonshot/AI Gateway options)
 - Workspace location + bootstrap files
 - Gateway settings (port/bind/auth/tailscale)
-- Providers (Telegram, WhatsApp, Discord, Signal)
+- Providers (Telegram, WhatsApp, Discord, Google Chat, Mattermost (plugin), Signal)
 - Daemon install (LaunchAgent / systemd user unit)
 - Health check
 - Skills (recommended)
@@ -114,9 +117,11 @@ Tip: `--json` does **not** imply non-interactive mode. Use `--non-interactive` (
    - Non‑loopback binds still require auth.
 
 5) **Channels**
-   - WhatsApp: optional QR login.
-   - Telegram: bot token.
-   - Discord: bot token.
+  - WhatsApp: optional QR login.
+  - Telegram: bot token.
+  - Discord: bot token.
+  - Google Chat: service account JSON + webhook audience.
+  - Mattermost (plugin): bot token + base URL.
    - Signal: optional `signal-cli` install + account config.
    - iMessage: local `imsg` CLI path + DB access.
   - DM security: default is pairing. First DM sends a code; approve via `clawdbot pairing approve <channel> <code>` or use allowlists.
@@ -312,5 +317,5 @@ will prompt to install it (npm or a local path) before it can be configured.
 
 - macOS app onboarding: [Onboarding](/start/onboarding)
 - Config reference: [Gateway configuration](/gateway/configuration)
-- Providers: [WhatsApp](/channels/whatsapp), [Telegram](/channels/telegram), [Discord](/channels/discord), [Signal](/channels/signal), [iMessage](/channels/imessage)
+- Providers: [WhatsApp](/channels/whatsapp), [Telegram](/channels/telegram), [Discord](/channels/discord), [Google Chat](/channels/googlechat), [Signal](/channels/signal), [iMessage](/channels/imessage)
 - Skills: [Skills](/tools/skills), [Skills config](/tools/skills-config)

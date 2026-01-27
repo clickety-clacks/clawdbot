@@ -98,8 +98,34 @@ describe("loadClawdbotPlugins", () => {
     expect(enabled?.status).toBe("loaded");
   });
 
-  it("loads bundled telegram plugin when enabled", { timeout: 120_000 }, () => {
-    process.env.CLAWDBOT_BUNDLED_PLUGINS_DIR = path.join(process.cwd(), "extensions");
+  it("loads bundled telegram plugin when enabled", () => {
+    const bundledDir = makeTempDir();
+    writePlugin({
+      id: "telegram",
+      body: `export default { id: "telegram", register(api) {
+  api.registerChannel({
+    plugin: {
+      id: "telegram",
+      meta: {
+        id: "telegram",
+        label: "Telegram",
+        selectionLabel: "Telegram",
+        docsPath: "/channels/telegram",
+        blurb: "telegram channel"
+      },
+      capabilities: { chatTypes: ["direct"] },
+      config: {
+        listAccountIds: () => [],
+        resolveAccount: () => ({ accountId: "default" })
+      },
+      outbound: { deliveryMode: "direct" }
+    }
+  });
+} };`,
+      dir: bundledDir,
+      filename: "telegram.ts",
+    });
+    process.env.CLAWDBOT_BUNDLED_PLUGINS_DIR = bundledDir;
 
     const registry = loadClawdbotPlugins({
       cache: false,
@@ -321,6 +347,33 @@ describe("loadClawdbotPlugins", () => {
     const handler = registry.httpHandlers.find((entry) => entry.pluginId === "http-demo");
     expect(handler).toBeDefined();
     const httpPlugin = registry.plugins.find((entry) => entry.id === "http-demo");
+    expect(httpPlugin?.httpHandlers).toBe(1);
+  });
+
+  it("registers http routes", () => {
+    process.env.CLAWDBOT_BUNDLED_PLUGINS_DIR = "/nonexistent/bundled/plugins";
+    const plugin = writePlugin({
+      id: "http-route-demo",
+      body: `export default { id: "http-route-demo", register(api) {
+  api.registerHttpRoute({ path: "/demo", handler: async (_req, res) => { res.statusCode = 200; res.end("ok"); } });
+} };`,
+    });
+
+    const registry = loadClawdbotPlugins({
+      cache: false,
+      workspaceDir: plugin.dir,
+      config: {
+        plugins: {
+          load: { paths: [plugin.file] },
+          allow: ["http-route-demo"],
+        },
+      },
+    });
+
+    const route = registry.httpRoutes.find((entry) => entry.pluginId === "http-route-demo");
+    expect(route).toBeDefined();
+    expect(route?.path).toBe("/demo");
+    const httpPlugin = registry.plugins.find((entry) => entry.id === "http-route-demo");
     expect(httpPlugin?.httpHandlers).toBe(1);
   });
 

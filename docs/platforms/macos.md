@@ -62,7 +62,7 @@ Node service + app IPC:
 
 Diagram (SCI):
 ```
-Gateway -> Bridge -> Node Service (TS)
+Gateway -> Node Service (WS)
                  |  IPC (UDS + token + HMAC + TTL)
                  v
              Mac App (UI + TCC + system.run)
@@ -99,7 +99,7 @@ Example:
 ```
 
 Notes:
-- `allowlist` entries are JSON-encoded argv arrays.
+- `allowlist` entries are glob patterns for resolved binary paths.
 - Choosing “Always Allow” in the prompt adds that command to the allowlist.
 - `system.run` environment overrides are filtered (drops `PATH`, `DYLD_*`, `LD_*`, `NODE_OPTIONS`, `PYTHON*`, `PERL*`, `RUBYOPT`) and then merged with the app’s environment.
 
@@ -180,6 +180,9 @@ components can talk to a remote Gateway as if it were on localhost.
   or restarts it if needed.
 - **SSH shape:** `ssh -N -L <local>:127.0.0.1:<remote>` with BatchMode +
   ExitOnForwardFailure + keepalive options.
+- **IP reporting:** the SSH tunnel uses loopback, so the gateway will see the node
+  IP as `127.0.0.1`. Use **Direct (ws/wss)** transport if you want the real client
+  IP to appear (see [macOS remote access](/platforms/mac/remote)).
 
 For setup steps, see [macOS remote access](/platforms/mac/remote). For protocol
 details, see [Gateway protocol](/gateway/protocol).

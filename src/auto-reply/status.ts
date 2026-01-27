@@ -13,6 +13,14 @@ import {
   type SessionEntry,
   type SessionScope,
 } from "../config/sessions.js";
+import {
+  getTtsMaxLength,
+  getTtsProvider,
+  isSummarizationEnabled,
+  resolveTtsAutoMode,
+  resolveTtsConfig,
+  resolveTtsPrefsPath,
+} from "../tts/tts.js";
 import { resolveCommitHash } from "../infra/git-commit.js";
 import {
   estimateUsageCost,
@@ -22,6 +30,7 @@ import {
 } from "../utils/usage-format.js";
 import { VERSION } from "../version.js";
 import { listChatCommands, listChatCommandsForConfig } from "./commands-registry.js";
+import { listPluginCommands } from "../plugins/commands.js";
 import type { SkillCommandSpec } from "../agents/skills.js";
 import type { ElevatedLevel, ReasoningLevel, ThinkLevel, VerboseLevel } from "./thinking.js";
 import type { MediaUnderstandingDecision } from "../media-understanding/types.js";
@@ -52,6 +61,7 @@ type StatusArgs = {
   resolvedElevated?: ElevatedLevel;
   modelAuth?: string;
   usageLine?: string;
+  timeLine?: string;
   queue?: QueueStatus;
   mediaDecisions?: MediaUnderstandingDecision[];
   subagentsLine?: string;
@@ -243,6 +253,25 @@ const formatMediaUnderstandingLine = (decisions?: MediaUnderstandingDecision[]) 
   return `📎 Media: ${parts.join(" · ")}`;
 };
 
+const formatVoiceModeLine = (
+  config?: ClawdbotConfig,
+  sessionEntry?: SessionEntry,
+): string | null => {
+  if (!config) return null;
+  const ttsConfig = resolveTtsConfig(config);
+  const prefsPath = resolveTtsPrefsPath(ttsConfig);
+  const autoMode = resolveTtsAutoMode({
+    config: ttsConfig,
+    prefsPath,
+    sessionAuto: sessionEntry?.ttsAuto,
+  });
+  if (autoMode === "off") return null;
+  const provider = getTtsProvider(ttsConfig, prefsPath);
+  const maxLength = getTtsMaxLength(prefsPath);
+  const summarize = isSummarizationEnabled(prefsPath) ? "on" : "off";
+  return `🔊 Voice: ${autoMode} · provider=${provider} · limit=${maxLength} · summary=${summarize}`;
+};
+
 export function buildStatusMessage(args: StatusArgs): string {
   const now = args.now ?? Date.now();
   const entry = args.sessionEntry;
@@ -378,9 +407,11 @@ export function buildStatusMessage(args: StatusArgs): string {
   const usageCostLine =
     usagePair && costLine ? `${usagePair} · ${costLine}` : (usagePair ?? costLine);
   const mediaLine = formatMediaUnderstandingLine(args.mediaDecisions);
+  const voiceLine = formatVoiceModeLine(args.config, args.sessionEntry);
 
   return [
     versionLine,
+    args.timeLine,
     modelLine,
     usageCostLine,
     `📚 ${contextLine}`,
@@ -389,6 +420,7 @@ export function buildStatusMessage(args: StatusArgs): string {
     `🧵 ${sessionLine}`,
     args.subagentsLine,
     `⚙️ ${optionsLine}`,
+    voiceLine,
     activationLine,
   ]
     .filter(Boolean)
@@ -441,6 +473,15 @@ export function buildCommandsMessage(
     const aliasLabel = aliases.length ? ` (aliases: ${aliases.join(", ")})` : "";
     const scopeLabel = command.scope === "text" ? " (text-only)" : "";
     lines.push(`${primary}${aliasLabel}${scopeLabel} - ${command.description}`);
+  }
+  const pluginCommands = listPluginCommands();
+  if (pluginCommands.length > 0) {
+    lines.push("");
+    lines.push("Plugin commands:");
+    for (const command of pluginCommands) {
+      const pluginLabel = command.pluginId ? ` (plugin: ${command.pluginId})` : "";
+      lines.push(`/${command.name}${pluginLabel} - ${command.description}`);
+    }
   }
   return lines.join("\n");
 }

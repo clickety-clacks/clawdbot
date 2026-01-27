@@ -29,6 +29,7 @@ This page describes the current CLI behavior. If commands change, update this do
 - [`sessions`](/cli/sessions)
 - [`gateway`](/cli/gateway)
 - [`logs`](/cli/logs)
+- [`system`](/cli/system)
 - [`models`](/cli/models)
 - [`memory`](/cli/memory)
 - [`nodes`](/cli/nodes)
@@ -38,7 +39,6 @@ This page describes the current CLI behavior. If commands change, update this do
 - [`sandbox`](/cli/sandbox)
 - [`tui`](/cli/tui)
 - [`browser`](/cli/browser)
-- [`wake`](/cli/wake)
 - [`cron`](/cli/cron)
 - [`dns`](/cli/dns)
 - [`docs`](/cli/docs)
@@ -145,6 +145,10 @@ clawdbot [--dev] [--profile <name>] <command>
     restart
     run
   logs
+  system
+    event
+    heartbeat last|enable|disable
+    presence
   models
     list
     status
@@ -160,7 +164,6 @@ clawdbot [--dev] [--profile <name>] <command>
     list
     recreate
     explain
-  wake
   cron
     status
     list
@@ -293,8 +296,8 @@ Options:
 - `--reset` (reset config + credentials + sessions + workspace before wizard)
 - `--non-interactive`
 - `--mode <local|remote>`
-- `--flow <quickstart|advanced>`
-- `--auth-choice <setup-token|claude-cli|token|openai-codex|openai-api-key|openrouter-api-key|ai-gateway-api-key|moonshot-api-key|kimi-code-api-key|codex-cli|gemini-api-key|zai-api-key|apiKey|minimax-api|opencode-zen|skip>`
+- `--flow <quickstart|advanced|manual>` (manual is an alias for advanced)
+- `--auth-choice <setup-token|token|chutes|openai-codex|openai-api-key|openrouter-api-key|ai-gateway-api-key|moonshot-api-key|kimi-code-api-key|synthetic-api-key|venice-api-key|gemini-api-key|zai-api-key|apiKey|minimax-api|minimax-api-lightning|opencode-zen|skip>`
 - `--token-provider <id>` (non-interactive; used with `--auth-choice token`)
 - `--token <token>` (non-interactive; used with `--auth-choice token`)
 - `--token-profile-id <id>` (non-interactive; default: `<provider>:manual`)
@@ -311,7 +314,7 @@ Options:
 - `--opencode-zen-api-key <key>`
 - `--gateway-port <port>`
 - `--gateway-bind <loopback|lan|tailnet|auto|custom>`
-- `--gateway-auth <off|token|password>`
+- `--gateway-auth <token|password>`
 - `--gateway-token <token>`
 - `--gateway-password <password>`
 - `--remote-url <url>`
@@ -352,10 +355,10 @@ Options:
 ## Channel helpers
 
 ### `channels`
-Manage chat channel accounts (WhatsApp/Telegram/Discord/Slack/Signal/iMessage/MS Teams).
+Manage chat channel accounts (WhatsApp/Telegram/Discord/Google Chat/Slack/Mattermost (plugin)/Signal/iMessage/MS Teams).
 
 Subcommands:
-- `channels list`: show configured channels and auth profiles (Claude Code + Codex CLI OAuth sync included).
+- `channels list`: show configured channels and auth profiles.
 - `channels status`: check gateway reachability and channel health (`--probe` runs extra checks; use `clawdbot health` or `clawdbot status --deep` for gateway health probes).
 - Tip: `channels status` prints warnings with suggested fixes when it can detect common misconfigurations (then points you to `clawdbot doctor`).
 - `channels logs`: show recent channel logs from the gateway log file.
@@ -365,7 +368,7 @@ Subcommands:
 - `channels logout`: log out of a channel session (if supported).
 
 Common options:
-- `--channel <name>`: `whatsapp|telegram|discord|slack|signal|imessage|msteams`
+- `--channel <name>`: `whatsapp|telegram|discord|googlechat|slack|mattermost|signal|imessage|msteams`
 - `--account <id>`: channel account id (default `default`)
 - `--name <label>`: display name for the account
 
@@ -386,12 +389,6 @@ Common options:
 - `--channel <name|all>` (default `all`)
 - `--lines <n>` (default `200`)
 - `--json`
-
-OAuth sync sources:
-- Claude Code → `anthropic:claude-cli`
-  - macOS: Keychain item "Claude Code-credentials" (choose "Always Allow" to avoid launchd prompts)
-  - Linux/Windows: `~/.claude/.credentials.json`
-- `~/.codex/auth.json` → `openai-codex:codex-cli`
 
 More detail: [/concepts/oauth](/concepts/oauth)
 
@@ -472,7 +469,7 @@ Options:
 - `--session-id <id>`
 - `--thinking <off|minimal|low|medium|high|xhigh>` (GPT-5.2 + Codex models only)
 - `--verbose <on|full|off>`
-- `--channel <whatsapp|telegram|discord|slack|signal|imessage>`
+- `--channel <whatsapp|telegram|discord|slack|mattermost|signal|imessage|msteams>`
 - `--local`
 - `--deliver`
 - `--json`
@@ -663,7 +660,7 @@ Subcommands:
 
 Common RPCs:
 - `config.apply` (validate + write config + restart + wake)
-- `config.patch` (merge a partial update without clobbering unrelated keys)
+- `config.patch` (merge a partial update + restart + wake)
 - `update.run` (run update + restart + wake)
 
 Tip: when calling `config.set`/`config.apply`/`config.patch` directly, pass `baseHash` from
@@ -673,10 +670,11 @@ Tip: when calling `config.set`/`config.apply`/`config.patch` directly, pass `bas
 
 See [/concepts/models](/concepts/models) for fallback behavior and scanning strategy.
 
-Preferred Anthropic auth (CLI token, not API key):
+Preferred Anthropic auth (setup-token):
 
 ```bash
 claude setup-token
+clawdbot models auth setup-token --provider anthropic
 clawdbot models status
 ```
 
@@ -700,8 +698,15 @@ Options:
 - `--json`
 - `--plain`
 - `--check` (exit 1=expired/missing, 2=expiring)
+- `--probe` (live probe of configured auth profiles)
+- `--probe-provider <name>`
+- `--probe-profile <id>` (repeat or comma-separated)
+- `--probe-timeout <ms>`
+- `--probe-concurrency <n>`
+- `--probe-max-tokens <n>`
 
 Always includes the auth overview and OAuth expiry status for profiles in the auth store.
+`--probe` runs live requests (may consume tokens and trigger rate limits).
 
 ### `models set <model>`
 Set `agents.defaults.model.primary`.
@@ -756,9 +761,9 @@ Options:
 - `set`: `--provider <name>`, `--agent <id>`, `<profileIds...>`
 - `clear`: `--provider <name>`, `--agent <id>`
 
-## Cron + wake
+## System
 
-### `wake`
+### `system event`
 Enqueue a system event and optionally trigger a heartbeat (Gateway RPC).
 
 Required:
@@ -769,7 +774,21 @@ Options:
 - `--json`
 - `--url`, `--token`, `--timeout`, `--expect-final`
 
-### `cron`
+### `system heartbeat last|enable|disable`
+Heartbeat controls (Gateway RPC).
+
+Options:
+- `--json`
+- `--url`, `--token`, `--timeout`, `--expect-final`
+
+### `system presence`
+List system presence entries (Gateway RPC).
+
+Options:
+- `--json`
+- `--url`, `--token`, `--timeout`, `--expect-final`
+
+## Cron
 Manage scheduled jobs (Gateway RPC). See [/automation/cron-jobs](/automation/cron-jobs).
 
 Subcommands:
@@ -791,11 +810,10 @@ All `cron` commands accept `--url`, `--token`, `--timeout`, `--expect-final`.
 [`clawdbot node`](/cli/node).
 
 Subcommands:
-- `node run --host <gateway-host> --port 18790`
+- `node run --host <gateway-host> --port 18789`
 - `node status`
 - `node install [--host <gateway-host>] [--port <port>] [--tls] [--tls-fingerprint <sha256>] [--node-id <id>] [--display-name <name>] [--runtime <node|bun>] [--force]`
 - `node uninstall`
-- `node run`
 - `node stop`
 - `node restart`
 

@@ -30,7 +30,7 @@ The onboarding wizard generates a gateway token by default, so paste it here on 
 ## What it can do (today)
 - Chat with the model via Gateway WS (`chat.history`, `chat.send`, `chat.abort`, `chat.inject`)
 - Stream tool calls + live tool output cards in Chat (agent events)
-- Channels: WhatsApp/Telegram status + QR login + per-channel config (`channels.status`, `web.login.*`, `config.patch`)
+- Channels: WhatsApp/Telegram/Discord/Slack + plugin channels (Mattermost, etc.) status + QR login + per-channel config (`channels.status`, `web.login.*`, `config.patch`)
 - Instances: presence list + refresh (`system-presence`)
 - Sessions: list + per-session thinking/verbose overrides (`sessions.list`, `sessions.patch`)
 - Cron jobs: list/add/run/enable/disable + run history (`cron.*`)
@@ -70,10 +70,11 @@ Open:
 
 By default, Serve requests can authenticate via Tailscale identity headers
 (`tailscale-user-login`) when `gateway.auth.allowTailscale` is `true`. Clawdbot
-only accepts these when the request hits loopback with Tailscale’s
-`x-forwarded-*` headers. Set `gateway.auth.allowTailscale: false` (or force
-`gateway.auth.mode: "password"`) if you want to require a token/password even
-for Serve traffic.
+verifies the identity by resolving the `x-forwarded-for` address with
+`tailscale whois` and matching it to the header, and only accepts these when the
+request hits loopback with Tailscale’s `x-forwarded-*` headers. Set
+`gateway.auth.allowTailscale: false` (or force `gateway.auth.mode: "password"`)
+if you want to require a token/password even for Serve traffic.
 
 ### Bind to tailnet + token
 
@@ -108,8 +109,8 @@ Clawdbot **blocks** Control UI connections without device identity.
 }
 ```
 
-This disables device identity + pairing for the Control UI. Use only if you
-trust the network.
+This disables device identity + pairing for the Control UI (even on HTTPS). Use
+only if you trust the network.
 
 See [Tailscale](/gateway/tailscale) for HTTPS setup guidance.
 

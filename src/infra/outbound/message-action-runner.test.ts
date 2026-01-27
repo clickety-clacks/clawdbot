@@ -321,6 +321,44 @@ describe("runMessageAction context isolation", () => {
       }),
     ).rejects.toThrow(/Cross-context messaging denied/);
   });
+
+  it("aborts send when abortSignal is already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      runMessageAction({
+        cfg: slackConfig,
+        action: "send",
+        params: {
+          channel: "slack",
+          target: "#C12345678",
+          message: "hi",
+        },
+        dryRun: true,
+        abortSignal: controller.signal,
+      }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("aborts broadcast when abortSignal is already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      runMessageAction({
+        cfg: slackConfig,
+        action: "broadcast",
+        params: {
+          targets: ["channel:C12345678"],
+          channel: "slack",
+          message: "hi",
+        },
+        dryRun: true,
+        abortSignal: controller.signal,
+      }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+  });
 });
 
 describe("runMessageAction sendAttachment hydration", () => {
@@ -408,5 +446,67 @@ describe("runMessageAction sendAttachment hydration", () => {
     expect((result.payload as { buffer?: string }).buffer).toBe(
       Buffer.from("hello").toString("base64"),
     );
+  });
+});
+
+describe("runMessageAction accountId defaults", () => {
+  const handleAction = vi.fn(async () => jsonResult({ ok: true }));
+  const accountPlugin: ChannelPlugin = {
+    id: "discord",
+    meta: {
+      id: "discord",
+      label: "Discord",
+      selectionLabel: "Discord",
+      docsPath: "/channels/discord",
+      blurb: "Discord test plugin.",
+    },
+    capabilities: { chatTypes: ["direct"] },
+    config: {
+      listAccountIds: () => ["default"],
+      resolveAccount: () => ({}),
+    },
+    actions: {
+      listActions: () => ["send"],
+      handleAction,
+    },
+  };
+
+  beforeEach(() => {
+    setActivePluginRegistry(
+      createTestRegistry([
+        {
+          pluginId: "discord",
+          source: "test",
+          plugin: accountPlugin,
+        },
+      ]),
+    );
+    handleAction.mockClear();
+  });
+
+  afterEach(() => {
+    setActivePluginRegistry(createTestRegistry([]));
+    vi.clearAllMocks();
+  });
+
+  it("propagates defaultAccountId into params", async () => {
+    await runMessageAction({
+      cfg: {} as ClawdbotConfig,
+      action: "send",
+      params: {
+        channel: "discord",
+        target: "channel:123",
+        message: "hi",
+      },
+      defaultAccountId: "ops",
+    });
+
+    expect(handleAction).toHaveBeenCalled();
+    const ctx = handleAction.mock.calls[0]?.[0] as {
+      accountId?: string | null;
+      params: Record<string, unknown>;
+    };
+    expect(ctx.accountId).toBe("ops");
+    expect(ctx.params.accountId).toBe("ops");
   });
 });

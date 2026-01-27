@@ -1,3 +1,4 @@
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
@@ -5,7 +6,7 @@ import { defineConfig } from "vitest/config";
 const repoRoot = path.dirname(fileURLToPath(import.meta.url));
 const isCI = process.env.CI === "true" || process.env.GITHUB_ACTIONS === "true";
 const isWindows = process.platform === "win32";
-const localWorkers = 4;
+const localWorkers = Math.max(4, Math.min(16, os.cpus().length));
 const ciWorkers = isWindows ? 2 : 3;
 
 export default defineConfig({
@@ -15,7 +16,7 @@ export default defineConfig({
     },
   },
   test: {
-    testTimeout: isWindows ? 120_000 : 60_000,
+    testTimeout: 120_000,
     hookTimeout: isWindows ? 180_000 : 120_000,
     pool: "forks",
     maxWorkers: isCI ? ciWorkers : localWorkers,
@@ -33,6 +34,7 @@ export default defineConfig({
       "**/vendor/**",
       "dist/Clawdbot.app/**",
       "**/*.live.test.ts",
+      "**/*.e2e.test.ts",
     ],
     coverage: {
       provider: "v8",

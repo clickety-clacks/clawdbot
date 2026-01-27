@@ -1,7 +1,7 @@
 ---
 summary: "CLI reference for `clawdbot channels` (accounts, status, login/logout, logs)"
 read_when:
-  - You want to add/remove channel accounts (WhatsApp/Telegram/Discord/Slack/Signal/iMessage)
+  - You want to add/remove channel accounts (WhatsApp/Telegram/Discord/Google Chat/Slack/Mattermost (plugin)/Signal/iMessage)
   - You want to check channel status or tail channel logs
 ---
 
@@ -44,6 +44,7 @@ clawdbot channels logout --channel whatsapp
 
 - Run `clawdbot status --deep` for a broad probe.
 - Use `clawdbot doctor` for guided fixes.
+- `clawdbot channels list` prints `Claude: HTTP 403 ... user:profile` → usage snapshot needs the `user:profile` scope. Use `--no-usage`, or provide a claude.ai session key (`CLAUDE_WEB_SESSION_KEY` / `CLAUDE_WEB_COOKIE`), or re-auth via Claude Code CLI.
 
 ## Capabilities probe
 

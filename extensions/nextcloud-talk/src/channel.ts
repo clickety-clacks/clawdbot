@@ -24,6 +24,7 @@ import { nextcloudTalkOnboardingAdapter } from "./onboarding.js";
 import { getNextcloudTalkRuntime } from "./runtime.js";
 import { sendMessageNextcloudTalk } from "./send.js";
 import type { CoreConfig } from "./types.js";
+import { resolveNextcloudTalkGroupToolPolicy } from "./policy.js";
 
 const meta = {
   id: "nextcloud-talk",
@@ -159,6 +160,7 @@ export const nextcloudTalkPlugin: ChannelPlugin<ResolvedNextcloudTalkAccount> = 
 
       return true;
     },
+    resolveToolPolicy: resolveNextcloudTalkGroupToolPolicy,
   },
   messaging: {
     normalizeTarget: normalizeNextcloudTalkMessagingTarget,
@@ -245,6 +247,7 @@ export const nextcloudTalkPlugin: ChannelPlugin<ResolvedNextcloudTalkAccount> = 
   outbound: {
     deliveryMode: "direct",
     chunker: (text, limit) => getNextcloudTalkRuntime().channel.text.chunkMarkdownText(text, limit),
+    chunkerMode: "markdown",
     textChunkLimit: 4000,
     sendText: async ({ to, text, accountId, replyToId }) => {
       const result = await sendMessageNextcloudTalk(to, text, {

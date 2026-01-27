@@ -12,7 +12,7 @@ import {
 import { ApplicationCommandOptionType, ButtonStyle } from "discord-api-types/v10";
 
 import { resolveEffectiveMessagesConfig, resolveHumanDelayConfig } from "../../agents/identity.js";
-import { resolveTextChunkLimit } from "../../auto-reply/chunk.js";
+import { resolveChunkMode, resolveTextChunkLimit } from "../../auto-reply/chunk.js";
 import {
   buildCommandTextFromArgs,
   findCommandByNativeName,
@@ -40,7 +40,7 @@ import {
 } from "../../pairing/pairing-store.js";
 import { resolveAgentRoute } from "../../routing/resolve-route.js";
 import { loadWebMedia } from "../../web/media.js";
-import { chunkDiscordText } from "../chunk.js";
+import { chunkDiscordTextWithMode } from "../chunk.js";
 import { resolveCommandAuthorizedFromAuthorizers } from "../../channels/command-gating.js";
 import {
   allowListMatches,
@@ -93,16 +93,18 @@ function buildDiscordCommandOptions(params: {
             typeof focused?.value === "string" ? focused.value.trim().toLowerCase() : "";
           const choices = resolveCommandArgChoices({ command, arg, cfg });
           const filtered = focusValue
-            ? choices.filter((choice) => choice.toLowerCase().includes(focusValue))
+            ? choices.filter((choice) => choice.label.toLowerCase().includes(focusValue))
             : choices;
           await interaction.respond(
-            filtered.slice(0, 25).map((choice) => ({ name: choice, value: choice })),
+            filtered.slice(0, 25).map((choice) => ({ name: choice.label, value: choice.value })),
           );
         }
       : undefined;
     const choices =
       resolvedChoices.length > 0 && !autocomplete
-        ? resolvedChoices.slice(0, 25).map((choice) => ({ name: choice, value: choice }))
+        ? resolvedChoices
+            .slice(0, 25)
+            .map((choice) => ({ name: choice.label, value: choice.value }))
         : undefined;
     return {
       name: arg.name,
@@ -254,7 +256,7 @@ async function handleDiscordCommandArgInteraction(
     return;
   }
   const commandDefinition =
-    findCommandByNativeName(parsed.command) ??
+    findCommandByNativeName(parsed.command, "discord") ??
     listChatCommands().find((entry) => entry.key === parsed.command);
   if (!commandDefinition) {
     await safeDiscordInteractionCall("command arg update", () =>
@@ -351,7 +353,11 @@ export function createDiscordCommandArgFallbackButton(params: DiscordCommandArgC
 
 function buildDiscordCommandArgMenu(params: {
   command: ChatCommandDefinition;
-  menu: { arg: CommandArgDefinition; choices: string[]; title?: string };
+  menu: {
+    arg: CommandArgDefinition;
+    choices: Array<{ value: string; label: string }>;
+    title?: string;
+  };
   interaction: CommandInteraction;
   cfg: ReturnType<typeof loadConfig>;
   discordConfig: DiscordConfig;
@@ -365,11 +371,11 @@ function buildDiscordCommandArgMenu(params: {
     const buttons = choices.map(
       (choice) =>
         new DiscordCommandArgButton({
-          label: choice,
+          label: choice.label,
           customId: buildDiscordCommandArgCustomId({
             command: commandLabel,
             arg: menu.arg.name,
-            value: choice,
+            value: choice.value,
             userId,
           }),
           cfg: params.cfg,
@@ -395,7 +401,7 @@ export function createDiscordNativeCommand(params: {
 }) {
   const { command, cfg, discordConfig, accountId, sessionPrefix, ephemeralDefault } = params;
   const commandDefinition =
-    findCommandByNativeName(command.name) ??
+    findCommandByNativeName(command.name, "discord") ??
     ({
       key: command.name,
       nativeName: command.name,
@@ -767,6 +773,7 @@ async function dispatchDiscordCommandInteraction(params: {
             }),
             maxLinesPerMessage: discordConfig?.maxLinesPerMessage,
             preferFollowUp: preferFollowUp || didReply,
+            chunkMode: resolveChunkMode(cfg, "discord", accountId),
           });
         } catch (error) {
           if (isDiscordUnknownInteraction(error)) {
@@ -797,8 +804,9 @@ async function deliverDiscordInteractionReply(params: {
   textLimit: number;
   maxLinesPerMessage?: number;
   preferFollowUp: boolean;
+  chunkMode: "length" | "newline";
 }) {
-  const { interaction, payload, textLimit, maxLinesPerMessage, preferFollowUp } = params;
+  const { interaction, payload, textLimit, maxLinesPerMessage, preferFollowUp, chunkMode } = params;
   const mediaList = payload.mediaUrls ?? (payload.mediaUrl ? [payload.mediaUrl] : []);
   const text = payload.text ?? "";
 
@@ -838,10 +846,12 @@ async function deliverDiscordInteractionReply(params: {
         };
       }),
     );
-    const chunks = chunkDiscordText(text, {
+    const chunks = chunkDiscordTextWithMode(text, {
       maxChars: textLimit,
       maxLines: maxLinesPerMessage,
+      chunkMode,
     });
+    if (!chunks.length && text) chunks.push(text);
     const caption = chunks[0] ?? "";
     await sendMessage(caption, media);
     for (const chunk of chunks.slice(1)) {
@@ -852,10 +862,12 @@ async function deliverDiscordInteractionReply(params: {
   }
 
   if (!text.trim()) return;
-  const chunks = chunkDiscordText(text, {
+  const chunks = chunkDiscordTextWithMode(text, {
     maxChars: textLimit,
     maxLines: maxLinesPerMessage,
+    chunkMode,
   });
+  if (!chunks.length && text) chunks.push(text);
   for (const chunk of chunks) {
     if (!chunk.trim()) continue;
     await sendMessage(chunk);

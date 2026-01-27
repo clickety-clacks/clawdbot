@@ -25,9 +25,12 @@ Set `gateway.auth.mode` to control the handshake:
 
 When `tailscale.mode = "serve"` and `gateway.auth.allowTailscale` is `true`,
 valid Serve proxy requests can authenticate via Tailscale identity headers
-(`tailscale-user-login`) without supplying a token/password. Clawdbot only
-treats a request as Serve when it arrives from loopback with Tailscale’s
-`x-forwarded-for`, `x-forwarded-proto`, and `x-forwarded-host` headers.
+(`tailscale-user-login`) without supplying a token/password. Clawdbot verifies
+the identity by resolving the `x-forwarded-for` address via the local Tailscale
+daemon (`tailscale whois`) and matching it to the header before accepting it.
+Clawdbot only treats a request as Serve when it arrives from loopback with
+Tailscale’s `x-forwarded-for`, `x-forwarded-proto`, and `x-forwarded-host`
+headers.
 To require explicit credentials, set `gateway.auth.allowTailscale: false` or
 force `gateway.auth.mode: "password"`.
 
@@ -94,8 +97,8 @@ clawdbot gateway --tailscale funnel --auth password
   or `tailscale funnel` configuration on shutdown.
 - `gateway.bind: "tailnet"` is a direct Tailnet bind (no HTTPS, no Serve/Funnel).
 - `gateway.bind: "auto"` prefers loopback; use `tailnet` if you want Tailnet-only.
-- Serve/Funnel only expose the **Gateway control UI + WS**. Node **bridge** traffic
-  uses the separate bridge port (default `18790`) and is **not** proxied by Serve.
+- Serve/Funnel only expose the **Gateway control UI + WS**. Nodes connect over
+  the same Gateway WS endpoint, so Serve can work for node access.
 
 ## Browser control server (remote Gateway + local browser)
 

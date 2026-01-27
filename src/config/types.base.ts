@@ -31,6 +31,13 @@ export type BlockStreamingChunkConfig = {
   breakPreference?: "paragraph" | "newline" | "sentence";
 };
 
+export type MarkdownTableMode = "off" | "bullets" | "code";
+
+export type MarkdownConfig = {
+  /** Table rendering mode (off|bullets|code). */
+  tables?: MarkdownTableMode;
+};
+
 export type HumanDelayConfig = {
   /** Delay style for block replies (off|natural|custom). */
   mode?: "off" | "natural" | "custom";
@@ -128,6 +135,8 @@ export type DiagnosticsCacheTraceConfig = {
 
 export type DiagnosticsConfig = {
   enabled?: boolean;
+  /** Optional ad-hoc diagnostics flags (e.g. "telegram.http"). */
+  flags?: string[];
   otel?: DiagnosticsOtelConfig;
   cacheTrace?: DiagnosticsCacheTraceConfig;
 };

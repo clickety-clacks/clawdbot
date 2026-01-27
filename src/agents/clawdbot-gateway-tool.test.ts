@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
+import "./test-helpers/fast-core-tools.js";
 import { createClawdbotTools } from "./clawdbot-tools.js";
 
 vi.mock("./tools/gateway.js", () => ({
@@ -79,6 +80,32 @@ describe("gateway tool", () => {
     expect(callGatewayTool).toHaveBeenCalledWith("config.get", expect.any(Object), {});
     expect(callGatewayTool).toHaveBeenCalledWith(
       "config.apply",
+      expect.any(Object),
+      expect.objectContaining({
+        raw: raw.trim(),
+        baseHash: "hash-1",
+        sessionKey: "agent:main:whatsapp:dm:+15555550123",
+      }),
+    );
+  });
+
+  it("passes config.patch through gateway call", async () => {
+    const { callGatewayTool } = await import("./tools/gateway.js");
+    const tool = createClawdbotTools({
+      agentSessionKey: "agent:main:whatsapp:dm:+15555550123",
+    }).find((candidate) => candidate.name === "gateway");
+    expect(tool).toBeDefined();
+    if (!tool) throw new Error("missing gateway tool");
+
+    const raw = '{\n  channels: { telegram: { groups: { "*": { requireMention: false } } } }\n}\n';
+    await tool.execute("call4", {
+      action: "config.patch",
+      raw,
+    });
+
+    expect(callGatewayTool).toHaveBeenCalledWith("config.get", expect.any(Object), {});
+    expect(callGatewayTool).toHaveBeenCalledWith(
+      "config.patch",
       expect.any(Object),
       expect.objectContaining({
         raw: raw.trim(),

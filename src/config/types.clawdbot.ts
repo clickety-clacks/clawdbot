@@ -1,4 +1,5 @@
 import type { AgentBinding, AgentsConfig } from "./types.agents.js";
+import type { ApprovalsConfig } from "./types.approvals.js";
 import type { AuthConfig } from "./types.auth.js";
 import type { DiagnosticsConfig, LoggingConfig, SessionConfig, WebConfig } from "./types.base.js";
 import type { BrowserConfig } from "./types.browser.js";
@@ -19,6 +20,7 @@ import type {
   MessagesConfig,
 } from "./types.messages.js";
 import type { ModelsConfig } from "./types.models.js";
+import type { NodeHostConfig } from "./types.node-host.js";
 import type { PluginsConfig } from "./types.plugins.js";
 import type { SkillsConfig } from "./types.skills.js";
 import type { ToolsConfig } from "./types.tools.js";
@@ -76,6 +78,7 @@ export type ClawdbotConfig = {
   skills?: SkillsConfig;
   plugins?: PluginsConfig;
   models?: ModelsConfig;
+  nodeHost?: NodeHostConfig;
   agents?: AgentsConfig;
   tools?: ToolsConfig;
   bindings?: AgentBinding[];
@@ -83,6 +86,7 @@ export type ClawdbotConfig = {
   audio?: AudioConfig;
   messages?: MessagesConfig;
   commands?: CommandsConfig;
+  approvals?: ApprovalsConfig;
   session?: SessionConfig;
   web?: WebConfig;
   channels?: ChannelsConfig;

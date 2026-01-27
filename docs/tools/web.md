@@ -84,7 +84,7 @@ current limits and pricing.
 
 **Environment alternative:** set `BRAVE_API_KEY` in the Gateway process
 environment. For a gateway install, put it in `~/.clawdbot/.env` (or your
-service environment). See [Env vars](/start/faq#how-does-clawdbot-load-environment-variables).
+service environment). See [Env vars](/help/faq#how-does-clawdbot-load-environment-variables).
 
 ## Using Perplexity (direct or via OpenRouter)
 
@@ -174,6 +174,7 @@ Search the web using your configured provider.
 - `country` (optional): 2-letter country code for region-specific results (e.g., "DE", "US", "ALL"). If omitted, Brave chooses its default region.
 - `search_lang` (optional): ISO language code for search results (e.g., "de", "en", "fr")
 - `ui_lang` (optional): ISO language code for UI elements
+- `freshness` (optional, Brave only): filter by discovery time (`pd`, `pw`, `pm`, `py`, or `YYYY-MM-DDtoYYYY-MM-DD`)
 
 **Examples:**
 
@@ -192,6 +193,12 @@ await web_search({
   country: "FR",
   search_lang: "fr",
   ui_lang: "fr"
+});
+
+// Recent results (past week)
+await web_search({
+  query: "TMBG interview",
+  freshness: "pw"
 });
 ```
 

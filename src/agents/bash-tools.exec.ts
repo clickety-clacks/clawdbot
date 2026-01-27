@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import path from "node:path";
 import type { AgentTool, AgentToolResult } from "@mariozechner/pi-agent-core";
 import { Type } from "@sinclair/typebox";
@@ -10,8 +10,7 @@ import {
   type ExecSecurity,
   type ExecApprovalsFile,
   addAllowlistEntry,
-  analyzeShellCommand,
-  evaluateExecAllowlist,
+  evaluateShellAllowlist,
   maxAsk,
   minSecurity,
   requiresExecApproval,
@@ -27,7 +26,8 @@ import {
   resolveShellEnvFallbackTimeoutMs,
 } from "../infra/shell-env.js";
 import { enqueueSystemEvent } from "../infra/system-events.js";
-import { logInfo } from "../logger.js";
+import { logInfo, logWarn } from "../logger.js";
+import { formatSpawnError, spawnWithFallback } from "../process/spawn-utils.js";
 import {
   type ProcessSession,
   type SessionStdin,
@@ -363,69 +363,131 @@ async function runExecProcess(opts: {
   let stdin: SessionStdin | undefined;
 
   if (opts.sandbox) {
-    child = spawn(
-      "docker",
-      buildDockerExecArgs({
-        containerName: opts.sandbox.containerName,
-        command: opts.command,
-        workdir: opts.containerWorkdir ?? opts.sandbox.containerWorkdir,
-        env: opts.env,
-        tty: opts.usePty,
-      }),
-      {
+    const { child: spawned } = await spawnWithFallback({
+      argv: [
+        "docker",
+        ...buildDockerExecArgs({
+          containerName: opts.sandbox.containerName,
+          command: opts.command,
+          workdir: opts.containerWorkdir ?? opts.sandbox.containerWorkdir,
+          env: opts.env,
+          tty: opts.usePty,
+        }),
+      ],
+      options: {
         cwd: opts.workdir,
         env: process.env,
         detached: process.platform !== "win32",
         stdio: ["pipe", "pipe", "pipe"],
         windowsHide: true,
       },
-    ) as ChildProcessWithoutNullStreams;
+      fallbacks: [
+        {
+          label: "no-detach",
+          options: { detached: false },
+        },
+      ],
+      onFallback: (err, fallback) => {
+        const errText = formatSpawnError(err);
+        const warning = `Warning: spawn failed (${errText}); retrying with ${fallback.label}.`;
+        logWarn(`exec: spawn failed (${errText}); retrying with ${fallback.label}.`);
+        opts.warnings.push(warning);
+      },
+    });
+    child = spawned as ChildProcessWithoutNullStreams;
     stdin = child.stdin;
   } else if (opts.usePty) {
-    const ptyModule = (await import("@lydell/node-pty")) as unknown as {
-      spawn?: PtySpawn;
-      default?: { spawn?: PtySpawn };
-    };
-    const spawnPty = ptyModule.spawn ?? ptyModule.default?.spawn;
-    if (!spawnPty) {
-      throw new Error("PTY support is unavailable (node-pty spawn not found).");
-    }
     const { shell, args: shellArgs } = getShellConfig();
-    pty = spawnPty(shell, [...shellArgs, opts.command], {
-      cwd: opts.workdir,
-      env: opts.env,
-      name: process.env.TERM ?? "xterm-256color",
-      cols: 120,
-      rows: 30,
-    });
-    stdin = {
-      destroyed: false,
-      write: (data, cb) => {
-        try {
-          pty?.write(data);
-          cb?.(null);
-        } catch (err) {
-          cb?.(err as Error);
-        }
-      },
-      end: () => {
-        try {
-          const eof = process.platform === "win32" ? "\x1a" : "\x04";
-          pty?.write(eof);
-        } catch {
-          // ignore EOF errors
-        }
-      },
-    };
+    try {
+      const ptyModule = (await import("@lydell/node-pty")) as unknown as {
+        spawn?: PtySpawn;
+        default?: { spawn?: PtySpawn };
+      };
+      const spawnPty = ptyModule.spawn ?? ptyModule.default?.spawn;
+      if (!spawnPty) {
+        throw new Error("PTY support is unavailable (node-pty spawn not found).");
+      }
+      pty = spawnPty(shell, [...shellArgs, opts.command], {
+        cwd: opts.workdir,
+        env: opts.env,
+        name: process.env.TERM ?? "xterm-256color",
+        cols: 120,
+        rows: 30,
+      });
+      stdin = {
+        destroyed: false,
+        write: (data, cb) => {
+          try {
+            pty?.write(data);
+            cb?.(null);
+          } catch (err) {
+            cb?.(err as Error);
+          }
+        },
+        end: () => {
+          try {
+            const eof = process.platform === "win32" ? "\x1a" : "\x04";
+            pty?.write(eof);
+          } catch {
+            // ignore EOF errors
+          }
+        },
+      };
+    } catch (err) {
+      const errText = String(err);
+      const warning = `Warning: PTY spawn failed (${errText}); retrying without PTY for \`${opts.command}\`.`;
+      logWarn(`exec: PTY spawn failed (${errText}); retrying without PTY for "${opts.command}".`);
+      opts.warnings.push(warning);
+      const { child: spawned } = await spawnWithFallback({
+        argv: [shell, ...shellArgs, opts.command],
+        options: {
+          cwd: opts.workdir,
+          env: opts.env,
+          detached: process.platform !== "win32",
+          stdio: ["pipe", "pipe", "pipe"],
+          windowsHide: true,
+        },
+        fallbacks: [
+          {
+            label: "no-detach",
+            options: { detached: false },
+          },
+        ],
+        onFallback: (fallbackErr, fallback) => {
+          const fallbackText = formatSpawnError(fallbackErr);
+          const fallbackWarning = `Warning: spawn failed (${fallbackText}); retrying with ${fallback.label}.`;
+          logWarn(`exec: spawn failed (${fallbackText}); retrying with ${fallback.label}.`);
+          opts.warnings.push(fallbackWarning);
+        },
+      });
+      child = spawned as ChildProcessWithoutNullStreams;
+      stdin = child.stdin;
+    }
   } else {
     const { shell, args: shellArgs } = getShellConfig();
-    child = spawn(shell, [...shellArgs, opts.command], {
-      cwd: opts.workdir,
-      env: opts.env,
-      detached: process.platform !== "win32",
-      stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true,
-    }) as ChildProcessWithoutNullStreams;
+    const { child: spawned } = await spawnWithFallback({
+      argv: [shell, ...shellArgs, opts.command],
+      options: {
+        cwd: opts.workdir,
+        env: opts.env,
+        detached: process.platform !== "win32",
+        stdio: ["pipe", "pipe", "pipe"],
+        windowsHide: true,
+      },
+      fallbacks: [
+        {
+          label: "no-detach",
+          options: { detached: false },
+        },
+      ],
+      onFallback: (err, fallback) => {
+        const errText = formatSpawnError(err);
+        const warning = `Warning: spawn failed (${errText}); retrying with ${fallback.label}.`;
+        logWarn(`exec: spawn failed (${errText}); retrying with ${fallback.label}.`);
+        opts.warnings.push(warning);
+      },
+    });
+    child = spawned as ChildProcessWithoutNullStreams;
     stdin = child.stdin;
   }
 
@@ -777,7 +839,7 @@ export function createExecTool(
       const configuredSecurity = defaults?.security ?? (host === "sandbox" ? "deny" : "allowlist");
       const requestedSecurity = normalizeExecSecurity(params.security);
       let security = minSecurity(configuredSecurity, requestedSecurity ?? configuredSecurity);
-      if (elevatedRequested) {
+      if (elevatedRequested && elevatedMode === "full") {
         security = "full";
       }
       const configuredAsk = defaults?.ask ?? "on-miss";
@@ -824,10 +886,7 @@ export function createExecTool(
       applyPathPrepend(env, defaultPathPrepend);
 
       if (host === "node") {
-        const approvals = resolveExecApprovals(
-          agentId,
-          host === "node" ? { security: "allowlist" } : undefined,
-        );
+        const approvals = resolveExecApprovals(agentId, { security, ask });
         const hostSecurity = minSecurity(security, approvals.agent.security);
         const hostAsk = maxAsk(ask, approvals.agent.ask);
         const askFallback = approvals.agent.askFallback;
@@ -871,9 +930,16 @@ export function createExecTool(
         if (nodeEnv) {
           applyPathPrepend(nodeEnv, defaultPathPrepend, { requireExisting: true });
         }
-        const analysis = analyzeShellCommand({ command: params.command, cwd: workdir, env });
+        const baseAllowlistEval = evaluateShellAllowlist({
+          command: params.command,
+          allowlist: [],
+          safeBins: new Set(),
+          cwd: workdir,
+          env,
+        });
+        let analysisOk = baseAllowlistEval.analysisOk;
         let allowlistSatisfied = false;
-        if (hostAsk === "on-miss" && hostSecurity === "allowlist") {
+        if (hostAsk === "on-miss" && hostSecurity === "allowlist" && analysisOk) {
           try {
             const approvalsSnapshot = (await callGatewayTool(
               "exec.approvals.node.get",
@@ -891,12 +957,15 @@ export function createExecTool(
                 overrides: { security: "allowlist" },
               });
               // Allowlist-only precheck; safe bins are node-local and may diverge.
-              allowlistSatisfied = evaluateExecAllowlist({
-                analysis,
+              const allowlistEval = evaluateShellAllowlist({
+                command: params.command,
                 allowlist: resolved.allowlist,
                 safeBins: new Set(),
                 cwd: workdir,
-              }).allowlistSatisfied;
+                env,
+              });
+              allowlistSatisfied = allowlistEval.allowlistSatisfied;
+              analysisOk = allowlistEval.analysisOk;
             }
           } catch {
             // Fall back to requiring approval if node approvals cannot be fetched.
@@ -905,7 +974,7 @@ export function createExecTool(
         const requiresAsk = requiresExecApproval({
           ask: hostAsk,
           security: hostSecurity,
-          analysisOk: analysis.ok,
+          analysisOk,
           allowlistSatisfied,
         });
         const commandText = params.command;
@@ -1088,27 +1157,28 @@ export function createExecTool(
       }
 
       if (host === "gateway" && !bypassApprovals) {
-        const approvals = resolveExecApprovals(agentId, { security: "allowlist" });
+        const approvals = resolveExecApprovals(agentId, { security, ask });
         const hostSecurity = minSecurity(security, approvals.agent.security);
         const hostAsk = maxAsk(ask, approvals.agent.ask);
         const askFallback = approvals.agent.askFallback;
         if (hostSecurity === "deny") {
           throw new Error("exec denied: host=gateway security=deny");
         }
-        const analysis = analyzeShellCommand({ command: params.command, cwd: workdir, env });
-        const allowlistEval = evaluateExecAllowlist({
-          analysis,
+        const allowlistEval = evaluateShellAllowlist({
+          command: params.command,
           allowlist: approvals.allowlist,
           safeBins,
           cwd: workdir,
+          env,
         });
         const allowlistMatches = allowlistEval.allowlistMatches;
+        const analysisOk = allowlistEval.analysisOk;
         const allowlistSatisfied =
-          hostSecurity === "allowlist" && analysis.ok ? allowlistEval.allowlistSatisfied : false;
+          hostSecurity === "allowlist" && analysisOk ? allowlistEval.allowlistSatisfied : false;
         const requiresAsk = requiresExecApproval({
           ask: hostAsk,
           security: hostSecurity,
-          analysisOk: analysis.ok,
+          analysisOk,
           allowlistSatisfied,
         });
 
@@ -1117,7 +1187,7 @@ export function createExecTool(
           const approvalSlug = createApprovalSlug(approvalId);
           const expiresAtMs = Date.now() + DEFAULT_APPROVAL_TIMEOUT_MS;
           const contextKey = `exec:${approvalId}`;
-          const resolvedPath = analysis.segments[0]?.resolution?.resolvedPath;
+          const resolvedPath = allowlistEval.segments[0]?.resolution?.resolvedPath;
           const noticeSeconds = Math.max(1, Math.round(approvalRunningNoticeMs / 1000));
           const commandText = params.command;
           const effectiveTimeout =
@@ -1164,7 +1234,7 @@ export function createExecTool(
               if (askFallback === "full") {
                 approvedByAsk = true;
               } else if (askFallback === "allowlist") {
-                if (!analysis.ok || !allowlistSatisfied) {
+                if (!analysisOk || !allowlistSatisfied) {
                   deniedReason = "approval-timeout (allowlist-miss)";
                 } else {
                   approvedByAsk = true;
@@ -1177,7 +1247,7 @@ export function createExecTool(
             } else if (decision === "allow-always") {
               approvedByAsk = true;
               if (hostSecurity === "allowlist") {
-                for (const segment of analysis.segments) {
+                for (const segment of allowlistEval.segments) {
                   const pattern = segment.resolution?.resolvedPath ?? "";
                   if (pattern) {
                     addAllowlistEntry(approvals.file, agentId, pattern);
@@ -1188,7 +1258,7 @@ export function createExecTool(
 
             if (
               hostSecurity === "allowlist" &&
-              (!analysis.ok || !allowlistSatisfied) &&
+              (!analysisOk || !allowlistSatisfied) &&
               !approvedByAsk
             ) {
               deniedReason = deniedReason ?? "allowlist-miss";
@@ -1288,7 +1358,7 @@ export function createExecTool(
           };
         }
 
-        if (hostSecurity === "allowlist" && (!analysis.ok || !allowlistSatisfied)) {
+        if (hostSecurity === "allowlist" && (!analysisOk || !allowlistSatisfied)) {
           throw new Error("exec denied: allowlist miss");
         }
 
@@ -1302,7 +1372,7 @@ export function createExecTool(
               agentId,
               match,
               params.command,
-              analysis.segments[0]?.resolution?.resolvedPath,
+              allowlistEval.segments[0]?.resolution?.resolvedPath,
             );
           }
         }
@@ -1310,7 +1380,7 @@ export function createExecTool(
 
       const effectiveTimeout =
         typeof params.timeout === "number" ? params.timeout : defaultTimeoutSec;
-      const warningText = warnings.length ? `${warnings.join("\n")}\n\n` : "";
+      const getWarningText = () => (warnings.length ? `${warnings.join("\n")}\n\n` : "");
       const usePty = params.pty === true && !sandbox;
       const run = await runExecProcess({
         command: params.command,
@@ -1350,7 +1420,7 @@ export function createExecTool(
               {
                 type: "text",
                 text:
-                  `${warningText}` +
+                  `${getWarningText()}` +
                   `Command still running (session ${run.session.id}, pid ${
                     run.session.pid ?? "n/a"
                   }). ` +
@@ -1400,7 +1470,7 @@ export function createExecTool(
               content: [
                 {
                   type: "text",
-                  text: `${warningText}${outcome.aggregated || "(no output)"}`,
+                  text: `${getWarningText()}${outcome.aggregated || "(no output)"}`,
                 },
               ],
               details: {

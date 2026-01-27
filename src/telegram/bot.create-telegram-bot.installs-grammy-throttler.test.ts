@@ -1,9 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { escapeRegExp, formatEnvelopeTimestamp } from "../../test/helpers/envelope-timestamp.js";
-import { resetInboundDedupe } from "../auto-reply/reply/inbound-dedupe.js";
-import { createTelegramBot, getTelegramSequentialKey } from "./bot.js";
 import { resolveTelegramFetch } from "./fetch.js";
 
+let createTelegramBot: typeof import("./bot.js").createTelegramBot;
+let getTelegramSequentialKey: typeof import("./bot.js").getTelegramSequentialKey;
+let resetInboundDedupe: typeof import("../auto-reply/reply/inbound-dedupe.js").resetInboundDedupe;
+
+const { sessionStorePath } = vi.hoisted(() => ({
+  sessionStorePath: `/tmp/clawdbot-telegram-throttler-${Math.random().toString(16).slice(2)}.json`,
+}));
 const { loadWebMedia } = vi.hoisted(() => ({
   loadWebMedia: vi.fn(),
 }));
@@ -20,6 +25,14 @@ vi.mock("../config/config.js", async (importOriginal) => {
   return {
     ...actual,
     loadConfig,
+  };
+});
+
+vi.mock("../config/sessions.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../config/sessions.js")>();
+  return {
+    ...actual,
+    resolveStorePath: vi.fn((storePath) => storePath ?? sessionStorePath),
   };
 });
 
@@ -77,6 +90,7 @@ vi.mock("grammy", () => ({
     on = onSpy;
     stop = stopSpy;
     command = commandSpy;
+    catch = vi.fn();
     constructor(
       public token: string,
       public options?: {
@@ -114,7 +128,7 @@ vi.mock("../auto-reply/reply.js", () => {
   return { getReplyFromConfig: replySpy, __replySpy: replySpy };
 });
 
-const replyModule = await import("../auto-reply/reply.js");
+let replyModule: typeof import("../auto-reply/reply.js");
 
 const getOnHandler = (event: string) => {
   const handler = onSpy.mock.calls.find((call) => call[0] === event)?.[1];
@@ -125,7 +139,11 @@ const getOnHandler = (event: string) => {
 const ORIGINAL_TZ = process.env.TZ;
 
 describe("createTelegramBot", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
+    vi.resetModules();
+    ({ resetInboundDedupe } = await import("../auto-reply/reply/inbound-dedupe.js"));
+    ({ createTelegramBot, getTelegramSequentialKey } = await import("./bot.js"));
+    replyModule = await import("../auto-reply/reply.js");
     process.env.TZ = "UTC";
     resetInboundDedupe();
     loadConfig.mockReturnValue({
@@ -160,13 +178,11 @@ describe("createTelegramBot", () => {
     expect(throttlerSpy).toHaveBeenCalledTimes(1);
     expect(useSpy).toHaveBeenCalledWith("throttler");
   });
-  it("forces native fetch only under Bun", () => {
+  it("uses wrapped fetch when global fetch is available", () => {
     const originalFetch = globalThis.fetch;
-    const originalBun = (globalThis as { Bun?: unknown }).Bun;
     const fetchSpy = vi.fn() as unknown as typeof fetch;
     globalThis.fetch = fetchSpy;
     try {
-      (globalThis as { Bun?: unknown }).Bun = {};
       createTelegramBot({ token: "tok" });
       const fetchImpl = resolveTelegramFetch();
       expect(fetchImpl).toBeTypeOf("function");
@@ -177,33 +193,6 @@ describe("createTelegramBot", () => {
       expect(clientFetch).not.toBe(fetchSpy);
     } finally {
       globalThis.fetch = originalFetch;
-      if (originalBun === undefined) {
-        delete (globalThis as { Bun?: unknown }).Bun;
-      } else {
-        (globalThis as { Bun?: unknown }).Bun = originalBun;
-      }
-    }
-  });
-  it("does not force native fetch on Node", () => {
-    const originalFetch = globalThis.fetch;
-    const originalBun = (globalThis as { Bun?: unknown }).Bun;
-    const fetchSpy = vi.fn() as unknown as typeof fetch;
-    globalThis.fetch = fetchSpy;
-    try {
-      if (originalBun !== undefined) {
-        delete (globalThis as { Bun?: unknown }).Bun;
-      }
-      createTelegramBot({ token: "tok" });
-      const fetchImpl = resolveTelegramFetch();
-      expect(fetchImpl).toBeUndefined();
-      expect(botCtorSpy).toHaveBeenCalledWith("tok", undefined);
-    } finally {
-      globalThis.fetch = originalFetch;
-      if (originalBun === undefined) {
-        delete (globalThis as { Bun?: unknown }).Bun;
-      } else {
-        (globalThis as { Bun?: unknown }).Bun = originalBun;
-      }
     }
   });
   it("passes timeoutSeconds even without a custom fetch", () => {

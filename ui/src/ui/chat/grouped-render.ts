@@ -7,11 +7,53 @@ import type { MessageGroup } from "../types/chat-types";
 import { renderCopyAsMarkdownButton } from "./copy-as-markdown";
 import { isToolResultMessage, normalizeRoleForGrouping } from "./message-normalizer";
 import {
-  extractText,
-  extractThinking,
+  extractTextCached,
+  extractThinkingCached,
   formatReasoningMarkdown,
 } from "./message-extract";
 import { extractToolCards, renderToolCardSidebar } from "./tool-cards";
+
+type ImageBlock = {
+  url: string;
+  alt?: string;
+};
+
+function extractImages(message: unknown): ImageBlock[] {
+  const m = message as Record<string, unknown>;
+  const content = m.content;
+  const images: ImageBlock[] = [];
+
+  if (Array.isArray(content)) {
+    for (const block of content) {
+      if (typeof block !== "object" || block === null) continue;
+      const b = block as Record<string, unknown>;
+
+      if (b.type === "image") {
+        // Handle source object format (from sendChatMessage)
+        const source = b.source as Record<string, unknown> | undefined;
+        if (source?.type === "base64" && typeof source.data === "string") {
+          const data = source.data as string;
+          const mediaType = (source.media_type as string) || "image/png";
+          // If data is already a data URL, use it directly
+          const url = data.startsWith("data:")
+            ? data
+            : `data:${mediaType};base64,${data}`;
+          images.push({ url });
+        } else if (typeof b.url === "string") {
+          images.push({ url: b.url });
+        }
+      } else if (b.type === "image_url") {
+        // OpenAI format
+        const imageUrl = b.image_url as Record<string, unknown> | undefined;
+        if (typeof imageUrl?.url === "string") {
+          images.push({ url: imageUrl.url });
+        }
+      }
+    }
+  }
+
+  return images;
+}
 
 export function renderReadingIndicatorGroup(assistant?: AssistantIdentity) {
   return html`
@@ -163,6 +205,25 @@ function isAvatarUrl(value: string): boolean {
   );
 }
 
+function renderMessageImages(images: ImageBlock[]) {
+  if (images.length === 0) return nothing;
+
+  return html`
+    <div class="chat-message-images">
+      ${images.map(
+        (img) => html`
+          <img
+            src=${img.url}
+            alt=${img.alt ?? "Attached image"}
+            class="chat-message-image"
+            @click=${() => window.open(img.url, "_blank")}
+          />
+        `,
+      )}
+    </div>
+  `;
+}
+
 function renderGroupedMessage(
   message: unknown,
   opts: { isStreaming: boolean; showReasoning: boolean },
@@ -179,10 +240,14 @@ function renderGroupedMessage(
 
   const toolCards = extractToolCards(message);
   const hasToolCards = toolCards.length > 0;
+  const images = extractImages(message);
+  const hasImages = images.length > 0;
 
-  const extractedText = extractText(message);
+  const extractedText = extractTextCached(message);
   const extractedThinking =
-    opts.showReasoning && role === "assistant" ? extractThinking(message) : null;
+    opts.showReasoning && role === "assistant"
+      ? extractThinkingCached(message)
+      : null;
   const markdownBase = extractedText?.trim() ? extractedText : null;
   const reasoningMarkdown = extractedThinking
     ? formatReasoningMarkdown(extractedThinking)
@@ -205,11 +270,12 @@ function renderGroupedMessage(
     )}`;
   }
 
-  if (!markdown && !hasToolCards) return nothing;
+  if (!markdown && !hasToolCards && !hasImages) return nothing;
 
   return html`
     <div class="${bubbleClasses}">
       ${canCopyMarkdown ? renderCopyAsMarkdownButton(markdown!) : nothing}
+      ${renderMessageImages(images)}
       ${reasoningMarkdown
         ? html`<div class="chat-thinking">${unsafeHTML(
             toSanitizedMarkdownHtml(reasoningMarkdown),

@@ -17,6 +17,7 @@ import {
   type OutboundDeliveryResult,
   type OutboundSendDeps,
 } from "./deliver.js";
+import { normalizeReplyPayloadsForDelivery } from "./payloads.js";
 import type { OutboundChannel } from "./targets.js";
 import { resolveOutboundTarget } from "./targets.js";
 
@@ -34,6 +35,7 @@ type MessageSendParams = {
   content: string;
   channel?: string;
   mediaUrl?: string;
+  mediaUrls?: string[];
   gifPlayback?: boolean;
   accountId?: string;
   dryRun?: boolean;
@@ -45,7 +47,10 @@ type MessageSendParams = {
   mirror?: {
     sessionKey: string;
     agentId?: string;
+    text?: string;
+    mediaUrls?: string[];
   };
+  abortSignal?: AbortSignal;
 };
 
 export type MessageSendResult = {
@@ -53,6 +58,7 @@ export type MessageSendResult = {
   to: string;
   via: "direct" | "gateway";
   mediaUrl: string | null;
+  mediaUrls?: string[];
   result?: OutboundDeliveryResult | { messageId: string };
   dryRun?: boolean;
 };
@@ -115,13 +121,29 @@ export async function sendMessage(params: MessageSendParams): Promise<MessageSen
     throw new Error(`Unknown channel: ${channel}`);
   }
   const deliveryMode = plugin.outbound?.deliveryMode ?? "direct";
+  const normalizedPayloads = normalizeReplyPayloadsForDelivery([
+    {
+      text: params.content,
+      mediaUrl: params.mediaUrl,
+      mediaUrls: params.mediaUrls,
+    },
+  ]);
+  const mirrorText = normalizedPayloads
+    .map((payload) => payload.text)
+    .filter(Boolean)
+    .join("\n");
+  const mirrorMediaUrls = normalizedPayloads.flatMap(
+    (payload) => payload.mediaUrls ?? (payload.mediaUrl ? [payload.mediaUrl] : []),
+  );
+  const primaryMediaUrl = mirrorMediaUrls[0] ?? params.mediaUrl ?? null;
 
   if (params.dryRun) {
     return {
       channel,
       to: params.to,
       via: deliveryMode === "gateway" ? "gateway" : "direct",
-      mediaUrl: params.mediaUrl ?? null,
+      mediaUrl: primaryMediaUrl,
+      mediaUrls: mirrorMediaUrls.length ? mirrorMediaUrls : undefined,
       dryRun: true,
     };
   }
@@ -142,15 +164,16 @@ export async function sendMessage(params: MessageSendParams): Promise<MessageSen
       channel: outboundChannel,
       to: resolvedTarget.to,
       accountId: params.accountId,
-      payloads: [{ text: params.content, mediaUrl: params.mediaUrl }],
+      payloads: normalizedPayloads,
       gifPlayback: params.gifPlayback,
       deps: params.deps,
       bestEffort: params.bestEffort,
+      abortSignal: params.abortSignal,
       mirror: params.mirror
         ? {
             ...params.mirror,
-            text: params.content,
-            mediaUrls: params.mediaUrl ? [params.mediaUrl] : undefined,
+            text: mirrorText || params.content,
+            mediaUrls: mirrorMediaUrls.length ? mirrorMediaUrls : undefined,
           }
         : undefined,
     });
@@ -159,7 +182,8 @@ export async function sendMessage(params: MessageSendParams): Promise<MessageSen
       channel,
       to: params.to,
       via: "direct",
-      mediaUrl: params.mediaUrl ?? null,
+      mediaUrl: primaryMediaUrl,
+      mediaUrls: mirrorMediaUrls.length ? mirrorMediaUrls : undefined,
       result: results.at(-1),
     };
   }
@@ -173,6 +197,7 @@ export async function sendMessage(params: MessageSendParams): Promise<MessageSen
       to: params.to,
       message: params.content,
       mediaUrl: params.mediaUrl,
+      mediaUrls: mirrorMediaUrls.length ? mirrorMediaUrls : params.mediaUrls,
       gifPlayback: params.gifPlayback,
       accountId: params.accountId,
       channel,
@@ -189,7 +214,8 @@ export async function sendMessage(params: MessageSendParams): Promise<MessageSen
     channel,
     to: params.to,
     via: "gateway",
-    mediaUrl: params.mediaUrl ?? null,
+    mediaUrl: primaryMediaUrl,
+    mediaUrls: mirrorMediaUrls.length ? mirrorMediaUrls : undefined,
     result,
   };
 }

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { ToolsSchema } from "./zod-schema.agent-runtime.js";
+import { ApprovalsSchema } from "./zod-schema.approvals.js";
 import { AgentsSchema, AudioSchema, BindingsSchema, BroadcastSchema } from "./zod-schema.agents.js";
 import { HexColorSchema, ModelsConfigSchema } from "./zod-schema.core.js";
 import { HookMappingSchema, HooksGmailSchema, InternalHooksSchema } from "./zod-schema.hooks.js";
@@ -13,73 +14,17 @@ const BrowserSnapshotDefaultsSchema = z
   .strict()
   .optional();
 
-const ClawlineConfigSchema = z
+const NodeHostSchema = z
   .object({
-    enabled: z.boolean().optional(),
-    port: z.number().int().positive().optional(),
-    statePath: z.string().optional(),
-    alertInstructionsPath: z.string().optional(),
-    network: z
+    browserProxy: z
       .object({
-        bindAddress: z.string().optional(),
-        allowInsecurePublic: z.boolean().optional(),
-        allowedOrigins: z.array(z.string()).optional(),
+        enabled: z.boolean().optional(),
+        allowProfiles: z.array(z.string()).optional(),
       })
-      .optional(),
-    adapter: z
-      .object({
-        provider: z.string().optional(),
-        model: z.string().optional(),
-        timeoutSeconds: z.number().int().positive().optional(),
-        responseFallback: z.string().optional(),
-        systemPrompt: z.string().optional(),
-      })
-      .optional(),
-    auth: z
-      .object({
-        jwtSigningKey: z.string().nullable().optional(),
-        tokenTtlSeconds: z.number().int().nullable().optional(),
-        maxAttemptsPerMinute: z.number().int().nonnegative().optional(),
-        reissueGraceSeconds: z.number().int().nonnegative().optional(),
-      })
-      .optional(),
-    pairing: z
-      .object({
-        maxPendingRequests: z.number().int().nonnegative().optional(),
-        maxRequestsPerMinute: z.number().int().nonnegative().optional(),
-        pendingTtlSeconds: z.number().int().nonnegative().optional(),
-        pendingSocketTimeoutSeconds: z.number().int().nonnegative().optional(),
-      })
-      .optional(),
-    media: z
-      .object({
-        storagePath: z.string().optional(),
-        maxInlineBytes: z.number().int().nonnegative().optional(),
-        maxUploadBytes: z.number().int().nonnegative().optional(),
-        unreferencedUploadTtlSeconds: z.number().int().nonnegative().optional(),
-      })
-      .optional(),
-    sessions: z
-      .object({
-        maxMessageBytes: z.number().int().positive().optional(),
-        maxReplayMessages: z.number().int().nonnegative().optional(),
-        maxPromptMessages: z.number().int().nonnegative().optional(),
-        maxMessagesPerSecond: z.number().int().nonnegative().optional(),
-        maxTypingPerSecond: z.number().int().nonnegative().optional(),
-        typingAutoExpireSeconds: z.number().int().nonnegative().optional(),
-        maxQueuedMessages: z.number().int().nonnegative().optional(),
-        maxWriteQueueDepth: z.number().int().nonnegative().optional(),
-        adapterExecuteTimeoutSeconds: z.number().int().positive().optional(),
-        streamInactivitySeconds: z.number().int().nonnegative().optional(),
-      })
-      .optional(),
-    streams: z
-      .object({
-        chunkPersistIntervalMs: z.number().int().nonnegative().optional(),
-        chunkBufferBytes: z.number().int().nonnegative().optional(),
-      })
+      .strict()
       .optional(),
   })
+  .strict()
   .optional();
 
 export const ClawdbotSchema = z
@@ -117,6 +62,7 @@ export const ClawdbotSchema = z
     diagnostics: z
       .object({
         enabled: z.boolean().optional(),
+        flags: z.array(z.string()).optional(),
         otel: z
           .object({
             enabled: z.boolean().optional(),
@@ -262,6 +208,7 @@ export const ClawdbotSchema = z
       .strict()
       .optional(),
     models: ModelsConfigSchema,
+    nodeHost: NodeHostSchema,
     agents: AgentsSchema,
     tools: ToolsSchema,
     bindings: BindingsSchema,
@@ -275,6 +222,7 @@ export const ClawdbotSchema = z
       .optional(),
     messages: MessagesSchema,
     commands: CommandsSchema,
+    approvals: ApprovalsSchema,
     session: SessionSchema,
     cron: z
       .object({
@@ -315,13 +263,18 @@ export const ClawdbotSchema = z
       })
       .strict()
       .optional(),
-    clawline: ClawlineConfigSchema,
     channels: ChannelsSchema,
     discovery: z
       .object({
         wideArea: z
           .object({
             enabled: z.boolean().optional(),
+          })
+          .strict()
+          .optional(),
+        mdns: z
+          .object({
+            mode: z.enum(["off", "minimal", "full"]).optional(),
           })
           .strict()
           .optional(),
@@ -366,6 +319,7 @@ export const ClawdbotSchema = z
             enabled: z.boolean().optional(),
             basePath: z.string().optional(),
             allowInsecureAuth: z.boolean().optional(),
+            dangerouslyDisableDeviceAuth: z.boolean().optional(),
           })
           .strict()
           .optional(),
@@ -378,6 +332,7 @@ export const ClawdbotSchema = z
           })
           .strict()
           .optional(),
+        trustedProxies: z.array(z.string()).optional(),
         tailscale: z
           .object({
             mode: z.union([z.literal("off"), z.literal("serve"), z.literal("funnel")]).optional(),
@@ -388,6 +343,7 @@ export const ClawdbotSchema = z
         remote: z
           .object({
             url: z.string().optional(),
+            transport: z.union([z.literal("ssh"), z.literal("direct")]).optional(),
             token: z.string().optional(),
             password: z.string().optional(),
             tlsFingerprint: z.string().optional(),
@@ -473,6 +429,15 @@ export const ClawdbotSchema = z
           .optional(),
         nodes: z
           .object({
+            browser: z
+              .object({
+                mode: z
+                  .union([z.literal("auto"), z.literal("manual"), z.literal("off")])
+                  .optional(),
+                node: z.string().optional(),
+              })
+              .strict()
+              .optional(),
             allowCommands: z.array(z.string()).optional(),
             denyCommands: z.array(z.string()).optional(),
           })

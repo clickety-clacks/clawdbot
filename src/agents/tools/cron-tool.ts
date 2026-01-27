@@ -3,6 +3,7 @@ import { normalizeCronJobCreate, normalizeCronJobPatch } from "../../cron/normal
 import { loadConfig } from "../../config/config.js";
 import { truncateUtf16Safe } from "../../utils.js";
 import { optionalStringEnum, stringEnum } from "../schema/typebox.js";
+import { resolveSessionAgentId } from "../agent-scope.js";
 import { type AnyAgentTool, jsonResult, readStringParam } from "./common.js";
 import { callGatewayTool, type GatewayCallOptions } from "./gateway.js";
 import { resolveInternalSessionKey, resolveMainSessionAlias } from "./sessions-helpers.js";
@@ -132,8 +133,50 @@ export function createCronTool(opts?: CronToolOptions): AnyAgentTool {
   return {
     label: "Cron",
     name: "cron",
-    description:
-      "Manage Gateway cron jobs (status/list/add/update/remove/run/runs) and send wake events. Use `jobId` as the canonical identifier; `id` is accepted for compatibility. Use `contextMessages` (0-10) to add previous messages as context to the job text.",
+    description: `Manage Gateway cron jobs (status/list/add/update/remove/run/runs) and send wake events.
+
+ACTIONS:
+- status: Check cron scheduler status
+- list: List jobs (use includeDisabled:true to include disabled)
+- add: Create job (requires job object, see schema below)
+- update: Modify job (requires jobId + patch object)
+- remove: Delete job (requires jobId)
+- run: Trigger job immediately (requires jobId)
+- runs: Get job run history (requires jobId)
+- wake: Send wake event (requires text, optional mode)
+
+JOB SCHEMA (for add action):
+{
+  "name": "string (optional)",
+  "schedule": { ... },      // Required: when to run
+  "payload": { ... },       // Required: what to execute
+  "sessionTarget": "main" | "isolated",  // Required
+  "enabled": true | false   // Optional, default true
+}
+
+SCHEDULE TYPES (schedule.kind):
+- "at": One-shot at absolute time
+  { "kind": "at", "atMs": <unix-ms-timestamp> }
+- "every": Recurring interval
+  { "kind": "every", "everyMs": <interval-ms>, "anchorMs": <optional-start-ms> }
+- "cron": Cron expression
+  { "kind": "cron", "expr": "<cron-expression>", "tz": "<optional-timezone>" }
+
+PAYLOAD TYPES (payload.kind):
+- "systemEvent": Injects text as system event into session
+  { "kind": "systemEvent", "text": "<message>" }
+- "agentTurn": Runs agent with message (isolated sessions only)
+  { "kind": "agentTurn", "message": "<prompt>", "model": "<optional>", "thinking": "<optional>", "timeoutSeconds": <optional>, "deliver": <optional-bool>, "channel": "<optional>", "to": "<optional>", "bestEffortDeliver": <optional-bool> }
+
+CRITICAL CONSTRAINTS:
+- sessionTarget="main" REQUIRES payload.kind="systemEvent"
+- sessionTarget="isolated" REQUIRES payload.kind="agentTurn"
+
+WAKE MODES (for wake action):
+- "next-heartbeat" (default): Wake on next heartbeat
+- "now": Wake immediately
+
+Use jobId as the canonical identifier; id is accepted for compatibility. Use contextMessages (0-10) to add previous messages as context to the job text.`,
     parameters: CronToolSchema,
     execute: async (_toolCallId, args) => {
       const params = args as Record<string, unknown>;
@@ -158,6 +201,15 @@ export function createCronTool(opts?: CronToolOptions): AnyAgentTool {
             throw new Error("job required");
           }
           const job = normalizeCronJobCreate(params.job) ?? params.job;
+          if (job && typeof job === "object" && !("agentId" in job)) {
+            const cfg = loadConfig();
+            const agentId = opts?.agentSessionKey
+              ? resolveSessionAgentId({ sessionKey: opts.agentSessionKey, config: cfg })
+              : undefined;
+            if (agentId) {
+              (job as { agentId?: string }).agentId = agentId;
+            }
+          }
           const contextMessages =
             typeof params.contextMessages === "number" && Number.isFinite(params.contextMessages)
               ? params.contextMessages

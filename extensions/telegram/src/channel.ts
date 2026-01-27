@@ -17,6 +17,7 @@ import {
   resolveDefaultTelegramAccountId,
   resolveTelegramAccount,
   resolveTelegramGroupRequireMention,
+  resolveTelegramGroupToolPolicy,
   setAccountEnabledInConfigSection,
   telegramOnboardingAdapter,
   TelegramConfigSchema,
@@ -154,6 +155,7 @@ export const telegramPlugin: ChannelPlugin<ResolvedTelegramAccount> = {
   },
   groups: {
     resolveRequireMention: resolveTelegramGroupRequireMention,
+    resolveToolPolicy: resolveTelegramGroupToolPolicy,
   },
   threading: {
     resolveReplyToMode: ({ cfg }) => cfg.channels?.telegram?.replyToMode ?? "first",
@@ -249,6 +251,7 @@ export const telegramPlugin: ChannelPlugin<ResolvedTelegramAccount> = {
   outbound: {
     deliveryMode: "direct",
     chunker: (text, limit) => getTelegramRuntime().channel.text.chunkMarkdownText(text, limit),
+    chunkerMode: "markdown",
     textChunkLimit: 4000,
     sendText: async ({ to, text, accountId, deps, replyToId, threadId }) => {
       const send =

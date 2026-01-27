@@ -1,12 +1,18 @@
-import { type FilesUploadV2Arguments, WebClient } from "@slack/web-api";
+import { type FilesUploadV2Arguments, type WebClient } from "@slack/web-api";
 
-import { resolveTextChunkLimit } from "../auto-reply/chunk.js";
+import {
+  chunkMarkdownTextWithMode,
+  resolveChunkMode,
+  resolveTextChunkLimit,
+} from "../auto-reply/chunk.js";
 import { loadConfig } from "../config/config.js";
 import { logVerbose } from "../globals.js";
 import { loadWebMedia } from "../web/media.js";
 import type { SlackTokenSource } from "./accounts.js";
 import { resolveSlackAccount } from "./accounts.js";
+import { createSlackWebClient } from "./client.js";
 import { markdownToSlackMrkdwnChunks } from "./format.js";
+import { resolveMarkdownTableMode } from "../config/markdown-tables.js";
 import { parseSlackTarget } from "./targets.js";
 import { resolveSlackBotToken } from "./token.js";
 
@@ -88,13 +94,17 @@ async function uploadSlackFile(params: {
   threadTs?: string;
   maxBytes?: number;
 }): Promise<string> {
-  const { buffer, contentType, fileName } = await loadWebMedia(params.mediaUrl, params.maxBytes);
+  const {
+    buffer,
+    contentType: _contentType,
+    fileName,
+  } = await loadWebMedia(params.mediaUrl, params.maxBytes);
   const basePayload = {
     channel_id: params.channelId,
     file: buffer,
     filename: fileName,
     ...(params.caption ? { initial_comment: params.caption } : {}),
-    ...(contentType ? { filetype: contentType } : {}),
+    // Note: filetype is deprecated in files.uploadV2, Slack auto-detects from file content
   };
   const payload: FilesUploadV2Arguments = params.threadTs
     ? { ...basePayload, thread_ts: params.threadTs }
@@ -133,12 +143,25 @@ export async function sendMessageSlack(
     fallbackToken: account.botToken,
     fallbackSource: account.botTokenSource,
   });
-  const client = opts.client ?? new WebClient(token);
+  const client = opts.client ?? createSlackWebClient(token);
   const recipient = parseRecipient(to);
   const { channelId } = await resolveChannelId(client, recipient);
   const textLimit = resolveTextChunkLimit(cfg, "slack", account.accountId);
   const chunkLimit = Math.min(textLimit, SLACK_TEXT_LIMIT);
-  const chunks = markdownToSlackMrkdwnChunks(trimmedMessage, chunkLimit);
+  const tableMode = resolveMarkdownTableMode({
+    cfg,
+    channel: "slack",
+    accountId: account.accountId,
+  });
+  const chunkMode = resolveChunkMode(cfg, "slack", account.accountId);
+  const markdownChunks =
+    chunkMode === "newline"
+      ? chunkMarkdownTextWithMode(trimmedMessage, chunkLimit, chunkMode)
+      : [trimmedMessage];
+  const chunks = markdownChunks.flatMap((markdown) =>
+    markdownToSlackMrkdwnChunks(markdown, chunkLimit, { tableMode }),
+  );
+  if (!chunks.length && trimmedMessage) chunks.push(trimmedMessage);
   const mediaMaxBytes =
     typeof account.config.mediaMaxMb === "number"
       ? account.config.mediaMaxMb * 1024 * 1024

@@ -21,6 +21,7 @@ import {
   resolveDefaultWhatsAppAccountId,
   resolveWhatsAppAccount,
   resolveWhatsAppGroupRequireMention,
+  resolveWhatsAppGroupToolPolicy,
   resolveWhatsAppHeartbeatRecipients,
   whatsappOnboardingAdapter,
   WhatsAppConfigSchema,
@@ -198,6 +199,7 @@ export const whatsappPlugin: ChannelPlugin<ResolvedWhatsAppAccount> = {
   },
   groups: {
     resolveRequireMention: resolveWhatsAppGroupRequireMention,
+    resolveToolPolicy: resolveWhatsAppGroupToolPolicy,
     resolveGroupIntroHint: () =>
       "WhatsApp IDs: SenderId is the participant JID; [message_id: ...] is the message id for reactions (use SenderId as participant).",
   },
@@ -274,6 +276,7 @@ export const whatsappPlugin: ChannelPlugin<ResolvedWhatsAppAccount> = {
   outbound: {
     deliveryMode: "gateway",
     chunker: (text, limit) => getWhatsAppRuntime().channel.text.chunkText(text, limit),
+    chunkerMode: "text",
     textChunkLimit: 4000,
     pollMaxOptions: 12,
     resolveTarget: ({ to, allowFrom, mode }) => {

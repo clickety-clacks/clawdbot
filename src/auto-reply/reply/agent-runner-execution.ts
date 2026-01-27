@@ -14,6 +14,7 @@ import {
 } from "../../agents/pi-embedded-helpers.js";
 import {
   resolveAgentIdFromSessionKey,
+  resolveGroupSessionKey,
   resolveSessionTranscriptPath,
   type SessionEntry,
   updateSessionStore,
@@ -82,11 +83,13 @@ export async function runAgentTurnWithFallback(params: {
   // Track payloads sent directly (not via pipeline) during tool flush to avoid duplicates.
   const directlySentBlockKeys = new Set<string>();
 
-  const runId = crypto.randomUUID();
+  const runId = params.opts?.runId ?? crypto.randomUUID();
+  params.opts?.onAgentRunStart?.(runId);
   if (params.sessionKey) {
     registerAgentRunContext(runId, {
       sessionKey: params.sessionKey,
       verboseLevel: params.resolvedVerboseLevel,
+      isHeartbeat: params.isHeartbeat,
     });
   }
   let runResult: Awaited<ReturnType<typeof runEmbeddedPiAgent>>;
@@ -135,6 +138,7 @@ export async function runAgentTurnWithFallback(params: {
         cfg: params.followupRun.run.config,
         provider: params.followupRun.run.provider,
         model: params.followupRun.run.model,
+        agentDir: params.followupRun.run.agentDir,
         fallbacksOverride: resolveAgentModelFallbacksOverride(
           params.followupRun.run.config,
           resolveAgentIdFromSessionKey(params.followupRun.run.sessionKey),
@@ -174,8 +178,20 @@ export async function runAgentTurnWithFallback(params: {
               extraSystemPrompt: params.followupRun.run.extraSystemPrompt,
               ownerNumbers: params.followupRun.run.ownerNumbers,
               cliSessionId,
+              images: params.opts?.images,
             })
               .then((result) => {
+                // CLI backends don't emit streaming assistant events, so we need to
+                // emit one with the final text so server-chat can populate its buffer
+                // and send the response to TUI/WebSocket clients.
+                const cliText = result.payloads?.[0]?.text?.trim();
+                if (cliText) {
+                  emitAgentEvent({
+                    runId,
+                    stream: "assistant",
+                    data: { text: cliText },
+                  });
+                }
                 emitAgentEvent({
                   runId,
                   stream: "lifecycle",
@@ -212,6 +228,10 @@ export async function runAgentTurnWithFallback(params: {
             agentAccountId: params.sessionCtx.AccountId,
             messageTo: params.sessionCtx.OriginatingTo ?? params.sessionCtx.To,
             messageThreadId: params.sessionCtx.MessageThreadId ?? undefined,
+            groupId: resolveGroupSessionKey(params.sessionCtx)?.id,
+            groupChannel:
+              params.sessionCtx.GroupChannel?.trim() ?? params.sessionCtx.GroupSubject?.trim(),
+            groupSpace: params.sessionCtx.GroupSpace?.trim() ?? undefined,
             // Provider threading context for tool auto-injection
             ...buildThreadingToolContext({
               sessionCtx: params.sessionCtx,
@@ -248,6 +268,8 @@ export async function runAgentTurnWithFallback(params: {
             bashElevated: params.followupRun.run.bashElevated,
             timeoutMs: params.followupRun.run.timeoutMs,
             runId,
+            images: params.opts?.images,
+            abortSignal: params.opts?.abortSignal,
             blockReplyBreak: params.resolvedBlockStreamingBreak,
             blockReplyChunking: params.blockReplyChunking,
             onPartialReply: allowPartialStream
@@ -349,12 +371,13 @@ export async function runAgentTurnWithFallback(params: {
                   // Use pipeline if available (block streaming enabled), otherwise send directly
                   if (params.blockStreamingEnabled && params.blockReplyPipeline) {
                     params.blockReplyPipeline.enqueue(blockPayload);
-                  } else {
-                    // Send directly when flushing before tool execution (no streaming).
+                  } else if (params.blockStreamingEnabled) {
+                    // Send directly when flushing before tool execution (no pipeline but streaming enabled).
                     // Track sent key to avoid duplicate in final payloads.
                     directlySentBlockKeys.add(createBlockReplyPayloadKey(blockPayload));
                     await params.opts?.onBlockReply?.(blockPayload);
                   }
+                  // When streaming is disabled entirely, blocks are accumulated in final text instead.
                 }
               : undefined,
             onBlockReplyFlush:
@@ -503,14 +526,17 @@ export async function runAgentTurnWithFallback(params: {
       }
 
       defaultRuntime.error(`Embedded agent failed before reply: ${message}`);
+      const trimmedMessage = message.replace(/\.\s*$/, "");
+      const fallbackText = isContextOverflow
+        ? "⚠️ Context overflow — prompt too large for this model. Try a shorter message or a larger-context model."
+        : isRoleOrderingError
+          ? "⚠️ Message ordering conflict - please try again. If this persists, use /new to start a fresh session."
+          : `⚠️ Agent failed before reply: ${trimmedMessage}.\nLogs: clawdbot logs --follow`;
+
       return {
         kind: "final",
         payload: {
-          text: isContextOverflow
-            ? "⚠️ Context overflow — prompt too large for this model. Try a shorter message or a larger-context model."
-            : isRoleOrderingError
-              ? "⚠️ Message ordering conflict - please try again. If this persists, use /new to start a fresh session."
-              : `⚠️ Agent failed before reply: ${message}. Check gateway logs for details.`,
+          text: fallbackText,
         },
       };
     }

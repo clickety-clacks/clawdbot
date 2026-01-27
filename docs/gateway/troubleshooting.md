@@ -7,7 +7,7 @@ read_when:
 
 When Clawdbot misbehaves, here's how to fix it.
 
-Start with the FAQ’s [First 60 seconds](/start/faq#first-60-seconds-if-somethings-broken) if you just want a quick triage recipe. This page goes deeper on runtime failures and diagnostics.
+Start with the FAQ’s [First 60 seconds](/help/faq#first-60-seconds-if-somethings-broken) if you just want a quick triage recipe. This page goes deeper on runtime failures and diagnostics.
 
 Provider-specific shortcuts: [/channels/troubleshooting](/channels/troubleshooting)
 
@@ -30,6 +30,47 @@ Quick triage commands (in order):
 See also: [Health checks](/gateway/health) and [Logging](/logging).
 
 ## Common Issues
+
+### No API key found for provider "anthropic"
+
+This means the **agent’s auth store is empty** or missing Anthropic credentials.
+Auth is **per agent**, so a new agent won’t inherit the main agent’s keys.
+
+Fix options:
+- Re-run onboarding and choose **Anthropic** for that agent.
+- Or paste a setup-token on the **gateway host**:
+  ```bash
+  clawdbot models auth setup-token --provider anthropic
+  ```
+- Or copy `auth-profiles.json` from the main agent dir to the new agent dir.
+
+Verify:
+```bash
+clawdbot models status
+```
+
+### OAuth token refresh failed (Anthropic Claude subscription)
+
+This means the stored Anthropic OAuth token expired and the refresh failed.
+If you’re on a Claude subscription (no API key), the most reliable fix is to
+switch to a **Claude Code setup-token** and paste it on the **gateway host**.
+
+**Recommended (setup-token):**
+
+```bash
+# Run on the gateway host (paste the setup-token)
+clawdbot models auth setup-token --provider anthropic
+clawdbot models status
+```
+
+If you generated the token elsewhere:
+
+```bash
+clawdbot models auth paste-token --provider anthropic
+clawdbot models status
+```
+
+More detail: [Anthropic](/providers/anthropic) and [OAuth](/concepts/oauth).
 
 ### Control UI fails on HTTP ("device identity required" / "connect failed")
 
@@ -168,7 +209,7 @@ the Gateway likely refused to bind.
 - Fix: run `clawdbot doctor` to update it (or `clawdbot gateway install --force` for a full rewrite).
 
 **If `Last gateway error:` mentions “refusing to bind … without auth”**
-- You set `gateway.bind` to a non-loopback mode (`lan`/`tailnet`/`custom`, or `auto` when loopback is unavailable) but left auth off.
+- You set `gateway.bind` to a non-loopback mode (`lan`/`tailnet`/`custom`, or `auto` when loopback is unavailable) but didn’t configure auth.
 - Fix: set `gateway.auth.mode` + `gateway.auth.token` (or export `CLAWDBOT_GATEWAY_TOKEN`) and restart the service.
 
 **If `clawdbot gateway status` says `bind=tailnet` but no tailnet interface was found**

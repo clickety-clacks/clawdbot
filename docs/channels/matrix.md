@@ -10,7 +10,7 @@ on any homeserver, so you need a Matrix account for the bot. Once it is logged i
 the bot directly or invite it to rooms (Matrix "groups"). Beeper is a valid client option too,
 but it requires E2EE to be enabled.
 
-Status: supported via plugin (matrix-bot-sdk). Direct messages, rooms, threads, media, reactions,
+Status: supported via plugin (@vector-im/matrix-bot-sdk). Direct messages, rooms, threads, media, reactions,
 polls (send + poll-start as text), location, and E2EE (with crypto support).
 
 ## Plugin required
@@ -215,6 +215,7 @@ Provider options:
 - `channels.matrix.initialSyncLimit`: initial sync limit.
 - `channels.matrix.threadReplies`: `off | inbound | always` (default: inbound).
 - `channels.matrix.textChunkLimit`: outbound text chunk size (chars).
+- `channels.matrix.chunkMode`: `length` (default) or `newline` to split on blank lines (paragraph boundaries) before length chunking.
 - `channels.matrix.dm.policy`: `pairing | allowlist | open | disabled` (default: pairing).
 - `channels.matrix.dm.allowFrom`: DM allowlist (user IDs or display names). `open` requires `"*"`. The wizard resolves names to IDs when possible.
 - `channels.matrix.groupPolicy`: `allowlist | open | disabled` (default: allowlist).
