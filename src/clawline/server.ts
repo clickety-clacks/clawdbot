@@ -288,6 +288,24 @@ function describeClawlineAttachments(
   return `Attachments:\n${lines.join("\n")}`;
 }
 
+function summarizeAttachmentStats(attachments?: NormalizedAttachment[]): {
+  count: number;
+  inlineBytes: number;
+  assetCount: number;
+} | null {
+  if (!attachments || attachments.length === 0) return null;
+  let inlineBytes = 0;
+  let assetCount = 0;
+  for (const attachment of attachments) {
+    if (attachment.type === "image") {
+      inlineBytes += Math.round((attachment.data.length / 4) * 3);
+    } else if (attachment.type === "asset") {
+      assetCount += 1;
+    }
+  }
+  return { count: attachments.length, inlineBytes, assetCount };
+}
+
 function buildAssistantTextFromPayload(payload: ReplyPayload, fallback: string): string | null {
   const parts: string[] = [];
   const text = payload.text?.trim();
@@ -1837,6 +1855,20 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       if (!event.channelType) {
         event.channelType = DEFAULT_CHANNEL_TYPE;
       }
+      const stats = summarizeAttachmentStats(event.attachments);
+      if (stats) {
+        logger.info?.("[clawline:http] ws_send_message", {
+          deviceId: session.deviceId,
+          userId: session.userId,
+          messageId: event.id,
+          attachmentCount: stats.count,
+          inlineBytes: stats.inlineBytes,
+          assetCount: stats.assetCount,
+          channelType: event.channelType,
+          streaming: event.streaming,
+          replay: true,
+        });
+      }
       await sendJson(session.socket, event);
     }
   }
@@ -1846,6 +1878,20 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       return;
     }
     if (session.socket.readyState !== WebSocket.OPEN) return;
+    const stats = summarizeAttachmentStats(payload.attachments);
+    if (stats) {
+      logger.info?.("[clawline:http] ws_send_message", {
+        deviceId: session.deviceId,
+        userId: session.userId,
+        messageId: payload.id,
+        attachmentCount: stats.count,
+        inlineBytes: stats.inlineBytes,
+        assetCount: stats.assetCount,
+        channelType: payload.channelType ?? DEFAULT_CHANNEL_TYPE,
+        streaming: payload.streaming,
+        replay: false,
+      });
+    }
     session.socket.send(JSON.stringify(payload), (err) => {
       if (err) {
         session.socket.close();
@@ -1977,55 +2023,74 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
     const target = resolveSendTarget(targetInput);
 
-    // Derive channelType from the stored clawlineChannelType field.
-    // This field is set when messages are received, storing "admin" or "personal".
-    // Use case-insensitive comparison: updateLastRoute now stores canonical userId,
-    // but existing session data may have peerId (from bindingId) with different casing.
+    // Determine channelType in order of precedence:
+    // 1. Explicit channelType parameter
+    // 2. Derived from sessionKey (`:dm:` sessions are personal)
+    // 3. Inferred from main session entry
     let channelType: ChannelType = DEFAULT_CHANNEL_TYPE;
-    try {
+    const sessionKeyRaw = typeof params.sessionKey === "string" ? params.sessionKey.trim() : "";
+    const isPersonalSession = sessionKeyRaw.includes(":clawline:dm:");
+    if (params.channelType === "admin") {
+      channelType = ADMIN_CHANNEL_TYPE;
+      logger.info?.(`[clawline] sendOutboundMessage using explicit channelType=admin`);
+    } else if (params.channelType === "personal") {
+      channelType = DEFAULT_CHANNEL_TYPE;
+      logger.info?.(`[clawline] sendOutboundMessage using explicit channelType=personal`);
+    } else if (isPersonalSession) {
+      // Session key indicates a personal channel (e.g., agent:main:clawline:dm:flynn)
+      channelType = DEFAULT_CHANNEL_TYPE;
       logger.info?.(
-        `[clawline] sendOutboundMessage loading session store: path=${sessionStorePath} mainSessionKey=${mainSessionKey}`,
+        `[clawline] sendOutboundMessage using personal channel from sessionKey=${sessionKeyRaw}`,
       );
-      // Use skipCache to ensure we read the latest data - the session may have been
-      // updated very recently by an inbound message and the cache might be stale.
-      const store = loadSessionStore(sessionStorePath, { skipCache: true });
-      const storeKeys = Object.keys(store);
-      const mainEntry = store[mainSessionKey];
-      const lastToLower = mainEntry?.lastTo?.toLowerCase();
-      const targetLower = target.userId.toLowerCase();
-      const userMatch = lastToLower === targetLower;
-      logger.info?.(
-        `[clawline] sendOutboundMessage store loaded: keys=[${storeKeys.join(",")}] hasMainEntry=${!!mainEntry}`,
-      );
-      if (mainEntry) {
+    } else {
+      // No explicit channelType - infer from main session entry
+      try {
         logger.info?.(
-          `[clawline] sendOutboundMessage mainEntry fields: lastTo=${mainEntry.lastTo ?? "undefined"} lastChannel=${mainEntry.lastChannel ?? "undefined"} clawlineChannelType=${mainEntry.clawlineChannelType ?? "undefined"} deliveryContext=${JSON.stringify(mainEntry.deliveryContext ?? null)}`,
+          `[clawline] sendOutboundMessage loading session store: path=${sessionStorePath} mainSessionKey=${mainSessionKey}`,
         );
-      }
-      const isTargetAdmin = isAdminUserId(target.userId);
-      logger.info?.(
-        `[clawline] sendOutboundMessage channelType check: mainEntry.lastTo=${mainEntry?.lastTo ?? "undefined"} target.userId=${target.userId} mainEntry.clawlineChannelType=${mainEntry?.clawlineChannelType ?? "undefined"} match=${userMatch} isTargetAdmin=${isTargetAdmin}`,
-      );
-      // Use admin channel if:
-      // 1. clawlineChannelType is explicitly "admin", OR
-      // 2. clawlineChannelType is not set (null/undefined) AND target is an admin user
-      // This ensures admin users get notifications on the admin channel by default,
-      // even for sessions created before clawlineChannelType tracking was added.
-      const storedChannelType = mainEntry?.clawlineChannelType;
-      if (userMatch) {
-        if (storedChannelType === "admin") {
-          channelType = ADMIN_CHANNEL_TYPE;
-        } else if (storedChannelType == null && isTargetAdmin) {
-          // Default to admin channel for admin users when not explicitly set
-          channelType = ADMIN_CHANNEL_TYPE;
+        // Use skipCache to ensure we read the latest data - the session may have been
+        // updated very recently by an inbound message and the cache might be stale.
+        const store = loadSessionStore(sessionStorePath, { skipCache: true });
+        const storeKeys = Object.keys(store);
+        const mainEntry = store[mainSessionKey];
+        const lastToLower = mainEntry?.lastTo?.toLowerCase();
+        const targetLower = target.userId.toLowerCase();
+        const userMatch = lastToLower === targetLower;
+        logger.info?.(
+          `[clawline] sendOutboundMessage store loaded: keys=[${storeKeys.join(",")}] hasMainEntry=${!!mainEntry}`,
+        );
+        if (mainEntry) {
           logger.info?.(
-            `[clawline] sendOutboundMessage defaulting to admin channel for admin user (clawlineChannelType was null/undefined)`,
+            `[clawline] sendOutboundMessage mainEntry fields: lastTo=${mainEntry.lastTo ?? "undefined"} lastChannel=${mainEntry.lastChannel ?? "undefined"} clawlineChannelType=${mainEntry.clawlineChannelType ?? "undefined"} deliveryContext=${JSON.stringify(mainEntry.deliveryContext ?? null)}`,
           );
         }
+        const isTargetAdmin = isAdminUserId(target.userId);
+        logger.info?.(
+          `[clawline] sendOutboundMessage channelType check: mainEntry.lastTo=${mainEntry?.lastTo ?? "undefined"} target.userId=${target.userId} mainEntry.clawlineChannelType=${mainEntry?.clawlineChannelType ?? "undefined"} match=${userMatch} isTargetAdmin=${isTargetAdmin}`,
+        );
+        // Use admin channel if:
+        // 1. clawlineChannelType is explicitly "admin", OR
+        // 2. clawlineChannelType is not set (null/undefined) AND target is an admin user
+        // This ensures admin users get notifications on the admin channel by default,
+        // even for sessions created before clawlineChannelType tracking was added.
+        const storedChannelType = mainEntry?.clawlineChannelType;
+        if (userMatch) {
+          if (storedChannelType === "admin") {
+            channelType = ADMIN_CHANNEL_TYPE;
+          } else if (storedChannelType == null && isTargetAdmin) {
+            // Default to admin channel for admin users when not explicitly set
+            channelType = ADMIN_CHANNEL_TYPE;
+            logger.info?.(
+              `[clawline] sendOutboundMessage defaulting to admin channel for admin user (clawlineChannelType was null/undefined)`,
+            );
+          }
+        }
+      } catch (err) {
+        logger.error?.(
+          `[clawline] sendOutboundMessage failed to load session store: ${String(err)}`,
+        );
+        // Fall back to default on error
       }
-    } catch (err) {
-      logger.error?.(`[clawline] sendOutboundMessage failed to load session store: ${String(err)}`);
-      // Fall back to default on error
     }
 
     let outboundAttachments = {
