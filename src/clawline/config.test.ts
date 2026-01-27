@@ -23,19 +23,21 @@ describe("resolveClawlineConfig", () => {
 
   it("merges overrides from config", () => {
     const cfg = resolveClawlineConfig({
-      clawline: {
-        enabled: false,
-        port: 1234,
-        statePath: "/tmp/clawline",
-        network: {
-          bindAddress: "0.0.0.0",
-          allowInsecurePublic: true,
-          allowedOrigins: ["https://example.com"],
+      channels: {
+        clawline: {
+          enabled: false,
+          port: 1234,
+          statePath: "/tmp/clawline",
+          network: {
+            bindAddress: "0.0.0.0",
+            allowInsecurePublic: true,
+            allowedOrigins: ["https://example.com"],
+          },
+          media: {
+            storagePath: "/tmp/media",
+          },
+          alertInstructionsPath: "/tmp/clawline/alerts.md",
         },
-        media: {
-          storagePath: "/tmp/media",
-        },
-        alertInstructionsPath: "/tmp/clawline/alerts.md",
       },
     } as ClawdbotConfig);
 
@@ -51,12 +53,14 @@ describe("resolveClawlineConfig", () => {
 
   it("expands tildes in configurable paths", () => {
     const cfg = resolveClawlineConfig({
-      clawline: {
-        statePath: "~/custom/clawline",
-        media: {
-          storagePath: "~/custom/media",
+      channels: {
+        clawline: {
+          statePath: "~/custom/clawline",
+          media: {
+            storagePath: "~/custom/media",
+          },
+          alertInstructionsPath: "~/custom/instructions.md",
         },
-        alertInstructionsPath: "~/custom/instructions.md",
       },
     } as ClawdbotConfig);
 
@@ -67,15 +71,25 @@ describe("resolveClawlineConfig", () => {
 
   it("resolves relative media paths to absolute", () => {
     const cfg = resolveClawlineConfig({
-      clawline: {
-        media: {
-          storagePath: "relative/media",
+      channels: {
+        clawline: {
+          media: {
+            storagePath: "relative/media",
+          },
+          alertInstructionsPath: "relative/instructions.md",
         },
-        alertInstructionsPath: "relative/instructions.md",
       },
     } as ClawdbotConfig);
 
     expect(cfg.media.storagePath).toBe(path.resolve("relative/media"));
     expect(cfg.alertInstructionsPath).toBe(path.resolve("relative/instructions.md"));
+  });
+
+  it("allows opt-in enablement", () => {
+    const cfg = resolveClawlineConfig({
+      channels: { clawline: { enabled: true } },
+    } as ClawdbotConfig);
+
+    expect(cfg.enabled).toBe(true);
   });
 });

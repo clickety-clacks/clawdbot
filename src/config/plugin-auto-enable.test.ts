@@ -63,7 +63,7 @@ describe("applyPluginAutoEnable", () => {
   it("enables clawline service plugin when clawline is configured", () => {
     const result = applyPluginAutoEnable({
       config: {
-        clawline: { enabled: true },
+        channels: { clawline: { enabled: true } },
       },
       env: {},
     });

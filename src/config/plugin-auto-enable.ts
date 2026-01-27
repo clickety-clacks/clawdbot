@@ -43,7 +43,7 @@ const SERVICE_PLUGIN_CHECKS: Array<{
 }> = [
   {
     pluginId: "clawline",
-    isConfigured: (cfg) => cfg.clawline?.enabled === true,
+    isConfigured: (cfg) => cfg.channels?.clawline?.enabled === true,
   },
 ];
 

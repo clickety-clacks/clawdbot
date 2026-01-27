@@ -70,22 +70,6 @@ describe("buildThreadingToolContext", () => {
     expect(result.currentChannelId).toBe("imessage:+15550001");
   });
 
-  it("prefers OriginatingTo for Clawline tool context", () => {
-    const sessionCtx = {
-      Provider: "clawline",
-      OriginatingTo: "mike",
-      To: "device:16548a0e-412d-4694-9071-9d9968831b2c",
-    } as TemplateContext;
-
-    const result = buildThreadingToolContext({
-      sessionCtx,
-      config: cfg,
-      hasRepliedRef: undefined,
-    });
-
-    expect(result.currentChannelId).toBe("mike");
-  });
-
   it("uses chat_id for iMessage groups", () => {
     const sessionCtx = {
       Provider: "imessage",

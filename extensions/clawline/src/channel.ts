@@ -27,7 +27,7 @@ function resolveClawlineAccount(params: {
   accountId?: string | null;
 }): ResolvedClawlineAccount {
   const resolvedAccountId = params.accountId ?? DEFAULT_ACCOUNT_ID;
-  const enabled = params.cfg.clawline?.enabled !== false;
+  const enabled = params.cfg.channels?.clawline?.enabled === true;
   return {
     accountId: resolvedAccountId,
     enabled,
@@ -45,7 +45,7 @@ export const clawlinePlugin: ChannelPlugin<ResolvedClawlineAccount> = {
     chatTypes: ["direct"],
     media: true,
   },
-  reload: { configPrefixes: ["clawline"] },
+  reload: { configPrefixes: ["channels.clawline"] },
   actions: clawlineMessageActions,
   // Accept any target as valid - Clawline actions do their own filtering
   // via userId/channelType params, not standard target resolution.
@@ -59,7 +59,8 @@ export const clawlinePlugin: ChannelPlugin<ResolvedClawlineAccount> = {
     listAccountIds: () => [DEFAULT_ACCOUNT_ID],
     resolveAccount: (cfg, accountId) => resolveClawlineAccount({ cfg, accountId }),
     defaultAccountId: () => DEFAULT_ACCOUNT_ID,
-    isConfigured: () => true,
+    isConfigured: (account, cfg) =>
+      Boolean(cfg.channels?.clawline?.enabled === true && account.enabled === true),
     describeAccount: (account) => ({
       accountId: account.accountId,
       enabled: account.enabled,
@@ -67,9 +68,12 @@ export const clawlinePlugin: ChannelPlugin<ResolvedClawlineAccount> = {
     }),
     setAccountEnabled: ({ cfg, enabled }) => ({
       ...cfg,
-      clawline: {
-        ...(cfg.clawline ?? {}),
-        enabled,
+      channels: {
+        ...(cfg.channels ?? {}),
+        clawline: {
+          ...(cfg.channels?.clawline ?? {}),
+          enabled,
+        },
       },
     }),
   },

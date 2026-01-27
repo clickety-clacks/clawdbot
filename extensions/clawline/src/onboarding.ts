@@ -18,16 +18,18 @@ function sanitizeOrigins(input: string): string[] {
     .filter(Boolean);
 }
 
-function ensureClawlineBlock(cfg: ClawdbotConfig): NonNullable<ClawdbotConfig["clawline"]> {
-  return cfg.clawline ?? {};
+function ensureClawlineBlock(
+  cfg: ClawdbotConfig,
+): NonNullable<NonNullable<ClawdbotConfig["channels"]>["clawline"]> {
+  return cfg.channels?.clawline ?? {};
 }
 
 export const clawlineOnboardingAdapter: ChannelOnboardingAdapter = {
   channel: "clawline",
   async getStatus({ cfg }) {
-    const enabled = cfg.clawline?.enabled === true;
-    const port = cfg.clawline?.port ?? DEFAULT_PORT;
-    const bindAddress = cfg.clawline?.network?.bindAddress ?? DEFAULT_BIND;
+    const enabled = cfg.channels?.clawline?.enabled === true;
+    const port = cfg.channels?.clawline?.port ?? DEFAULT_PORT;
+    const bindAddress = cfg.channels?.clawline?.network?.bindAddress ?? DEFAULT_BIND;
     const statusLines = [
       enabled
         ? `Clawline: enabled (${bindAddress}:${port})`
@@ -54,9 +56,12 @@ export const clawlineOnboardingAdapter: ChannelOnboardingAdapter = {
       return {
         cfg: {
           ...cfg,
-          clawline: {
-            ...current,
-            enabled: false,
+          channels: {
+            ...(cfg.channels ?? {}),
+            clawline: {
+              ...current,
+              enabled: false,
+            },
           },
         },
       };
@@ -106,15 +111,18 @@ export const clawlineOnboardingAdapter: ChannelOnboardingAdapter = {
 
     const next: ClawdbotConfig = {
       ...cfg,
-      clawline: {
-        ...current,
-        enabled: true,
-        port,
-        network: {
-          ...current.network,
-          bindAddress,
-          allowInsecurePublic: allowPublic,
-          allowedOrigins,
+      channels: {
+        ...(cfg.channels ?? {}),
+        clawline: {
+          ...current,
+          enabled: true,
+          port,
+          network: {
+            ...current.network,
+            bindAddress,
+            allowInsecurePublic: allowPublic,
+            allowedOrigins,
+          },
         },
       },
     };
@@ -123,9 +131,12 @@ export const clawlineOnboardingAdapter: ChannelOnboardingAdapter = {
   },
   disable: (cfg) => ({
     ...cfg,
-    clawline: {
-      ...(cfg.clawline ?? {}),
-      enabled: false,
+    channels: {
+      ...(cfg.channels ?? {}),
+      clawline: {
+        ...(cfg.channels?.clawline ?? {}),
+        enabled: false,
+      },
     },
   }),
 };

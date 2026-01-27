@@ -24,7 +24,7 @@ export async function startClawlineService(params: {
     return null;
   }
   const randomizePort =
-    Boolean(process.env.VITEST_WORKER_ID) && params.config.clawline?.port === undefined;
+    Boolean(process.env.VITEST_WORKER_ID) && params.config.channels?.clawline?.port === undefined;
   const providerConfig = randomizePort ? { ...resolved, port: 0 } : resolved;
   const mainSessionKey = resolveMainSessionKey(params.config);
   const mainSessionAgentId = resolveAgentIdFromSessionKey(mainSessionKey);

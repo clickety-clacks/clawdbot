@@ -32,7 +32,7 @@ type ParsedMessage = {
 };
 
 function resolveClawlineDbPath(cfg: ClawdbotConfig): string {
-  const clawlineStatePath = cfg.clawline?.statePath;
+  const clawlineStatePath = cfg.channels?.clawline?.statePath;
   if (clawlineStatePath) {
     return path.join(clawlineStatePath, "clawline.sqlite");
   }
@@ -160,7 +160,7 @@ async function listClawlineUsers(params: {
 
 export const clawlineMessageActions: ChannelMessageActionAdapter = {
   listActions: ({ cfg }) => {
-    if (!cfg.clawline?.enabled) return [];
+    if (!cfg.channels?.clawline?.enabled) return [];
     const actions: ChannelMessageActionName[] = ["send", "read", "list-users"];
     return actions;
   },

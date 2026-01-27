@@ -13,22 +13,25 @@ configuration and adapters as the rest of your deployment.
 
 ## Enabling
 
-The provider is enabled by default. Add a `clawline` block to configure bind
-address, port, or media paths:
+The provider is disabled by default. Enable it via the onboarding wizard or add
+an explicit `channels.clawline.enabled: true` block to configure bind address, port, or
+media paths:
 
 ```json5
 {
-  clawline: {
-    // Bind to loopback by default; set allowInsecurePublic to true if you bind to 0.0.0.0 or a LAN IP.
-    network: {
-      bindAddress: "127.0.0.1",
-      allowInsecurePublic: false,
-      allowedOrigins: ["null"]
-    },
-    port: 18792,
-    statePath: "~/.clawdbot/clawline",
-    media: {
-      storagePath: "~/.clawdbot/clawline-media"
+  channels: {
+    clawline: {
+      // Bind to loopback by default; set allowInsecurePublic to true if you bind to 0.0.0.0 or a LAN IP.
+      network: {
+        bindAddress: "127.0.0.1",
+        allowInsecurePublic: false,
+        allowedOrigins: ["null"]
+      },
+      port: 18792,
+      statePath: "~/.clawdbot/clawline",
+      media: {
+        storagePath: "~/.clawdbot/clawline-media"
+      }
     }
   }
 }
@@ -38,7 +41,8 @@ The default `allowedOrigins: ["null"]` matches how the mobile apps connect when 
 `Origin: null` (file:// contexts). When you expose the provider beyond loopback, replace this list with the exact
 https origins (and set `allowInsecurePublic` accordingly).
 
-Set `clawline.enabled` to `false` to disable the service entirely.
+Set `channels.clawline.enabled` to `false` (or omit the block) to keep the service
+disabled unless a user explicitly enables it.
 
 ## Adapter overrides
 
@@ -48,12 +52,14 @@ mobile clients without touching the global agent configuration:
 
 ```json5
 {
-  clawline: {
-    adapter: {
-      provider: "anthropic",
-      model: "claude-sonnet-4-5",
-      timeoutSeconds: 120,
-      responseFallback: "Sorry, something went wrong."
+  channels: {
+    clawline: {
+      adapter: {
+        provider: "anthropic",
+        model: "claude-sonnet-4-5",
+        timeoutSeconds: 120,
+        responseFallback: "Sorry, something went wrong."
+      }
     }
   }
 }
@@ -62,7 +68,7 @@ mobile clients without touching the global agent configuration:
 ## Transport security
 
 The server binds to `127.0.0.1` by default. When binding to any other address
-you **must** set `clawline.network.allowInsecurePublic = true` and provide an
+you **must** set `channels.clawline.network.allowInsecurePublic = true` and provide an
 allowlist of `network.allowedOrigins`. Run Clawline behind Tailscale, a VPN, or
 a reverse proxy with TLS termination for production use.
 
