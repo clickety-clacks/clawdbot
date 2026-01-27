@@ -11,6 +11,24 @@ type ResolvedClawlineAccount = {
   configured: boolean;
 };
 
+function parseClawlineUserId(raw?: string | null): string | undefined {
+  const trimmed = raw?.trim();
+  if (!trimmed) return undefined;
+  const colonIndex = trimmed.indexOf(":");
+  if (colonIndex < 0) return trimmed;
+  const value = trimmed.slice(colonIndex + 1).trim();
+  return value || undefined;
+}
+
+function normalizeClawlineTarget(raw: string): string | undefined {
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  const lower = trimmed.toLowerCase();
+  if (lower.startsWith("user:")) return `user:${trimmed.slice("user:".length).trim()}`;
+  if (lower.startsWith("device:")) return `device:${trimmed.slice("device:".length).trim()}`;
+  return trimmed;
+}
+
 const meta = {
   id: "clawline",
   label: "Clawline",
@@ -53,6 +71,17 @@ export const clawlinePlugin: ChannelPlugin<ResolvedClawlineAccount> = {
     targetResolver: {
       looksLikeId: () => true,
       hint: "Clawline targets are user IDs or device IDs",
+    },
+    normalizeTarget: normalizeClawlineTarget,
+  },
+  threading: {
+    buildToolContext: ({ context, hasRepliedRef }) => {
+      const userId = parseClawlineUserId(context.From);
+      if (!userId) return undefined;
+      return {
+        currentChannelId: `user:${userId}`,
+        hasRepliedRef,
+      };
     },
   },
   config: {
