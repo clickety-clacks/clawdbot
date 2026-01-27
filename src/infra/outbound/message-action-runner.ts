@@ -1,3 +1,5 @@
+import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -39,7 +41,7 @@ import { executePollAction, executeSendAction } from "./outbound-send-service.js
 import { actionHasTarget, actionRequiresTarget } from "./message-action-spec.js";
 import { resolveChannelTarget } from "./target-resolver.js";
 import { loadWebMedia } from "../../web/media.js";
-import { extensionForMime } from "../../media/mime.js";
+import { detectMime, extensionForMime } from "../../media/mime.js";
 
 export type MessageActionRunnerGateway = {
   url?: string;
@@ -434,6 +436,66 @@ async function resolveChannel(cfg: ClawdbotConfig, params: Record<string, unknow
   return selection.channel;
 }
 
+async function materializeInlineMedia(params: {
+  args: Record<string, unknown>;
+  dryRun: boolean;
+}): Promise<{ mediaUrl?: string; cleanup?: () => Promise<void> }> {
+  const mediaRaw = readStringParam(params.args, "media", { trim: false }) ?? "";
+  const dataUrlMatch = /^data:[^;]+;base64,/i.test(mediaRaw) ? mediaRaw : undefined;
+
+  const rawBuffer = readStringParam(params.args, "buffer", { trim: false });
+  if (!rawBuffer && !dataUrlMatch) {
+    return {};
+  }
+
+  const contentTypeParam =
+    readStringParam(params.args, "contentType") ?? readStringParam(params.args, "mimeType");
+  const normalized = normalizeBase64Payload({
+    base64: dataUrlMatch ?? rawBuffer ?? undefined,
+    contentType: contentTypeParam ?? undefined,
+  });
+
+  const base64 = normalized.base64?.replace(/\s+/g, "");
+  if (!base64) {
+    return {};
+  }
+
+  if (params.dryRun) {
+    return { mediaUrl: "inline://base64" };
+  }
+
+  const buffer = Buffer.from(base64, "base64");
+  if (buffer.length === 0) {
+    throw new Error("Attachment buffer is empty");
+  }
+
+  let mimeType = normalized.contentType?.trim() || "";
+  if (!mimeType) {
+    const detected = await detectMime({ buffer });
+    if (detected) {
+      mimeType = detected;
+      params.args.contentType = detected;
+    }
+  }
+
+  const filenameRaw = readStringParam(params.args, "filename");
+  const safeName = filenameRaw?.trim() ? path.basename(filenameRaw.trim()) : "attachment";
+  const currentExt = path.extname(safeName);
+  const derivedExt = mimeType ? extensionForMime(mimeType) : undefined;
+  const filename = currentExt || !derivedExt ? safeName : `${safeName}${derivedExt}`;
+
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-attachment-"));
+  const filePath = path.join(tmpDir, filename);
+  await fs.writeFile(filePath, buffer);
+
+  return {
+    mediaUrl: filePath,
+    cleanup: async () => {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    },
+  };
+}
+
 async function resolveActionTarget(params: {
   cfg: ClawdbotConfig;
   channel: ChannelId;
@@ -579,9 +641,10 @@ async function handleSendAction(ctx: ResolvedActionContext): Promise<MessageActi
     readStringParam(params, "path", { trim: false }) ??
     readStringParam(params, "filePath", { trim: false });
   const hasCard = params.card != null && typeof params.card === "object";
+  const hasInlineBuffer = Boolean(readStringParam(params, "buffer", { trim: false })?.trim());
   let message =
     readStringParam(params, "message", {
-      required: !mediaHint && !hasCard,
+      required: !mediaHint && !hasCard && !hasInlineBuffer,
       allowEmpty: true,
     }) ?? "";
 
@@ -592,6 +655,21 @@ async function handleSendAction(ctx: ResolvedActionContext): Promise<MessageActi
   if (!params.media) {
     // Use path/filePath if media not set, then fall back to parsed directives
     params.media = mediaHint || parsed.mediaUrls?.[0] || parsed.mediaUrl || undefined;
+  }
+
+  let cleanupInlineMedia: (() => Promise<void>) | undefined;
+  if (!params.media) {
+    const inlineMedia = await materializeInlineMedia({ args: params, dryRun });
+    if (inlineMedia.mediaUrl) {
+      params.media = inlineMedia.mediaUrl;
+      cleanupInlineMedia = inlineMedia.cleanup;
+    }
+  } else {
+    const inlineMedia = await materializeInlineMedia({ args: params, dryRun });
+    if (inlineMedia.mediaUrl) {
+      params.media = inlineMedia.mediaUrl;
+      cleanupInlineMedia = inlineMedia.cleanup;
+    }
   }
 
   message = await maybeApplyCrossContextMarker({
@@ -609,42 +687,48 @@ async function handleSendAction(ctx: ResolvedActionContext): Promise<MessageActi
   const mediaUrl = readStringParam(params, "media", { trim: false });
   const gifPlayback = readBooleanParam(params, "gifPlayback") ?? false;
   const bestEffort = readBooleanParam(params, "bestEffort");
-  const send = await executeSendAction({
-    ctx: {
-      cfg,
-      channel,
-      params,
-      accountId: accountId ?? undefined,
-      gateway,
-      toolContext: input.toolContext,
-      deps: input.deps,
-      dryRun,
-      mirror:
-        input.sessionKey && !dryRun
-          ? {
-              sessionKey: input.sessionKey,
-              agentId: input.agentId,
-            }
-          : undefined,
-    },
-    to,
-    message,
-    mediaUrl: mediaUrl || undefined,
-    gifPlayback,
-    bestEffort: bestEffort ?? undefined,
-  });
+  try {
+    const send = await executeSendAction({
+      ctx: {
+        cfg,
+        channel,
+        params,
+        accountId: accountId ?? undefined,
+        gateway,
+        toolContext: input.toolContext,
+        deps: input.deps,
+        dryRun,
+        mirror:
+          input.sessionKey && !dryRun
+            ? {
+                sessionKey: input.sessionKey,
+                agentId: input.agentId,
+              }
+            : undefined,
+      },
+      to,
+      message,
+      mediaUrl: mediaUrl || undefined,
+      gifPlayback,
+      bestEffort: bestEffort ?? undefined,
+    });
 
-  return {
-    kind: "send",
-    channel,
-    action,
-    to,
-    handledBy: send.handledBy,
-    payload: send.payload,
-    toolResult: send.toolResult,
-    sendResult: send.sendResult,
-    dryRun,
-  };
+    return {
+      kind: "send",
+      channel,
+      action,
+      to,
+      handledBy: send.handledBy,
+      payload: send.payload,
+      toolResult: send.toolResult,
+      sendResult: send.sendResult,
+      dryRun,
+    };
+  } finally {
+    if (cleanupInlineMedia) {
+      await cleanupInlineMedia();
+    }
+  }
 }
 
 async function handlePollAction(ctx: ResolvedActionContext): Promise<MessageActionRunResult> {

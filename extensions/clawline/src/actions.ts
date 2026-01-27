@@ -161,9 +161,10 @@ async function listClawlineUsers(params: {
 export const clawlineMessageActions: ChannelMessageActionAdapter = {
   listActions: ({ cfg }) => {
     if (!cfg.clawline?.enabled) return [];
-    const actions: ChannelMessageActionName[] = ["send", "read"];
+    const actions: ChannelMessageActionName[] = ["send", "read", "list-users"];
     return actions;
   },
+  supportsAction: ({ action }) => action === "read" || action === "list-users",
 
   handleAction: async ({ action, params, cfg }): Promise<AgentToolResult<unknown>> => {
     if (action === "read") {
