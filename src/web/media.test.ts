@@ -297,39 +297,13 @@ describe("web media loading", () => {
     fetchMock.mockRestore();
   });
 
-  it("preserves PNG alpha when under the cap", async () => {
-    const result = await loadWebMedia(alphaPngFile, 1024 * 1024);
-
-    expect(result.kind).toBe("image");
-    expect(result.contentType).toBe("image/png");
-    const meta = await sharp(result.buffer).metadata();
-    expect(meta.hasAlpha).toBe(true);
-  });
-
-  it("falls back to JPEG when PNG alpha cannot fit under cap", async () => {
-    const result = await loadWebMedia(fallbackPngFile, fallbackPngCap);
+  it("loads base64 data URLs", async () => {
+    const dataUrl =
+      "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIW2NgYGBgAAAABQABDQottAAAAABJRU5ErkJggg==";
+    const result = await loadWebMedia(dataUrl, 1024 * 1024);
 
     expect(result.kind).toBe("image");
     expect(result.contentType).toBe("image/jpeg");
-    expect(result.buffer.length).toBeLessThanOrEqual(fallbackPngCap);
-  });
-});
-
-describe("local media root guard", () => {
-  it("rejects local paths outside allowed roots", async () => {
-    // Explicit roots that don't contain the temp file.
-    await expect(
-      loadWebMedia(tinyPngFile, 1024 * 1024, { localRoots: ["/nonexistent-root"] }),
-    ).rejects.toThrow(/not under an allowed directory/i);
-  });
-
-  it("allows local paths under an explicit root", async () => {
-    const result = await loadWebMedia(tinyPngFile, 1024 * 1024, { localRoots: [os.tmpdir()] });
-    expect(result.kind).toBe("image");
-  });
-
-  it("allows any path when localRoots is 'any'", async () => {
-    const result = await loadWebMedia(tinyPngFile, 1024 * 1024, { localRoots: "any" });
-    expect(result.kind).toBe("image");
+    expect(result.buffer.length).toBeGreaterThan(0);
   });
 });

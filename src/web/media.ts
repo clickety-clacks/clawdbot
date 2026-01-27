@@ -252,6 +252,25 @@ async function loadWebMediaInternal(
     };
   };
 
+  if (mediaUrl.startsWith("data:")) {
+    const match = /^data:([^;]+);base64,(.*)$/i.exec(mediaUrl.trim());
+    if (!match) {
+      throw new Error("Invalid data URL (expected base64 payload)");
+    }
+    const [, mime, payload] = match;
+    const buffer = Buffer.from(payload, "base64");
+    const contentType = mime.trim().toLowerCase();
+    const kind = mediaKindFromMime(contentType);
+    const ext = extensionForMime(contentType);
+    const fileName = ext ? `inline${ext}` : "inline";
+    return await clampAndFinalize({
+      buffer,
+      contentType,
+      kind,
+      fileName,
+    });
+  }
+
   if (/^https?:\/\//i.test(mediaUrl)) {
     // Enforce a download cap during fetch to avoid unbounded memory usage.
     // For optimized images, allow fetching larger payloads before compression.
