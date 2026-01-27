@@ -1865,17 +1865,20 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       }
       const stats = summarizeAttachmentStats(event.attachments);
       if (stats) {
-        logger.info?.("[clawline:http] ws_send_message", {
-          deviceId: session.deviceId,
-          userId: session.userId,
-          messageId: event.id,
-          attachmentCount: stats.count,
-          inlineBytes: stats.inlineBytes,
-          assetCount: stats.assetCount,
-          channelType: event.channelType,
-          streaming: event.streaming,
-          replay: true,
-        });
+        logger.info?.(
+          `[clawline:http] ws_send_message attachmentCount=${stats.count} inlineBytes=${stats.inlineBytes} assetCount=${stats.assetCount} replay=true`,
+          {
+            deviceId: session.deviceId,
+            userId: session.userId,
+            messageId: event.id,
+            attachmentCount: stats.count,
+            inlineBytes: stats.inlineBytes,
+            assetCount: stats.assetCount,
+            channelType: event.channelType,
+            streaming: event.streaming,
+            replay: true,
+          },
+        );
       }
       await sendJson(session.socket, event);
     }
@@ -1888,17 +1891,20 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     if (session.socket.readyState !== WebSocket.OPEN) return;
     const stats = summarizeAttachmentStats(payload.attachments);
     if (stats) {
-      logger.info?.("[clawline:http] ws_send_message", {
-        deviceId: session.deviceId,
-        userId: session.userId,
-        messageId: payload.id,
-        attachmentCount: stats.count,
-        inlineBytes: stats.inlineBytes,
-        assetCount: stats.assetCount,
-        channelType: payload.channelType ?? DEFAULT_CHANNEL_TYPE,
-        streaming: payload.streaming,
-        replay: false,
-      });
+      logger.info?.(
+        `[clawline:http] ws_send_message attachmentCount=${stats.count} inlineBytes=${stats.inlineBytes} assetCount=${stats.assetCount} replay=false`,
+        {
+          deviceId: session.deviceId,
+          userId: session.userId,
+          messageId: payload.id,
+          attachmentCount: stats.count,
+          inlineBytes: stats.inlineBytes,
+          assetCount: stats.assetCount,
+          channelType: payload.channelType ?? DEFAULT_CHANNEL_TYPE,
+          streaming: payload.streaming,
+          replay: false,
+        },
+      );
     }
     session.socket.send(JSON.stringify(payload), (err) => {
       if (err) {
