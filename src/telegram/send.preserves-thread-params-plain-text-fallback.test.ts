@@ -19,6 +19,7 @@ vi.mock("../web/media.js", () => ({
 vi.mock("grammy", () => ({
   Bot: class {
     api = botApi;
+    catch = vi.fn();
     constructor(
       public token: string,
       public options?: { client?: { fetch?: typeof fetch } },
@@ -94,6 +95,7 @@ describe("buildInlineKeyboard", () => {
 
     expect(sendPhoto).toHaveBeenCalledWith(chatId, expect.anything(), {
       caption: "photo in topic",
+      parse_mode: "HTML",
       message_thread_id: 99,
     });
   });

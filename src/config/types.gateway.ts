@@ -17,8 +17,21 @@ export type WideAreaDiscoveryConfig = {
   enabled?: boolean;
 };
 
+export type MdnsDiscoveryMode = "off" | "minimal" | "full";
+
+export type MdnsDiscoveryConfig = {
+  /**
+   * mDNS/Bonjour discovery broadcast mode (default: minimal).
+   * - off: disable mDNS entirely
+   * - minimal: omit cliPath/sshPort from TXT records
+   * - full: include cliPath/sshPort in TXT records
+   */
+  mode?: MdnsDiscoveryMode;
+};
+
 export type DiscoveryConfig = {
   wideArea?: WideAreaDiscoveryConfig;
+  mdns?: MdnsDiscoveryConfig;
 };
 
 export type CanvasHostConfig = {
@@ -53,6 +66,8 @@ export type GatewayControlUiConfig = {
   basePath?: string;
   /** Allow token-only auth over insecure HTTP (default: false). */
   allowInsecureAuth?: boolean;
+  /** DANGEROUS: Disable device identity checks for the Control UI (default: false). */
+  dangerouslyDisableDeviceAuth?: boolean;
 };
 
 export type GatewayAuthMode = "token" | "password";
@@ -80,6 +95,8 @@ export type GatewayTailscaleConfig = {
 export type GatewayRemoteConfig = {
   /** Remote Gateway WebSocket URL (ws:// or wss://). */
   url?: string;
+  /** Transport for macOS remote connections (ssh tunnel or direct WS). */
+  transport?: "ssh" | "direct";
   /** Token for remote auth (when the gateway requires token auth). */
   token?: string;
   /** Password for remote auth (when the gateway requires password auth). */
@@ -175,6 +192,13 @@ export type GatewayHttpConfig = {
 };
 
 export type GatewayNodesConfig = {
+  /** Browser routing policy for node-hosted browser proxies. */
+  browser?: {
+    /** Routing mode (default: auto). */
+    mode?: "auto" | "manual" | "off";
+    /** Pin to a specific node id/name (optional). */
+    node?: string;
+  };
   /** Additional node.invoke commands to allow on the gateway. */
   allowCommands?: string[];
   /** Commands to deny even if they appear in the defaults or node claims. */
@@ -209,4 +233,10 @@ export type GatewayConfig = {
   tls?: GatewayTlsConfig;
   http?: GatewayHttpConfig;
   nodes?: GatewayNodesConfig;
+  /**
+   * IPs of trusted reverse proxies (e.g. Traefik, nginx). When a connection
+   * arrives from one of these IPs, the Gateway trusts `x-forwarded-for` (or
+   * `x-real-ip`) to determine the client IP for local pairing and HTTP checks.
+   */
+  trustedProxies?: string[];
 };

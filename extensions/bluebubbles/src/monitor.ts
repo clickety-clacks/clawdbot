@@ -1,7 +1,13 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 import type { ClawdbotConfig } from "clawdbot/plugin-sdk";
-import { resolveAckReaction } from "clawdbot/plugin-sdk";
+import {
+  logAckFailure,
+  logInboundDrop,
+  logTypingFailure,
+  resolveAckReaction,
+  resolveControlCommandGate,
+} from "clawdbot/plugin-sdk";
 import { markBlueBubblesChatRead, sendBlueBubblesTyping } from "./chat.js";
 import { resolveChatGuidForTarget, sendMessageBlueBubbles } from "./send.js";
 import { downloadBlueBubblesAttachment } from "./attachments.js";
@@ -49,7 +55,7 @@ type BlueBubblesReplyCacheEntry = {
 // Best-effort cache for resolving reply context when BlueBubbles webhooks omit sender/body.
 const blueBubblesReplyCacheByMessageId = new Map<string, BlueBubblesReplyCacheEntry>();
 
-// Bidirectional maps for short ID ↔ UUID resolution (token savings optimization)
+// Bidirectional maps for short ID ↔ message GUID resolution (token savings optimization)
 const blueBubblesShortIdToUuid = new Map<string, string>();
 const blueBubblesUuidToShortId = new Map<string, string>();
 let blueBubblesShortIdCounter = 0;
@@ -72,7 +78,7 @@ function rememberBlueBubblesReplyCache(
     return { ...entry, shortId: "" };
   }
 
-  // Check if we already have a short ID for this UUID
+  // Check if we already have a short ID for this GUID
   let shortId = blueBubblesUuidToShortId.get(messageId);
   if (!shortId) {
     shortId = generateShortId();
@@ -80,7 +86,7 @@ function rememberBlueBubblesReplyCache(
     blueBubblesUuidToShortId.set(messageId, shortId);
   }
 
-  const fullEntry: BlueBubblesReplyCacheEntry = { ...entry, shortId };
+  const fullEntry: BlueBubblesReplyCacheEntry = { ...entry, messageId, shortId };
 
   // Refresh insertion order.
   blueBubblesReplyCacheByMessageId.delete(messageId);
@@ -116,8 +122,8 @@ function rememberBlueBubblesReplyCache(
 }
 
 /**
- * Resolves a short message ID (e.g., "1", "2") to a full BlueBubbles UUID.
- * Returns the input unchanged if it's already a UUID or not found in the mapping.
+ * Resolves a short message ID (e.g., "1", "2") to a full BlueBubbles GUID.
+ * Returns the input unchanged if it's already a GUID or not found in the mapping.
  */
 export function resolveBlueBubblesMessageId(
   shortOrUuid: string,
@@ -153,7 +159,7 @@ export function _resetBlueBubblesShortIdState(): void {
 }
 
 /**
- * Gets the short ID for a UUID, if one exists.
+ * Gets the short ID for a message GUID, if one exists.
  */
 function getShortIdForUuid(uuid: string): string | undefined {
   return blueBubblesUuidToShortId.get(uuid.trim());
@@ -244,7 +250,177 @@ type WebhookTarget = {
   statusSink?: (patch: { lastInboundAt?: number; lastOutboundAt?: number }) => void;
 };
 
+/**
+ * Entry type for debouncing inbound messages.
+ * Captures the normalized message and its target for later combined processing.
+ */
+type BlueBubblesDebounceEntry = {
+  message: NormalizedWebhookMessage;
+  target: WebhookTarget;
+};
+
+/**
+ * Default debounce window for inbound message coalescing (ms).
+ * This helps combine URL text + link preview balloon messages that BlueBubbles
+ * sends as separate webhook events when no explicit inbound debounce config exists.
+ */
+const DEFAULT_INBOUND_DEBOUNCE_MS = 350;
+
+/**
+ * Combines multiple debounced messages into a single message for processing.
+ * Used when multiple webhook events arrive within the debounce window.
+ */
+function combineDebounceEntries(entries: BlueBubblesDebounceEntry[]): NormalizedWebhookMessage {
+  if (entries.length === 0) {
+    throw new Error("Cannot combine empty entries");
+  }
+  if (entries.length === 1) {
+    return entries[0].message;
+  }
+
+  // Use the first message as the base (typically the text message)
+  const first = entries[0].message;
+
+  // Combine text from all entries, filtering out duplicates and empty strings
+  const seenTexts = new Set<string>();
+  const textParts: string[] = [];
+  
+  for (const entry of entries) {
+    const text = entry.message.text.trim();
+    if (!text) continue;
+    // Skip duplicate text (URL might be in both text message and balloon)
+    const normalizedText = text.toLowerCase();
+    if (seenTexts.has(normalizedText)) continue;
+    seenTexts.add(normalizedText);
+    textParts.push(text);
+  }
+
+  // Merge attachments from all entries
+  const allAttachments = entries.flatMap((e) => e.message.attachments ?? []);
+
+  // Use the latest timestamp
+  const timestamps = entries
+    .map((e) => e.message.timestamp)
+    .filter((t): t is number => typeof t === "number");
+  const latestTimestamp = timestamps.length > 0 ? Math.max(...timestamps) : first.timestamp;
+
+  // Collect all message IDs for reference
+  const messageIds = entries
+    .map((e) => e.message.messageId)
+    .filter((id): id is string => Boolean(id));
+
+  // Prefer reply context from any entry that has it
+  const entryWithReply = entries.find((e) => e.message.replyToId);
+
+  return {
+    ...first,
+    text: textParts.join(" "),
+    attachments: allAttachments.length > 0 ? allAttachments : first.attachments,
+    timestamp: latestTimestamp,
+    // Use first message's ID as primary (for reply reference), but we've coalesced others
+    messageId: messageIds[0] ?? first.messageId,
+    // Preserve reply context if present
+    replyToId: entryWithReply?.message.replyToId ?? first.replyToId,
+    replyToBody: entryWithReply?.message.replyToBody ?? first.replyToBody,
+    replyToSender: entryWithReply?.message.replyToSender ?? first.replyToSender,
+    // Clear balloonBundleId since we've combined (the combined message is no longer just a balloon)
+    balloonBundleId: undefined,
+  };
+}
+
 const webhookTargets = new Map<string, WebhookTarget[]>();
+
+/**
+ * Maps webhook targets to their inbound debouncers.
+ * Each target gets its own debouncer keyed by a unique identifier.
+ */
+const targetDebouncers = new Map<
+  WebhookTarget,
+  ReturnType<BlueBubblesCoreRuntime["channel"]["debounce"]["createInboundDebouncer"]>
+>();
+
+function resolveBlueBubblesDebounceMs(
+  config: ClawdbotConfig,
+  core: BlueBubblesCoreRuntime,
+): number {
+  const inbound = config.messages?.inbound;
+  const hasExplicitDebounce =
+    typeof inbound?.debounceMs === "number" || typeof inbound?.byChannel?.bluebubbles === "number";
+  if (!hasExplicitDebounce) return DEFAULT_INBOUND_DEBOUNCE_MS;
+  return core.channel.debounce.resolveInboundDebounceMs({ cfg: config, channel: "bluebubbles" });
+}
+
+/**
+ * Creates or retrieves a debouncer for a webhook target.
+ */
+function getOrCreateDebouncer(target: WebhookTarget) {
+  const existing = targetDebouncers.get(target);
+  if (existing) return existing;
+
+  const { account, config, runtime, core } = target;
+
+  const debouncer = core.channel.debounce.createInboundDebouncer<BlueBubblesDebounceEntry>({
+    debounceMs: resolveBlueBubblesDebounceMs(config, core),
+    buildKey: (entry) => {
+      const msg = entry.message;
+      // Build key from account + chat + sender to coalesce messages from same source
+      const chatKey =
+        msg.chatGuid?.trim() ??
+        msg.chatIdentifier?.trim() ??
+        (msg.chatId ? String(msg.chatId) : "dm");
+      return `bluebubbles:${account.accountId}:${chatKey}:${msg.senderId}`;
+    },
+    shouldDebounce: (entry) => {
+      const msg = entry.message;
+      // Skip debouncing for messages with attachments - process immediately
+      if (msg.attachments && msg.attachments.length > 0) return false;
+      // Skip debouncing for from-me messages (they're just cached, not processed)
+      if (msg.fromMe) return false;
+      // Skip debouncing for control commands - process immediately
+      if (core.channel.text.hasControlCommand(msg.text, config)) return false;
+      // Debounce normal text messages and URL balloon messages
+      return true;
+    },
+    onFlush: async (entries) => {
+      if (entries.length === 0) return;
+      
+      // Use target from first entry (all entries have same target due to key structure)
+      const flushTarget = entries[0].target;
+      
+      if (entries.length === 1) {
+        // Single message - process normally
+        await processMessage(entries[0].message, flushTarget);
+        return;
+      }
+
+      // Multiple messages - combine and process
+      const combined = combineDebounceEntries(entries);
+      
+      if (core.logging.shouldLogVerbose()) {
+        const count = entries.length;
+        const preview = combined.text.slice(0, 50);
+        runtime.log?.(
+          `[bluebubbles] coalesced ${count} messages: "${preview}${combined.text.length > 50 ? "..." : ""}"`,
+        );
+      }
+      
+      await processMessage(combined, flushTarget);
+    },
+    onError: (err) => {
+      runtime.error?.(`[${account.accountId}] [bluebubbles] debounce flush failed: ${String(err)}`);
+    },
+  });
+
+  targetDebouncers.set(target, debouncer);
+  return debouncer;
+}
+
+/**
+ * Removes a debouncer for a target (called during unregistration).
+ */
+function removeDebouncer(target: WebhookTarget): void {
+  targetDebouncers.delete(target);
+}
 
 function normalizeWebhookPath(raw: string): string {
   const trimmed = raw.trim();
@@ -269,6 +445,8 @@ export function registerBlueBubblesWebhookTarget(target: WebhookTarget): () => v
     } else {
       webhookTargets.delete(key);
     }
+    // Clean up debouncer when target is unregistered
+    removeDebouncer(normalizedTarget);
   };
 }
 
@@ -384,29 +562,15 @@ function buildMessagePlaceholder(message: NormalizedWebhookMessage): string {
   return "";
 }
 
-const REPLY_BODY_TRUNCATE_LENGTH = 60;
-
-function formatReplyContext(message: {
+// Returns inline reply tag like "[[reply_to:4]]" for prepending to message body
+function formatReplyTag(message: {
   replyToId?: string;
   replyToShortId?: string;
-  replyToBody?: string;
-  replyToSender?: string;
 }): string | null {
-  if (!message.replyToId && !message.replyToBody && !message.replyToSender) return null;
-  // Prefer short ID for token savings
-  const displayId = message.replyToShortId || message.replyToId;
-  // Only include sender if we don't have an ID (fallback)
-  const label = displayId ? `id:${displayId}` : (message.replyToSender?.trim() || "unknown");
-  const rawBody = message.replyToBody?.trim();
-  if (!rawBody) {
-    return `[Replying to ${label}]\n[/Replying]`;
-  }
-  // Truncate long reply bodies for token savings
-  const body =
-    rawBody.length > REPLY_BODY_TRUNCATE_LENGTH
-      ? `${rawBody.slice(0, REPLY_BODY_TRUNCATE_LENGTH)}…`
-      : rawBody;
-  return `[Replying to ${label}]\n${body}\n[/Replying]`;
+  // Prefer short ID
+  const rawId = message.replyToShortId || message.replyToId;
+  if (!rawId) return null;
+  return `[[reply_to:${rawId}]]`;
 }
 
 function readNumberLike(record: Record<string, unknown> | null, key: string): number | undefined {
@@ -623,6 +787,10 @@ type NormalizedWebhookMessage = {
   fromMe?: boolean;
   attachments?: BlueBubblesAttachment[];
   balloonBundleId?: string;
+  associatedMessageGuid?: string;
+  associatedMessageType?: number;
+  associatedMessageEmoji?: string;
+  isTapback?: boolean;
   participants?: BlueBubblesParticipant[];
   replyToId?: string;
   replyToBody?: string;
@@ -658,6 +826,113 @@ const REACTION_TYPE_MAP = new Map<number, { emoji: string; action: "added" | "re
   [3004, { emoji: "‼️", action: "removed" }],
   [3005, { emoji: "❓", action: "removed" }],
 ]);
+
+// Maps tapback text patterns (e.g., "Loved", "Liked") to emoji + action
+const TAPBACK_TEXT_MAP = new Map<string, { emoji: string; action: "added" | "removed" }>([
+  ["loved", { emoji: "❤️", action: "added" }],
+  ["liked", { emoji: "👍", action: "added" }],
+  ["disliked", { emoji: "👎", action: "added" }],
+  ["laughed at", { emoji: "😂", action: "added" }],
+  ["emphasized", { emoji: "‼️", action: "added" }],
+  ["questioned", { emoji: "❓", action: "added" }],
+  // Removal patterns (e.g., "Removed a heart from")
+  ["removed a heart from", { emoji: "❤️", action: "removed" }],
+  ["removed a like from", { emoji: "👍", action: "removed" }],
+  ["removed a dislike from", { emoji: "👎", action: "removed" }],
+  ["removed a laugh from", { emoji: "😂", action: "removed" }],
+  ["removed an emphasis from", { emoji: "‼️", action: "removed" }],
+  ["removed a question from", { emoji: "❓", action: "removed" }],
+]);
+
+const TAPBACK_EMOJI_REGEX =
+  /(?:\p{Regional_Indicator}{2})|(?:[0-9#*]\uFE0F?\u20E3)|(?:\p{Extended_Pictographic}(?:\uFE0F|\uFE0E)?(?:\p{Emoji_Modifier})?(?:\u200D\p{Extended_Pictographic}(?:\uFE0F|\uFE0E)?(?:\p{Emoji_Modifier})?)*)/u;
+
+function extractFirstEmoji(text: string): string | null {
+  const match = text.match(TAPBACK_EMOJI_REGEX);
+  return match ? match[0] : null;
+}
+
+function extractQuotedTapbackText(text: string): string | null {
+  const match = text.match(/[“"]([^”"]+)[”"]/s);
+  return match ? match[1] : null;
+}
+
+function isTapbackAssociatedType(type: number | undefined): boolean {
+  return typeof type === "number" && Number.isFinite(type) && type >= 2000 && type < 4000;
+}
+
+function resolveTapbackActionHint(type: number | undefined): "added" | "removed" | undefined {
+  if (typeof type !== "number" || !Number.isFinite(type)) return undefined;
+  if (type >= 3000 && type < 4000) return "removed";
+  if (type >= 2000 && type < 3000) return "added";
+  return undefined;
+}
+
+function resolveTapbackContext(message: NormalizedWebhookMessage): {
+  emojiHint?: string;
+  actionHint?: "added" | "removed";
+  replyToId?: string;
+} | null {
+  const associatedType = message.associatedMessageType;
+  const hasTapbackType = isTapbackAssociatedType(associatedType);
+  const hasTapbackMarker = Boolean(message.associatedMessageEmoji) || Boolean(message.isTapback);
+  if (!hasTapbackType && !hasTapbackMarker) return null;
+  const replyToId = message.associatedMessageGuid?.trim() || message.replyToId?.trim() || undefined;
+  const actionHint = resolveTapbackActionHint(associatedType);
+  const emojiHint =
+    message.associatedMessageEmoji?.trim() || REACTION_TYPE_MAP.get(associatedType ?? -1)?.emoji;
+  return { emojiHint, actionHint, replyToId };
+}
+
+// Detects tapback text patterns like 'Loved "message"' and converts to structured format
+function parseTapbackText(params: {
+  text: string;
+  emojiHint?: string;
+  actionHint?: "added" | "removed";
+  requireQuoted?: boolean;
+}): {
+  emoji: string;
+  action: "added" | "removed";
+  quotedText: string;
+} | null {
+  const trimmed = params.text.trim();
+  const lower = trimmed.toLowerCase();
+  if (!trimmed) return null;
+
+  for (const [pattern, { emoji, action }] of TAPBACK_TEXT_MAP) {
+    if (lower.startsWith(pattern)) {
+      // Extract quoted text if present (e.g., 'Loved "hello"' -> "hello")
+      const afterPattern = trimmed.slice(pattern.length).trim();
+      if (params.requireQuoted) {
+        const strictMatch = afterPattern.match(/^[“"](.+)[”"]$/s);
+        if (!strictMatch) return null;
+        return { emoji, action, quotedText: strictMatch[1] };
+      }
+      const quotedText =
+        extractQuotedTapbackText(afterPattern) ?? extractQuotedTapbackText(trimmed) ?? afterPattern;
+      return { emoji, action, quotedText };
+    }
+  }
+
+  if (lower.startsWith("reacted")) {
+    const emoji = extractFirstEmoji(trimmed) ?? params.emojiHint;
+    if (!emoji) return null;
+    const quotedText = extractQuotedTapbackText(trimmed);
+    if (params.requireQuoted && !quotedText) return null;
+    const fallback = trimmed.slice("reacted".length).trim();
+    return { emoji, action: params.actionHint ?? "added", quotedText: quotedText ?? fallback };
+  }
+
+  if (lower.startsWith("removed")) {
+    const emoji = extractFirstEmoji(trimmed) ?? params.emojiHint;
+    if (!emoji) return null;
+    const quotedText = extractQuotedTapbackText(trimmed);
+    if (params.requireQuoted && !quotedText) return null;
+    const fallback = trimmed.slice("removed".length).trim();
+    return { emoji, action: params.actionHint ?? "removed", quotedText: quotedText ?? fallback };
+  }
+  return null;
+}
 
 function maskSecret(value: string): string {
   if (value.length <= 6) return "***";
@@ -799,6 +1074,25 @@ function normalizeWebhookMessage(payload: Record<string, unknown>): NormalizedWe
     readString(message, "messageId") ??
     undefined;
   const balloonBundleId = readString(message, "balloonBundleId");
+  const associatedMessageGuid =
+    readString(message, "associatedMessageGuid") ??
+    readString(message, "associated_message_guid") ??
+    readString(message, "associatedMessageId") ??
+    undefined;
+  const associatedMessageType =
+    readNumberLike(message, "associatedMessageType") ??
+    readNumberLike(message, "associated_message_type");
+  const associatedMessageEmoji =
+    readString(message, "associatedMessageEmoji") ??
+    readString(message, "associated_message_emoji") ??
+    readString(message, "reactionEmoji") ??
+    readString(message, "reaction_emoji") ??
+    undefined;
+  const isTapback =
+    readBoolean(message, "isTapback") ??
+    readBoolean(message, "is_tapback") ??
+    readBoolean(message, "tapback") ??
+    undefined;
 
   const timestampRaw =
     readNumber(message, "date") ??
@@ -829,6 +1123,10 @@ function normalizeWebhookMessage(payload: Record<string, unknown>): NormalizedWe
     fromMe,
     attachments: extractAttachments(message),
     balloonBundleId,
+    associatedMessageGuid,
+    associatedMessageType,
+    associatedMessageEmoji,
+    isTapback,
     participants: normalizedParticipants,
     replyToId: replyMetadata.replyToId,
     replyToBody: replyMetadata.replyToBody,
@@ -850,8 +1148,13 @@ function normalizeWebhookReaction(payload: Record<string, unknown>): NormalizedW
   if (!associatedGuid || associatedType === undefined) return null;
 
   const mapping = REACTION_TYPE_MAP.get(associatedType);
-  const emoji = mapping?.emoji ?? `reaction:${associatedType}`;
-  const action = mapping?.action ?? "added";
+  const associatedEmoji =
+    readString(message, "associatedMessageEmoji") ??
+    readString(message, "associated_message_emoji") ??
+    readString(message, "reactionEmoji") ??
+    readString(message, "reaction_emoji");
+  const emoji = (associatedEmoji?.trim() || mapping?.emoji) ?? `reaction:${associatedType}`;
+  const action = mapping?.action ?? resolveTapbackActionHint(associatedType) ?? "added";
 
   const handleValue = message.handle ?? message.sender;
   const handle =
@@ -1074,7 +1377,10 @@ export async function handleBlueBubblesWebhookRequest(
         );
       });
     } else if (message) {
-      processMessage(message, target).catch((err) => {
+      // Route messages through debouncer to coalesce rapid-fire events
+      // (e.g., text message + URL balloon arriving as separate webhooks)
+      const debouncer = getOrCreateDebouncer(target);
+      debouncer.enqueue({ message, target }).catch((err) => {
         target.runtime.error?.(
           `[${target.account.accountId}] BlueBubbles webhook failed: ${String(err)}`,
         );
@@ -1116,7 +1422,21 @@ async function processMessage(
   const text = message.text.trim();
   const attachments = message.attachments ?? [];
   const placeholder = buildMessagePlaceholder(message);
-  const rawBody = text || placeholder;
+  // Check if text is a tapback pattern (e.g., 'Loved "hello"') and transform to emoji format
+  // For tapbacks, we'll append [[reply_to:N]] at the end; for regular messages, prepend it
+  const tapbackContext = resolveTapbackContext(message);
+  const tapbackParsed = parseTapbackText({
+    text,
+    emojiHint: tapbackContext?.emojiHint,
+    actionHint: tapbackContext?.actionHint,
+    requireQuoted: !tapbackContext,
+  });
+  const isTapbackMessage = Boolean(tapbackParsed);
+  const rawBody = tapbackParsed
+    ? tapbackParsed.action === "removed"
+      ? `removed ${tapbackParsed.emoji} reaction`
+      : `reacted with ${tapbackParsed.emoji}`
+    : text || placeholder;
 
   const cacheMessageId = message.messageId?.trim();
   let messageShortId: string | undefined;
@@ -1346,23 +1666,25 @@ async function processMessage(
         })
       : false;
   const dmAuthorized = dmPolicy === "open" || ownerAllowedForCommands;
-  const commandAuthorized = isGroup
-    ? core.channel.commands.resolveCommandAuthorizedFromAuthorizers({
-        useAccessGroups,
-        authorizers: [
-          { configured: effectiveAllowFrom.length > 0, allowed: ownerAllowedForCommands },
-          { configured: effectiveGroupAllowFrom.length > 0, allowed: groupAllowedForCommands },
-        ],
-      })
-    : dmAuthorized;
+  const commandGate = resolveControlCommandGate({
+    useAccessGroups,
+    authorizers: [
+      { configured: effectiveAllowFrom.length > 0, allowed: ownerAllowedForCommands },
+      { configured: effectiveGroupAllowFrom.length > 0, allowed: groupAllowedForCommands },
+    ],
+    allowTextCommands: true,
+    hasControlCommand: hasControlCmd,
+  });
+  const commandAuthorized = isGroup ? commandGate.commandAuthorized : dmAuthorized;
 
   // Block control commands from unauthorized senders in groups
-  if (isGroup && hasControlCmd && !commandAuthorized) {
-    logVerbose(
-      core,
-      runtime,
-      `bluebubbles: drop control command from unauthorized sender ${message.senderId}`,
-    );
+  if (isGroup && commandGate.shouldBlock) {
+    logInboundDrop({
+      log: (msg) => logVerbose(core, runtime, msg),
+      channel: "bluebubbles",
+      reason: "control command (unauthorized)",
+      target: message.senderId,
+    });
     return;
   }
 
@@ -1441,7 +1763,11 @@ async function processMessage(
   let replyToSender = message.replyToSender;
   let replyToShortId: string | undefined;
 
-  if (replyToId && (!replyToBody || !replyToSender)) {
+  if (isTapbackMessage && tapbackContext?.replyToId) {
+    replyToId = tapbackContext.replyToId;
+  }
+
+  if (replyToId) {
     const cached = resolveReplyContextFromCache({
       accountId: account.accountId,
       replyToId,
@@ -1469,8 +1795,15 @@ async function processMessage(
     replyToShortId = getShortIdForUuid(replyToId);
   }
 
-  const replyContext = formatReplyContext({ replyToId, replyToShortId, replyToBody, replyToSender });
-  const baseBody = replyContext ? `${rawBody}\n\n${replyContext}` : rawBody;
+  // Use inline [[reply_to:N]] tag format
+  // For tapbacks/reactions: append at end (e.g., "reacted with ❤️ [[reply_to:4]]")
+  // For regular replies: prepend at start (e.g., "[[reply_to:4]] Awesome")
+  const replyTag = formatReplyTag({ replyToId, replyToShortId });
+  const baseBody = replyTag
+    ? isTapbackMessage
+      ? `${rawBody} ${replyTag}`
+      : `${replyTag} ${rawBody}`
+    : rawBody;
   const fromLabel = isGroup ? undefined : message.senderName || `user:${message.senderId}`;
   const groupSubject = isGroup ? message.chatName?.trim() || undefined : undefined;
   const groupMembers = isGroup
@@ -1521,19 +1854,20 @@ async function processMessage(
     core,
     runtime,
   });
-  const shouldAckReaction = () => {
-    if (!ackReactionValue) return false;
-    if (ackReactionScope === "all") return true;
-    if (ackReactionScope === "direct") return !isGroup;
-    if (ackReactionScope === "group-all") return isGroup;
-    if (ackReactionScope === "group-mentions") {
-      if (!isGroup) return false;
-      if (!requireMention) return false;
-      if (!canDetectMention) return false;
-      return effectiveWasMentioned;
-    }
-    return false;
-  };
+  const shouldAckReaction = () =>
+    Boolean(
+      ackReactionValue &&
+        core.channel.reactions.shouldAckReaction({
+          scope: ackReactionScope,
+          isDirect: !isGroup,
+          isGroup,
+          isMentionableGroup: isGroup,
+          requireMention: Boolean(requireMention),
+          canDetectMention,
+          effectiveWasMentioned,
+          shouldBypassMention,
+        }),
+    );
   const ackMessageId = message.messageId?.trim() || "";
   const ackReactionPromise =
     shouldAckReaction() && ackMessageId && chatGuidForActions && ackReactionValue
@@ -1662,9 +1996,15 @@ async function processMessage(
               ? [payload.mediaUrl]
               : [];
           if (mediaList.length > 0) {
+            const tableMode = core.channel.text.resolveMarkdownTableMode({
+              cfg: config,
+              channel: "bluebubbles",
+              accountId: account.accountId,
+            });
+            const text = core.channel.text.convertMarkdownTables(payload.text ?? "", tableMode);
             let first = true;
             for (const mediaUrl of mediaList) {
-              const caption = first ? payload.text : undefined;
+              const caption = first ? text : undefined;
               first = false;
               const result = await sendBlueBubblesMedia({
                 cfg: config,
@@ -1686,10 +2026,21 @@ async function processMessage(
             account.config.textChunkLimit && account.config.textChunkLimit > 0
               ? account.config.textChunkLimit
               : DEFAULT_TEXT_LIMIT;
-          const chunks = core.channel.text.chunkMarkdownText(payload.text ?? "", textLimit);
-          if (!chunks.length && payload.text) chunks.push(payload.text);
+          const chunkMode = account.config.chunkMode ?? "length";
+          const tableMode = core.channel.text.resolveMarkdownTableMode({
+            cfg: config,
+            channel: "bluebubbles",
+            accountId: account.accountId,
+          });
+          const text = core.channel.text.convertMarkdownTables(payload.text ?? "", tableMode);
+          const chunks =
+            chunkMode === "newline"
+              ? core.channel.text.chunkTextWithMode(text, textLimit, chunkMode)
+              : core.channel.text.chunkMarkdownText(text, textLimit);
+          if (!chunks.length && text) chunks.push(text);
           if (!chunks.length) return;
-          for (const chunk of chunks) {
+          for (let i = 0; i < chunks.length; i++) {
+            const chunk = chunks[i];
             const result = await sendMessageBlueBubbles(outboundTarget, chunk, {
               cfg: config,
               accountId: account.accountId,
@@ -1698,6 +2049,17 @@ async function processMessage(
             maybeEnqueueOutboundMessageId(result.messageId, chunk);
             sentMessage = true;
             statusSink?.({ lastOutboundAt: Date.now() });
+            // In newline mode, restart typing after each chunk if more chunks remain
+            // Small delay allows the Apple API to finish clearing the typing state from message send
+            if (chunkMode === "newline" && i < chunks.length - 1 && chatGuidForActions) {
+              await new Promise((r) => setTimeout(r, 150));
+              sendBlueBubblesTyping(chatGuidForActions, true, {
+                cfg: config,
+                accountId: account.accountId,
+              }).catch(() => {
+                // Ignore typing errors
+              });
+            }
           }
         },
         onReplyStart: async () => {
@@ -1737,29 +2099,27 @@ async function processMessage(
       },
     });
   } finally {
-    if (
-      removeAckAfterReply &&
-      sentMessage &&
-      ackReactionPromise &&
-      ackReactionValue &&
-      chatGuidForActions &&
-      ackMessageId
-    ) {
-      void ackReactionPromise.then((didAck) => {
-        if (!didAck) return;
-        sendBlueBubblesReaction({
-          chatGuid: chatGuidForActions,
-          messageGuid: ackMessageId,
-          emoji: ackReactionValue,
-          remove: true,
-          opts: { cfg: config, accountId: account.accountId },
-        }).catch((err) => {
-          logVerbose(
-            core,
-            runtime,
-            `ack reaction removal failed chatGuid=${chatGuidForActions} msg=${ackMessageId}: ${String(err)}`,
-          );
-        });
+    if (sentMessage && chatGuidForActions && ackMessageId) {
+      core.channel.reactions.removeAckReactionAfterReply({
+        removeAfterReply: removeAckAfterReply,
+        ackReactionPromise,
+        ackReactionValue: ackReactionValue ?? null,
+        remove: () =>
+          sendBlueBubblesReaction({
+            chatGuid: chatGuidForActions,
+            messageGuid: ackMessageId,
+            emoji: ackReactionValue ?? "",
+            remove: true,
+            opts: { cfg: config, accountId: account.accountId },
+          }),
+        onError: (err) => {
+          logAckFailure({
+            log: (msg) => logVerbose(core, runtime, msg),
+            channel: "bluebubbles",
+            target: `${chatGuidForActions}/${ackMessageId}`,
+            error: err,
+          });
+        },
       });
     }
     if (chatGuidForActions && baseUrl && password && !sentMessage) {
@@ -1768,7 +2128,13 @@ async function processMessage(
         cfg: config,
         accountId: account.accountId,
       }).catch((err) => {
-        logVerbose(core, runtime, `typing stop (no reply) failed: ${String(err)}`);
+        logTypingFailure({
+          log: (msg) => logVerbose(core, runtime, msg),
+          channel: "bluebubbles",
+          action: "stop",
+          target: chatGuidForActions,
+          error: err,
+        });
       });
     }
   }
@@ -1846,7 +2212,11 @@ async function processReaction(
   const chatLabel = reaction.isGroup ? ` in group:${peerId}` : "";
   // Use short ID for token savings
   const messageDisplayId = getShortIdForUuid(reaction.messageId) || reaction.messageId;
-  const text = `BlueBubbles reaction ${reaction.action}: ${reaction.emoji} by ${senderLabel}${chatLabel} on msg ${messageDisplayId}`;
+  // Format: "Tyler reacted with ❤️ [[reply_to:5]]" or "Tyler removed ❤️ reaction [[reply_to:5]]"
+  const text =
+    reaction.action === "removed"
+      ? `${senderLabel} removed ${reaction.emoji} reaction [[reply_to:${messageDisplayId}]]${chatLabel}`
+      : `${senderLabel} reacted with ${reaction.emoji} [[reply_to:${messageDisplayId}]]${chatLabel}`;
   core.system.enqueueSystemEvent(text, {
     sessionKey: route.sessionKey,
     contextKey: `bluebubbles:reaction:${reaction.action}:${peerId}:${reaction.messageId}:${reaction.senderId}:${reaction.emoji}`,

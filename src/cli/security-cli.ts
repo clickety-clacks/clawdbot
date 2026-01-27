@@ -6,6 +6,7 @@ import { runSecurityAudit } from "../security/audit.js";
 import { fixSecurityFootguns } from "../security/fix.js";
 import { formatDocsLink } from "../terminal/links.js";
 import { isRich, theme } from "../terminal/theme.js";
+import { shortenHomeInString, shortenHomePath } from "../utils.js";
 import { formatCliCommand } from "./command-format.js";
 
 type SecurityAuditOptions = {
@@ -83,18 +84,31 @@ export function registerSecurityCli(program: Command) {
           lines.push("");
           lines.push(heading("FIX"));
           for (const change of fixResult.changes) {
-            lines.push(muted(`  ${change}`));
+            lines.push(muted(`  ${shortenHomeInString(change)}`));
           }
           for (const action of fixResult.actions) {
-            const mode = action.mode.toString(8).padStart(3, "0");
-            if (action.ok) lines.push(muted(`  chmod ${mode} ${action.path}`));
-            else if (action.skipped)
-              lines.push(muted(`  skip chmod ${mode} ${action.path} (${action.skipped})`));
-            else if (action.error)
-              lines.push(muted(`  chmod ${mode} ${action.path} failed: ${action.error}`));
+            if (action.kind === "chmod") {
+              const mode = action.mode.toString(8).padStart(3, "0");
+              if (action.ok) lines.push(muted(`  chmod ${mode} ${shortenHomePath(action.path)}`));
+              else if (action.skipped)
+                lines.push(
+                  muted(`  skip chmod ${mode} ${shortenHomePath(action.path)} (${action.skipped})`),
+                );
+              else if (action.error)
+                lines.push(
+                  muted(`  chmod ${mode} ${shortenHomePath(action.path)} failed: ${action.error}`),
+                );
+              continue;
+            }
+            const command = shortenHomeInString(action.command);
+            if (action.ok) lines.push(muted(`  ${command}`));
+            else if (action.skipped) lines.push(muted(`  skip ${command} (${action.skipped})`));
+            else if (action.error) lines.push(muted(`  ${command} failed: ${action.error}`));
           }
           if (fixResult.errors.length > 0) {
-            for (const err of fixResult.errors) lines.push(muted(`  error: ${err}`));
+            for (const err of fixResult.errors) {
+              lines.push(muted(`  error: ${shortenHomeInString(err)}`));
+            }
           }
         }
       }

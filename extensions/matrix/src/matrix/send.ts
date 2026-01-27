@@ -1,4 +1,4 @@
-import type { MatrixClient } from "matrix-bot-sdk";
+import type { MatrixClient } from "@vector-im/matrix-bot-sdk";
 
 import type { PollInput } from "clawdbot/plugin-sdk";
 import { getMatrixRuntime } from "../runtime.js";
@@ -50,15 +50,29 @@ export async function sendMessageMatrix(
   try {
     const roomId = await resolveMatrixRoomId(client, to);
     const cfg = getCore().config.loadConfig();
+    const tableMode = getCore().channel.text.resolveMarkdownTableMode({
+      cfg,
+      channel: "matrix",
+      accountId: opts.accountId,
+    });
+    const convertedMessage = getCore().channel.text.convertMarkdownTables(
+      trimmedMessage,
+      tableMode,
+    );
     const textLimit = getCore().channel.text.resolveTextChunkLimit(cfg, "matrix");
     const chunkLimit = Math.min(textLimit, MATRIX_TEXT_LIMIT);
-    const chunks = getCore().channel.text.chunkMarkdownText(trimmedMessage, chunkLimit);
+    const chunkMode = getCore().channel.text.resolveChunkMode(cfg, "matrix", opts.accountId);
+    const chunks = getCore().channel.text.chunkMarkdownTextWithMode(
+      convertedMessage,
+      chunkLimit,
+      chunkMode,
+    );
     const threadId = normalizeThreadId(opts.threadId);
     const relation = threadId
       ? buildThreadRelation(threadId, opts.replyToId)
       : buildReplyRelation(opts.replyToId);
     const sendContent = async (content: MatrixOutboundContent) => {
-      // matrix-bot-sdk uses sendMessage differently
+      // @vector-im/matrix-bot-sdk uses sendMessage differently
       const eventId = await client.sendMessage(roomId, content);
       return eventId;
     };
@@ -158,7 +172,7 @@ export async function sendPollMatrix(
     const pollPayload = threadId
       ? { ...pollContent, "m.relates_to": buildThreadRelation(threadId) }
       : pollContent;
-    // matrix-bot-sdk sendEvent returns eventId string directly
+    // @vector-im/matrix-bot-sdk sendEvent returns eventId string directly
     const eventId = await client.sendEvent(roomId, M_POLL_START, pollPayload);
 
     return {

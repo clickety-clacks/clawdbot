@@ -1,5 +1,12 @@
-import type { BlockStreamingCoalesceConfig, DmPolicy, GroupPolicy } from "./types.base.js";
+import type {
+  BlockStreamingCoalesceConfig,
+  DmPolicy,
+  GroupPolicy,
+  MarkdownConfig,
+} from "./types.base.js";
+import type { ChannelHeartbeatVisibilityConfig } from "./types.channels.js";
 import type { DmConfig } from "./types.messages.js";
+import type { GroupToolPolicyConfig } from "./types.tools.js";
 
 export type WhatsAppActionConfig = {
   reactions?: boolean;
@@ -12,6 +19,8 @@ export type WhatsAppConfig = {
   accounts?: Record<string, WhatsAppAccountConfig>;
   /** Optional provider capability tags used for agent/runtime guidance. */
   capabilities?: string[];
+  /** Markdown formatting overrides (tables). */
+  markdown?: MarkdownConfig;
   /** Allow channel-initiated config writes (default: true). */
   configWrites?: boolean;
   /** Send read receipts for incoming messages (default true). */
@@ -46,6 +55,8 @@ export type WhatsAppConfig = {
   dms?: Record<string, DmConfig>;
   /** Outbound text chunk size (chars). Default: 4000. */
   textChunkLimit?: number;
+  /** Chunking mode: "length" (default) splits by size; "newline" splits on every newline. */
+  chunkMode?: "length" | "newline";
   /** Maximum media file size in MB. Default: 50. */
   mediaMaxMb?: number;
   /** Disable block streaming for this account. */
@@ -58,6 +69,7 @@ export type WhatsAppConfig = {
     string,
     {
       requireMention?: boolean;
+      tools?: GroupToolPolicyConfig;
     }
   >;
   /** Acknowledgment reaction sent immediately upon message receipt. */
@@ -77,6 +89,8 @@ export type WhatsAppConfig = {
   };
   /** Debounce window (ms) for batching rapid consecutive messages from the same sender (0 to disable). */
   debounceMs?: number;
+  /** Heartbeat visibility settings for this channel. */
+  heartbeat?: ChannelHeartbeatVisibilityConfig;
 };
 
 export type WhatsAppAccountConfig = {
@@ -84,6 +98,8 @@ export type WhatsAppAccountConfig = {
   name?: string;
   /** Optional provider capability tags used for agent/runtime guidance. */
   capabilities?: string[];
+  /** Markdown formatting overrides (tables). */
+  markdown?: MarkdownConfig;
   /** Allow channel-initiated config writes (default: true). */
   configWrites?: boolean;
   /** If false, do not start this WhatsApp account provider. Default: true. */
@@ -108,6 +124,8 @@ export type WhatsAppAccountConfig = {
   /** Per-DM config overrides keyed by user ID. */
   dms?: Record<string, DmConfig>;
   textChunkLimit?: number;
+  /** Chunking mode: "length" (default) splits by size; "newline" splits on every newline. */
+  chunkMode?: "length" | "newline";
   mediaMaxMb?: number;
   blockStreaming?: boolean;
   /** Merge streamed block replies before sending. */
@@ -116,6 +134,7 @@ export type WhatsAppAccountConfig = {
     string,
     {
       requireMention?: boolean;
+      tools?: GroupToolPolicyConfig;
     }
   >;
   /** Acknowledgment reaction sent immediately upon message receipt. */
@@ -135,4 +154,6 @@ export type WhatsAppAccountConfig = {
   };
   /** Debounce window (ms) for batching rapid consecutive messages from the same sender (0 to disable). */
   debounceMs?: number;
+  /** Heartbeat visibility settings for this account. */
+  heartbeat?: ChannelHeartbeatVisibilityConfig;
 };

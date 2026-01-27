@@ -1,6 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import fs from "node:fs/promises";
-import path from "node:path";
 
 import type { ClawdbotConfig } from "../../config/config.js";
 import { setActivePluginRegistry } from "../../plugins/runtime.js";
@@ -323,6 +321,44 @@ describe("runMessageAction context isolation", () => {
       }),
     ).rejects.toThrow(/Cross-context messaging denied/);
   });
+
+  it("aborts send when abortSignal is already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      runMessageAction({
+        cfg: slackConfig,
+        action: "send",
+        params: {
+          channel: "slack",
+          target: "#C12345678",
+          message: "hi",
+        },
+        dryRun: true,
+        abortSignal: controller.signal,
+      }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("aborts broadcast when abortSignal is already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      runMessageAction({
+        cfg: slackConfig,
+        action: "broadcast",
+        params: {
+          targets: ["channel:C12345678"],
+          channel: "slack",
+          message: "hi",
+        },
+        dryRun: true,
+        abortSignal: controller.signal,
+      }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+  });
 });
 
 describe("runMessageAction sendAttachment hydration", () => {
@@ -413,40 +449,25 @@ describe("runMessageAction sendAttachment hydration", () => {
   });
 });
 
-describe("runMessageAction send inline attachment", () => {
-  const inlinePlugin: ChannelPlugin = {
-    id: "imessage",
+describe("runMessageAction accountId defaults", () => {
+  const handleAction = vi.fn(async () => jsonResult({ ok: true }));
+  const accountPlugin: ChannelPlugin = {
+    id: "discord",
     meta: {
-      id: "imessage",
-      label: "iMessage",
-      selectionLabel: "iMessage",
-      docsPath: "/channels/imessage",
-      blurb: "Inline media test plugin.",
+      id: "discord",
+      label: "Discord",
+      selectionLabel: "Discord",
+      docsPath: "/channels/discord",
+      blurb: "Discord test plugin.",
     },
-    capabilities: { chatTypes: ["direct"], media: true },
+    capabilities: { chatTypes: ["direct"] },
     config: {
       listAccountIds: () => ["default"],
-      resolveAccount: () => ({ enabled: true }),
-      isConfigured: () => true,
+      resolveAccount: () => ({}),
     },
-    outbound: {
-      deliveryMode: "direct",
-      sendText: async () => ({
-        channel: "imessage",
-        messageId: "m_text",
-      }),
-      sendMedia: async ({ mediaUrl }) => {
-        if (!mediaUrl) {
-          throw new Error("missing mediaUrl");
-        }
-        const data = await fs.readFile(mediaUrl);
-        (inlinePlugin.outbound as { lastMedia?: Buffer }).lastMedia = data;
-        (inlinePlugin.outbound as { lastPath?: string }).lastPath = mediaUrl;
-        return {
-          channel: "imessage",
-          messageId: "m_media",
-        };
-      },
+    actions: {
+      listActions: () => ["send"],
+      handleAction,
     },
   };
 
@@ -454,48 +475,38 @@ describe("runMessageAction send inline attachment", () => {
     setActivePluginRegistry(
       createTestRegistry([
         {
-          pluginId: "imessage",
+          pluginId: "discord",
           source: "test",
-          plugin: inlinePlugin,
+          plugin: accountPlugin,
         },
       ]),
     );
+    handleAction.mockClear();
   });
 
   afterEach(() => {
     setActivePluginRegistry(createTestRegistry([]));
+    vi.clearAllMocks();
   });
 
-  it("writes buffer attachments to a temp file and cleans up", async () => {
-    const cfg = {
-      channels: {
-        imessage: { enabled: true },
-      },
-    } as ClawdbotConfig;
-
-    const pngBase64 =
-      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIW2NgYGBgAAAABQABDQottAAAAABJRU5ErkJggg==";
-
-    const result = await runMessageAction({
-      cfg,
+  it("propagates defaultAccountId into params", async () => {
+    await runMessageAction({
+      cfg: {} as ClawdbotConfig,
       action: "send",
       params: {
-        channel: "imessage",
-        target: "+15551234567",
-        message: "",
-        buffer: pngBase64,
-        contentType: "image/png",
-        filename: "tiny",
+        channel: "discord",
+        target: "channel:123",
+        message: "hi",
       },
+      defaultAccountId: "ops",
     });
 
-    expect(result.kind).toBe("send");
-    const lastPath = (inlinePlugin.outbound as { lastPath?: string }).lastPath;
-    const lastMedia = (inlinePlugin.outbound as { lastMedia?: Buffer }).lastMedia;
-    expect(lastPath).toBeTruthy();
-    expect(lastMedia?.byteLength).toBeGreaterThan(0);
-    if (!lastPath) throw new Error("missing temp media path");
-    expect(path.extname(lastPath)).toBe(".png");
-    await expect(fs.stat(lastPath)).rejects.toThrow();
+    expect(handleAction).toHaveBeenCalled();
+    const ctx = handleAction.mock.calls[0]?.[0] as {
+      accountId?: string | null;
+      params: Record<string, unknown>;
+    };
+    expect(ctx.accountId).toBe("ops");
+    expect(ctx.params.accountId).toBe("ops");
   });
 });

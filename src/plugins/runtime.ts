@@ -9,8 +9,10 @@ const createEmptyRegistry = (): PluginRegistry => ({
   providers: [],
   gatewayHandlers: {},
   httpHandlers: [],
+  httpRoutes: [],
   cliRegistrars: [],
   services: [],
+  commands: [],
   diagnostics: [],
 });
 

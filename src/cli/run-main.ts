@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -49,13 +50,21 @@ export async function runCli(argv: string[] = process.argv) {
   });
 
   const parseArgv = rewriteUpdateFlagArgv(normalizedArgv);
-  if (hasHelpOrVersion(parseArgv)) {
-    const primary = getPrimaryCommand(parseArgv);
-    if (primary) {
-      const { registerSubCliByName } = await import("./program/register.subclis.js");
-      await registerSubCliByName(program, primary);
-    }
+  // Register the primary subcommand if one exists (for lazy-loading)
+  const primary = getPrimaryCommand(parseArgv);
+  if (primary) {
+    const { registerSubCliByName } = await import("./program/register.subclis.js");
+    await registerSubCliByName(program, primary);
   }
+
+  const shouldSkipPluginRegistration = !primary && hasHelpOrVersion(parseArgv);
+  if (!shouldSkipPluginRegistration) {
+    // Register plugin CLI commands before parsing
+    const { registerPluginCliCommands } = await import("../plugins/cli.js");
+    const { loadConfig } = await import("../config/config.js");
+    registerPluginCliCommands(program, loadConfig());
+  }
+
   await program.parseAsync(parseArgv);
 }
 
@@ -82,13 +91,16 @@ function stripWindowsNodeExec(argv: string[]): string[] {
   const execBase = path.basename(execPath).toLowerCase();
   const isExecPath = (value: string | undefined): boolean => {
     if (!value) return false;
-    const lower = normalizeCandidate(value).toLowerCase();
+    const normalized = normalizeCandidate(value);
+    if (!normalized) return false;
+    const lower = normalized.toLowerCase();
     return (
       lower === execPathLower ||
       path.basename(lower) === execBase ||
       lower.endsWith("\\node.exe") ||
       lower.endsWith("/node.exe") ||
-      lower.includes("node.exe")
+      lower.includes("node.exe") ||
+      (path.basename(lower) === "node.exe" && fs.existsSync(normalized))
     );
   };
   const filtered = argv.filter((arg, index) => index === 0 || !isExecPath(arg));

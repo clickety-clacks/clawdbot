@@ -1,6 +1,5 @@
 import {
   type Component,
-  fuzzyFilter,
   getEditorKeybindings,
   Input,
   isKeyRelease,
@@ -10,7 +9,7 @@ import {
   truncateToWidth,
 } from "@mariozechner/pi-tui";
 import { visibleWidth } from "../../terminal/ansi.js";
-import { findWordBoundaryIndex } from "./fuzzy-filter.js";
+import { findWordBoundaryIndex, fuzzyFilterLower, prepareSearchItems } from "./fuzzy-filter.js";
 
 export interface SearchableSelectListTheme extends SelectListTheme {
   searchPrompt: (text: string) => string;
@@ -28,6 +27,7 @@ export class SearchableSelectList implements Component {
   private maxVisible: number;
   private theme: SearchableSelectListTheme;
   private searchInput: Input;
+  private regexCache = new Map<string, RegExp>();
 
   onSelect?: (item: SelectItem) => void;
   onCancel?: () => void;
@@ -39,6 +39,15 @@ export class SearchableSelectList implements Component {
     this.maxVisible = maxVisible;
     this.theme = theme;
     this.searchInput = new Input();
+  }
+
+  private getCachedRegex(pattern: string): RegExp {
+    let regex = this.regexCache.get(pattern);
+    if (!regex) {
+      regex = new RegExp(this.escapeRegex(pattern), "gi");
+      this.regexCache.set(pattern, regex);
+    }
+    return regex;
   }
 
   private updateFilter() {
@@ -59,58 +68,47 @@ export class SearchableSelectList implements Component {
    * Smart filtering that prioritizes:
    * 1. Exact substring match in label (highest priority)
    * 2. Word-boundary prefix match in label
-   * 3. Exact substring match in description
+   * 3. Exact substring in description
    * 4. Fuzzy match (lowest priority)
    */
   private smartFilter(query: string): SelectItem[] {
     const q = query.toLowerCase();
-    type ScoredItem = { item: SelectItem; score: number };
-    const exactLabel: ScoredItem[] = [];
-    const wordBoundary: ScoredItem[] = [];
-    const descriptionMatches: ScoredItem[] = [];
+    type ScoredItem = { item: SelectItem; tier: number; score: number };
+    const scoredItems: ScoredItem[] = [];
     const fuzzyCandidates: SelectItem[] = [];
 
     for (const item of this.items) {
       const label = item.label.toLowerCase();
       const desc = (item.description ?? "").toLowerCase();
 
-      // Tier 1: Exact substring in label (score 0-99)
+      // Tier 1: Exact substring in label
       const labelIndex = label.indexOf(q);
       if (labelIndex !== -1) {
-        // Earlier match = better score
-        exactLabel.push({ item, score: labelIndex });
+        scoredItems.push({ item, tier: 0, score: labelIndex });
         continue;
       }
-      // Tier 2: Word-boundary prefix in label (score 100-199)
+      // Tier 2: Word-boundary prefix in label
       const wordBoundaryIndex = findWordBoundaryIndex(label, q);
       if (wordBoundaryIndex !== null) {
-        wordBoundary.push({ item, score: wordBoundaryIndex });
+        scoredItems.push({ item, tier: 1, score: wordBoundaryIndex });
         continue;
       }
-      // Tier 3: Exact substring in description (score 200-299)
+      // Tier 3: Exact substring in description
       const descIndex = desc.indexOf(q);
       if (descIndex !== -1) {
-        descriptionMatches.push({ item, score: descIndex });
+        scoredItems.push({ item, tier: 2, score: descIndex });
         continue;
       }
       // Tier 4: Fuzzy match (score 300+)
       fuzzyCandidates.push(item);
     }
 
-    exactLabel.sort(this.compareByScore);
-    wordBoundary.sort(this.compareByScore);
-    descriptionMatches.sort(this.compareByScore);
-    const fuzzyMatches = fuzzyFilter(
-      fuzzyCandidates,
-      query,
-      (i) => `${i.label} ${i.description ?? ""}`,
-    );
-    return [
-      ...exactLabel.map((s) => s.item),
-      ...wordBoundary.map((s) => s.item),
-      ...descriptionMatches.map((s) => s.item),
-      ...fuzzyMatches,
-    ];
+    scoredItems.sort(this.compareByScore);
+
+    const preparedCandidates = prepareSearchItems(fuzzyCandidates);
+    const fuzzyMatches = fuzzyFilterLower(preparedCandidates, q);
+
+    return [...scoredItems.map((s) => s.item), ...fuzzyMatches];
   }
 
   private escapeRegex(str: string): string {
@@ -118,9 +116,10 @@ export class SearchableSelectList implements Component {
   }
 
   private compareByScore = (
-    a: { item: SelectItem; score: number },
-    b: { item: SelectItem; score: number },
+    a: { item: SelectItem; tier: number; score: number },
+    b: { item: SelectItem; tier: number; score: number },
   ) => {
+    if (a.tier !== b.tier) return a.tier - b.tier;
     if (a.score !== b.score) return a.score - b.score;
     return this.getItemLabel(a.item).localeCompare(this.getItemLabel(b.item));
   };
@@ -140,7 +139,7 @@ export class SearchableSelectList implements Component {
     const uniqueTokens = Array.from(new Set(tokens)).sort((a, b) => b.length - a.length);
     let result = text;
     for (const token of uniqueTokens) {
-      const regex = new RegExp(this.escapeRegex(token), "gi");
+      const regex = this.getCachedRegex(token);
       result = result.replace(regex, (match) => this.theme.matchHighlight(match));
     }
     return result;
@@ -215,7 +214,8 @@ export class SearchableSelectList implements Component {
       const maxValueWidth = Math.min(30, width - prefixWidth - 4);
       const truncatedValue = truncateToWidth(displayValue, maxValueWidth, "");
       const valueText = this.highlightMatch(truncatedValue, query);
-      const spacing = " ".repeat(Math.max(1, 32 - visibleWidth(valueText)));
+      const spacingWidth = Math.max(1, 32 - visibleWidth(valueText));
+      const spacing = " ".repeat(spacingWidth);
       const descriptionStart = prefixWidth + visibleWidth(valueText) + spacing.length;
       const remainingWidth = width - descriptionStart - 2;
       if (remainingWidth > 10) {

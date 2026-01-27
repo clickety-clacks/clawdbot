@@ -75,12 +75,12 @@ function resolveEnvSourceLabel(params: {
   return `${prefix}${params.label}`;
 }
 
-export function resolveAwsSdkEnvVarName(): string | undefined {
-  if (process.env[AWS_BEARER_ENV]?.trim()) return AWS_BEARER_ENV;
-  if (process.env[AWS_ACCESS_KEY_ENV]?.trim() && process.env[AWS_SECRET_KEY_ENV]?.trim()) {
+export function resolveAwsSdkEnvVarName(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  if (env[AWS_BEARER_ENV]?.trim()) return AWS_BEARER_ENV;
+  if (env[AWS_ACCESS_KEY_ENV]?.trim() && env[AWS_SECRET_KEY_ENV]?.trim()) {
     return AWS_ACCESS_KEY_ENV;
   }
-  if (process.env[AWS_PROFILE_ENV]?.trim()) return AWS_PROFILE_ENV;
+  if (env[AWS_PROFILE_ENV]?.trim()) return AWS_PROFILE_ENV;
   return undefined;
 }
 
@@ -282,6 +282,7 @@ export function resolveEnvApiKey(provider: string): EnvApiKeyResult | null {
     "kimi-code": "KIMICODE_API_KEY",
     minimax: "MINIMAX_API_KEY",
     synthetic: "SYNTHETIC_API_KEY",
+    venice: "VENICE_API_KEY",
     mistral: "MISTRAL_API_KEY",
     opencode: "OPENCODE_API_KEY",
   };

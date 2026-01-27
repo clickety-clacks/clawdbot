@@ -16,6 +16,7 @@ export type AuthChoice =
   | "moonshot-api-key"
   | "kimi-code-api-key"
   | "synthetic-api-key"
+  | "venice-api-key"
   | "codex-cli"
   | "apiKey"
   | "gemini-api-key"
@@ -31,7 +32,7 @@ export type AuthChoice =
   | "copilot-proxy"
   | "qwen-portal"
   | "skip";
-export type GatewayAuthChoice = "off" | "token" | "password";
+export type GatewayAuthChoice = "token" | "password";
 export type ResetScope = "config" | "config+creds+sessions" | "full";
 export type GatewayBind = "loopback" | "lan" | "auto" | "custom" | "tailnet";
 export type TailscaleMode = "off" | "serve" | "funnel";
@@ -42,7 +43,8 @@ export type ProviderChoice = ChannelChoice;
 
 export type OnboardOptions = {
   mode?: OnboardMode;
-  flow?: "quickstart" | "advanced";
+  /** "manual" is an alias for "advanced". */
+  flow?: "quickstart" | "advanced" | "manual";
   workspace?: string;
   nonInteractive?: boolean;
   /** Required for non-interactive onboarding; skips the interactive risk prompt when true. */
@@ -67,6 +69,7 @@ export type OnboardOptions = {
   zaiApiKey?: string;
   minimaxApiKey?: string;
   syntheticApiKey?: string;
+  veniceApiKey?: string;
   opencodeZenApiKey?: string;
   gatewayPort?: number;
   gatewayBind?: GatewayBind;

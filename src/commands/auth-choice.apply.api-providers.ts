@@ -23,6 +23,8 @@ import {
   applyOpenrouterProviderConfig,
   applySyntheticConfig,
   applySyntheticProviderConfig,
+  applyVeniceConfig,
+  applyVeniceProviderConfig,
   applyVercelAiGatewayConfig,
   applyVercelAiGatewayProviderConfig,
   applyZaiConfig,
@@ -30,6 +32,7 @@ import {
   MOONSHOT_DEFAULT_MODEL_REF,
   OPENROUTER_DEFAULT_MODEL_REF,
   SYNTHETIC_DEFAULT_MODEL_REF,
+  VENICE_DEFAULT_MODEL_REF,
   VERCEL_AI_GATEWAY_DEFAULT_MODEL_REF,
   setGeminiApiKey,
   setKimiCodeApiKey,
@@ -37,6 +40,7 @@ import {
   setOpencodeZenApiKey,
   setOpenrouterApiKey,
   setSyntheticApiKey,
+  setVeniceApiKey,
   setVercelAiGatewayApiKey,
   setZaiApiKey,
   ZAI_DEFAULT_MODEL_REF,
@@ -56,7 +60,35 @@ export async function applyAuthChoiceApiProviders(
     );
   };
 
-  if (params.authChoice === "openrouter-api-key") {
+  let authChoice = params.authChoice;
+  if (
+    authChoice === "apiKey" &&
+    params.opts?.tokenProvider &&
+    params.opts.tokenProvider !== "anthropic" &&
+    params.opts.tokenProvider !== "openai"
+  ) {
+    if (params.opts.tokenProvider === "openrouter") {
+      authChoice = "openrouter-api-key";
+    } else if (params.opts.tokenProvider === "vercel-ai-gateway") {
+      authChoice = "ai-gateway-api-key";
+    } else if (params.opts.tokenProvider === "moonshot") {
+      authChoice = "moonshot-api-key";
+    } else if (params.opts.tokenProvider === "kimi-code") {
+      authChoice = "kimi-code-api-key";
+    } else if (params.opts.tokenProvider === "google") {
+      authChoice = "gemini-api-key";
+    } else if (params.opts.tokenProvider === "zai") {
+      authChoice = "zai-api-key";
+    } else if (params.opts.tokenProvider === "synthetic") {
+      authChoice = "synthetic-api-key";
+    } else if (params.opts.tokenProvider === "venice") {
+      authChoice = "venice-api-key";
+    } else if (params.opts.tokenProvider === "opencode") {
+      authChoice = "opencode-zen";
+    }
+  }
+
+  if (authChoice === "openrouter-api-key") {
     const store = ensureAuthProfileStore(params.agentDir, {
       allowKeychainPrompt: false,
     });
@@ -79,6 +111,11 @@ export async function applyAuthChoiceApiProviders(
           : existingCred.type === "token"
             ? "token"
             : "api_key";
+      hasCredential = true;
+    }
+
+    if (!hasCredential && params.opts?.token && params.opts?.tokenProvider === "openrouter") {
+      await setOpenrouterApiKey(normalizeApiKeyInput(params.opts.token), params.agentDir);
       hasCredential = true;
     }
 
@@ -129,8 +166,18 @@ export async function applyAuthChoiceApiProviders(
     return { config: nextConfig, agentModelOverride };
   }
 
-  if (params.authChoice === "ai-gateway-api-key") {
+  if (authChoice === "ai-gateway-api-key") {
     let hasCredential = false;
+
+    if (
+      !hasCredential &&
+      params.opts?.token &&
+      params.opts?.tokenProvider === "vercel-ai-gateway"
+    ) {
+      await setVercelAiGatewayApiKey(normalizeApiKeyInput(params.opts.token), params.agentDir);
+      hasCredential = true;
+    }
+
     const envKey = resolveEnvApiKey("vercel-ai-gateway");
     if (envKey) {
       const useExisting = await params.prompter.confirm({
@@ -171,8 +218,14 @@ export async function applyAuthChoiceApiProviders(
     return { config: nextConfig, agentModelOverride };
   }
 
-  if (params.authChoice === "moonshot-api-key") {
+  if (authChoice === "moonshot-api-key") {
     let hasCredential = false;
+
+    if (!hasCredential && params.opts?.token && params.opts?.tokenProvider === "moonshot") {
+      await setMoonshotApiKey(normalizeApiKeyInput(params.opts.token), params.agentDir);
+      hasCredential = true;
+    }
+
     const envKey = resolveEnvApiKey("moonshot");
     if (envKey) {
       const useExisting = await params.prompter.confirm({
@@ -212,15 +265,22 @@ export async function applyAuthChoiceApiProviders(
     return { config: nextConfig, agentModelOverride };
   }
 
-  if (params.authChoice === "kimi-code-api-key") {
-    await params.prompter.note(
-      [
-        "Kimi Code uses a dedicated endpoint and API key.",
-        "Get your API key at: https://www.kimi.com/code/en",
-      ].join("\n"),
-      "Kimi Code",
-    );
+  if (authChoice === "kimi-code-api-key") {
     let hasCredential = false;
+    if (!hasCredential && params.opts?.token && params.opts?.tokenProvider === "kimi-code") {
+      await setKimiCodeApiKey(normalizeApiKeyInput(params.opts.token), params.agentDir);
+      hasCredential = true;
+    }
+
+    if (!hasCredential) {
+      await params.prompter.note(
+        [
+          "Kimi Code uses a dedicated endpoint and API key.",
+          "Get your API key at: https://www.kimi.com/code/en",
+        ].join("\n"),
+        "Kimi Code",
+      );
+    }
     const envKey = resolveEnvApiKey("kimi-code");
     if (envKey) {
       const useExisting = await params.prompter.confirm({
@@ -261,8 +321,14 @@ export async function applyAuthChoiceApiProviders(
     return { config: nextConfig, agentModelOverride };
   }
 
-  if (params.authChoice === "gemini-api-key") {
+  if (authChoice === "gemini-api-key") {
     let hasCredential = false;
+
+    if (!hasCredential && params.opts?.token && params.opts?.tokenProvider === "google") {
+      await setGeminiApiKey(normalizeApiKeyInput(params.opts.token), params.agentDir);
+      hasCredential = true;
+    }
+
     const envKey = resolveEnvApiKey("google");
     if (envKey) {
       const useExisting = await params.prompter.confirm({
@@ -302,8 +368,14 @@ export async function applyAuthChoiceApiProviders(
     return { config: nextConfig, agentModelOverride };
   }
 
-  if (params.authChoice === "zai-api-key") {
+  if (authChoice === "zai-api-key") {
     let hasCredential = false;
+
+    if (!hasCredential && params.opts?.token && params.opts?.tokenProvider === "zai") {
+      await setZaiApiKey(normalizeApiKeyInput(params.opts.token), params.agentDir);
+      hasCredential = true;
+    }
+
     const envKey = resolveEnvApiKey("zai");
     if (envKey) {
       const useExisting = await params.prompter.confirm({
@@ -359,12 +431,16 @@ export async function applyAuthChoiceApiProviders(
     return { config: nextConfig, agentModelOverride };
   }
 
-  if (params.authChoice === "synthetic-api-key") {
-    const key = await params.prompter.text({
-      message: "Enter Synthetic API key",
-      validate: (value) => (value?.trim() ? undefined : "Required"),
-    });
-    await setSyntheticApiKey(String(key).trim(), params.agentDir);
+  if (authChoice === "synthetic-api-key") {
+    if (params.opts?.token && params.opts?.tokenProvider === "synthetic") {
+      await setSyntheticApiKey(String(params.opts.token).trim(), params.agentDir);
+    } else {
+      const key = await params.prompter.text({
+        message: "Enter Synthetic API key",
+        validate: (value) => (value?.trim() ? undefined : "Required"),
+      });
+      await setSyntheticApiKey(String(key).trim(), params.agentDir);
+    }
     nextConfig = applyAuthProfileConfig(nextConfig, {
       profileId: "synthetic:default",
       provider: "synthetic",
@@ -387,16 +463,82 @@ export async function applyAuthChoiceApiProviders(
     return { config: nextConfig, agentModelOverride };
   }
 
-  if (params.authChoice === "opencode-zen") {
-    await params.prompter.note(
-      [
-        "OpenCode Zen provides access to Claude, GPT, Gemini, and more models.",
-        "Get your API key at: https://opencode.ai/auth",
-        "Requires an active OpenCode Zen subscription.",
-      ].join("\n"),
-      "OpenCode Zen",
-    );
+  if (authChoice === "venice-api-key") {
     let hasCredential = false;
+
+    if (!hasCredential && params.opts?.token && params.opts?.tokenProvider === "venice") {
+      await setVeniceApiKey(normalizeApiKeyInput(params.opts.token), params.agentDir);
+      hasCredential = true;
+    }
+
+    if (!hasCredential) {
+      await params.prompter.note(
+        [
+          "Venice AI provides privacy-focused inference with uncensored models.",
+          "Get your API key at: https://venice.ai/settings/api",
+          "Supports 'private' (fully private) and 'anonymized' (proxy) modes.",
+        ].join("\n"),
+        "Venice AI",
+      );
+    }
+
+    const envKey = resolveEnvApiKey("venice");
+    if (envKey) {
+      const useExisting = await params.prompter.confirm({
+        message: `Use existing VENICE_API_KEY (${envKey.source}, ${formatApiKeyPreview(envKey.apiKey)})?`,
+        initialValue: true,
+      });
+      if (useExisting) {
+        await setVeniceApiKey(envKey.apiKey, params.agentDir);
+        hasCredential = true;
+      }
+    }
+    if (!hasCredential) {
+      const key = await params.prompter.text({
+        message: "Enter Venice AI API key",
+        validate: validateApiKeyInput,
+      });
+      await setVeniceApiKey(normalizeApiKeyInput(String(key)), params.agentDir);
+    }
+    nextConfig = applyAuthProfileConfig(nextConfig, {
+      profileId: "venice:default",
+      provider: "venice",
+      mode: "api_key",
+    });
+    {
+      const applied = await applyDefaultModelChoice({
+        config: nextConfig,
+        setDefaultModel: params.setDefaultModel,
+        defaultModel: VENICE_DEFAULT_MODEL_REF,
+        applyDefaultConfig: applyVeniceConfig,
+        applyProviderConfig: applyVeniceProviderConfig,
+        noteDefault: VENICE_DEFAULT_MODEL_REF,
+        noteAgentModel,
+        prompter: params.prompter,
+      });
+      nextConfig = applied.config;
+      agentModelOverride = applied.agentModelOverride ?? agentModelOverride;
+    }
+    return { config: nextConfig, agentModelOverride };
+  }
+
+  if (authChoice === "opencode-zen") {
+    let hasCredential = false;
+    if (!hasCredential && params.opts?.token && params.opts?.tokenProvider === "opencode") {
+      await setOpencodeZenApiKey(normalizeApiKeyInput(params.opts.token), params.agentDir);
+      hasCredential = true;
+    }
+
+    if (!hasCredential) {
+      await params.prompter.note(
+        [
+          "OpenCode Zen provides access to Claude, GPT, Gemini, and more models.",
+          "Get your API key at: https://opencode.ai/auth",
+          "Requires an active OpenCode Zen subscription.",
+        ].join("\n"),
+        "OpenCode Zen",
+      );
+    }
     const envKey = resolveEnvApiKey("opencode");
     if (envKey) {
       const useExisting = await params.prompter.confirm({

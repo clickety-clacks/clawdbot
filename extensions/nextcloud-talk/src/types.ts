@@ -7,6 +7,8 @@ import type {
 
 export type NextcloudTalkRoomConfig = {
   requireMention?: boolean;
+  /** Optional tool policy overrides for this room. */
+  tools?: { allow?: string[]; deny?: string[] };
   /** If specified, only load these skills for this room. Omit = all skills; empty = no skills. */
   skills?: string[];
   /** If false, disable the bot for this room. */
@@ -60,6 +62,8 @@ export type NextcloudTalkAccountConfig = {
   dms?: Record<string, DmConfig>;
   /** Outbound text chunk size (chars). Default: 4000. */
   textChunkLimit?: number;
+  /** Chunking mode: "length" (default) splits by size; "newline" splits on every newline. */
+  chunkMode?: "length" | "newline";
   /** Disable block streaming for this account. */
   blockStreaming?: boolean;
   /** Merge streamed block replies before sending. */

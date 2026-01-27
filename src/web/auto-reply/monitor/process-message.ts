@@ -1,13 +1,5 @@
-import {
-  resolveEffectiveMessagesConfig,
-  resolveIdentityName,
-  resolveIdentityNamePrefix,
-} from "../../../agents/identity.js";
-import {
-  extractShortModelName,
-  type ResponsePrefixContext,
-} from "../../../auto-reply/reply/response-prefix-template.js";
-import { resolveTextChunkLimit } from "../../../auto-reply/chunk.js";
+import { resolveIdentityNamePrefix } from "../../../agents/identity.js";
+import { resolveChunkMode, resolveTextChunkLimit } from "../../../auto-reply/chunk.js";
 import {
   formatInboundEnvelope,
   resolveEnvelopeFormatOptions,
@@ -22,12 +14,14 @@ import type { ReplyPayload } from "../../../auto-reply/types.js";
 import { shouldComputeCommandAuthorized } from "../../../auto-reply/command-detection.js";
 import { finalizeInboundContext } from "../../../auto-reply/reply/inbound-context.js";
 import { toLocationContext } from "../../../channels/location.js";
+import { createReplyPrefixContext } from "../../../channels/reply-prefix.js";
 import type { loadConfig } from "../../../config/config.js";
 import {
   readSessionUpdatedAt,
   recordSessionMetaFromInbound,
   resolveStorePath,
 } from "../../../config/sessions.js";
+import { resolveMarkdownTableMode } from "../../../config/markdown-tables.js";
 import { logVerbose, shouldLogVerbose } from "../../../globals.js";
 import type { getChildLogger } from "../../../logging.js";
 import { readChannelAllowFromStore } from "../../../pairing/pairing-store.js";
@@ -235,27 +229,31 @@ export async function processMessage(params: {
       : undefined;
 
   const textLimit = params.maxMediaTextChunkLimit ?? resolveTextChunkLimit(params.cfg, "whatsapp");
+  const chunkMode = resolveChunkMode(params.cfg, "whatsapp", params.route.accountId);
+  const tableMode = resolveMarkdownTableMode({
+    cfg: params.cfg,
+    channel: "whatsapp",
+    accountId: params.route.accountId,
+  });
   let didLogHeartbeatStrip = false;
   let didSendReply = false;
   const commandAuthorized = shouldComputeCommandAuthorized(params.msg.body, params.cfg)
     ? await resolveWhatsAppCommandAuthorized({ cfg: params.cfg, msg: params.msg })
     : undefined;
   const configuredResponsePrefix = params.cfg.messages?.responsePrefix;
-  const resolvedMessages = resolveEffectiveMessagesConfig(params.cfg, params.route.agentId);
+  const prefixContext = createReplyPrefixContext({
+    cfg: params.cfg,
+    agentId: params.route.agentId,
+  });
   const isSelfChat =
     params.msg.chatType !== "group" &&
     Boolean(params.msg.selfE164) &&
     normalizeE164(params.msg.from) === normalizeE164(params.msg.selfE164 ?? "");
   const responsePrefix =
-    resolvedMessages.responsePrefix ??
+    prefixContext.responsePrefix ??
     (configuredResponsePrefix === undefined && isSelfChat
       ? (resolveIdentityNamePrefix(params.cfg, params.route.agentId) ?? "[clawdbot]")
       : undefined);
-
-  // Create mutable context for response prefix template interpolation
-  let prefixContext: ResponsePrefixContext = {
-    identityName: resolveIdentityName(params.cfg, params.route.agentId),
-  };
 
   const ctxPayload = finalizeInboundContext({
     Body: combinedBody,
@@ -328,7 +326,7 @@ export async function processMessage(params: {
     replyResolver: params.replyResolver,
     dispatcherOptions: {
       responsePrefix,
-      responsePrefixContextProvider: () => prefixContext,
+      responsePrefixContextProvider: prefixContext.responsePrefixContextProvider,
       onHeartbeatStrip: () => {
         if (!didLogHeartbeatStrip) {
           didLogHeartbeatStrip = true;
@@ -341,10 +339,12 @@ export async function processMessage(params: {
           msg: params.msg,
           maxMediaBytes: params.maxMediaBytes,
           textLimit,
+          chunkMode,
           replyLogger: params.replyLogger,
           connectionId: params.connectionId,
           // Tool + block updates are noisy; skip their log lines.
           skipLog: info.kind !== "final",
+          tableMode,
         });
         didSendReply = true;
         if (info.kind === "tool") {
@@ -386,13 +386,7 @@ export async function processMessage(params: {
         typeof params.cfg.channels?.whatsapp?.blockStreaming === "boolean"
           ? !params.cfg.channels.whatsapp.blockStreaming
           : undefined,
-      onModelSelected: (ctx) => {
-        // Mutate the object directly instead of reassigning to ensure the closure sees updates
-        prefixContext.provider = ctx.provider;
-        prefixContext.model = extractShortModelName(ctx.model);
-        prefixContext.modelFull = `${ctx.provider}/${ctx.model}`;
-        prefixContext.thinkingLevel = ctx.thinkLevel ?? "off";
-      },
+      onModelSelected: prefixContext.onModelSelected,
     },
   });
 

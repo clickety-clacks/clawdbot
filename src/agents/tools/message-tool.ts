@@ -11,10 +11,6 @@ import {
 import { BLUEBUBBLES_GROUP_ACTIONS } from "../../channels/plugins/bluebubbles-actions.js";
 import type { ClawdbotConfig } from "../../config/config.js";
 import { loadConfig } from "../../config/config.js";
-import {
-  appendAssistantMessageToSessionTranscript,
-  resolveMirroredTranscriptText,
-} from "../../config/sessions.js";
 import { GATEWAY_CLIENT_IDS, GATEWAY_CLIENT_MODES } from "../../gateway/protocol/client-info.js";
 import { normalizeTargetForProvider } from "../../infra/outbound/target-normalization.js";
 import { getToolResult, runMessageAction } from "../../infra/outbound/message-action-runner.js";
@@ -63,6 +59,7 @@ function buildSendSchema(options: { includeButtons: boolean; includeCards: boole
     replyTo: Type.Optional(Type.String()),
     threadId: Type.Optional(Type.String()),
     asVoice: Type.Optional(Type.Boolean()),
+    silent: Type.Optional(Type.Boolean()),
     bestEffort: Type.Optional(Type.Boolean()),
     gifPlayback: Type.Optional(Type.Boolean()),
     buttons: Type.Optional(
@@ -98,6 +95,9 @@ function buildReactionSchema() {
     messageId: Type.Optional(Type.String()),
     emoji: Type.Optional(Type.String()),
     remove: Type.Optional(Type.Boolean()),
+    targetAuthor: Type.Optional(Type.String()),
+    targetAuthorUuid: Type.Optional(Type.String()),
+    groupId: Type.Optional(Type.String()),
   };
 }
 
@@ -334,13 +334,23 @@ export function createMessageTool(options?: MessageToolOptions): AnyAgentTool {
     name: "message",
     description,
     parameters: schema,
-    execute: async (_toolCallId, args) => {
+    execute: async (_toolCallId, args, signal) => {
+      // Check if already aborted before doing any work
+      if (signal?.aborted) {
+        const err = new Error("Message send aborted");
+        err.name = "AbortError";
+        throw err;
+      }
       const params = args as Record<string, unknown>;
       const cfg = options?.config ?? loadConfig();
       const action = readStringParam(params, "action", {
         required: true,
       }) as ChannelMessageActionName;
+
       const accountId = readStringParam(params, "accountId") ?? agentAccountId;
+      if (accountId) {
+        params.accountId = accountId;
+      }
 
       const gateway = {
         url: readStringParam(params, "gatewayUrl", { trim: false }),
@@ -363,6 +373,9 @@ export function createMessageTool(options?: MessageToolOptions): AnyAgentTool {
               currentThreadTs: options?.currentThreadTs,
               replyToMode: options?.replyToMode,
               hasRepliedRef: options?.hasRepliedRef,
+              // Direct tool invocations should not add cross-context decoration.
+              // The agent is composing a message, not forwarding from another chat.
+              skipCrossContextDecoration: true,
             }
           : undefined;
 
@@ -373,35 +386,11 @@ export function createMessageTool(options?: MessageToolOptions): AnyAgentTool {
         defaultAccountId: accountId ?? undefined,
         gateway,
         toolContext,
-        sessionKey: options?.agentSessionKey,
         agentId: options?.agentSessionKey
           ? resolveSessionAgentId({ sessionKey: options.agentSessionKey, config: cfg })
           : undefined,
+        abortSignal: signal,
       });
-
-      if (
-        action === "send" &&
-        options?.agentSessionKey &&
-        !result.dryRun &&
-        result.handledBy === "plugin"
-      ) {
-        const mediaUrl = typeof params.media === "string" ? params.media : undefined;
-        const mirrorText = resolveMirroredTranscriptText({
-          text: typeof params.message === "string" ? params.message : undefined,
-          mediaUrls: mediaUrl ? [mediaUrl] : undefined,
-        });
-        if (mirrorText) {
-          const agentId = resolveSessionAgentId({
-            sessionKey: options.agentSessionKey,
-            config: cfg,
-          });
-          await appendAssistantMessageToSessionTranscript({
-            agentId,
-            sessionKey: options.agentSessionKey,
-            text: mirrorText,
-          });
-        }
-      }
 
       const toolResult = getToolResult(result);
       if (toolResult) return toolResult;

@@ -206,6 +206,76 @@ export async function ensureTailscaledInstalled(
   await exec("brew", ["install", "tailscale"]);
 }
 
+type ExecErrorDetails = {
+  stdout?: unknown;
+  stderr?: unknown;
+  message?: unknown;
+  code?: unknown;
+};
+
+export type TailscaleWhoisIdentity = {
+  login: string;
+  name?: string;
+};
+
+type TailscaleWhoisCacheEntry = {
+  value: TailscaleWhoisIdentity | null;
+  expiresAt: number;
+};
+
+const whoisCache = new Map<string, TailscaleWhoisCacheEntry>();
+
+function extractExecErrorText(err: unknown) {
+  const errOutput = err as ExecErrorDetails;
+  const stdout = typeof errOutput.stdout === "string" ? errOutput.stdout : "";
+  const stderr = typeof errOutput.stderr === "string" ? errOutput.stderr : "";
+  const message = typeof errOutput.message === "string" ? errOutput.message : "";
+  const code = typeof errOutput.code === "string" ? errOutput.code : "";
+  return { stdout, stderr, message, code };
+}
+
+function isPermissionDeniedError(err: unknown): boolean {
+  const { stdout, stderr, message, code } = extractExecErrorText(err);
+  if (code.toUpperCase() === "EACCES") return true;
+  const combined = `${stdout}\n${stderr}\n${message}`.toLowerCase();
+  return (
+    combined.includes("permission denied") ||
+    combined.includes("access denied") ||
+    combined.includes("operation not permitted") ||
+    combined.includes("not permitted") ||
+    combined.includes("requires root") ||
+    combined.includes("must be run as root") ||
+    combined.includes("must be run with sudo") ||
+    combined.includes("requires sudo") ||
+    combined.includes("need sudo")
+  );
+}
+
+// Helper to attempt a command, and retry with sudo if it fails.
+async function execWithSudoFallback(
+  exec: typeof runExec,
+  bin: string,
+  args: string[],
+  opts: { maxBuffer?: number; timeoutMs?: number },
+): Promise<{ stdout: string; stderr: string }> {
+  try {
+    return await exec(bin, args, opts);
+  } catch (err) {
+    if (!isPermissionDeniedError(err)) {
+      throw err;
+    }
+    logVerbose(`Command failed, retrying with sudo: ${bin} ${args.join(" ")}`);
+    try {
+      return await exec("sudo", ["-n", bin, ...args], opts);
+    } catch (sudoErr) {
+      const { stderr, message } = extractExecErrorText(sudoErr);
+      const detail = (stderr || message).trim();
+      if (detail) logVerbose(`Sudo retry failed: ${detail}`);
+      throw err;
+    }
+  }
+}
+
 export async function ensureFunnel(
   port: number,
   exec: typeof runExec = runExec,
@@ -237,10 +307,16 @@ export async function ensureFunnel(
     }
 
     logVerbose(`Enabling funnel on port ${port}…`);
-    const { stdout } = await exec(tailscaleBin, ["funnel", "--yes", "--bg", `${port}`], {
-      maxBuffer: 200_000,
-      timeoutMs: 15_000,
-    });
+    // Attempt with fallback
+    const { stdout } = await execWithSudoFallback(
+      exec,
+      tailscaleBin,
+      ["funnel", "--yes", "--bg", `${port}`],
+      {
+        maxBuffer: 200_000,
+        timeoutMs: 15_000,
+      },
+    );
     if (stdout.trim()) console.log(stdout.trim());
   } catch (err) {
     const errOutput = err as { stdout?: unknown; stderr?: unknown };
@@ -288,7 +364,7 @@ export async function ensureFunnel(
 
 export async function enableTailscaleServe(port: number, exec: typeof runExec = runExec) {
   const tailscaleBin = await getTailscaleBinary();
-  await exec(tailscaleBin, ["serve", "--bg", "--yes", `${port}`], {
+  await execWithSudoFallback(exec, tailscaleBin, ["serve", "--bg", "--yes", `${port}`], {
     maxBuffer: 200_000,
     timeoutMs: 15_000,
   });
@@ -296,7 +372,7 @@ export async function enableTailscaleServe(port: number, exec: typeof runExec = 
 
 export async function disableTailscaleServe(exec: typeof runExec = runExec) {
   const tailscaleBin = await getTailscaleBinary();
-  await exec(tailscaleBin, ["serve", "reset"], {
+  await execWithSudoFallback(exec, tailscaleBin, ["serve", "reset"], {
     maxBuffer: 200_000,
     timeoutMs: 15_000,
   });
@@ -304,7 +380,7 @@ export async function disableTailscaleServe(exec: typeof runExec = runExec) {
 
 export async function enableTailscaleFunnel(port: number, exec: typeof runExec = runExec) {
   const tailscaleBin = await getTailscaleBinary();
-  await exec(tailscaleBin, ["funnel", "--bg", "--yes", `${port}`], {
+  await execWithSudoFallback(exec, tailscaleBin, ["funnel", "--bg", "--yes", `${port}`], {
     maxBuffer: 200_000,
     timeoutMs: 15_000,
   });
@@ -312,8 +388,78 @@ export async function enableTailscaleFunnel(port: number, exec: typeof runExec =
 
 export async function disableTailscaleFunnel(exec: typeof runExec = runExec) {
   const tailscaleBin = await getTailscaleBinary();
-  await exec(tailscaleBin, ["funnel", "reset"], {
+  await execWithSudoFallback(exec, tailscaleBin, ["funnel", "reset"], {
     maxBuffer: 200_000,
     timeoutMs: 15_000,
   });
+}
+
+function getString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function readRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
+}
+
+function parseWhoisIdentity(payload: Record<string, unknown>): TailscaleWhoisIdentity | null {
+  const userProfile =
+    readRecord(payload.UserProfile) ?? readRecord(payload.userProfile) ?? readRecord(payload.User);
+  const login =
+    getString(userProfile?.LoginName) ??
+    getString(userProfile?.Login) ??
+    getString(userProfile?.login) ??
+    getString(payload.LoginName) ??
+    getString(payload.login);
+  if (!login) return null;
+  const name =
+    getString(userProfile?.DisplayName) ??
+    getString(userProfile?.Name) ??
+    getString(userProfile?.displayName) ??
+    getString(payload.DisplayName) ??
+    getString(payload.name);
+  return { login, name };
+}
+
+function readCachedWhois(ip: string, now: number): TailscaleWhoisIdentity | null | undefined {
+  const cached = whoisCache.get(ip);
+  if (!cached) return undefined;
+  if (cached.expiresAt <= now) {
+    whoisCache.delete(ip);
+    return undefined;
+  }
+  return cached.value;
+}
+
+function writeCachedWhois(ip: string, value: TailscaleWhoisIdentity | null, ttlMs: number) {
+  whoisCache.set(ip, { value, expiresAt: Date.now() + ttlMs });
+}
+
+export async function readTailscaleWhoisIdentity(
+  ip: string,
+  exec: typeof runExec = runExec,
+  opts?: { timeoutMs?: number; cacheTtlMs?: number; errorTtlMs?: number },
+): Promise<TailscaleWhoisIdentity | null> {
+  const normalized = ip.trim();
+  if (!normalized) return null;
+  const now = Date.now();
+  const cached = readCachedWhois(normalized, now);
+  if (cached !== undefined) return cached;
+
+  const cacheTtlMs = opts?.cacheTtlMs ?? 60_000;
+  const errorTtlMs = opts?.errorTtlMs ?? 5_000;
+  try {
+    const tailscaleBin = await getTailscaleBinary();
+    const { stdout } = await exec(tailscaleBin, ["whois", "--json", normalized], {
+      timeoutMs: opts?.timeoutMs ?? 5_000,
+      maxBuffer: 200_000,
+    });
+    const parsed = stdout ? parsePossiblyNoisyJsonObject(stdout) : {};
+    const identity = parseWhoisIdentity(parsed);
+    writeCachedWhois(normalized, identity, cacheTtlMs);
+    return identity;
+  } catch {
+    writeCachedWhois(normalized, null, errorTtlMs);
+    return null;
+  }
 }

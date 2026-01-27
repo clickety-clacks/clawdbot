@@ -14,8 +14,10 @@ import {
   handleWhoamiCommand,
 } from "./commands-info.js";
 import { handleAllowlistCommand } from "./commands-allowlist.js";
+import { handleApproveCommand } from "./commands-approve.js";
 import { handleSubagentsCommand } from "./commands-subagents.js";
 import { handleModelsCommand } from "./commands-models.js";
+import { handleTtsCommands } from "./commands-tts.js";
 import {
   handleAbortTrigger,
   handleActivationCommand,
@@ -24,6 +26,7 @@ import {
   handleStopCommand,
   handleUsageCommand,
 } from "./commands-session.js";
+import { handlePluginCommand } from "./commands-plugin.js";
 import type {
   CommandHandler,
   CommandHandlerResult,
@@ -31,15 +34,19 @@ import type {
 } from "./commands-types.js";
 
 const HANDLERS: CommandHandler[] = [
+  // Plugin commands are processed first, before built-in commands
+  handlePluginCommand,
   handleBashCommand,
   handleActivationCommand,
   handleSendPolicyCommand,
   handleUsageCommand,
   handleRestartCommand,
+  handleTtsCommands,
   handleHelpCommand,
   handleCommandsListCommand,
   handleStatusCommand,
   handleAllowlistCommand,
+  handleApproveCommand,
   handleContextCommand,
   handleWhoamiCommand,
   handleSubagentsCommand,

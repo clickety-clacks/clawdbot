@@ -38,10 +38,12 @@ applies: workspace wins, then managed/local, then bundled.
 
 ## Plugins + skills
 
-Plugins can ship their own skills (for example, `voice-call`) and gate them via
-`metadata.clawdbot.requires.config` on the plugin’s config entry. See
-[Plugins](/plugin) for plugin discovery/config and [Tools](/tools) for the tool
-surface those skills teach.
+Plugins can ship their own skills by listing `skills` directories in
+`clawdbot.plugin.json` (paths relative to the plugin root). Plugin skills load
+when the plugin is enabled and participate in the normal skill precedence rules.
+You can gate them via `metadata.clawdbot.requires.config` on the plugin’s config
+entry. See [Plugins](/plugin) for discovery/config and [Tools](/tools) for the
+tool surface those skills teach.
 
 ## ClawdHub (install + sync)
 
@@ -61,6 +63,14 @@ Common flows:
 By default, `clawdhub` installs into `./skills` under your current working
 directory (or falls back to the configured Clawdbot workspace). Clawdbot picks
 that up as `<workspace>/skills` on the next session.
+
+## Security notes
+
+- Treat third-party skills as **trusted code**. Read them before enabling.
+- Prefer sandboxed runs for untrusted inputs and risky tools. See [Sandboxing](/gateway/sandboxing).
+- `skills.entries.*.env` and `skills.entries.*.apiKey` inject secrets into the **host** process
+  for that agent turn (not the sandbox). Keep secrets out of prompts and logs.
+- For a broader threat model and checklists, see [Security](/gateway/security).
 
 ## Format (AgentSkills + Pi-compatible)
 

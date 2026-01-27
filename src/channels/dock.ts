@@ -2,19 +2,27 @@ import type { ClawdbotConfig } from "../config/config.js";
 import { resolveDiscordAccount } from "../discord/accounts.js";
 import { resolveIMessageAccount } from "../imessage/accounts.js";
 import { resolveSignalAccount } from "../signal/accounts.js";
-import { resolveSlackAccount } from "../slack/accounts.js";
+import { resolveSlackAccount, resolveSlackReplyToMode } from "../slack/accounts.js";
 import { buildSlackThreadingToolContext } from "../slack/threading-tool-context.js";
 import { resolveTelegramAccount } from "../telegram/accounts.js";
+import { normalizeAccountId } from "../routing/session-key.js";
 import { normalizeE164 } from "../utils.js";
 import { resolveWhatsAppAccount } from "../web/accounts.js";
 import { normalizeWhatsAppTarget } from "../whatsapp/normalize.js";
 import { requireActivePluginRegistry } from "../plugins/runtime.js";
 import {
   resolveDiscordGroupRequireMention,
+  resolveDiscordGroupToolPolicy,
+  resolveGoogleChatGroupRequireMention,
+  resolveGoogleChatGroupToolPolicy,
   resolveIMessageGroupRequireMention,
+  resolveIMessageGroupToolPolicy,
   resolveSlackGroupRequireMention,
+  resolveSlackGroupToolPolicy,
   resolveTelegramGroupRequireMention,
+  resolveTelegramGroupToolPolicy,
   resolveWhatsAppGroupRequireMention,
+  resolveWhatsAppGroupToolPolicy,
 } from "./plugins/group-mentions.js";
 import type {
   ChannelCapabilities,
@@ -103,6 +111,7 @@ const DOCKS: Record<ChatChannelId, ChannelDock> = {
     },
     groups: {
       resolveRequireMention: resolveTelegramGroupRequireMention,
+      resolveToolPolicy: resolveTelegramGroupToolPolicy,
     },
     threading: {
       resolveReplyToMode: ({ cfg }) => cfg.channels?.telegram?.replyToMode ?? "first",
@@ -141,6 +150,7 @@ const DOCKS: Record<ChatChannelId, ChannelDock> = {
     },
     groups: {
       resolveRequireMention: resolveWhatsAppGroupRequireMention,
+      resolveToolPolicy: resolveWhatsAppGroupToolPolicy,
       resolveGroupIntroHint: () =>
         "WhatsApp IDs: SenderId is the participant JID; [message_id: ...] is the message id for reactions (use SenderId as participant).",
     },
@@ -189,6 +199,7 @@ const DOCKS: Record<ChatChannelId, ChannelDock> = {
     },
     groups: {
       resolveRequireMention: resolveDiscordGroupRequireMention,
+      resolveToolPolicy: resolveDiscordGroupToolPolicy,
     },
     mentions: {
       stripPatterns: () => ["<@!?\\d+>"],
@@ -200,6 +211,64 @@ const DOCKS: Record<ChatChannelId, ChannelDock> = {
         currentThreadTs: context.ReplyToId,
         hasRepliedRef,
       }),
+    },
+  },
+  googlechat: {
+    id: "googlechat",
+    capabilities: {
+      chatTypes: ["direct", "group", "thread"],
+      reactions: true,
+      media: true,
+      threads: true,
+      blockStreaming: true,
+    },
+    outbound: { textChunkLimit: 4000 },
+    config: {
+      resolveAllowFrom: ({ cfg, accountId }) => {
+        const channel = cfg.channels?.googlechat as
+          | {
+              accounts?: Record<string, { dm?: { allowFrom?: Array<string | number> } }>;
+              dm?: { allowFrom?: Array<string | number> };
+            }
+          | undefined;
+        const normalized = normalizeAccountId(accountId);
+        const account =
+          channel?.accounts?.[normalized] ??
+          channel?.accounts?.[
+            Object.keys(channel?.accounts ?? {}).find(
+              (key) => key.toLowerCase() === normalized.toLowerCase(),
+            ) ?? ""
+          ];
+        return (account?.dm?.allowFrom ?? channel?.dm?.allowFrom ?? []).map((entry) =>
+          String(entry),
+        );
+      },
+      formatAllowFrom: ({ allowFrom }) =>
+        allowFrom
+          .map((entry) => String(entry).trim())
+          .filter(Boolean)
+          .map((entry) =>
+            entry
+              .replace(/^(googlechat|google-chat|gchat):/i, "")
+              .replace(/^user:/i, "")
+              .replace(/^users\//i, "")
+              .toLowerCase(),
+          ),
+    },
+    groups: {
+      resolveRequireMention: resolveGoogleChatGroupRequireMention,
+      resolveToolPolicy: resolveGoogleChatGroupToolPolicy,
+    },
+    threading: {
+      resolveReplyToMode: ({ cfg }) => cfg.channels?.googlechat?.replyToMode ?? "off",
+      buildToolContext: ({ context, hasRepliedRef }) => {
+        const threadId = context.MessageThreadId ?? context.ReplyToId;
+        return {
+          currentChannelId: context.To?.trim() || undefined,
+          currentThreadTs: threadId != null ? String(threadId) : undefined,
+          hasRepliedRef,
+        };
+      },
     },
   },
   slack: {
@@ -222,10 +291,11 @@ const DOCKS: Record<ChatChannelId, ChannelDock> = {
     },
     groups: {
       resolveRequireMention: resolveSlackGroupRequireMention,
+      resolveToolPolicy: resolveSlackGroupToolPolicy,
     },
     threading: {
-      resolveReplyToMode: ({ cfg, accountId }) =>
-        resolveSlackAccount({ cfg, accountId }).replyToMode ?? "off",
+      resolveReplyToMode: ({ cfg, accountId, chatType }) =>
+        resolveSlackReplyToMode(resolveSlackAccount({ cfg, accountId }), chatType),
       allowTagsWhenOff: true,
       buildToolContext: (params) => buildSlackThreadingToolContext(params),
     },
@@ -284,6 +354,7 @@ const DOCKS: Record<ChatChannelId, ChannelDock> = {
     },
     groups: {
       resolveRequireMention: resolveIMessageGroupRequireMention,
+      resolveToolPolicy: resolveIMessageGroupToolPolicy,
     },
     threading: {
       buildToolContext: ({ context, hasRepliedRef }) => {

@@ -147,7 +147,8 @@ Available actions:
 - **addParticipant**: Add someone to a group (`chatGuid`, `address`)
 - **removeParticipant**: Remove someone from a group (`chatGuid`, `address`)
 - **leaveGroup**: Leave a group chat (`chatGuid`)
-- **sendAttachment**: Send media/files (`to`, `buffer`, `filename`)
+- **sendAttachment**: Send media/files (`to`, `buffer`, `filename`, `asVoice`)
+  - Voice memos: set `asVoice: true` with **MP3** or **CAF** audio to send as an iMessage voice message. BlueBubbles converts MP3 → CAF when sending voice memos.
 
 ### Message IDs (short vs full)
 Clawdbot may surface *short* message IDs (e.g., `1`, `2`) to save tokens.
@@ -195,6 +196,7 @@ Provider options:
 - `channels.bluebubbles.sendReadReceipts`: Send read receipts (default: `true`).
 - `channels.bluebubbles.blockStreaming`: Enable block streaming (default: `true`).
 - `channels.bluebubbles.textChunkLimit`: Outbound chunk size in chars (default: 4000).
+- `channels.bluebubbles.chunkMode`: `length` (default) splits only when exceeding `textChunkLimit`; `newline` splits on blank lines (paragraph boundaries) before length chunking.
 - `channels.bluebubbles.mediaMaxMb`: Inbound media cap in MB (default: 8).
 - `channels.bluebubbles.historyLimit`: Max group messages for context (0 disables).
 - `channels.bluebubbles.dmHistoryLimit`: DM history limit.
@@ -211,6 +213,7 @@ Prefer `chat_guid` for stable routing:
 - `chat_id:123`
 - `chat_identifier:...`
 - Direct handles: `+15555550123`, `user@example.com`
+  - If a direct handle does not have an existing DM chat, Clawdbot will create one via `POST /api/v1/chat/new`. This requires the BlueBubbles Private API to be enabled.
 
 ## Security
 - Webhook requests are authenticated by comparing `guid`/`password` query params or headers against `channels.bluebubbles.password`. Requests from `localhost` are also accepted.

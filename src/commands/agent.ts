@@ -377,10 +377,12 @@ export async function agentCommand(
         runContext.messageChannel,
         opts.replyChannel ?? opts.channel,
       );
+      const spawnedBy = opts.spawnedBy ?? sessionEntry?.spawnedBy;
       const fallbackResult = await runWithModelFallback({
         cfg,
         provider,
         model,
+        agentDir,
         fallbacksOverride: resolveAgentModelFallbacksOverride(cfg, sessionAgentId),
         run: (providerOverride, modelOverride) => {
           if (isCliProvider(providerOverride, cfg)) {
@@ -412,6 +414,10 @@ export async function agentCommand(
             agentAccountId: runContext.accountId,
             messageTo: opts.replyTo ?? opts.to,
             messageThreadId: opts.threadId,
+            groupId: runContext.groupId,
+            groupChannel: runContext.groupChannel,
+            groupSpace: runContext.groupSpace,
+            spawnedBy,
             currentChannelId: runContext.currentChannelId,
             currentThreadTs: runContext.currentThreadTs,
             replyToMode: runContext.replyToMode,

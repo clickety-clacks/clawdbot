@@ -4,6 +4,8 @@ export type GroupPolicy = "open" | "disabled" | "allowlist";
 export type BlueBubblesGroupConfig = {
   /** If true, only respond in this group when mentioned. */
   requireMention?: boolean;
+  /** Optional tool policy overrides for this group. */
+  tools?: { allow?: string[]; deny?: string[] };
 };
 
 export type BlueBubblesAccountConfig = {
@@ -36,6 +38,8 @@ export type BlueBubblesAccountConfig = {
   dms?: Record<string, unknown>;
   /** Outbound text chunk size (chars). Default: 4000. */
   textChunkLimit?: number;
+  /** Chunking mode: "newline" (default) splits on every newline; "length" splits by size. */
+  chunkMode?: "length" | "newline";
   blockStreaming?: boolean;
   /** Merge streamed block replies before sending. */
   blockStreamingCoalesce?: Record<string, unknown>;
