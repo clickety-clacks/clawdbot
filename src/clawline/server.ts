@@ -59,6 +59,7 @@ import { createAssetHandlers } from "./http-assets.js";
 import { callGateway } from "../gateway/call.js";
 import { GATEWAY_CLIENT_MODES, GATEWAY_CLIENT_NAMES } from "../gateway/protocol/client-info.js";
 import { loadWebMedia } from "../web/media.js";
+import { clawlineAttachmentsToImages } from "./attachments.js";
 
 export const PROTOCOL_VERSION = 1;
 
@@ -2297,6 +2298,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         const inboundBody = attachmentSummary
           ? `${rawContent}\n\n${attachmentSummary}`
           : rawContent;
+        const inboundImages = clawlineAttachmentsToImages(ownership.attachments);
 
         let route:
           | ReturnType<typeof resolveAgentRoute>
@@ -2489,6 +2491,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             dispatcher,
             replyOptions: {
               ...replyOptions,
+              images: inboundImages.length > 0 ? inboundImages : undefined,
               onModelSelected: (ctx) => {
                 prefixContext.provider = ctx.provider;
                 prefixContext.model = extractShortModelName(ctx.model);
