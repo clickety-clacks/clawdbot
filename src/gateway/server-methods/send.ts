@@ -147,40 +147,10 @@ export const sendHandlers: GatewayRequestHandlers = {
           };
         }
         const outboundDeps = context.deps ? createOutboundSendDeps(context.deps) : undefined;
-        const mirrorPayloads = normalizeReplyPayloadsForDelivery([
-          { text: message, mediaUrl, mediaUrls },
-        ]);
-        const mirrorText = mirrorPayloads
-          .map((payload) => payload.text)
-          .filter(Boolean)
-          .join("\n");
-        const mirrorMediaUrls = mirrorPayloads.flatMap(
-          (payload) => payload.mediaUrls ?? (payload.mediaUrl ? [payload.mediaUrl] : []),
-        );
-        const providedSessionKey =
+        const sessionKeyTrimmed =
           typeof request.sessionKey === "string" && request.sessionKey.trim()
-            ? request.sessionKey.trim().toLowerCase()
+            ? request.sessionKey.trim()
             : undefined;
-        const derivedAgentId = resolveSessionAgentId({ config: cfg });
-        // If callers omit sessionKey, derive a target session key from the outbound route.
-        const derivedRoute = !providedSessionKey
-          ? await resolveOutboundSessionRoute({
-              cfg,
-              channel,
-              agentId: derivedAgentId,
-              accountId,
-              target: resolved.to,
-            })
-          : null;
-        if (derivedRoute) {
-          await ensureOutboundSessionEntry({
-            cfg,
-            agentId: derivedAgentId,
-            channel,
-            accountId,
-            route: derivedRoute,
-          });
-        }
         const results = await deliverOutboundPayloads({
           cfg,
           channel: outboundChannel,
@@ -189,21 +159,18 @@ export const sendHandlers: GatewayRequestHandlers = {
           payloads: [{ text: message, mediaUrl, mediaUrls }],
           gifPlayback: request.gifPlayback,
           deps: outboundDeps,
-          mirror: providedSessionKey
+          sessionKey: sessionKeyTrimmed,
+          mirror: sessionKeyTrimmed
             ? {
-                sessionKey: providedSessionKey,
-                agentId: resolveSessionAgentId({ sessionKey: providedSessionKey, config: cfg }),
-                text: mirrorText || message,
-                mediaUrls: mirrorMediaUrls.length > 0 ? mirrorMediaUrls : undefined,
+                sessionKey: sessionKeyTrimmed,
+                agentId: resolveSessionAgentId({
+                  sessionKey: sessionKeyTrimmed,
+                  config: cfg,
+                }),
+                text: message,
+                mediaUrls: request.mediaUrl ? [request.mediaUrl] : undefined,
               }
-            : derivedRoute
-              ? {
-                  sessionKey: derivedRoute.sessionKey,
-                  agentId: derivedAgentId,
-                  text: mirrorText || message,
-                  mediaUrls: mirrorMediaUrls.length > 0 ? mirrorMediaUrls : undefined,
-                }
-              : undefined,
+            : undefined,
         });
 
         const result = results.at(-1);

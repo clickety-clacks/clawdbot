@@ -42,8 +42,8 @@ export const clawlineOutbound: ChannelOutboundAdapter = {
     }
     return { ok: true, to: trimmed };
   },
-  sendText: async ({ to, text }) => {
-    const result = await sendClawlineOutboundMessage({ target: to, text });
+  sendText: async ({ to, text, sessionKey }) => {
+    const result = await sendClawlineOutboundMessage({ target: to, text, sessionKey });
     return {
       channel: "clawline",
       messageId: result.messageId,
@@ -53,7 +53,7 @@ export const clawlineOutbound: ChannelOutboundAdapter = {
       },
     };
   },
-  sendMedia: async ({ cfg, to, text, mediaUrl }) => {
+  sendMedia: async ({ cfg, to, text, mediaUrl, sessionKey }) => {
     if (!mediaUrl) {
       throw new Error("Clawline outbound media delivery requires mediaUrl");
     }
@@ -69,6 +69,7 @@ export const clawlineOutbound: ChannelOutboundAdapter = {
       target: to,
       text: text ?? "",
       attachments,
+      sessionKey,
     });
     return {
       channel: "clawline",

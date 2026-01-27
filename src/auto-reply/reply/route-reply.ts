@@ -124,15 +124,15 @@ export async function routeReply(params: RouteReplyParams): Promise<RouteReplyRe
       replyToId: resolvedReplyToId ?? null,
       threadId: resolvedThreadId,
       abortSignal,
-      mirror:
-        params.mirror !== false && params.sessionKey
-          ? {
-              sessionKey: params.sessionKey,
-              agentId: resolveSessionAgentId({ sessionKey: params.sessionKey, config: cfg }),
-              text,
-              mediaUrls,
-            }
-          : undefined,
+      sessionKey: params.sessionKey,
+      mirror: params.sessionKey
+        ? {
+            sessionKey: params.sessionKey,
+            agentId: resolveSessionAgentId({ sessionKey: params.sessionKey, config: cfg }),
+            text,
+            mediaUrls,
+          }
+        : undefined,
     });
 
     const last = results.at(-1);
