@@ -38,7 +38,7 @@ export function buildThreadingToolContext(params: {
       const fallbackTo = sessionCtx.To?.trim() || undefined;
       return {
         currentChannelId: originTo || fallbackTo,
-        currentChannelProvider: provider,
+        currentChannelProvider: "clawline",
         hasRepliedRef,
       };
     }
