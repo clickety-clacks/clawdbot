@@ -1334,14 +1334,27 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         logger.warn?.("alert_session_key_invalid", { sessionKey: rawSessionKey });
       }
 
+      // Parse the session key to extract channel and userId for explicit delivery.
+      // This ensures the response goes to the targeted session's channel, not lastTo.
+      // Format: agent:main:clawline:dm:{userId} → channel=clawline, to={userId}
+      const sessionParts = resolvedSessionKey.split(":");
+      const isClawlineSession =
+        sessionParts.length >= 5 &&
+        sessionParts[0] === "agent" &&
+        sessionParts[2] === "clawline" &&
+        sessionParts[3] === "dm";
+      const alertChannel = isClawlineSession ? "clawline" : undefined;
+      const alertTo = isClawlineSession ? sessionParts[4] : undefined;
+
       const params: Record<string, unknown> = {
         message: `System Alert: ${text}`,
-        // deliver: false keeps the response in the targeted session without
-        // attempting to route it via lastTo (which causes context fragmentation)
-        deliver: false,
+        deliver: true,
         idempotencyKey: randomUUID(),
       };
       params.sessionKey = resolvedSessionKey;
+      // Explicitly set channel and to for clawline sessions to prevent lastTo redirect
+      if (alertChannel) params.channel = alertChannel;
+      if (alertTo) params.to = alertTo;
       await callGateway({
         method: "agent",
         params,
