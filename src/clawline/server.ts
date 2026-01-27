@@ -288,7 +288,7 @@ function describeClawlineAttachments(
   return `Attachments:\n${lines.join("\n")}`;
 }
 
-function summarizeAttachmentStats(attachments?: NormalizedAttachment[]): {
+function summarizeAttachmentStats(attachments?: unknown[]): {
   count: number;
   inlineBytes: number;
   assetCount: number;
@@ -296,14 +296,22 @@ function summarizeAttachmentStats(attachments?: NormalizedAttachment[]): {
   if (!attachments || attachments.length === 0) return null;
   let inlineBytes = 0;
   let assetCount = 0;
+  let count = 0;
   for (const attachment of attachments) {
-    if (attachment.type === "image") {
-      inlineBytes += Math.round((attachment.data.length / 4) * 3);
-    } else if (attachment.type === "asset") {
+    if (!attachment || typeof attachment !== "object") continue;
+    const typed = attachment as { type?: unknown; data?: unknown };
+    if (typed.type === "image") {
+      const data = typeof typed.data === "string" ? typed.data : "";
+      if (!data) continue;
+      inlineBytes += Math.round((data.length / 4) * 3);
+      count += 1;
+    } else if (typed.type === "asset") {
       assetCount += 1;
+      count += 1;
     }
   }
-  return { count: attachments.length, inlineBytes, assetCount };
+  if (count === 0) return null;
+  return { count, inlineBytes, assetCount };
 }
 
 function buildAssistantTextFromPayload(payload: ReplyPayload, fallback: string): string | null {
