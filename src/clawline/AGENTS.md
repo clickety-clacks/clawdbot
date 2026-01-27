@@ -54,6 +54,13 @@ When merging upstream clawdbot changes:
 2. **Prefer upstream patterns** - use current extension/integration model
 3. **Don't invent core hooks** without explicit approval
 4. **Adapt, don't force** - if upstream's model changed, adapt Clawline to it
+5. **Correctness over legacy** - match upstream behavior even if it requires a larger refactor
+
+### Example Applications (Non-Exhaustive)
+
+- **Config/schema alignment**: migrate config to match upstream schema rather than relaxing validators.
+- **Isolation**: implement routing/target inference in the channel adapter before touching core tool logic.
+- **Prove before change**: confirm with logs/state inspection (allowlist, session store, DB) before editing code.
 
 ### Process
 
