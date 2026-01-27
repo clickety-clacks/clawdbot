@@ -1864,6 +1864,15 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       if (!event.channelType) {
         event.channelType = DEFAULT_CHANNEL_TYPE;
       }
+      logger.info("replay_send", {
+        deviceId: session.deviceId,
+        userId: session.userId,
+        messageId: event.id,
+        channelType: event.channelType,
+        streaming: event.streaming,
+        attachmentCount: Array.isArray(event.attachments) ? event.attachments.length : 0,
+        replay: true,
+      });
       const stats = summarizeAttachmentStats(event.attachments);
       if (stats) {
         logger.info?.(
@@ -3038,6 +3047,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       await updateLastSeen(session.deviceId, nowMs());
       const lastMessageId =
         typeof payload.lastMessageId === "string" ? payload.lastMessageId : null;
+      logger.info("replay_request", {
+        deviceId: session.deviceId,
+        userId: session.userId,
+        lastMessageId: lastMessageId ?? "(null)",
+      });
       if (
         typeof payload.lastMessageId === "string" &&
         !SERVER_EVENT_ID_REGEX.test(payload.lastMessageId)
