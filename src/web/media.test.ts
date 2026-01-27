@@ -185,4 +185,14 @@ describe("web media loading", () => {
 
     fetchMock.mockRestore();
   });
+
+  it("loads base64 data URLs", async () => {
+    const dataUrl =
+      "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIW2NgYGBgAAAABQABDQottAAAAABJRU5ErkJggg==";
+    const result = await loadWebMedia(dataUrl, 1024 * 1024);
+
+    expect(result.kind).toBe("image");
+    expect(result.contentType).toBe("image/jpeg");
+    expect(result.buffer.length).toBeGreaterThan(0);
+  });
 });
