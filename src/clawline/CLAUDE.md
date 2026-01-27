@@ -89,6 +89,7 @@ Preserve Clawline behavior while aligning to upstream's CURRENT patterns (even i
 - **Minimize divergence**: after the merge, the diff vs upstream should be as small as possible and clearly justified.
 - **Prefer upstream patterns**: use whatever extension/integration model upstream uses now.
 - **Avoid inventing new core hooks or architecture** unless explicitly approved.
+- **Correctness over legacy**: match upstream behavior even if it requires a larger refactor.
 
 ### Process
 
@@ -105,6 +106,12 @@ Only touch core files if upstream still uses similar patterns:
 - A config schema/types entry for a new provider.
 - A catalog/registry listing used by onboarding.
 - Minimal plugin-SDK exports used by extensions.
+
+### Example Applications (Non-Exhaustive)
+
+- **Config/schema alignment**: migrate config to match upstream schema rather than relaxing validators.
+- **Isolation**: implement routing/target inference in the channel adapter before touching core tool logic.
+- **Prove before change**: confirm with logs/state inspection (allowlist, session store, DB) before editing code.
 
 ### Notifications
 
