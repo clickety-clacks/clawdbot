@@ -108,11 +108,10 @@ export type ClawlineOutboundSendParams = {
   mediaUrl?: string;
   attachments?: ClawlineOutboundAttachmentInput[];
   /**
-   * Override channel type for delivery. If provided, skip inference from main session.
-   * Can also be derived from sessionKey if provided (userId-admin | userId-personal suffix).
+   * Override channel type for delivery (backward compat if sessionKey is omitted).
    */
   channelType?: "admin" | "personal";
-  /** Session key for this delivery. Used to derive channelType if not explicitly set. */
+  /** Session key for this delivery (preferred when provided). */
   sessionKey?: string;
 };
 

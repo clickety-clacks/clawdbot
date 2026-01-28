@@ -443,6 +443,87 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("prefers sessionKey routing for admin messages", async () => {
+    const adminDeviceId = randomUUID();
+    const userDeviceId = randomUUID();
+    const baseEntry = {
+      claimedName: "Test Device",
+      deviceInfo: {
+        platform: "iOS",
+        model: "iPhone",
+        osVersion: "17.0",
+        appVersion: "1.0",
+      },
+      tokenDelivered: true,
+      createdAt: Date.now() - 1_000,
+      lastSeenAt: Date.now() - 500,
+    };
+    const ctx = await setupTestServer([
+      {
+        ...baseEntry,
+        deviceId: adminDeviceId,
+        claimedName: "Flynn",
+        userId: "flynn",
+        isAdmin: true,
+      },
+      {
+        ...baseEntry,
+        deviceId: userDeviceId,
+        claimedName: "QA Sim",
+        userId: "qa_sim",
+        isAdmin: false,
+      },
+    ]);
+    const cleanupWs = async (...sockets: WebSocket[]) => {
+      sockets.forEach((ws) => {
+        try {
+          ws.terminate();
+        } catch {
+          /* ignore */
+        }
+      });
+    };
+    try {
+      const adminPair = await performPairRequest(ctx.port, adminDeviceId);
+      const userPair = await performPairRequest(ctx.port, userDeviceId);
+      const { ws: adminWs } = await authenticateDevice(
+        ctx.port,
+        adminDeviceId,
+        adminPair.token as string,
+      );
+      const { ws: userWs } = await authenticateDevice(
+        ctx.port,
+        userDeviceId,
+        userPair.token as string,
+      );
+
+      const received: any[] = [];
+      const listener = (data: WebSocket.RawData) => {
+        received.push(JSON.parse(decodeRawData(data)));
+      };
+      userWs.on("message", listener);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      received.length = 0;
+
+      adminWs.send(
+        JSON.stringify({
+          type: "message",
+          id: `c_${randomUUID()}`,
+          sessionKey: "agent:main:main",
+          channelType: "personal",
+          content: "secret-admin-update",
+        }),
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(received).toHaveLength(0);
+      userWs.off("message", listener);
+      await cleanupWs(adminWs, userWs);
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("includes isAdmin in auth_result based on allowlist entry", async () => {
     const adminDeviceId = randomUUID();
     const userDeviceId = randomUUID();
@@ -529,6 +610,72 @@ describe.sequential("clawline provider server", () => {
       expect(queueCall?.params?.text).toBe("[codex] Check on Flynn");
       expect(wakeCall?.params?.text).toBe("[codex] Check on Flynn");
       expect(wakeCall?.params?.mode).toBe("now");
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("routes alerts to personal session keys with explicit channel/to", async () => {
+    const ctx = await setupTestServer();
+    try {
+      const response = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message: "Check personal channel",
+          source: "codex",
+          sessionKey: "agent:main:clawline:flynn:main",
+        }),
+      });
+      expect(response.status).toBe(200);
+      expect(gatewayCallMock).toHaveBeenCalledTimes(3);
+      const agentCall = gatewayCallMock.mock.calls[0]?.[0] as {
+        params?: {
+          sessionKey?: string;
+          deliver?: boolean;
+          channel?: string;
+          to?: string;
+        };
+        method?: string;
+      };
+      expect(agentCall?.method).toBe("agent");
+      expect(agentCall?.params?.sessionKey).toBe("agent:main:clawline:flynn:main");
+      expect(agentCall?.params?.deliver).toBe(true);
+      expect(agentCall?.params?.channel).toBe("clawline");
+      expect(agentCall?.params?.to).toBe("flynn");
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("routes alerts to main session keys without explicit channel/to", async () => {
+    const ctx = await setupTestServer();
+    try {
+      const response = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message: "Check main session",
+          source: "codex",
+          sessionKey: "agent:main:main",
+        }),
+      });
+      expect(response.status).toBe(200);
+      expect(gatewayCallMock).toHaveBeenCalledTimes(3);
+      const agentCall = gatewayCallMock.mock.calls[0]?.[0] as {
+        params?: {
+          sessionKey?: string;
+          deliver?: boolean;
+          channel?: string;
+          to?: string;
+        };
+        method?: string;
+      };
+      expect(agentCall?.method).toBe("agent");
+      expect(agentCall?.params?.sessionKey).toBe("agent:main:main");
+      expect(agentCall?.params?.deliver).toBe(true);
+      expect(agentCall?.params?.channel).toBeUndefined();
+      expect(agentCall?.params?.to).toBeUndefined();
     } finally {
       await ctx.cleanup();
     }
