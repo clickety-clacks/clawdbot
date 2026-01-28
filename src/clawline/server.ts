@@ -2382,41 +2382,19 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           CommandAuthorized: true,
         });
 
-        if (channelType === ADMIN_CHANNEL_TYPE) {
-          logger.info?.(
-            `[clawline] updateLastRoute call: sessionStorePath=${sessionStorePath} sessionKey=${route.mainSessionKey} channel=${channelLabel} to=${session.userId} clawlineChannelType=${channelType}`,
-          );
-          await updateLastRoute({
-            storePath: sessionStorePath,
-            sessionKey: route.mainSessionKey,
-            channel: channelLabel,
-            // Use canonical userId for routing, not peerId (which may be bindingId with different casing)
-            to: session.userId,
-            accountId: route.accountId,
-            clawlineChannelType: channelType,
-          });
-          logger.info?.(`[clawline] updateLastRoute completed: clawlineChannelType=${channelType}`);
-        } else {
-          logger.info?.(
-            `[clawline] skip updateLastRoute for main session (personal channel): sessionKey=${route.mainSessionKey} to=${session.userId}`,
-          );
-        }
-
-        // For personal channels, also update lastTo on the personal session key.
-        // This ensures responses from the personal session can route back to the user
-        // even when alerts are delivered directly to the session.
-        if (route.sessionKey !== route.mainSessionKey) {
-          logger.info?.(
-            `[clawline] updateLastRoute for personal session: sessionKey=${route.sessionKey} to=${session.userId}`,
-          );
-          await updateLastRoute({
-            storePath: sessionStorePath,
-            sessionKey: route.sessionKey,
-            channel: channelLabel,
-            to: session.userId,
-            accountId: route.accountId,
-          });
-        }
+        logger.info?.(
+          `[clawline] updateLastRoute call: sessionStorePath=${sessionStorePath} sessionKey=${route.sessionKey} channel=${channelLabel} to=${session.userId} clawlineChannelType=${channelType}`,
+        );
+        await updateLastRoute({
+          storePath: sessionStorePath,
+          sessionKey: route.sessionKey,
+          channel: channelLabel,
+          // Use canonical userId for routing, not peerId (which may be bindingId with different casing)
+          to: session.userId,
+          accountId: route.accountId,
+          clawlineChannelType: channelType === ADMIN_CHANNEL_TYPE ? channelType : undefined,
+        });
+        logger.info?.(`[clawline] updateLastRoute completed: clawlineChannelType=${channelType}`);
 
         const fallbackText = adapterOverrides.responseFallback?.trim() ?? "";
         const prefixContext: ResponsePrefixContext = {
