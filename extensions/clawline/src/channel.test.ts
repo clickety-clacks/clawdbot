@@ -8,12 +8,26 @@ describe("clawline plugin", () => {
       cfg: {} as any,
       accountId: "default",
       context: {
-        From: "clawline-dm:Flynn",
+        From: "clawline:flynn-admin",
+        OriginatingTo: "user:Flynn",
       },
       hasRepliedRef: { value: false },
     });
 
     expect(context?.currentChannelId).toBe("user:Flynn");
+  });
+
+  it("strips channel suffix when OriginatingTo is unavailable", () => {
+    const context = clawlinePlugin.threading?.buildToolContext?.({
+      cfg: {} as any,
+      accountId: "default",
+      context: {
+        From: "clawline:flynn-personal",
+      },
+      hasRepliedRef: { value: false },
+    });
+
+    expect(context?.currentChannelId).toBe("user:flynn");
   });
 
   it("normalizes targets without lowercasing ids", () => {
