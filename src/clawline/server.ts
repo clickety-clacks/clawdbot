@@ -17,7 +17,7 @@ import { getFollowupQueueDepth } from "../auto-reply/reply/queue.js";
 import { extractShortModelName } from "../auto-reply/reply/response-prefix-template.js";
 import type { ResponsePrefixContext } from "../auto-reply/reply/response-prefix-template.js";
 import type { ReplyPayload } from "../auto-reply/types.js";
-import { buildAgentSessionKey, DEFAULT_ACCOUNT_ID } from "../routing/resolve-route.js";
+import { DEFAULT_ACCOUNT_ID } from "../routing/resolve-route.js";
 import {
   resolveEffectiveMessagesConfig,
   resolveHumanDelayConfig,
@@ -271,12 +271,6 @@ function buildClawlinePersonalSessionKey(agentId: string, userId: string): strin
   return `agent:${normalizedAgentId}:clawline:${normalizedUserId}:main`;
 }
 
-function isClawlinePersonalSessionKey(sessionKey: string | undefined | null): boolean {
-  const normalized = (sessionKey ?? "").trim().toLowerCase();
-  if (!normalized) return false;
-  return /^agent:[^:]+:clawline:[^:]+:main$/.test(normalized);
-}
-
 function describeClawlineAttachments(
   attachments: NormalizedAttachment[],
   assetsDir: string,
@@ -411,6 +405,7 @@ type ServerMessage = {
   content: string;
   timestamp: number;
   streaming: boolean;
+  sessionKey?: string;
   attachments?: unknown[];
   deviceId?: string;
   channelType?: ChannelType;
@@ -665,6 +660,47 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   let cleanupOrphanedAssetFiles!: AssetHandlers["cleanupOrphanedAssetFiles"];
   let cleanupUnreferencedAssets!: AssetHandlers["cleanupUnreferencedAssets"];
 
+  function migrateLegacyClawlineSessionKeys(database: SqliteDatabase) {
+    const selectLegacy = database.prepare(
+      `SELECT id, payloadJson FROM events WHERE payloadJson LIKE '%"sessionKey"%' AND payloadJson LIKE '%clawline:dm:%'`,
+    );
+    const updateEvent = database.prepare(
+      `UPDATE events SET payloadJson = ?, payloadBytes = ? WHERE id = ?`,
+    );
+    let updated = 0;
+    const runMigration = database.transaction(() => {
+      for (const row of selectLegacy.iterate() as IterableIterator<{
+        id: string;
+        payloadJson: string;
+      }>) {
+        let payload: ServerMessage;
+        try {
+          payload = JSON.parse(row.payloadJson) as ServerMessage;
+        } catch {
+          continue;
+        }
+        const sessionKey = typeof payload.sessionKey === "string" ? payload.sessionKey.trim() : "";
+        if (!sessionKey) continue;
+        const parts = sessionKey.split(":");
+        if (parts.length < 5) continue;
+        if (parts[0] !== "agent" || parts[2] !== "clawline" || parts[3] !== "dm") continue;
+        const normalizedUserId = sanitizeUserId(parts[4]).toLowerCase();
+        if (!normalizedUserId) continue;
+        const agentId = parts[1] || "main";
+        const nextSessionKey = buildClawlinePersonalSessionKey(agentId, normalizedUserId);
+        if (nextSessionKey === sessionKey) continue;
+        payload.sessionKey = nextSessionKey;
+        const payloadJson = JSON.stringify(payload);
+        updateEvent.run(payloadJson, Buffer.byteLength(payloadJson, "utf8"), row.id);
+        updated += 1;
+      }
+    });
+    runMigration();
+    if (updated > 0) {
+      logger.info?.("[clawline] migrated_legacy_session_keys", { updated });
+    }
+  }
+
   function initializeDatabaseResources(): boolean {
     if (db) {
       return false;
@@ -724,6 +760,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       );
       CREATE INDEX IF NOT EXISTS idx_message_assets_assetId ON message_assets(assetId);
     `);
+
+    migrateLegacyClawlineSessionKeys(newDb);
 
     sequenceStatement = userSequenceStmt(newDb);
     insertEventStmt = newDb.prepare(
@@ -804,6 +842,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         attachmentsHash: string,
         assetIds: string[],
         channelType: ChannelType,
+        sessionKey: string,
       ) => {
         for (const assetId of assetIds) {
           const asset = selectAssetStmt.get(assetId) as
@@ -829,6 +868,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           deviceId: session.deviceId,
           attachments: attachments.length > 0 ? attachments : undefined,
           channelType,
+          sessionKey,
         };
         const payloadJson = JSON.stringify(event);
         const payloadBytes = Buffer.byteLength(payloadJson, "utf8");
@@ -1336,7 +1376,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     const trimmed = value.trim();
     if (!trimmed) return false;
     if (trimmed === "global") return true;
-    return /^agent:[^:]+:[^:]+/.test(trimmed);
+    return (
+      /^agent:[^:]+:main$/i.test(trimmed) || /^agent:[^:]+:clawline:[^:]+:main$/i.test(trimmed)
+    );
   }
 
   async function wakeGatewayForAlert(text: string, sessionKey?: string) {
@@ -1349,11 +1391,17 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       let decisionReason = "missing_session_key";
       let decisionAction = "fallback_main_session";
 
+      const normalizedMainKey = mainSessionKey.toLowerCase();
       if (hasSessionKey) {
         if (trimmedSessionKey.length === 0) {
           decisionReason = "empty_session_key";
         } else if (isValid) {
-          resolvedSessionKey = trimmedSessionKey;
+          const normalized = trimmedSessionKey.toLowerCase();
+          if (normalized === normalizedMainKey) {
+            resolvedSessionKey = mainSessionKey;
+          } else {
+            resolvedSessionKey = trimmedSessionKey;
+          }
           decisionReason = "valid_session_key";
           decisionAction = "use_provided_session_key";
         } else {
@@ -1370,15 +1418,28 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
       // Parse the session key to extract channel and userId for explicit delivery.
       // This ensures the response goes to the targeted session's channel, not lastTo.
-      // Format: agent:main:clawline:dm:{userId} → channel=clawline, to={userId}
+      // Formats:
+      // - agent:main:main (DM/main session) -> no explicit channel/to
+      // - agent:main:clawline:{userId}:main -> channel=clawline, to={userId}
       const sessionParts = resolvedSessionKey.split(":");
       const isClawlineSession =
-        sessionParts.length >= 5 &&
-        sessionParts[0] === "agent" &&
-        sessionParts[2] === "clawline" &&
-        sessionParts[3] === "dm";
-      const alertChannel = isClawlineSession ? "clawline" : undefined;
-      const alertTo = isClawlineSession ? sessionParts[4] : undefined;
+        sessionParts.length >= 5 && sessionParts[0] === "agent" && sessionParts[2] === "clawline";
+      let alertChannel: string | undefined;
+      let alertTo: string | undefined;
+      if (isClawlineSession) {
+        const specPersonal = sessionParts[4] === "main" && sessionParts[3];
+        if (specPersonal) {
+          alertChannel = "clawline";
+          const normalizedUserId = sanitizeUserId(sessionParts[3]).toLowerCase();
+          if (normalizedUserId) {
+            alertTo = normalizedUserId;
+            resolvedSessionKey = buildClawlinePersonalSessionKey(
+              mainSessionAgentId,
+              normalizedUserId,
+            );
+          }
+        }
+      }
 
       const params: Record<string, unknown> = {
         message: `System Alert: ${text}`,
@@ -1794,11 +1855,42 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   }
 
   async function sendReplay(session: Session, lastMessageId: string | null) {
-    // All messages are stored under the real userId; channelType separates admin/personal views.
+    // All messages are stored under the real userId; sessionKey/channelType separate admin/personal views.
     // Query once to get all messages for this user.
     const transcriptTargets: Array<{ userId: string; channelType: ChannelType }> = [
       { userId: session.userId, channelType: DEFAULT_CHANNEL_TYPE },
     ];
+    const expectedPersonalSessionKey = buildClawlinePersonalSessionKey(
+      mainSessionAgentId,
+      session.userId,
+    );
+    const normalizedMainKey = mainSessionKey.toLowerCase();
+    const normalizedPersonalKey = expectedPersonalSessionKey.toLowerCase();
+    const normalizeEventRouting = (event: ServerMessage): ChannelType => {
+      const rawSessionKey = typeof event.sessionKey === "string" ? event.sessionKey.trim() : "";
+      const normalizedSessionKey = rawSessionKey.toLowerCase();
+      if (rawSessionKey) {
+        if (normalizedSessionKey === normalizedMainKey) {
+          event.sessionKey = mainSessionKey;
+          event.channelType = ADMIN_CHANNEL_TYPE;
+          return ADMIN_CHANNEL_TYPE;
+        }
+        if (normalizedSessionKey === normalizedPersonalKey) {
+          event.sessionKey = expectedPersonalSessionKey;
+          event.channelType = DEFAULT_CHANNEL_TYPE;
+          return DEFAULT_CHANNEL_TYPE;
+        }
+        logger.warn?.("[clawline] replay_session_key_unrecognized", {
+          messageId: event.id,
+          sessionKey: rawSessionKey,
+        });
+      }
+      const channelType = normalizeChannelType(event.channelType);
+      event.channelType = channelType;
+      event.sessionKey =
+        channelType === ADMIN_CHANNEL_TYPE ? mainSessionKey : expectedPersonalSessionKey;
+      return channelType;
+    };
     let anchor: { userId: string; sequence: number; timestamp: number } | null = null;
     if (lastMessageId) {
       const anchorRow = selectEventByIdStmt.get(lastMessageId) as
@@ -1836,9 +1928,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       const parsed = rows
         .map((row) => parseServerMessage(row.payloadJson))
         .map((event) => {
-          if (!event.channelType) {
+          if (!event.channelType && !event.sessionKey) {
             event.channelType = target.channelType;
           }
+          normalizeEventRouting(event);
           return event;
         });
       combined.push(...parsed);
@@ -1868,14 +1961,15 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     });
     await sendJson(session.socket, payload);
     for (const event of limited) {
-      if (!event.channelType) {
-        event.channelType = DEFAULT_CHANNEL_TYPE;
+      if (event.channelType === ADMIN_CHANNEL_TYPE && !session.isAdmin) {
+        continue;
       }
       logger.info("replay_send", {
         deviceId: session.deviceId,
         userId: session.userId,
         messageId: event.id,
         channelType: event.channelType,
+        sessionKey: event.sessionKey,
         streaming: event.streaming,
         attachmentCount: Array.isArray(event.attachments) ? event.attachments.length : 0,
         replay: true,
@@ -1902,8 +1996,31 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   }
 
   function sendPayloadToSession(session: Session, payload: ServerMessage) {
-    if (payload.channelType === ADMIN_CHANNEL_TYPE && !session.isAdmin) {
+    const expectedPersonalSessionKey = buildClawlinePersonalSessionKey(
+      mainSessionAgentId,
+      session.userId,
+    );
+    const payloadSessionKey =
+      typeof payload.sessionKey === "string" ? payload.sessionKey.trim() : "";
+    const normalizedPayloadSessionKey = payloadSessionKey.toLowerCase();
+    const normalizedMainKey = mainSessionKey.toLowerCase();
+    let resolvedChannelType = normalizeChannelType(payload.channelType);
+    if (payloadSessionKey) {
+      if (normalizedPayloadSessionKey === normalizedMainKey) {
+        resolvedChannelType = ADMIN_CHANNEL_TYPE;
+      } else if (normalizedPayloadSessionKey === expectedPersonalSessionKey.toLowerCase()) {
+        resolvedChannelType = DEFAULT_CHANNEL_TYPE;
+      }
+    }
+    if (resolvedChannelType === ADMIN_CHANNEL_TYPE && !session.isAdmin) {
       return;
+    }
+    if (!payload.channelType) {
+      payload.channelType = resolvedChannelType;
+    }
+    if (!payload.sessionKey) {
+      payload.sessionKey =
+        resolvedChannelType === ADMIN_CHANNEL_TYPE ? mainSessionKey : expectedPersonalSessionKey;
     }
     if (session.socket.readyState !== WebSocket.OPEN) return;
     const stats = summarizeAttachmentStats(payload.attachments);
@@ -1962,6 +2079,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     if (!payload.channelType) {
       payload.channelType = channelType;
     }
+    if (!payload.sessionKey) {
+      payload.sessionKey =
+        channelType === ADMIN_CHANNEL_TYPE
+          ? mainSessionKey
+          : buildClawlinePersonalSessionKey(mainSessionAgentId, session.userId);
+    }
     if (channelType === ADMIN_CHANNEL_TYPE) {
       broadcastToAdmins(payload);
       return;
@@ -1982,6 +2105,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     attachmentsHash: string,
     assetIds: string[],
     channelType: ChannelType,
+    sessionKey: string,
   ): Promise<{ event: ServerMessage; sequence: number }> {
     const timestamp = nowMs();
     try {
@@ -1997,6 +2121,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             attachmentsHash,
             assetIds,
             channelType,
+            sessionKey,
           ) as { event: ServerMessage; sequence: number },
       );
     } catch (err: any) {
@@ -2012,6 +2137,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     targetUserId: string,
     content: string,
     channelType: ChannelType,
+    sessionKey: string,
     attachments?: NormalizedAttachment[],
   ): Promise<ServerMessage> {
     const timestamp = nowMs();
@@ -2023,6 +2149,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       timestamp,
       streaming: false,
       channelType,
+      sessionKey,
       attachments: attachments && attachments.length > 0 ? attachments : undefined,
     };
     await appendEvent(event, targetUserId);
@@ -2048,32 +2175,48 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
     const target = resolveSendTarget(targetInput);
 
-    // Determine channelType in order of precedence:
-    // 1. Explicit channelType parameter
-    // 2. Derived from sessionKey (agent:main:main => admin; agent:main:clawline:{userId}:main => personal)
+    const expectedPersonalSessionKey = buildClawlinePersonalSessionKey(
+      mainSessionAgentId,
+      target.userId,
+    );
+    const normalizedMainKey = mainSessionKey.toLowerCase();
+    const normalizedPersonalKey = expectedPersonalSessionKey.toLowerCase();
+
+    // Determine channelType/sessionKey in order of precedence:
+    // 1. Explicit sessionKey parameter (preferred if present)
+    // 2. Explicit channelType parameter
     // 3. Default to personal
     let channelType: ChannelType = DEFAULT_CHANNEL_TYPE;
     const sessionKeyRaw = typeof params.sessionKey === "string" ? params.sessionKey.trim() : "";
     const normalizedSessionKey = sessionKeyRaw.toLowerCase();
-    const normalizedMainKey = mainSessionKey.toLowerCase();
-    if (params.channelType === "admin") {
-      channelType = ADMIN_CHANNEL_TYPE;
-      logger.info?.("[clawline] sendOutboundMessage using explicit channelType=admin");
-    } else if (params.channelType === "personal") {
-      channelType = DEFAULT_CHANNEL_TYPE;
-      logger.info?.("[clawline] sendOutboundMessage using explicit channelType=personal");
-    } else {
+    let resolvedSessionKey = "";
+    if (sessionKeyRaw) {
       if (normalizedSessionKey === normalizedMainKey) {
         channelType = ADMIN_CHANNEL_TYPE;
+        resolvedSessionKey = mainSessionKey;
         logger.info?.(
           `[clawline] sendOutboundMessage using admin channel from sessionKey=${sessionKeyRaw}`,
         );
-      } else if (isClawlinePersonalSessionKey(sessionKeyRaw)) {
+      } else if (normalizedSessionKey === normalizedPersonalKey) {
         channelType = DEFAULT_CHANNEL_TYPE;
+        resolvedSessionKey = expectedPersonalSessionKey;
         logger.info?.(
           `[clawline] sendOutboundMessage using personal channel from sessionKey=${sessionKeyRaw}`,
         );
+      } else {
+        throw new Error(`Invalid clawline sessionKey: ${sessionKeyRaw}`);
       }
+    }
+    if (!resolvedSessionKey) {
+      if (params.channelType === "admin") {
+        channelType = ADMIN_CHANNEL_TYPE;
+        logger.info?.("[clawline] sendOutboundMessage using explicit channelType=admin");
+      } else if (params.channelType === "personal") {
+        channelType = DEFAULT_CHANNEL_TYPE;
+        logger.info?.("[clawline] sendOutboundMessage using explicit channelType=personal");
+      }
+      resolvedSessionKey =
+        channelType === ADMIN_CHANNEL_TYPE ? mainSessionKey : expectedPersonalSessionKey;
     }
 
     let outboundAttachments = {
@@ -2102,6 +2245,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       timestamp: nowMs(),
       streaming: false,
       channelType,
+      sessionKey: resolvedSessionKey,
       attachments:
         outboundAttachments.attachments.length > 0 ? outboundAttachments.attachments : undefined,
     };
@@ -2186,11 +2330,42 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         throw new ClientMessageError("payload_too_large", "Message too large");
       }
       const attachmentsHash = hashAttachments(attachmentsInfo.attachments);
-      const channelType = normalizeChannelType(payload.channelType);
-      logger.info?.("[clawline] inbound message channelType", {
+      const payloadSessionKey =
+        typeof payload.sessionKey === "string" ? payload.sessionKey.trim() : "";
+      const expectedPersonalSessionKey = buildClawlinePersonalSessionKey(
+        mainSessionAgentId,
+        session.userId,
+      );
+      const normalizedMainKey = mainSessionKey.toLowerCase();
+      const normalizedPersonalKey = expectedPersonalSessionKey.toLowerCase();
+      let channelType: ChannelType;
+      let resolvedSessionKey: string;
+      let routingSource: "sessionKey" | "channelType";
+      if (payloadSessionKey) {
+        const normalizedPayloadSessionKey = payloadSessionKey.toLowerCase();
+        if (normalizedPayloadSessionKey === normalizedMainKey) {
+          channelType = ADMIN_CHANNEL_TYPE;
+          resolvedSessionKey = mainSessionKey;
+        } else if (normalizedPayloadSessionKey === normalizedPersonalKey) {
+          channelType = DEFAULT_CHANNEL_TYPE;
+          resolvedSessionKey = expectedPersonalSessionKey;
+        } else {
+          throw new ClientMessageError("invalid_message", "Invalid sessionKey");
+        }
+        routingSource = "sessionKey";
+      } else {
+        channelType = normalizeChannelType(payload.channelType);
+        resolvedSessionKey =
+          channelType === ADMIN_CHANNEL_TYPE ? mainSessionKey : expectedPersonalSessionKey;
+        routingSource = "channelType";
+      }
+      logger.info?.("[clawline] inbound message routing", {
         messageId: payload.id,
         payloadChannelType: payload.channelType,
+        payloadSessionKey: payload.sessionKey,
         normalizedChannelType: channelType,
+        resolvedSessionKey,
+        routingSource,
         sessionIsAdmin: session.isAdmin,
         userId: session.userId,
         deviceId: session.deviceId,
@@ -2260,6 +2435,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           attachmentsHash,
           ownership.assetIds,
           channelType,
+          resolvedSessionKey,
         );
         await new Promise<void>((resolve) => {
           session.socket.send(JSON.stringify({ type: "ack", id: payload.id }), (err) => {
@@ -2278,10 +2454,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         const inboundImages = clawlineAttachmentsToImages(ownership.attachments);
 
         const channelLabel = "clawline";
-        const routeSessionKey =
-          channelType === ADMIN_CHANNEL_TYPE
-            ? mainSessionKey
-            : buildClawlinePersonalSessionKey(mainSessionAgentId, session.userId);
+        const routeSessionKey = resolvedSessionKey;
         const route = {
           agentId: mainSessionAgentId,
           channel: "clawline",
@@ -2392,6 +2565,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               targetUserId,
               assistantText,
               channelType,
+              route.sessionKey,
               attachments,
             );
             broadcastToChannelSessions(channelType, session, assistantEvent);
@@ -2936,14 +3110,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       ws.close();
       return;
     }
-    // Track device activity under a stable session key; agent routing uses the
-    // main/personal session keys defined in docs/architecture.md.
-    const sessionKey = buildAgentSessionKey({
-      agentId: mainSessionAgentId,
-      channel: "clawline",
-      peer: { kind: "dm", id: entry.userId },
-      dmScope: "per-channel-peer",
-    });
+    // Track device activity under the spec session keys (DM or personal).
+    const sessionKey = entry.isAdmin
+      ? mainSessionKey
+      : buildClawlinePersonalSessionKey(mainSessionAgentId, entry.userId);
     const peerId = derivePeerId(entry);
     const session: Session = {
       socket: ws,
