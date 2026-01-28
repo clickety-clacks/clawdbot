@@ -479,12 +479,24 @@ const FACE_SPEAK_MAX_CHARS = 500;
 // - Non-blocking (fire-and-forget)
 // - Debug-only logging (no warn/error)
 // - Empty text skipped; long text capped
-function triggerFaceSpeak(text: string, logger: Logger) {
+function triggerFaceSpeak(text: string, logger: Logger, meta?: { sessionKey?: string }) {
   const endpoint =
     typeof process.env.CLU_FACE_SPEAK_URL === "string" ? process.env.CLU_FACE_SPEAK_URL.trim() : "";
-  if (!endpoint) return;
+  if (!endpoint) {
+    logger.info?.("[clawline] face_speak_skipped", {
+      reason: "missing_endpoint",
+      sessionKey: meta?.sessionKey,
+    });
+    return;
+  }
   const trimmed = text.trim();
-  if (!trimmed) return;
+  if (!trimmed) {
+    logger.info?.("[clawline] face_speak_skipped", {
+      reason: "empty_text",
+      sessionKey: meta?.sessionKey,
+    });
+    return;
+  }
   const capped =
     trimmed.length > FACE_SPEAK_MAX_CHARS ? trimmed.slice(0, FACE_SPEAK_MAX_CHARS) : trimmed;
   const redactedHost = (() => {
@@ -499,6 +511,7 @@ function triggerFaceSpeak(text: string, logger: Logger) {
   logger.info?.("[clawline] face_speak_triggered", {
     textLength: capped.length,
     endpointHost: redactedHost,
+    sessionKey: meta?.sessionKey,
   });
   void (async () => {
     const controller = new AbortController();
@@ -2087,16 +2100,27 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         },
       );
     }
-    const shouldSpeak = payload.role === "assistant" && !payload.streaming;
-    const speakText = payload.content ?? "";
     session.socket.send(JSON.stringify(payload), (err) => {
       if (err) {
         session.socket.close();
         return;
       }
-      if (shouldSpeak) {
-        triggerFaceSpeak(speakText, logger);
+      if (payload.role !== "assistant") {
+        logger.info?.("[clawline] face_speak_skipped", {
+          reason: "non_assistant",
+          sessionKey: payload.sessionKey,
+        });
+        return;
       }
+      if (payload.streaming) {
+        logger.info?.("[clawline] face_speak_skipped", {
+          reason: "streaming",
+          sessionKey: payload.sessionKey,
+        });
+        return;
+      }
+      const speakText = payload.content ?? "";
+      triggerFaceSpeak(speakText, logger, { sessionKey: payload.sessionKey });
     });
   }
 
