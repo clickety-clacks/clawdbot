@@ -6,23 +6,23 @@ Clawline is a WebSocket-based local gateway connecting devices to Clawdbot.
 
 **Core concept**: SESSION = conversation memory, CHANNEL = delivery pipe.
 
-Clawline synthesizes channel-specific peer IDs so admin/personal behave like Discord channels.
+Clawline follows the canonical session key spec:
 
 | Clawline | Clawdbot Equivalent | Session Key | Reply Goes To |
 |----------|---------------------|-------------|---------------|
-| Admin channel | Discord channel-like DM | `agent:main:clawline:dm:{userId}-admin` | User's devices |
-| Personal channel | Discord channel-like DM | `agent:main:clawline:dm:{userId}-personal` | User's devices |
+| Admin channel | Main DM session | `agent:main:main` | Admin devices only |
+| Personal channel | Per-user Clawline session | `agent:main:clawline:{userId}:main` | User's devices |
 
-### Admin Channel (Per-Channel Session)
+### Admin Channel (Main Session)
 
 - Only `isAdmin: true` allowlist users can access
-- Conversation is isolated from the personal channel
-- Replies go to that user's devices (admin-only gated)
+- Conversation uses the shared main session (`agent:main:main`)
+- Replies go to admin devices only (admin-only gated)
 
 ### Personal Channels (Per-User Sessions)
 
-- Each registered user gets isolated conversation
-- Admin users also have personal channel access
+- Each registered user gets isolated conversation via `agent:main:clawline:{userId}:main`
+- Admin users also have personal channel access (separate from main)
 
 ## Key Constants
 

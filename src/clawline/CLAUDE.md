@@ -10,26 +10,21 @@ Clawline maps to Clawdbot's session/routing model. Understanding this mapping is
 
 Conversation continuity comes from the SESSION, not the channel. The channel just determines where replies get delivered.
 
-### Clawline Admin + Personal → Per-Channel Sessions
+### Clawline Admin + Personal → Spec Session Keys
 
-Clawline synthesizes channel-specific peer IDs so admin/personal behave like Discord channels:
+Clawline follows the canonical session key spec:
 
-- Admin channel peer ID: `{userId}-admin`
-- Personal channel peer ID: `{userId}-personal`
+- **Admin channel** uses the main DM session: `agent:main:main`
+- **Personal channel** uses per-user Clawline sessions: `agent:main:clawline:{userId}:main`
 
-This yields distinct sessions:
-
-- `agent:main:clawline:dm:{userId}-admin`
-- `agent:main:clawline:dm:{userId}-personal`
-
-Both are isolated from each other and from other providers. Admin access is still enforced by allowlist `isAdmin`.
+Admin access is enforced by allowlist `isAdmin`.
 
 ### Session Routing Summary
 
 | Clawline | Clawdbot Equivalent | Session Key | Memory |
 |----------|---------------------|-------------|--------|
-| Admin channel | Discord channel-like DM | `agent:main:clawline:dm:{userId}-admin` | Isolated |
-| Personal channel | Discord channel-like DM | `agent:main:clawline:dm:{userId}-personal` | Isolated |
+| Admin channel | Main DM session | `agent:main:main` | Shared main |
+| Personal channel | Per-user Clawline session | `agent:main:clawline:{userId}:main` | Isolated |
 
 ### Comparison with Other Providers
 
@@ -37,8 +32,8 @@ Both are isolated from each other and from other providers. Admin access is stil
 |--------|---------|---------------|
 | Discord DM | `agent:main:main` | That Discord user |
 | Telegram DM | `agent:main:main` | That Telegram chat |
-| Clawline admin | `agent:main:clawline:dm:userId-admin` | That user's devices |
-| Clawline personal | `agent:main:clawline:dm:userId-personal` | That user's devices |
+| Clawline admin | `agent:main:main` | Admin devices only |
+| Clawline personal | `agent:main:clawline:userId:main` | That user's devices |
 | Discord `#channel` | `agent:main:discord:channel:id` | That Discord channel |
 
 ### Reply Routing
