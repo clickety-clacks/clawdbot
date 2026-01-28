@@ -265,26 +265,16 @@ function normalizeChannelType(value: unknown): ChannelType {
   return DEFAULT_CHANNEL_TYPE;
 }
 
-function buildChannelPeerId(userId: string, channelType: ChannelType): string {
-  const base = sanitizeUserId(userId);
-  const suffix = channelType === ADMIN_CHANNEL_TYPE ? "admin" : "personal";
-  return `${base}-${suffix}`;
+function buildClawlinePersonalSessionKey(agentId: string, userId: string): string {
+  const normalizedAgentId = (agentId ?? "").trim().toLowerCase() || "main";
+  const normalizedUserId = sanitizeUserId(userId).toLowerCase();
+  return `agent:${normalizedAgentId}:clawline:${normalizedUserId}:main`;
 }
 
-function parseChannelTypeFromPeerId(peerId: string): ChannelType | null {
-  const lowered = peerId.toLowerCase();
-  if (lowered.endsWith("-admin")) return ADMIN_CHANNEL_TYPE;
-  if (lowered.endsWith("-personal")) return DEFAULT_CHANNEL_TYPE;
-  return null;
-}
-
-function inferChannelTypeFromSessionKey(sessionKey: string | undefined | null): ChannelType | null {
-  const trimmed = sessionKey?.trim();
-  if (!trimmed) return null;
-  const parts = trimmed.split(":");
-  const peerId = parts[parts.length - 1];
-  if (!peerId) return null;
-  return parseChannelTypeFromPeerId(peerId);
+function isClawlinePersonalSessionKey(sessionKey: string | undefined | null): boolean {
+  const normalized = (sessionKey ?? "").trim().toLowerCase();
+  if (!normalized) return false;
+  return /^agent:[^:]+:clawline:[^:]+:main$/.test(normalized);
 }
 
 function describeClawlineAttachments(
@@ -2060,10 +2050,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
     // Determine channelType in order of precedence:
     // 1. Explicit channelType parameter
-    // 2. Derived from sessionKey suffix (userId-admin | userId-personal)
+    // 2. Derived from sessionKey (agent:main:main => admin; agent:main:clawline:{userId}:main => personal)
     // 3. Default to personal
     let channelType: ChannelType = DEFAULT_CHANNEL_TYPE;
     const sessionKeyRaw = typeof params.sessionKey === "string" ? params.sessionKey.trim() : "";
+    const normalizedSessionKey = sessionKeyRaw.toLowerCase();
+    const normalizedMainKey = mainSessionKey.toLowerCase();
     if (params.channelType === "admin") {
       channelType = ADMIN_CHANNEL_TYPE;
       logger.info?.("[clawline] sendOutboundMessage using explicit channelType=admin");
@@ -2071,11 +2063,15 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       channelType = DEFAULT_CHANNEL_TYPE;
       logger.info?.("[clawline] sendOutboundMessage using explicit channelType=personal");
     } else {
-      const inferred = inferChannelTypeFromSessionKey(sessionKeyRaw);
-      if (inferred) {
-        channelType = inferred;
+      if (normalizedSessionKey === normalizedMainKey) {
+        channelType = ADMIN_CHANNEL_TYPE;
         logger.info?.(
-          `[clawline] sendOutboundMessage using channelType=${inferred} from sessionKey=${sessionKeyRaw}`,
+          `[clawline] sendOutboundMessage using admin channel from sessionKey=${sessionKeyRaw}`,
+        );
+      } else if (isClawlinePersonalSessionKey(sessionKeyRaw)) {
+        channelType = DEFAULT_CHANNEL_TYPE;
+        logger.info?.(
+          `[clawline] sendOutboundMessage using personal channel from sessionKey=${sessionKeyRaw}`,
         );
       }
     }
@@ -2282,20 +2278,18 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         const inboundImages = clawlineAttachmentsToImages(ownership.attachments);
 
         const channelLabel = "clawline";
-        const channelPeerId = buildChannelPeerId(session.userId, channelType);
+        const routeSessionKey =
+          channelType === ADMIN_CHANNEL_TYPE
+            ? mainSessionKey
+            : buildClawlinePersonalSessionKey(mainSessionAgentId, session.userId);
         const route = {
           agentId: mainSessionAgentId,
           channel: "clawline",
           accountId: DEFAULT_ACCOUNT_ID,
-          sessionKey: buildAgentSessionKey({
-            agentId: mainSessionAgentId,
-            channel: "clawline",
-            peer: { kind: "dm", id: channelPeerId },
-            dmScope: "per-channel-peer",
-          }),
+          sessionKey: routeSessionKey,
           mainSessionKey,
         };
-        const peerId = channelPeerId;
+        const peerId = session.peerId;
 
         const ctxPayload = finalizeInboundContext({
           Body: inboundBody,
@@ -2942,8 +2936,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       ws.close();
       return;
     }
-    // Track device activity under a stable session key; per-channel routing
-    // uses synthesized peer IDs (userId-admin | userId-personal).
+    // Track device activity under a stable session key; agent routing uses the
+    // main/personal session keys defined in docs/architecture.md.
     const sessionKey = buildAgentSessionKey({
       agentId: mainSessionAgentId,
       channel: "clawline",
