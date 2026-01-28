@@ -2228,7 +2228,16 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       }
       const attachmentsHash = hashAttachments(attachmentsInfo.attachments);
       const channelType = normalizeChannelType(payload.channelType);
-      if (channelType === ADMIN_CHANNEL_TYPE && !sessionHasAdminAccess(session)) {
+      logger.info?.("[clawline] inbound message channelType", {
+        messageId: payload.id,
+        payloadChannelType: payload.channelType,
+        normalizedChannelType: channelType,
+        sessionIsAdmin: session.isAdmin,
+        userId: session.userId,
+        deviceId: session.deviceId,
+        sessionKey: session.sessionKey,
+      });
+      if (channelType === ADMIN_CHANNEL_TYPE && !session.isAdmin) {
         throw new ClientMessageError("forbidden", "Admin channel requires admin access");
       }
       const targetUserId = getTranscriptUserId(session, channelType);
