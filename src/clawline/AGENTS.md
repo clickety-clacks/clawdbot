@@ -34,18 +34,6 @@ DEFAULT_CHANNEL_TYPE = "personal"  // personal channel
 Messages and assets are stored under the real user's ID for all channel types.
 Channel type only affects session routing and UI separation.
 
-## Experimental Hooks
-
-### Face speak (outbound)
-
-If `CLU_FACE_SPEAK_URL` is set, the provider POSTs `{"text":"..."}` after successful outbound sends.
-This is best-effort (non-blocking, errors swallowed). Empty text is skipped; long text is capped.
-
-Example (local only):
-```bash
-export CLU_FACE_SPEAK_URL="http://127.0.0.1:9001/speak"
-```
-
 ## Files
 
 - `server.ts` - WebSocket server, auth, sessions, routing
