@@ -487,6 +487,19 @@ function triggerFaceSpeak(text: string, logger: Logger) {
   if (!trimmed) return;
   const capped =
     trimmed.length > FACE_SPEAK_MAX_CHARS ? trimmed.slice(0, FACE_SPEAK_MAX_CHARS) : trimmed;
+  const redactedHost = (() => {
+    try {
+      const host = new URL(endpoint).host;
+      if (!host) return "redacted";
+      return host.replace(/[^.]+/g, "***");
+    } catch {
+      return "invalid";
+    }
+  })();
+  logger.info?.("[clawline] face_speak_triggered", {
+    textLength: capped.length,
+    endpointHost: redactedHost,
+  });
   void (async () => {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 1500);
@@ -2074,9 +2087,15 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         },
       );
     }
+    const shouldSpeak = payload.role === "assistant" && !payload.streaming;
+    const speakText = payload.content ?? "";
     session.socket.send(JSON.stringify(payload), (err) => {
       if (err) {
         session.socket.close();
+        return;
+      }
+      if (shouldSpeak) {
+        triggerFaceSpeak(speakText, logger);
       }
     });
   }
@@ -2290,9 +2309,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       deliverToDevice(target.deviceId, event);
     } else {
       broadcastToUser(target.userId, event);
-    }
-    if (text.trim().length > 0) {
-      triggerFaceSpeak(text, logger);
     }
     return {
       messageId: event.id,
@@ -2606,9 +2622,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               attachments,
             );
             broadcastToChannelSessions(channelType, session, assistantEvent);
-            if (assistantText.trim().length > 0) {
-              triggerFaceSpeak(assistantText, logger);
-            }
           },
           onError: (err, info) => {
             logger.error?.("[clawline] reply_delivery_failed", {
