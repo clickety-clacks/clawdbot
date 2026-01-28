@@ -15,9 +15,18 @@ function parseClawlineUserId(raw?: string | null): string | undefined {
   const trimmed = raw?.trim();
   if (!trimmed) return undefined;
   const colonIndex = trimmed.indexOf(":");
-  if (colonIndex < 0) return trimmed;
+  if (colonIndex < 0) return stripClawlineChannelSuffix(trimmed);
   const value = trimmed.slice(colonIndex + 1).trim();
-  return value || undefined;
+  return stripClawlineChannelSuffix(value || undefined);
+}
+
+function stripClawlineChannelSuffix(value?: string): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) return undefined;
+  const lower = trimmed.toLowerCase();
+  if (lower.endsWith("-admin")) return trimmed.slice(0, -"-admin".length);
+  if (lower.endsWith("-personal")) return trimmed.slice(0, -"-personal".length);
+  return trimmed;
 }
 
 function normalizeClawlineTarget(raw: string): string | undefined {
@@ -76,7 +85,8 @@ export const clawlinePlugin: ChannelPlugin<ResolvedClawlineAccount> = {
   },
   threading: {
     buildToolContext: ({ context, hasRepliedRef }) => {
-      const userId = parseClawlineUserId(context.From);
+      const userId =
+        parseClawlineUserId(context.OriginatingTo) ?? parseClawlineUserId(context.From);
       if (!userId) return undefined;
       return {
         currentChannelId: `user:${userId}`,

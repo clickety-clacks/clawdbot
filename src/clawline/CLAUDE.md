@@ -10,33 +10,26 @@ Clawline maps to Clawdbot's session/routing model. Understanding this mapping is
 
 Conversation continuity comes from the SESSION, not the channel. The channel just determines where replies get delivered.
 
-### Clawline DM → Main Session
+### Clawline Admin + Personal → Per-Channel Sessions
 
-The Clawline **DM channel** (accessed by `isAdmin: true` users) maps to Clawdbot's **main session** (`agent:main:main`).
+Clawline synthesizes channel-specific peer IDs so admin/personal behave like Discord channels:
 
-- Equivalent to DMing the Discord bot or Telegram bot
-- Same conversation memory whether you DM via Discord, Telegram, or Clawline
-- Only `isAdmin: true` allowlist users can access this channel
-- Replies go back to the originating user (all their devices), NOT broadcast to all admins
-- Continuity comes from the shared session, not from broadcasting
+- Admin channel peer ID: `{userId}-admin`
+- Personal channel peer ID: `{userId}-personal`
 
-This matches Clawdbot's default `dmScope: "main"` behavior where all DMs share conversation context.
+This yields distinct sessions:
 
-### Personal Channels → Per-User Sessions
+- `agent:main:clawline:dm:{userId}-admin`
+- `agent:main:clawline:dm:{userId}-personal`
 
-Non-admin users get **personal channels** that map to isolated **per-user sessions**.
-
-- Each registered user (family member, etc.) gets their own isolated conversation
-- Similar to Discord channels - each has separate memory (`agent:main:clawline:dm:{userId}`)
-- Admin users also have access to personal channels (separate from the DM channel)
-- Agent doesn't mix conversations between users
+Both are isolated from each other and from other providers. Admin access is still enforced by allowlist `isAdmin`.
 
 ### Session Routing Summary
 
 | Clawline | Clawdbot Equivalent | Session Key | Memory |
 |----------|---------------------|-------------|--------|
-| DM channel | Discord/Telegram DM | `agent:main:main` | Shared (main) |
-| Personal channel | Discord channel | `agent:main:clawline:dm:{userId}` | Isolated |
+| Admin channel | Discord channel-like DM | `agent:main:clawline:dm:{userId}-admin` | Isolated |
+| Personal channel | Discord channel-like DM | `agent:main:clawline:dm:{userId}-personal` | Isolated |
 
 ### Comparison with Other Providers
 
@@ -44,16 +37,14 @@ Non-admin users get **personal channels** that map to isolated **per-user sessio
 |--------|---------|---------------|
 | Discord DM | `agent:main:main` | That Discord user |
 | Telegram DM | `agent:main:main` | That Telegram chat |
-| Clawline DM | `agent:main:main` | That Clawline user's devices |
+| Clawline admin | `agent:main:clawline:dm:userId-admin` | That user's devices |
+| Clawline personal | `agent:main:clawline:dm:userId-personal` | That user's devices |
 | Discord `#channel` | `agent:main:discord:channel:id` | That Discord channel |
-| Clawline personal | `agent:main:clawline:dm:userId` | That user's devices |
 
 ### Reply Routing
 
-All channels use the same pattern:
-- `OriginatingTo: "{userId}"` → `broadcastToUser(userId)` (all user's devices)
-
-No special handling for DM channel - it works like any other channel, just routes to main session.
+All Clawline channels use the same pattern:
+- `OriginatingTo: "user:{userId}"` → `broadcastToUser(userId)` (all user's devices)
 
 ## Key Files
 
@@ -64,11 +55,11 @@ No special handling for DM channel - it works like any other channel, just route
 
 ## Important Constants
 
-- `ADMIN_CHANNEL_TYPE = "admin"` - DM channel type (routes to main session)
-- `DEFAULT_CHANNEL_TYPE = "personal"` - Personal channel type (routes to per-user session)
+- `ADMIN_CHANNEL_TYPE = "admin"` - Admin channel type (access control + UI)
+- `DEFAULT_CHANNEL_TYPE = "personal"` - Personal channel type
 
 Messages and assets are stored under the real user's ID for both channel types.
-The channel type only affects session routing, not storage.
+The channel type affects session routing and UI separation, not storage.
 
 ---
 

@@ -818,10 +818,8 @@ export async function updateLastRoute(params: {
   deliveryContext?: DeliveryContext;
   ctx?: MsgContext;
   groupResolution?: import("./types.js").GroupKeyResolution | null;
-  clawlineChannelType?: SessionEntry["clawlineChannelType"];
 }) {
-  const { storePath, sessionKey, channel, to, accountId, threadId, ctx, clawlineChannelType } =
-    params;
+  const { storePath, sessionKey, channel, to, accountId, threadId, ctx } = params;
   return await withSessionStoreLock(storePath, async () => {
     const store = loadSessionStore(storePath);
     const existing = store[sessionKey];
@@ -877,7 +875,6 @@ export async function updateLastRoute(params: {
       lastTo: normalized.lastTo,
       lastAccountId: normalized.lastAccountId,
       lastThreadId: normalized.lastThreadId,
-      ...(clawlineChannelType ? { clawlineChannelType } : {}),
     };
     const next = mergeSessionEntry(
       existing,

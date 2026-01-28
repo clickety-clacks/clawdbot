@@ -44,8 +44,7 @@ export async function updateSessionStoreAfterAgentRun(params: {
   const contextTokens =
     params.contextTokensOverride ?? lookupContextTokens(modelUsed) ?? DEFAULT_CONTEXT_TOKENS;
 
-  // Read fresh inside the lock to avoid clobbering concurrent writes (e.g. clawlineChannelType
-  // set by updateLastRoute during the agent run).
+  // Read fresh inside the lock to avoid clobbering concurrent writes during the agent run.
   await updateSessionStore(storePath, (store) => {
     const entry = store[sessionKey] ?? {
       sessionId,
