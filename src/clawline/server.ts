@@ -472,40 +472,6 @@ const DENYLIST_FILENAME = "denylist.json";
 const JWT_KEY_FILENAME = "jwt.key";
 const DB_FILENAME = "clawline.sqlite";
 const SESSION_REPLACED_CODE = 1000;
-const FACE_SPEAK_MAX_CHARS = 500;
-
-// Experimental: best-effort hook for local "face speak" tooling.
-// - OFF unless CLU_FACE_SPEAK_URL is set
-// - Non-blocking (fire-and-forget)
-// - Debug-only logging (no warn/error)
-// - Empty text skipped; long text capped
-function triggerFaceSpeak(text: string, logger: Logger) {
-  const endpoint =
-    typeof process.env.CLU_FACE_SPEAK_URL === "string" ? process.env.CLU_FACE_SPEAK_URL.trim() : "";
-  if (!endpoint) return;
-  const trimmed = text.trim();
-  if (!trimmed) return;
-  const capped =
-    trimmed.length > FACE_SPEAK_MAX_CHARS ? trimmed.slice(0, FACE_SPEAK_MAX_CHARS) : trimmed;
-  void (async () => {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 1500);
-    try {
-      await fetch(endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: capped }),
-        signal: controller.signal,
-      });
-    } catch (err) {
-      logger.info?.("[clawline] face_speak_failed", {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    } finally {
-      clearTimeout(timeout);
-    }
-  })();
-}
 
 function mergeConfig(partial?: Partial<ProviderConfig>): ProviderConfig {
   const merged = JSON.parse(JSON.stringify(DEFAULT_CONFIG)) as ProviderConfig;
@@ -2291,9 +2257,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     } else {
       broadcastToUser(target.userId, event);
     }
-    if (text.trim().length > 0) {
-      triggerFaceSpeak(text, logger);
-    }
     return {
       messageId: event.id,
       userId: target.userId,
@@ -2606,9 +2569,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               attachments,
             );
             broadcastToChannelSessions(channelType, session, assistantEvent);
-            if (assistantText.trim().length > 0) {
-              triggerFaceSpeak(assistantText, logger);
-            }
           },
           onError: (err, info) => {
             logger.error?.("[clawline] reply_delivery_failed", {
