@@ -2383,7 +2383,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           // Use canonical userId for routing, not peerId (which may be bindingId with different casing)
           to: session.userId,
           accountId: route.accountId,
-          clawlineChannelType: channelType,
+          // Keep main session pinned to admin channel; personal traffic should not override it.
+          clawlineChannelType: channelType === ADMIN_CHANNEL_TYPE ? channelType : undefined,
         });
         logger.info?.(`[clawline] updateLastRoute completed: clawlineChannelType=${channelType}`);
 
