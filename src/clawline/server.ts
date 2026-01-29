@@ -473,6 +473,8 @@ const JWT_KEY_FILENAME = "jwt.key";
 const DB_FILENAME = "clawline.sqlite";
 const SESSION_REPLACED_CODE = 1000;
 const FACE_SPEAK_MAX_CHARS = 500;
+const FACE_SPEAK_DEDUPE_TTL_MS = 5 * 60 * 1000;
+const FACE_SPEAK_DEDUPE_MAX = 1000;
 
 // Experimental: best-effort hook for local "face speak" tooling.
 // - OFF unless CLU_FACE_SPEAK_URL is set
@@ -1603,6 +1605,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const connectionState = new WeakMap<WebSocket, ConnectionState>();
   const pendingSockets = new Map<string, PendingConnection>();
   const faceSpeakPending = new Map<string, string>();
+  const faceSpeakDedupe = new Map<string, number>();
   const sessionsByDevice = new Map<string, Session>();
   const userSessions = new Map<string, Set<Session>>();
   const perUserQueue = new Map<string, Promise<unknown>>();
@@ -2164,6 +2167,27 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       if (!endpoint) {
         logDecision("skip", "missing_endpoint", speakTextLen);
         return;
+      }
+      // Prevent duplicate TTS when the same assistant message is delivered to multiple sessions.
+      const now = nowMs();
+      for (const [key, ts] of faceSpeakDedupe) {
+        if (now - ts > FACE_SPEAK_DEDUPE_TTL_MS) {
+          faceSpeakDedupe.delete(key);
+        }
+      }
+      while (faceSpeakDedupe.size > FACE_SPEAK_DEDUPE_MAX) {
+        const oldest = faceSpeakDedupe.keys().next().value;
+        if (!oldest) break;
+        faceSpeakDedupe.delete(oldest);
+      }
+      const dedupeKey = messageId ?? (speakTextLen > 0 ? `text:${sha256(speakText.trim())}` : "");
+      if (dedupeKey) {
+        const lastSeen = faceSpeakDedupe.get(dedupeKey);
+        if (lastSeen !== undefined && now - lastSeen < FACE_SPEAK_DEDUPE_TTL_MS) {
+          logDecision("skip", "dedupe", speakTextLen);
+          return;
+        }
+        faceSpeakDedupe.set(dedupeKey, now);
       }
       logDecision("attempt", "ok", speakTextLen);
       triggerFaceSpeak(speakText, logger, { sessionKey, messageId }, endpoint);
