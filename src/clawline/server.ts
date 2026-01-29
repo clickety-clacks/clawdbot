@@ -479,13 +479,23 @@ const FACE_SPEAK_MAX_CHARS = 500;
 // - Non-blocking (fire-and-forget)
 // - Debug-only logging (no warn/error)
 // - Empty text skipped; long text capped
-function triggerFaceSpeak(text: string, logger: Logger, meta?: { sessionKey?: string }) {
+function triggerFaceSpeak(
+  text: string,
+  logger: Logger,
+  meta?: { sessionKey?: string; messageId?: string },
+  endpointOverride?: string,
+) {
   const endpoint =
-    typeof process.env.CLU_FACE_SPEAK_URL === "string" ? process.env.CLU_FACE_SPEAK_URL.trim() : "";
+    typeof endpointOverride === "string" && endpointOverride.trim().length > 0
+      ? endpointOverride.trim()
+      : typeof process.env.CLU_FACE_SPEAK_URL === "string"
+        ? process.env.CLU_FACE_SPEAK_URL.trim()
+        : "";
   if (!endpoint) {
     logger.info?.("[clawline] face_speak_skipped", {
       reason: "missing_endpoint",
       sessionKey: meta?.sessionKey,
+      messageId: meta?.messageId,
     });
     return;
   }
@@ -494,6 +504,7 @@ function triggerFaceSpeak(text: string, logger: Logger, meta?: { sessionKey?: st
     logger.info?.("[clawline] face_speak_skipped", {
       reason: "empty_text",
       sessionKey: meta?.sessionKey,
+      messageId: meta?.messageId,
     });
     return;
   }
@@ -512,6 +523,7 @@ function triggerFaceSpeak(text: string, logger: Logger, meta?: { sessionKey?: st
     textLength: capped.length,
     endpointHost: redactedHost,
     sessionKey: meta?.sessionKey,
+    messageId: meta?.messageId,
   });
   void (async () => {
     const controller = new AbortController();
@@ -1590,6 +1602,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
   const connectionState = new WeakMap<WebSocket, ConnectionState>();
   const pendingSockets = new Map<string, PendingConnection>();
+  const faceSpeakPending = new Map<string, string>();
   const sessionsByDevice = new Map<string, Session>();
   const userSessions = new Map<string, Set<Session>>();
   const perUserQueue = new Map<string, Promise<unknown>>();
@@ -2105,22 +2118,55 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         session.socket.close();
         return;
       }
-      if (payload.role !== "assistant") {
-        logger.info?.("[clawline] face_speak_skipped", {
-          reason: "non_assistant",
-          sessionKey: payload.sessionKey,
-        });
+      const role = payload.role ?? "assistant";
+      const streaming = Boolean(payload.streaming);
+      const sessionKey = payload.sessionKey;
+      const messageId = payload.id;
+      const payloadText = typeof payload.content === "string" ? payload.content : "";
+      const payloadTextLen = payloadText.trim().length;
+      const pendingKey = messageId || sessionKey || "";
+      const logDecision = (decision: "skip" | "attempt", reason: string, textLen: number) => {
+        logger.info?.(
+          `[clawline] face_speak_decision role=${role} streaming=${streaming} textLen=${textLen} decision=${decision} reason=${reason}`,
+          { sessionKey, messageId },
+        );
+      };
+      if (role !== "assistant") {
+        logDecision("skip", "non_assistant", payloadTextLen);
         return;
       }
-      if (payload.streaming) {
-        logger.info?.("[clawline] face_speak_skipped", {
-          reason: "streaming",
-          sessionKey: payload.sessionKey,
-        });
+      if (streaming) {
+        if (pendingKey && payloadTextLen > 0) {
+          faceSpeakPending.set(pendingKey, payloadText);
+        }
+        logDecision("skip", "streaming", payloadTextLen);
         return;
       }
-      const speakText = payload.content ?? "";
-      triggerFaceSpeak(speakText, logger, { sessionKey: payload.sessionKey });
+      let speakText = payloadText;
+      if (!payloadTextLen && pendingKey) {
+        const pendingText = faceSpeakPending.get(pendingKey);
+        if (typeof pendingText === "string") {
+          speakText = pendingText;
+        }
+      }
+      if (pendingKey) {
+        faceSpeakPending.delete(pendingKey);
+      }
+      const speakTextLen = speakText.trim().length;
+      if (!speakTextLen) {
+        logDecision("skip", "empty_text", speakTextLen);
+        return;
+      }
+      const endpoint =
+        typeof process.env.CLU_FACE_SPEAK_URL === "string"
+          ? process.env.CLU_FACE_SPEAK_URL.trim()
+          : "";
+      if (!endpoint) {
+        logDecision("skip", "missing_endpoint", speakTextLen);
+        return;
+      }
+      logDecision("attempt", "ok", speakTextLen);
+      triggerFaceSpeak(speakText, logger, { sessionKey, messageId }, endpoint);
     });
   }
 
