@@ -295,6 +295,7 @@ export async function compactEmbeddedPiSessionDirect(
       : undefined;
 
     const runtimeInfo = {
+      sessionKey: params.sessionKey,
       host: machineName,
       os: `${os.type()} ${os.release()}`,
       arch: os.arch(),

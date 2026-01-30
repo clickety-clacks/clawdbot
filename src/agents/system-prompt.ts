@@ -128,6 +128,11 @@ function buildDocsSection(params: { docsPath?: string; isMinimal: boolean; readT
 
 export function buildAgentSystemPrompt(params: {
   workspaceDir: string;
+  /**
+   * Current session key for this agent run (read-only context).
+   * This is surfaced in the Runtime line so agents can self-route notifications.
+   */
+  sessionKey?: string;
   defaultThinkLevel?: ThinkLevel;
   reasoningLevel?: ReasoningLevel;
   extraSystemPrompt?: string;
@@ -158,6 +163,7 @@ export function buildAgentSystemPrompt(params: {
     channel?: string;
     capabilities?: string[];
     repoRoot?: string;
+    sessionKey?: string;
   };
   messageToolHints?: string[];
   sandboxInfo?: {
@@ -558,9 +564,22 @@ export function buildAgentSystemPrompt(params: {
     );
   }
 
+  // Surface the active sessionKey to the agent so it can self-route notifications/alerts.
+  // - Necessary for Clawline: external tmux coding agents need the sessionKey to target notify.
+  // - Valuable for any channel: agents become self-aware of their session context without hints.
+  // - This is read-only runtime context, not a security boundary.
+  // - Matches the existing pattern of exposing runtime details (host, model, channel).
+  const runtimeSessionKey = params.sessionKey ?? runtimeInfo?.sessionKey;
+  const runtimeLine = buildRuntimeLine(
+    runtimeInfo,
+    runtimeChannel,
+    runtimeCapabilities,
+    params.defaultThinkLevel,
+    runtimeSessionKey,
+  );
   lines.push(
     "## Runtime",
-    buildRuntimeLine(runtimeInfo, runtimeChannel, runtimeCapabilities, params.defaultThinkLevel),
+    runtimeLine,
     `Reasoning: ${reasoningLevel} (hidden unless on/stream). Toggle /reasoning; /status shows Reasoning when enabled.`,
   );
 
@@ -577,13 +596,18 @@ export function buildRuntimeLine(
     model?: string;
     defaultModel?: string;
     repoRoot?: string;
+    sessionKey?: string;
   },
   runtimeChannel?: string,
   runtimeCapabilities: string[] = [],
   defaultThinkLevel?: ThinkLevel,
+  sessionKey?: string,
 ): string {
   return `Runtime: ${[
     runtimeInfo?.agentId ? `agent=${runtimeInfo.agentId}` : "",
+    sessionKey || runtimeInfo?.sessionKey
+      ? `sessionKey=${sessionKey ?? runtimeInfo?.sessionKey}`
+      : "",
     runtimeInfo?.host ? `host=${runtimeInfo.host}` : "",
     runtimeInfo?.repoRoot ? `repo=${runtimeInfo.repoRoot}` : "",
     runtimeInfo?.os
