@@ -1532,22 +1532,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         clientVersion: "clawline",
         mode: GATEWAY_CLIENT_MODES.BACKEND,
       });
-      await callGateway({
-        method: "system-event",
-        params: { text },
-        clientName: GATEWAY_CLIENT_NAMES.CLI,
-        clientDisplayName: "clawline-alert",
-        clientVersion: "clawline",
-        mode: GATEWAY_CLIENT_MODES.BACKEND,
-      });
-      await callGateway({
-        method: "wake",
-        params: { text, mode: "now" },
-        clientName: GATEWAY_CLIENT_NAMES.CLI,
-        clientDisplayName: "clawline-alert",
-        clientVersion: "clawline",
-        mode: GATEWAY_CLIENT_MODES.BACKEND,
-      });
     } catch (err) {
       logger.error("alert_gateway_wake_failed", err);
       throw err instanceof HttpError
