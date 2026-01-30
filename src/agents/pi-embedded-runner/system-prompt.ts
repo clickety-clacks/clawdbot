@@ -28,6 +28,7 @@ export function buildEmbeddedSystemPrompt(params: {
   promptMode?: PromptMode;
   runtimeInfo: {
     agentId?: string;
+    sessionKey?: string;
     host: string;
     os: string;
     arch: string;
@@ -51,6 +52,7 @@ export function buildEmbeddedSystemPrompt(params: {
 }): string {
   return buildAgentSystemPrompt({
     workspaceDir: params.workspaceDir,
+    sessionKey: params.runtimeInfo.sessionKey,
     defaultThinkLevel: params.defaultThinkLevel,
     reasoningLevel: params.reasoningLevel,
     extraSystemPrompt: params.extraSystemPrompt,

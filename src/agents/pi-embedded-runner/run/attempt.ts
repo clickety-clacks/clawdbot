@@ -394,6 +394,7 @@ export async function runEmbeddedAttempt(
     const { runtimeInfo, userTimezone, userTime, userTimeFormat } = buildSystemPromptParams({
       config: params.config,
       agentId: sessionAgentId,
+      sessionKey: params.sessionKey,
       workspaceDir: effectiveWorkspace,
       cwd: process.cwd(),
       runtime: {

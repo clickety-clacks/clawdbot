@@ -119,6 +119,7 @@ export async function runCliAgent(params: {
     contextFiles,
     modelDisplay,
     agentId: sessionAgentId,
+    sessionKey: params.sessionKey,
   });
 
   const { sessionId: cliSessionIdToSend, isNew } = resolveSessionIdToSend({
