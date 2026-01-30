@@ -1451,7 +1451,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     if (!trimmed) return false;
     if (trimmed === "global") return true;
     return (
-      /^agent:[^:]+:main$/i.test(trimmed) || /^agent:[^:]+:clawline:[^:]+:main$/i.test(trimmed)
+      /^agent:[^:]+:main$/i.test(trimmed) ||
+      /^agent:[^:]+:clawline:[^:]+:main$/i.test(trimmed) ||
+      /^agent:[^:]+:clawline:dm:[^:]+$/i.test(trimmed)
     );
   }
 
@@ -1502,9 +1504,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       let alertTo: string | undefined;
       if (isClawlineSession) {
         const specPersonal = sessionParts[4] === "main" && sessionParts[3];
-        if (specPersonal) {
+        const isLegacyDm = sessionParts[3] === "dm" && sessionParts[4];
+        if (specPersonal || isLegacyDm) {
           alertChannel = "clawline";
-          const normalizedUserId = sanitizeUserId(sessionParts[3]).toLowerCase();
+          const userSegment = specPersonal ? sessionParts[3] : sessionParts[4];
+          const normalizedUserId = sanitizeUserId(userSegment).toLowerCase();
           if (normalizedUserId) {
             alertTo = normalizedUserId;
             resolvedSessionKey = buildClawlinePersonalSessionKey(
