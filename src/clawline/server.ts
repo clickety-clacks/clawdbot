@@ -2404,10 +2404,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     });
     if (target.kind === "device") {
       deliverToDevice(target.deviceId, event);
-    } else if (channelType === ADMIN_CHANNEL_TYPE) {
-      // Admin-channel responses must reach all admin sessions, not just sessions
-      // for the target userId. Matches the pattern in broadcastToChannelSessions().
-      broadcastToAdmins(event);
     } else {
       broadcastToUser(target.userId, event);
     }
