@@ -2221,6 +2221,27 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     return true;
   }
 
+  /**
+   * Route a message to the correct set of sessions based on sessionKey.
+   * Admin session key (agent:main:main) → all admin sessions (shared channel).
+   * Personal session key → all sessions for the target user.
+   */
+  function broadcastToSessionKey(sessionKey: string, targetUserId: string, payload: ServerMessage) {
+    const isMain = sessionKey.toLowerCase() === mainSessionKey.toLowerCase();
+    if (isMain) {
+      for (const session of sessionsByDevice.values()) {
+        if (!session.isAdmin) continue;
+        sendPayloadToSession(session, payload);
+      }
+    } else {
+      const sessions = userSessions.get(targetUserId);
+      if (!sessions) return;
+      for (const session of sessions) {
+        sendPayloadToSession(session, payload);
+      }
+    }
+  }
+
   function broadcastToChannelSessions(
     channelType: ChannelType,
     session: Session,
@@ -2405,7 +2426,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     if (target.kind === "device") {
       deliverToDevice(target.deviceId, event);
     } else {
-      broadcastToUser(target.userId, event);
+      broadcastToSessionKey(resolvedSessionKey, target.userId, event);
     }
     return {
       messageId: event.id,
