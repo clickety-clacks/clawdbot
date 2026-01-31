@@ -55,6 +55,7 @@ import { callGateway } from "../gateway/call.js";
 import { GATEWAY_CLIENT_MODES, GATEWAY_CLIENT_NAMES } from "../gateway/protocol/client-info.js";
 import { loadWebMedia } from "../web/media.js";
 import { clawlineAttachmentsToImages } from "./attachments.js";
+import { sendDirectAgentMessage } from "../agents/direct-agent-message.js";
 
 export const PROTOCOL_VERSION = 1;
 
@@ -1276,6 +1277,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     logHttpRequest("alert_request_start");
     try {
       const payload = await parseAlertPayload(req);
+      logger.info?.("[clawline] alert_received", {
+        source: payload.source,
+        hasSessionKey: Boolean(payload.sessionKey),
+      });
       logger.info?.(
         `[clawline] alert_payload_received raw=${JSON.stringify(
           payload.raw,
@@ -1519,23 +1524,33 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         }
       }
 
-      const params: Record<string, unknown> = {
+      const deliveryContext =
+        alertChannel || alertTo ? { channel: alertChannel, to: alertTo } : undefined;
+
+      const alertLog = (event: string, detail?: Record<string, unknown>) =>
+        logger.info?.(`[clawline] ${event}`, {
+          ...detail,
+          sessionKey: resolvedSessionKey,
+          alertChannel,
+          alertTo,
+        });
+
+      alertLog("alert_wake_start");
+
+      const result = await sendDirectAgentMessage({
+        sessionKey: resolvedSessionKey,
         message: `System Alert: ${text}`,
-        deliver: true,
-        idempotencyKey: randomUUID(),
-      };
-      params.sessionKey = resolvedSessionKey;
-      // Explicitly set channel and to for clawline sessions to prevent lastTo redirect
-      if (alertChannel) params.channel = alertChannel;
-      if (alertTo) params.to = alertTo;
-      await callGateway({
-        method: "agent",
-        params,
-        clientName: GATEWAY_CLIENT_NAMES.CLI,
-        clientDisplayName: "clawline-alert",
-        clientVersion: "clawline",
-        mode: GATEWAY_CLIENT_MODES.BACKEND,
+        deliveryContext,
+        summaryLine: "System Alert",
+        timeoutMs: 60_000,
+        log: alertLog,
       });
+
+      alertLog("alert_wake_result", { outcome: result.outcome, error: result.error });
+
+      if (result.outcome === "error") {
+        throw new HttpError(502, "wake_failed", result.error ?? "agent call failed");
+      }
     } catch (err) {
       logger.error("alert_gateway_wake_failed", err);
       throw err instanceof HttpError
