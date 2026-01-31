@@ -450,6 +450,99 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("outbound admin-channel messages reach admin sessions but not non-admin", async () => {
+    const adminDeviceId = randomUUID();
+    const userDeviceId = randomUUID();
+    const baseEntry = {
+      claimedName: "Test Device",
+      deviceInfo: {
+        platform: "iOS",
+        model: "iPhone",
+        osVersion: "17.0",
+        appVersion: "1.0",
+      },
+      tokenDelivered: true,
+      createdAt: Date.now() - 1_000,
+      lastSeenAt: Date.now() - 500,
+    };
+    const ctx = await setupTestServer([
+      {
+        ...baseEntry,
+        deviceId: adminDeviceId,
+        claimedName: "Flynn",
+        userId: "flynn",
+        isAdmin: true,
+      },
+      {
+        ...baseEntry,
+        deviceId: userDeviceId,
+        claimedName: "QA Sim",
+        userId: "qa_sim",
+        isAdmin: false,
+      },
+    ]);
+    const cleanupWs = async (...sockets: WebSocket[]) => {
+      sockets.forEach((ws) => {
+        try {
+          ws.terminate();
+        } catch {
+          /* ignore */
+        }
+      });
+    };
+    try {
+      const adminPair = await performPairRequest(ctx.port, adminDeviceId);
+      const userPair = await performPairRequest(ctx.port, userDeviceId);
+      const { ws: adminWs } = await authenticateDevice(
+        ctx.port,
+        adminDeviceId,
+        adminPair.token as string,
+      );
+      const { ws: userWs } = await authenticateDevice(
+        ctx.port,
+        userDeviceId,
+        userPair.token as string,
+      );
+
+      const adminReceived: any[] = [];
+      const userReceived: any[] = [];
+      adminWs.on("message", (data: WebSocket.RawData) => {
+        adminReceived.push(JSON.parse(decodeRawData(data)));
+      });
+      userWs.on("message", (data: WebSocket.RawData) => {
+        userReceived.push(JSON.parse(decodeRawData(data)));
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      adminReceived.length = 0;
+      userReceived.length = 0;
+
+      // Outbound admin-channel message via sendMessage (the gateway callback path).
+      // This exercises sendOutboundMessage's broadcast dispatch — admin channel
+      // messages should go through broadcastToAdmins, not broadcastToUser.
+      await ctx.server.sendMessage({
+        target: "user:flynn",
+        text: "alert response",
+        sessionKey: "agent:main:main",
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Admin session receives the message
+      const adminMsgs = adminReceived.filter((m: any) => m.type === "message");
+      expect(adminMsgs).toHaveLength(1);
+      expect(adminMsgs[0].content).toBe("alert response");
+      expect(adminMsgs[0].channelType).toBe("admin");
+
+      // Non-admin session does NOT receive it
+      const userMsgs = userReceived.filter((m: any) => m.type === "message");
+      expect(userMsgs).toHaveLength(0);
+
+      await cleanupWs(adminWs, userWs);
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("prefers sessionKey routing for admin messages", async () => {
     const adminDeviceId = randomUUID();
     const userDeviceId = randomUUID();
