@@ -107,9 +107,14 @@ export function createAssetHandlers(deps: AssetHandlerDeps) {
       }
       const finalPath = path.join(assetsDir, assetId);
       await fs.rename(tmpPath, finalPath);
-      await enqueueWriteTask(() =>
-        insertAssetStmt.run(assetId, auth.userId, detectedMime, size, nowMs(), auth.deviceId),
-      );
+      try {
+        await enqueueWriteTask(() =>
+          insertAssetStmt.run(assetId, auth.userId, detectedMime, size, nowMs(), auth.deviceId),
+        );
+      } catch (err) {
+        await safeUnlink(finalPath);
+        throw err;
+      }
       res.setHeader("Content-Type", "application/json");
       res.writeHead(200);
       res.end(JSON.stringify({ assetId, mimeType: detectedMime, size }));

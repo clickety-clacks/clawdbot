@@ -103,14 +103,33 @@ async function readClawlineMessages(params: {
     queryParams.push(Math.min(limit, 100)); // Cap at 100
 
     const stmt = db.prepare(query);
-    const rows = stmt.all(...queryParams) as EventRow[];
+    const messages: ParsedMessage[] = [];
+    const batchSize = 100;
+    let offset = 0;
+    const maxRowsToScan = Math.max(targetLimit * 20, 500);
 
-    // Parse and filter messages
-    let messages = rows.map(parseEventPayload);
-
-    // Filter by channelType if specified
-    if (params.channelType) {
-      messages = messages.filter((m) => m.channelType === params.channelType);
+    while (messages.length < targetLimit) {
+      const rows = stmt.all(...queryParams, batchSize, offset) as EventRow[];
+      if (rows.length === 0) {
+        break;
+      }
+      offset += rows.length;
+      for (const row of rows) {
+        const parsed = parseEventPayload(row);
+        if (params.channelType && parsed.channelType !== params.channelType) {
+          continue;
+        }
+        if (parsed.type !== "user_message" && parsed.type !== "server_message") {
+          continue;
+        }
+        messages.push(parsed);
+        if (messages.length >= targetLimit) {
+          break;
+        }
+      }
+      if (offset >= maxRowsToScan) {
+        break;
+      }
     }
 
     // Filter to only actual messages (user_message, server_message)

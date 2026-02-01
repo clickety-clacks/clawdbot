@@ -728,13 +728,15 @@ describe.sequential("clawline provider server", () => {
   });
 
   it("initializes alert instructions file with default text when missing", async () => {
-    const ctx = await setupTestServer([], { alertInstructionsText: null });
+    const entry = createAllowlistEntry();
+    const ctx = await setupTestServer([entry], { alertInstructionsText: null });
+    const authHeader = await createAuthHeader(ctx, entry);
     try {
       const fileContents = (await fs.readFile(ctx.alertInstructionsPath, "utf8")).trim();
       expect(fileContents).toBe(DEFAULT_ALERT_INSTRUCTIONS_TEXT);
       const response = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", Authorization: authHeader },
         body: JSON.stringify({ message: "Check on Flynn", source: "codex" }),
       });
       expect(response.status).toBe(200);
@@ -749,11 +751,13 @@ describe.sequential("clawline provider server", () => {
   });
 
   it("returns 400 when alert payload is missing message", async () => {
-    const ctx = await setupTestServer();
+    const entry = createAllowlistEntry();
+    const ctx = await setupTestServer([entry]);
+    const authHeader = await createAuthHeader(ctx, entry);
     try {
       const response = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", Authorization: authHeader },
         body: JSON.stringify({ source: "codex" }),
       });
       expect(response.status).toBe(400);
