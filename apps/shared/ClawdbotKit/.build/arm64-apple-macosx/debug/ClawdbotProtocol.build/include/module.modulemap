@@ -1,3 +1,0 @@
-module ClawdbotProtocol {
-    header "/Users/mike/src/clawdbot/apps/shared/ClawdbotKit/.build/arm64-apple-macosx/debug/ClawdbotProtocol.build/include/ClawdbotProtocol-Swift.h"
-}
