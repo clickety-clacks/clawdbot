@@ -1144,7 +1144,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         dispatcher = createPinnedDispatcher(pinned);
         const media = await loadWebMedia(validatedUrl, config.media.maxUploadBytes, {
           fetchImpl: (input, init) =>
-            fetch(input, { ...init, dispatcher } as RequestInit & { dispatcher: Dispatcher }),
+            fetch(input, {
+              ...init,
+              dispatcher,
+              redirect: "manual",
+            } as RequestInit & { dispatcher: Dispatcher }),
         });
         const mimeType = (media.contentType ?? "application/octet-stream").toLowerCase();
         const buffer = media.buffer;
