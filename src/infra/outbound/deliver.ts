@@ -89,7 +89,6 @@ async function createChannelHandler(params: {
   identity?: OutboundIdentity;
   deps?: OutboundSendDeps;
   gifPlayback?: boolean;
-  sessionKey?: string;
 }): Promise<ChannelHandler> {
   const outbound = await loadChannelOutboundAdapter(params.channel);
   if (!outbound?.sendText || !outbound?.sendMedia) {
@@ -106,7 +105,6 @@ async function createChannelHandler(params: {
     identity: params.identity,
     deps: params.deps,
     gifPlayback: params.gifPlayback,
-    sessionKey: params.sessionKey,
   });
   if (!handler) {
     throw new Error(`Outbound not configured for channel: ${params.channel}`);
@@ -125,7 +123,6 @@ function createPluginHandler(params: {
   identity?: OutboundIdentity;
   deps?: OutboundSendDeps;
   gifPlayback?: boolean;
-  sessionKey?: string;
 }): ChannelHandler | null {
   const outbound = params.outbound;
   if (!outbound?.sendText || !outbound?.sendMedia) {
@@ -167,7 +164,6 @@ function createPluginHandler(params: {
         identity: params.identity,
         gifPlayback: params.gifPlayback,
         deps: params.deps,
-        sessionKey: params.sessionKey,
       }),
     sendMedia: async (caption, mediaUrl) =>
       sendMedia({
@@ -181,7 +177,6 @@ function createPluginHandler(params: {
         identity: params.identity,
         gifPlayback: params.gifPlayback,
         deps: params.deps,
-        sessionKey: params.sessionKey,
       }),
   };
 }
@@ -209,8 +204,6 @@ export async function deliverOutboundPayloads(params: {
     text?: string;
     mediaUrls?: string[];
   };
-  /** Session key for the delivery context. Used by clawline to determine channel type. */
-  sessionKey?: string;
 }): Promise<OutboundDeliveryResult[]> {
   const { cfg, channel, to, payloads } = params;
   const accountId = params.accountId;
@@ -228,7 +221,6 @@ export async function deliverOutboundPayloads(params: {
     threadId: params.threadId,
     identity: params.identity,
     gifPlayback: params.gifPlayback,
-    sessionKey: params.sessionKey,
   });
   const textLimit = handler.chunker
     ? resolveTextChunkLimit(cfg, channel, accountId, {

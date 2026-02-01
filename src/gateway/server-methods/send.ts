@@ -159,8 +159,7 @@ export const sendHandlers: GatewayRequestHandlers = {
           payloads: [{ text: message, mediaUrl, mediaUrls }],
           gifPlayback: request.gifPlayback,
           deps: outboundDeps,
-          sessionKey: sessionKeyTrimmed,
-          mirror: sessionKeyTrimmed
+          mirror: providedSessionKey
             ? {
                 sessionKey: sessionKeyTrimmed,
                 agentId: resolveSessionAgentId({
