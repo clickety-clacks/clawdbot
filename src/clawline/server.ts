@@ -1,4 +1,5 @@
 import http from "node:http";
+import dns from "node:dns";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -1131,7 +1132,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       .map((url) => (typeof url === "string" ? url.trim() : ""))
       .filter((url) => url.length > 0);
     for (const url of trimmedUrls) {
-      const validatedUrl = validateOutboundMediaUrl(url);
+      const validatedUrl = await validateOutboundMediaUrl(url);
       const media = await loadWebMedia(validatedUrl, config.media.maxUploadBytes);
       const mimeType = (media.contentType ?? "application/octet-stream").toLowerCase();
       const buffer = media.buffer;
@@ -1478,14 +1479,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         normalized === "::1" ||
         normalized.startsWith("fe80:") ||
         normalized.startsWith("fc") ||
-        normalized.startsWith("fd") ||
-        normalized.startsWith("::ffff:127.")
+        normalized.startsWith("fd")
       );
     }
     return false;
   }
 
-  function validateOutboundMediaUrl(rawUrl: string): string {
+  async function validateOutboundMediaUrl(rawUrl: string): Promise<string> {
     let parsed: URL;
     try {
       parsed = new URL(rawUrl);
@@ -1506,6 +1506,22 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
     if (net.isIP(hostname) && isPrivateIp(hostname)) {
       throw new ClientMessageError("invalid_message", "mediaUrl points to a private address");
+    }
+    if (!net.isIP(hostname)) {
+      let records: dns.LookupAddress[];
+      try {
+        records = await dns.promises.lookup(hostname, { all: true, verbatim: true });
+      } catch {
+        throw new ClientMessageError("invalid_message", "mediaUrl hostname could not be resolved");
+      }
+      if (!records.length) {
+        throw new ClientMessageError("invalid_message", "mediaUrl hostname could not be resolved");
+      }
+      for (const record of records) {
+        if (isPrivateIp(record.address)) {
+          throw new ClientMessageError("invalid_message", "mediaUrl points to a private address");
+        }
+      }
     }
     return parsed.toString();
   }
@@ -2317,6 +2333,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       if (streaming) {
         if (pendingKey && payloadTextLen > 0) {
           faceSpeakPending.set(pendingKey, payloadText);
+          // Map preserves insertion order; evict oldest entries.
           while (faceSpeakPending.size > FACE_SPEAK_PENDING_MAX) {
             const oldest = faceSpeakPending.keys().next().value;
             if (!oldest) {
