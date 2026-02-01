@@ -13,7 +13,7 @@ import type { Database as SqliteDatabase, Statement as SqliteStatement } from "b
 import { finalizeInboundContext } from "../auto-reply/reply/inbound-context.js";
 import { dispatchReplyFromConfig } from "../auto-reply/reply/dispatch-from-config.js";
 import { createReplyDispatcherWithTyping } from "../auto-reply/reply/reply-dispatcher.js";
-import { getFollowupQueueDepth } from "../auto-reply/reply/queue.js";
+import { getFollowupQueueDepth, resolveQueueSettings } from "../auto-reply/reply/queue.js";
 import { extractShortModelName } from "../auto-reply/reply/response-prefix-template.js";
 import type { ResponsePrefixContext } from "../auto-reply/reply/response-prefix-template.js";
 import type { ReplyPayload } from "../auto-reply/types.js";
@@ -55,7 +55,7 @@ import { callGateway } from "../gateway/call.js";
 import { GATEWAY_CLIENT_MODES, GATEWAY_CLIENT_NAMES } from "../gateway/protocol/client-info.js";
 import { loadWebMedia } from "../web/media.js";
 import { clawlineAttachmentsToImages } from "./attachments.js";
-import { sendDirectAgentMessage } from "../agents/direct-agent-message.js";
+import { type AnnounceQueueItem, enqueueAnnounce } from "../agents/subagent-announce-queue.js";
 
 export const PROTOCOL_VERSION = 1;
 
@@ -1573,20 +1573,51 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
       alertLog("alert_wake_start");
 
-      const result = await sendDirectAgentMessage({
-        sessionKey: resolvedSessionKey,
-        message: `System Alert: ${text}`,
-        deliveryContext,
-        summaryLine: "System Alert",
-        timeoutMs: 60_000,
-        log: alertLog,
+      const queueSettings = resolveQueueSettings({
+        cfg: openClawCfg,
+        channel: deliveryContext?.channel,
+      });
+      const sendQueuedAlert = async (item: AnnounceQueueItem) => {
+        const origin = item.origin;
+        const threadId =
+          origin?.threadId != null && origin.threadId !== "" ? String(origin.threadId) : undefined;
+        await callGateway({
+          method: "agent",
+          params: {
+            sessionKey: item.sessionKey,
+            message: item.prompt,
+            channel: origin?.channel,
+            accountId: origin?.accountId,
+            to: origin?.to,
+            threadId,
+            deliver: true,
+            idempotencyKey: randomUUID(),
+          },
+          expectFinal: true,
+          timeoutMs: 60_000,
+        });
+      };
+
+      // Always enqueue — never send directly to the agent, even if it appears idle.
+      // The gateway has no session-level locking. isEmbeddedPiRunActive has a race window:
+      // the agent turn can finish writing JSONL but not yet clear the active-runs Map,
+      // so a 'direct' send can hit the JSONL lock and timeout, losing the message.
+      // Enqueuing unconditionally eliminates this race. The queue drains when the agent
+      // is truly idle. The latency cost is negligible vs message loss.
+      enqueueAnnounce({
+        key: resolvedSessionKey,
+        item: {
+          prompt: `System Alert: ${text}`,
+          summaryLine: "System Alert",
+          enqueuedAt: Date.now(),
+          sessionKey: resolvedSessionKey,
+          origin: deliveryContext,
+        },
+        settings: queueSettings,
+        send: sendQueuedAlert,
       });
 
-      alertLog("alert_wake_result", { outcome: result.outcome, error: result.error });
-
-      if (result.outcome === "error") {
-        throw new HttpError(502, "wake_failed", result.error ?? "agent call failed");
-      }
+      alertLog("alert_wake_result", { outcome: "queued" });
     } catch (err) {
       logger.error("alert_gateway_wake_failed", err);
       throw err instanceof HttpError
