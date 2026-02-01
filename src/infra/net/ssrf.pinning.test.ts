@@ -48,6 +48,20 @@ describe("ssrf pinning", () => {
     await expect(resolvePinnedHostname("example.com", lookup)).rejects.toThrow(/private|internal/i);
   });
 
+  it.each([
+    "192.0.0.1",
+    "192.0.2.5",
+    "198.18.0.1",
+    "198.19.255.255",
+    "198.51.100.10",
+    "203.0.113.42",
+    "240.0.0.1",
+    "255.255.255.255",
+  ])("rejects reserved address %s", async (address) => {
+    const lookup = vi.fn(async () => [{ address, family: 4 }]);
+    await expect(resolvePinnedHostname("example.com", lookup)).rejects.toThrow(/private|internal/i);
+  });
+
   it("falls back for non-matching hostnames", async () => {
     const fallback = vi.fn((host: string, options?: unknown, callback?: unknown) => {
       const cb = typeof options === "function" ? options : (callback as () => void);

@@ -50,6 +50,7 @@ import { SlidingWindowRateLimiter } from "./rate-limiter.js";
 import { createAssetHandlers } from "./http-assets.js";
 import { callGateway } from "../gateway/call.js";
 import { GATEWAY_CLIENT_MODES, GATEWAY_CLIENT_NAMES } from "../gateway/protocol/client-info.js";
+import { FETCH_CLEANUP_SYMBOL } from "../media/fetch.js";
 import { loadWebMedia } from "../web/media.js";
 import {
   createPinnedDispatcher,
@@ -78,6 +79,7 @@ const INLINE_IMAGE_MIME_TYPES = new Set([
   "image/heic",
 ]);
 const MAX_ALERT_BODY_BYTES = 4 * 1024;
+const MAX_MEDIA_REDIRECTS = 5;
 type ChannelType = "personal" | "admin";
 const DEFAULT_CHANNEL_TYPE: ChannelType = "personal";
 const ADMIN_CHANNEL_TYPE: ChannelType = "admin";
@@ -1138,46 +1140,76 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       .map((url) => (typeof url === "string" ? url.trim() : ""))
       .filter((url) => url.length > 0);
     for (const url of trimmedUrls) {
-      const { url: validatedUrl, pinned } = await validateOutboundMediaUrl(url);
-      let dispatcher: Dispatcher | null = null;
-      try {
-        dispatcher = createPinnedDispatcher(pinned);
-        const media = await loadWebMedia(validatedUrl, config.media.maxUploadBytes, {
-          fetchImpl: (input, init) =>
-            fetch(input, {
-              ...init,
-              dispatcher,
-              redirect: "manual",
-            } as RequestInit & { dispatcher: Dispatcher }),
-        });
-        const mimeType = (media.contentType ?? "application/octet-stream").toLowerCase();
-        const buffer = media.buffer;
-        if (buffer.length === 0) {
-          continue;
+      const validated = await validateOutboundMediaUrl(url);
+      const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit) => {
+        let currentUrl = typeof input === "string" ? input : input.toString();
+        let currentPinned: PinnedHostname | null = null;
+        let redirectCount = 0;
+        while (true) {
+          if (!currentPinned) {
+            const resolved =
+              currentUrl === validated.url ? validated : await validateOutboundMediaUrl(currentUrl);
+            currentUrl = resolved.url;
+            currentPinned = resolved.pinned;
+          }
+          const dispatcher = createPinnedDispatcher(currentPinned);
+          const response = await fetch(currentUrl, {
+            ...init,
+            dispatcher,
+            redirect: "manual",
+          } as RequestInit & { dispatcher: Dispatcher });
+          if (isRedirectStatus(response.status)) {
+            const location = response.headers.get("location");
+            if (!location) {
+              (response as { [FETCH_CLEANUP_SYMBOL]?: () => Promise<void> | void })[
+                FETCH_CLEANUP_SYMBOL
+              ] = () => closeDispatcher(dispatcher);
+              return response;
+            }
+            void response.body?.cancel();
+            await closeDispatcher(dispatcher);
+            redirectCount += 1;
+            if (redirectCount > MAX_MEDIA_REDIRECTS) {
+              throw new ClientMessageError("invalid_message", "mediaUrl redirects too many times");
+            }
+            currentUrl = new URL(location, currentUrl).toString();
+            currentPinned = null;
+            continue;
+          }
+          (response as { [FETCH_CLEANUP_SYMBOL]?: () => Promise<void> | void })[
+            FETCH_CLEANUP_SYMBOL
+          ] = () => closeDispatcher(dispatcher);
+          return response;
         }
-        const isInlineImage = INLINE_IMAGE_MIME_TYPES.has(mimeType);
-        if (isInlineImage) {
-          resolved.push({ type: "image", mimeType, data: buffer.toString("base64") });
-          continue;
-        }
-        const assetId = `a_${randomUUID()}`;
-        const assetPath = path.join(assetsDir, assetId);
-        await fs.writeFile(assetPath, buffer);
-        await enqueueWriteTask(() =>
-          insertAssetStmt.run(
-            assetId,
-            params.ownerUserId,
-            mimeType,
-            buffer.length,
-            nowMs(),
-            params.uploaderDeviceId,
-          ),
-        );
-        resolved.push({ type: "asset", assetId });
-        assetIds.push(assetId);
-      } finally {
-        await closeDispatcher(dispatcher);
+      };
+      const media = await loadWebMedia(validated.url, config.media.maxUploadBytes, {
+        fetchImpl,
+      });
+      const mimeType = (media.contentType ?? "application/octet-stream").toLowerCase();
+      const buffer = media.buffer;
+      if (buffer.length === 0) {
+        continue;
       }
+      const isInlineImage = INLINE_IMAGE_MIME_TYPES.has(mimeType);
+      if (isInlineImage) {
+        resolved.push({ type: "image", mimeType, data: buffer.toString("base64") });
+        continue;
+      }
+      const assetId = `a_${randomUUID()}`;
+      const assetPath = path.join(assetsDir, assetId);
+      await fs.writeFile(assetPath, buffer);
+      await enqueueWriteTask(() =>
+        insertAssetStmt.run(
+          assetId,
+          params.ownerUserId,
+          mimeType,
+          buffer.length,
+          nowMs(),
+          params.uploaderDeviceId,
+        ),
+      );
+      resolved.push({ type: "asset", assetId });
+      assetIds.push(assetId);
     }
     return { attachments: resolved, assetIds };
   }
@@ -1463,6 +1495,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   function resolveAlertSource(source?: string): string | undefined {
     const cleaned = source ? sanitizeLabel(source) : undefined;
     return cleaned ?? DEFAULT_ALERT_SOURCE;
+  }
+
+  function isRedirectStatus(status: number): boolean {
+    return status >= 300 && status < 400;
   }
 
   async function validateOutboundMediaUrl(

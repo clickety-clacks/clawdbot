@@ -22,6 +22,7 @@ export class MediaFetchError extends Error {
 }
 
 export type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+export const FETCH_CLEANUP_SYMBOL = Symbol.for("clawdbot.fetchCleanup");
 
 type FetchMediaOptions = {
   url: string;
@@ -98,10 +99,13 @@ export async function fetchRemoteMedia(options: FetchMediaOptions): Promise<Fetc
     throw new MediaFetchError("fetch_failed", `Failed to fetch media from ${url}: ${String(err)}`);
   }
 
+  const cleanup = (res as { [FETCH_CLEANUP_SYMBOL]?: () => Promise<void> | void })[
+    FETCH_CLEANUP_SYMBOL
+  ];
   try {
     if (!res.ok) {
       const statusText = res.statusText ? ` ${res.statusText}` : "";
-      const redirected = finalUrl !== url ? ` (redirected to ${finalUrl})` : "";
+      const redirected = res.url && res.url !== url ? ` (redirected to ${res.url})` : "";
       let detail = `HTTP ${res.status}${statusText}`;
       if (!res.body) {
         detail = `HTTP ${res.status}${statusText}; empty response body`;
@@ -133,7 +137,7 @@ export async function fetchRemoteMedia(options: FetchMediaOptions): Promise<Fetc
       : Buffer.from(await res.arrayBuffer());
     let fileNameFromUrl: string | undefined;
     try {
-      const parsed = new URL(finalUrl);
+      const parsed = new URL(url);
       const base = path.basename(parsed.pathname);
       fileNameFromUrl = base || undefined;
     } catch {
@@ -145,7 +149,7 @@ export async function fetchRemoteMedia(options: FetchMediaOptions): Promise<Fetc
       headerFileName || fileNameFromUrl || (filePathHint ? path.basename(filePathHint) : undefined);
 
     const filePathForMime =
-      headerFileName && path.extname(headerFileName) ? headerFileName : (filePathHint ?? finalUrl);
+      headerFileName && path.extname(headerFileName) ? headerFileName : (filePathHint ?? url);
     const contentType = await detectMime({
       buffer,
       headerMime: res.headers.get("content-type"),
@@ -164,8 +168,8 @@ export async function fetchRemoteMedia(options: FetchMediaOptions): Promise<Fetc
       fileName,
     };
   } finally {
-    if (release) {
-      await release();
+    if (typeof cleanup === "function") {
+      await cleanup();
     }
   }
 }
