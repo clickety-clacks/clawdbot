@@ -1,5 +1,8 @@
 export function deepMerge<T>(target: T, source: Partial<T>): T {
   for (const [rawKey, value] of Object.entries(source ?? {}) as [keyof T, any][]) {
+    if (rawKey === "__proto__" || rawKey === "constructor" || rawKey === "prototype") {
+      continue;
+    }
     if (
       value &&
       typeof value === "object" &&
