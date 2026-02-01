@@ -84,7 +84,6 @@ async function createChannelHandler(params: {
   channel: Exclude<OutboundChannel, "none">;
   to: string;
   accountId?: string;
-  sessionKey?: string;
   replyToId?: string | null;
   threadId?: string | number | null;
   identity?: OutboundIdentity;
@@ -101,7 +100,6 @@ async function createChannelHandler(params: {
     channel: params.channel,
     to: params.to,
     accountId: params.accountId,
-    sessionKey: params.sessionKey,
     replyToId: params.replyToId,
     threadId: params.threadId,
     identity: params.identity,
@@ -120,7 +118,6 @@ function createPluginHandler(params: {
   channel: Exclude<OutboundChannel, "none">;
   to: string;
   accountId?: string;
-  sessionKey?: string;
   replyToId?: string | null;
   threadId?: string | number | null;
   identity?: OutboundIdentity;
@@ -147,7 +144,6 @@ function createPluginHandler(params: {
             text: payload.text ?? "",
             mediaUrl: payload.mediaUrl,
             accountId: params.accountId,
-            sessionKey: params.sessionKey,
             replyToId: params.replyToId,
             threadId: params.threadId,
             identity: params.identity,
@@ -163,7 +159,6 @@ function createPluginHandler(params: {
         to: params.to,
         text,
         accountId: params.accountId,
-        sessionKey: params.sessionKey,
         replyToId: params.replyToId,
         threadId: params.threadId,
         identity: params.identity,
@@ -177,7 +172,6 @@ function createPluginHandler(params: {
         text: caption,
         mediaUrl,
         accountId: params.accountId,
-        sessionKey: params.sessionKey,
         replyToId: params.replyToId,
         threadId: params.threadId,
         identity: params.identity,
@@ -194,8 +188,6 @@ export async function deliverOutboundPayloads(params: {
   channel: Exclude<OutboundChannel, "none">;
   to: string;
   accountId?: string;
-  /** Session key for the delivery context. Used by clawline to determine channel type. */
-  sessionKey?: string;
   payloads: ReplyPayload[];
   replyToId?: string | null;
   threadId?: string | number | null;
@@ -225,7 +217,6 @@ export async function deliverOutboundPayloads(params: {
     to,
     deps,
     accountId,
-    sessionKey: params.sessionKey,
     replyToId: params.replyToId,
     threadId: params.threadId,
     identity: params.identity,
