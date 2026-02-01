@@ -8,7 +8,7 @@ description: Local mobile provider for the Clawline iOS/Android clients.
 
 Clawline exposes a pairing/token-authenticated WebSocket + HTTP server that the
 Clawline iOS/Android apps can connect to for chat, uploads, and downloads. The
-service runs inside the Clawdbot gateway process, so it shares the same runtime
+service runs inside the OpenClaw gateway process, so it shares the same runtime
 configuration and adapters as the rest of your deployment.
 
 ## Enabling
@@ -25,15 +25,15 @@ media paths:
       network: {
         bindAddress: "127.0.0.1",
         allowInsecurePublic: false,
-        allowedOrigins: ["null"]
+        allowedOrigins: ["null"],
       },
       port: 18792,
-      statePath: "~/.clawdbot/clawline",
+      statePath: "~/.openclaw/clawline",
       media: {
-        storagePath: "~/.clawdbot/clawline-media"
-      }
-    }
-  }
+        storagePath: "~/.openclaw/clawline-media",
+      },
+    },
+  },
 }
 ```
 
@@ -58,10 +58,10 @@ mobile clients without touching the global agent configuration:
         provider: "anthropic",
         model: "claude-sonnet-4-5",
         timeoutSeconds: 120,
-        responseFallback: "Sorry, something went wrong."
-      }
-    }
-  }
+        responseFallback: "Sorry, something went wrong.",
+      },
+    },
+  },
 }
 ```
 
@@ -74,13 +74,13 @@ a reverse proxy with TLS termination for production use.
 
 ## Allowlist, pairing, and admin access
 
-Clawline tracks paired devices in `~/.clawdbot/clawline/allowlist.json`. Each entry carries
+Clawline tracks paired devices in `~/.openclaw/clawline/allowlist.json`. Each entry carries
 metadata plus an `isAdmin` flag that controls whether the device should see the admin
 transcript:
 
 - Tokens now only encode identity (`deviceId` + `userId`); they do **not** embed the admin flag.
 - The running provider reloads the allowlist whenever the file changes. Changing `isAdmin`
-  immediately updates replay + live fan-out—no need to reissue tokens.
+  immediately updates replay + live fan-out--no need to reissue tokens.
 - When a WebSocket authenticates, the server replies with an `auth_result` payload that includes
   `isAdmin: true|false`. Clients can use that field to hide/disable their admin UI, but the
   provider still enforces delivery, so flipping the allowlist entry is authoritative.

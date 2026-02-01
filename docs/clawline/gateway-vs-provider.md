@@ -12,14 +12,14 @@ A technical whitepaper on the decision to build Clawline as an independent provi
 
 ### What Is the Gateway?
 
-The Gateway is Clawdbot's orchestration layer. It provides:
+The Gateway is OpenClaw's orchestration layer. It provides:
 
 - **Agent invocation** (`agent.run`, `chat.send`)
 - **Session management** (`sessions.list`, `chat.history`)
 - **Health monitoring** (`health`, `channels.status`)
 - **Event broadcasting** to connected Control UI clients
 
-Its primary client is the Control UI—a web-based admin console for managing Clawdbot. The Gateway is designed for:
+Its primary client is the Control UI--a web-based admin console for managing OpenClaw. The Gateway is designed for:
 
 - Ephemeral connections (browser refresh = fresh state)
 - Trusted, single-user access (the admin)
@@ -39,16 +39,16 @@ Clawline serves native iOS/macOS chat applications. These clients require:
 
 ### The Shape Mismatch
 
-| Capability | Gateway | Clawline |
-|------------|---------|----------|
-| Connection model | Ephemeral | Persistent |
-| Storage | None (reads `.jsonl` files) | SQLite with indexed queries |
-| Offline clients | Drops events | Queues for replay |
-| Auth model | Token-based, trusted | Device allowlisting, untrusted |
-| Event delivery | Broadcast to all | Per-device with acks |
-| Client state | Stateless | Stateful per device |
+| Capability       | Gateway                     | Clawline                       |
+| ---------------- | --------------------------- | ------------------------------ |
+| Connection model | Ephemeral                   | Persistent                     |
+| Storage          | None (reads `.jsonl` files) | SQLite with indexed queries    |
+| Offline clients  | Drops events                | Queues for replay              |
+| Auth model       | Token-based, trusted        | Device allowlisting, untrusted |
+| Event delivery   | Broadcast to all            | Per-device with acks           |
+| Client state     | Stateless                   | Stateful per device            |
 
-These aren't minor differences—they represent fundamentally different architectural assumptions.
+These aren't minor differences--they represent fundamentally different architectural assumptions.
 
 ---
 
@@ -164,6 +164,7 @@ interface GatewayProviderPlugin {
 **1. Interface Design Without Evidence**
 
 What operations does the storage interface need?
+
 - Simple key-value? Indexed queries? Full-text search? Vector similarity?
 - Transactions? Batch operations? Streaming reads?
 
@@ -183,11 +184,12 @@ interface PluginLifecycle {
 }
 ```
 
-This is real engineering—not just exposing hooks but managing plugin lifecycles correctly.
+This is real engineering--not just exposing hooks but managing plugin lifecycles correctly.
 
 **3. Testing Matrix Explosion**
 
 Gateway currently tests against one client model. With plugins:
+
 - Test with SQLite storage + offline sync + device auth
 - Test with Postgres storage + real-time sync + token auth
 - Test with memory storage + no sync + no auth
@@ -207,7 +209,7 @@ Consider the typing indicator. Gateway emits lifecycle events:
 emitAgentEvent({
   runId,
   stream: "lifecycle",
-  data: { phase: "start" }  // or "end"
+  data: { phase: "start" }, // or "end"
 });
 ```
 
@@ -235,23 +237,25 @@ This is how general APIs become specific-customer APIs in disguise.
 
 ### Code Duplication
 
-| Component | Gateway LOC | Clawline LOC | Truly Duplicate |
-|-----------|-------------|--------------|-----------------|
-| WebSocket server | ~200 | ~200 | ~150 (patterns similar, not identical) |
-| Event routing | ~150 | ~100 | ~80 |
-| JSON-RPC dispatch | ~100 | ~80 | ~60 |
-| **Total** | | | **~290 LOC** |
+| Component         | Gateway LOC | Clawline LOC | Truly Duplicate                        |
+| ----------------- | ----------- | ------------ | -------------------------------------- |
+| WebSocket server  | ~200        | ~200         | ~150 (patterns similar, not identical) |
+| Event routing     | ~150        | ~100         | ~80                                    |
+| JSON-RPC dispatch | ~100        | ~80          | ~60                                    |
+| **Total**         |             |              | **~290 LOC**                           |
 
-The duplication is real but modest. Both systems need WebSocket handling and event routing—the implementations differ in details (ephemeral vs persistent, broadcast vs per-device).
+The duplication is real but modest. Both systems need WebSocket handling and event routing--the implementations differ in details (ephemeral vs persistent, broadcast vs per-device).
 
 ### Maintenance Burden
 
 **Separate Provider:**
+
 - Two systems to understand conceptually
 - Changes to shared core affect both
 - Each system's internals are independent
 
 **Gateway Plugins:**
+
 - One system with plugin architecture
 - Plugin interface is a contract that constrains both sides
 - Plugin bugs can affect Gateway stability
@@ -259,11 +263,13 @@ The duplication is real but modest. Both systems need WebSocket handling and eve
 ### Evolution Independence
 
 **Separate Provider:**
+
 - Clawline can change storage schema without Gateway release
 - Clawline can experiment with sync protocols freely
 - Gateway can refactor internals without Clawline compatibility concerns
 
 **Gateway Plugins:**
+
 - Storage schema changes may require interface changes
 - Sync protocol experiments constrained by interface
 - Gateway refactors must preserve plugin contracts
@@ -275,11 +281,13 @@ The duplication is real but modest. Both systems need WebSocket handling and eve
 ### What If Android/Electron Clients Emerge?
 
 **With Separate Provider (Current):**
+
 - Option A: Implement Clawline's WebSocket protocol (iOS protocol becomes standard)
 - Option B: Build another provider (more duplication)
 - Option C: Extract common patterns then (informed by two real implementations)
 
 **With Gateway Plugins (Hypothetical):**
+
 - New client implements Gateway's plugin interfaces
 - Benefits from existing storage/sync/auth plugins
 - Constrained by interfaces designed before their needs were known
@@ -287,11 +295,13 @@ The duplication is real but modest. Both systems need WebSocket handling and eve
 ### What If Clawline's Approach Is Wrong?
 
 **With Separate Provider:**
+
 - Replace Clawline entirely
 - Gateway unaffected
 - Migration path: deprecate old, build new
 
 **With Gateway Plugins:**
+
 - Must maintain backward compatibility or coordinate migration
 - Gateway changes required
 - All plugin users affected
@@ -302,7 +312,7 @@ The duplication is real but modest. Both systems need WebSocket handling and eve
 
 ### 1. Avoid Premature Abstraction
 
-> "Duplication is far cheaper than the wrong abstraction." — Sandi Metz
+> "Duplication is far cheaper than the wrong abstraction." -- Sandi Metz
 
 We have one native chat client. Extracting a "general native chat platform" from one example means guessing. The second client will reveal what's actually general.
 
@@ -329,15 +339,17 @@ The decision to build Clawline as a separate provider reflects a judgment about 
 **Clawline is chat-shaped.** It answers questions like "sync my messages," "did my device receive this?," "let me upload this image." Its clients are end-user chat applications.
 
 These are different domains with different requirements. Combining them would either:
+
 - Compromise Gateway's simplicity for capabilities only chat clients use
 - Create speculative abstractions based on one customer's needs
 
 The ~290 lines of duplicated patterns are an acceptable cost for:
+
 - Clear system boundaries
 - Independent evolution
 - Freedom to be wrong and recover
 
-If future chat clients emerge, we'll have evidence to inform proper abstractions. Until then, Clawline stands alone—focused, replaceable, and unconstrained by premature generalization.
+If future chat clients emerge, we'll have evidence to inform proper abstractions. Until then, Clawline stands alone--focused, replaceable, and unconstrained by premature generalization.
 
 ---
 

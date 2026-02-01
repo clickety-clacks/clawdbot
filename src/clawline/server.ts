@@ -143,12 +143,16 @@ function derivePeerId(entry: AllowlistEntry): string {
 }
 
 function normalizeUserIdFromClaimedName(claimedName?: string): string | null {
-  if (!claimedName) return null;
+  if (!claimedName) {
+    return null;
+  }
   const ascii = claimedName.normalize("NFKD").replace(COMBINING_MARKS_REGEX, "");
   const lowered = ascii.toLowerCase();
   const replaced = lowered.replace(/[^a-z0-9]+/g, "_");
   const trimmed = replaced.replace(/^_+|_+$/g, "");
-  if (!trimmed) return null;
+  if (!trimmed) {
+    return null;
+  }
   return trimmed.slice(0, USER_ID_MAX_LENGTH);
 }
 
@@ -190,7 +194,7 @@ async function notifyGatewayOfPending(entry: PendingEntry) {
 
 function normalizeAttachmentsInput(
   raw: unknown,
-  mediaConfig: ProviderConfig["media"],
+  _mediaConfig: ProviderConfig["media"],
 ): { attachments: NormalizedAttachment[]; inlineBytes: number; assetIds: string[] } {
   if (raw === undefined) {
     return { attachments: [], inlineBytes: 0, assetIds: [] };
@@ -205,7 +209,7 @@ function normalizeAttachmentsInput(
     if (!entry || typeof entry !== "object") {
       throw new ClientMessageError("invalid_message", "Invalid attachment");
     }
-    const typed = entry as any;
+    const typed = entry;
     if (typed.type === "image") {
       if (typeof typed.mimeType !== "string" || typeof typed.data !== "string") {
         throw new ClientMessageError("invalid_message", "Invalid inline attachment");
@@ -296,16 +300,22 @@ function summarizeAttachmentStats(attachments?: unknown[]): {
   inlineBytes: number;
   assetCount: number;
 } | null {
-  if (!attachments || attachments.length === 0) return null;
+  if (!attachments || attachments.length === 0) {
+    return null;
+  }
   let inlineBytes = 0;
   let assetCount = 0;
   let count = 0;
   for (const attachment of attachments) {
-    if (!attachment || typeof attachment !== "object") continue;
+    if (!attachment || typeof attachment !== "object") {
+      continue;
+    }
     const typed = attachment as { type?: unknown; data?: unknown };
     if (typed.type === "image") {
       const data = typeof typed.data === "string" ? typed.data : "";
-      if (!data) continue;
+      if (!data) {
+        continue;
+      }
       inlineBytes += Math.round((data.length / 4) * 3);
       count += 1;
     } else if (typed.type === "asset") {
@@ -313,7 +323,9 @@ function summarizeAttachmentStats(attachments?: unknown[]): {
       count += 1;
     }
   }
-  if (count === 0) return null;
+  if (count === 0) {
+    return null;
+  }
   return { count, inlineBytes, assetCount };
 }
 
@@ -425,8 +437,8 @@ export const DEFAULT_ALERT_INSTRUCTIONS_TEXT = `After handling this alert, evalu
 
 const DEFAULT_CONFIG: ProviderConfig = {
   port: 18800,
-  statePath: path.join(os.homedir(), ".clawdbot", "clawline"),
-  alertInstructionsPath: path.join(os.homedir(), ".clawdbot", "clawline", "alert-instructions.md"),
+  statePath: path.join(os.homedir(), ".openclaw", "clawline"),
+  alertInstructionsPath: path.join(os.homedir(), ".openclaw", "clawline", "alert-instructions.md"),
   network: {
     bindAddress: "127.0.0.1",
     allowInsecurePublic: false,
@@ -446,7 +458,7 @@ const DEFAULT_CONFIG: ProviderConfig = {
     pendingSocketTimeoutSeconds: 300,
   },
   media: {
-    storagePath: path.join(os.homedir(), ".clawdbot", "clawline-media"),
+    storagePath: path.join(os.homedir(), ".openclaw", "clawline-media"),
     maxInlineBytes: 262_144,
     maxUploadBytes: 104_857_600,
     unreferencedUploadTtlSeconds: 3600,
@@ -518,7 +530,9 @@ function triggerFaceSpeak(
   const redactedHost = (() => {
     try {
       const host = new URL(endpoint).host;
-      if (!host) return "redacted";
+      if (!host) {
+        return "redacted";
+      }
       return host.replace(/[^.]+/g, "***");
     } catch {
       return "invalid";
@@ -666,7 +680,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const adapterOverrides =
     (options.config as { adapterOverrides?: ClawlineAdapterOverrides } | undefined)
       ?.adapterOverrides ?? {};
-  const clawdbotCfg = options.clawdbotConfig;
+  const openClawCfg = options.openClawConfig;
   const logger: Logger = options.logger ?? console;
   const sessionStorePath = options.sessionStorePath;
   const mainSessionKey = options.mainSessionKey?.trim() || "agent:main:main";
@@ -758,15 +772,25 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           continue;
         }
         const sessionKey = typeof payload.sessionKey === "string" ? payload.sessionKey.trim() : "";
-        if (!sessionKey) continue;
+        if (!sessionKey) {
+          continue;
+        }
         const parts = sessionKey.split(":");
-        if (parts.length < 5) continue;
-        if (parts[0] !== "agent" || parts[2] !== "clawline" || parts[3] !== "dm") continue;
+        if (parts.length < 5) {
+          continue;
+        }
+        if (parts[0] !== "agent" || parts[2] !== "clawline" || parts[3] !== "dm") {
+          continue;
+        }
         const normalizedUserId = sanitizeUserId(parts[4]).toLowerCase();
-        if (!normalizedUserId) continue;
+        if (!normalizedUserId) {
+          continue;
+        }
         const agentId = parts[1] || "main";
         const nextSessionKey = buildClawlinePersonalSessionKey(agentId, normalizedUserId);
-        if (nextSessionKey === sessionKey) continue;
+        if (nextSessionKey === sessionKey) {
+          continue;
+        }
         payload.sessionKey = nextSessionKey;
         const payloadJson = JSON.stringify(payload);
         updateEvent.run(payloadJson, Buffer.byteLength(payloadJson, "utf8"), row.id);
@@ -906,7 +930,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       assetIdRegex: ASSET_ID_REGEX,
       canAccessAsset: ({ assetOwnerId, auth }) =>
         // Admins can access any asset; users can access their own
-        auth.isAdmin === true || assetOwnerId === auth.userId,
+        auth.isAdmin || assetOwnerId === auth.userId,
     }));
 
     insertUserMessageTx = newDb.transaction(
@@ -1212,9 +1236,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         headerValue: string | string[] | undefined,
         needle: string,
       ): boolean => {
-        if (typeof headerValue === "string") return headerValue.toLowerCase().includes(needle);
-        if (Array.isArray(headerValue))
+        if (typeof headerValue === "string") {
+          return headerValue.toLowerCase().includes(needle);
+        }
+        if (Array.isArray(headerValue)) {
           return headerValue.some((value) => value.toLowerCase().includes(needle));
+        }
         return false;
       };
       const isUpgradeRequest =
@@ -1454,10 +1481,16 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   }
 
   function isValidAlertSessionKey(value?: string) {
-    if (!value) return false;
+    if (!value) {
+      return false;
+    }
     const trimmed = value.trim();
-    if (!trimmed) return false;
-    if (trimmed === "global") return true;
+    if (!trimmed) {
+      return false;
+    }
+    if (trimmed === "global") {
+      return true;
+    }
     return (
       /^agent:[^:]+:main$/i.test(trimmed) ||
       /^agent:[^:]+:clawline:[^:]+:main$/i.test(trimmed) ||
@@ -1806,7 +1839,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
     for (const session of sessionsByDevice.values()) {
       const entry = findAllowlistEntry(session.deviceId);
-      if (!entry) continue;
+      if (!entry) {
+        continue;
+      }
       if (session.isAdmin !== entry.isAdmin) {
         session.isAdmin = entry.isAdmin;
         const state = connectionState.get(session.socket);
@@ -1836,7 +1871,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
   async function deliverPendingApproval(entry: AllowlistEntry) {
     const pending = pendingSockets.get(entry.deviceId);
-    if (!pending) return;
+    if (!pending) {
+      return;
+    }
     pendingSockets.delete(entry.deviceId);
     const token = issueToken(entry);
     const delivered = await sendJson(pending.socket, {
@@ -1874,14 +1911,18 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
   async function setTokenDelivered(deviceId: string, delivered: boolean) {
     const entry = findAllowlistEntry(deviceId);
-    if (!entry) return;
+    if (!entry) {
+      return;
+    }
     entry.tokenDelivered = delivered;
     await persistAllowlist();
   }
 
   async function updateLastSeen(deviceId: string, timestamp: number) {
     const entry = findAllowlistEntry(deviceId);
-    if (!entry) return;
+    if (!entry) {
+      return;
+    }
     entry.lastSeenAt = timestamp;
     await persistAllowlist();
   }
@@ -2053,7 +2094,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       isAdmin: session.isAdmin,
       replayCount: limited.length,
       replayTruncated: combined.length > limited.length,
-      historyReset: lastMessageId ? false : true,
+      historyReset: !lastMessageId,
     };
     // Debug logging for duplicate investigation
     logger.info("replay_complete", {
@@ -2126,7 +2167,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       payload.sessionKey =
         resolvedChannelType === ADMIN_CHANNEL_TYPE ? mainSessionKey : expectedPersonalSessionKey;
     }
-    if (session.socket.readyState !== WebSocket.OPEN) return;
+    if (session.socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
     const stats = summarizeAttachmentStats(payload.attachments);
     if (stats) {
       logger.info?.(
@@ -2205,7 +2248,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       }
       while (faceSpeakDedupe.size > FACE_SPEAK_DEDUPE_MAX) {
         const oldest = faceSpeakDedupe.keys().next().value;
-        if (!oldest) break;
+        if (!oldest) {
+          break;
+        }
         faceSpeakDedupe.delete(oldest);
       }
       const dedupeKey = messageId ?? (speakTextLen > 0 ? `text:${sha256(speakText.trim())}` : "");
@@ -2224,7 +2269,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
   function broadcastToUser(userId: string, payload: ServerMessage) {
     const sessions = userSessions.get(userId);
-    if (!sessions) return;
+    if (!sessions) {
+      return;
+    }
     for (const session of sessions) {
       sendPayloadToSession(session, payload);
     }
@@ -2232,7 +2279,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
   function broadcastToAdmins(payload: ServerMessage) {
     for (const session of sessionsByDevice.values()) {
-      if (!session.isAdmin) continue;
+      if (!session.isAdmin) {
+        continue;
+      }
       sendPayloadToSession(session, payload);
     }
   }
@@ -2244,27 +2293,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
     sendPayloadToSession(session, payload);
     return true;
-  }
-
-  /**
-   * Route a message to the correct set of sessions based on sessionKey.
-   * Admin session key (agent:main:main) → all admin sessions (shared channel).
-   * Personal session key → all sessions for the target user.
-   */
-  function broadcastToSessionKey(sessionKey: string, targetUserId: string, payload: ServerMessage) {
-    const isMain = sessionKey.toLowerCase() === mainSessionKey.toLowerCase();
-    if (isMain) {
-      for (const session of sessionsByDevice.values()) {
-        if (!session.isAdmin) continue;
-        sendPayloadToSession(session, payload);
-      }
-    } else {
-      const sessions = userSessions.get(targetUserId);
-      if (!sessions) return;
-      for (const session of sessions) {
-        sendPayloadToSession(session, payload);
-      }
-    }
   }
 
   function broadcastToChannelSessions(
@@ -2451,7 +2479,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     if (target.kind === "device") {
       deliverToDevice(target.deviceId, event);
     } else {
-      broadcastToSessionKey(resolvedSessionKey, target.userId, event);
+      broadcastToUser(target.userId, event);
     }
     return {
       messageId: event.id,
@@ -2590,7 +2618,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           ) {
             throw new ClientMessageError("invalid_message", "Duplicate mismatch");
           }
-          if (existing.streaming === MessageStreamingState.Failed) {
+          if (existing.streaming === (MessageStreamingState.Failed as number)) {
             throw new ClientMessageError("invalid_message", "Message failed");
           }
           if (existing.ackSent === 0) {
@@ -2694,7 +2722,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
         const fallbackText = adapterOverrides.responseFallback?.trim() ?? "";
         const prefixContext: ResponsePrefixContext = {
-          identityName: resolveIdentityName(clawdbotCfg, route.agentId),
+          identityName: resolveIdentityName(openClawCfg, route.agentId),
         };
 
         // Track activity state for typing indicator
@@ -2719,9 +2747,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         };
 
         const { dispatcher, replyOptions, markDispatchIdle } = createReplyDispatcherWithTyping({
-          responsePrefix: resolveEffectiveMessagesConfig(clawdbotCfg, route.agentId).responsePrefix,
+          responsePrefix: resolveEffectiveMessagesConfig(openClawCfg, route.agentId).responsePrefix,
           responsePrefixContextProvider: () => prefixContext,
-          humanDelay: resolveHumanDelayConfig(clawdbotCfg, route.agentId),
+          humanDelay: resolveHumanDelayConfig(openClawCfg, route.agentId),
           deliver: async (replyPayload) => {
             // Stop activity signal when first content arrives (streaming begins)
             if (activitySignaled) {
@@ -2786,7 +2814,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         try {
           const result = await dispatchReplyFromConfig({
             ctx: ctxPayload,
-            cfg: clawdbotCfg,
+            cfg: openClawCfg,
             dispatcher,
             replyOptions: {
               ...replyOptions,
@@ -3394,7 +3422,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         await cleanupTmpDirectory();
         await cleanupOrphanedAssetFiles();
       }
-      if (started) return;
+      if (started) {
+        return;
+      }
       await new Promise<void>((resolve, reject) => {
         const onError = (err: Error) => {
           httpServer.removeListener("error", onError);
@@ -3411,7 +3441,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       logger.info(`Provider listening on ${config.network.bindAddress}:${port}`);
     },
     async stop() {
-      if (!started) return;
+      if (!started) {
+        return;
+      }
       allowlistWatcher.close();
       pendingFileWatcher.close();
       denylistWatcher.close();

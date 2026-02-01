@@ -1,4 +1,4 @@
-import type { ClawdbotConfig } from "../config/config.js";
+import type { OpenClawConfig } from "../config/config.js";
 import type { getReplyFromConfig } from "../auto-reply/reply.js";
 
 export type DeviceInfo = {
@@ -86,7 +86,7 @@ export interface ProviderConfig {
 
 export interface ProviderOptions {
   config?: Partial<ProviderConfig>;
-  clawdbotConfig: ClawdbotConfig;
+  openClawConfig: OpenClawConfig;
   replyResolver?: typeof getReplyFromConfig;
   logger?: Logger;
   sessionStorePath: string;

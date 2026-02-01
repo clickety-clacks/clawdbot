@@ -1,14 +1,14 @@
 ---
 name: clawline-allowlist
 description: Inspect and reason about Clawline allowlist, pending, and denylist entries plus identity fields.
-metadata: {"clawdbot":{"skillKey":"clawline-allowlist"}}
+metadata: { "openclaw": { "skillKey": "clawline-allowlist" } }
 ---
 
 # Clawline Allowlist and Identity
 
 ## Key Files
 
-All files live under `~/.clawdbot/clawline/` by default (override with `clawline.statePath`).
+All files live under `~/.openclaw/clawline/` by default (override with `clawline.statePath`).
 
 - `allowlist.json` - approved devices
 - `pending.json` - waiting for approval
@@ -25,6 +25,7 @@ The provider watches allowlist/pending for changes, so edits take effect without
 - `bindingId`: optional secondary identifier for devices that migrate.
 
 UserId policy:
+
 - If `claimedName` is present, the server normalizes it (lowercase, punctuation -> `_`).
 - If the normalized name is empty, the server generates `user_<uuid>`.
 - Admin status is derived from the deployment's reserved admin userId; do not set `isAdmin` manually.
@@ -32,14 +33,15 @@ UserId policy:
 ## Inspect Entries
 
 ```bash
-jq ".entries" ~/.clawdbot/clawline/pending.json 2>/dev/null
-jq ".entries" ~/.clawdbot/clawline/allowlist.json 2>/dev/null
-jq "." ~/.clawdbot/clawline/denylist.json 2>/dev/null
+jq ".entries" ~/.openclaw/clawline/pending.json 2>/dev/null
+jq ".entries" ~/.openclaw/clawline/allowlist.json 2>/dev/null
+jq "." ~/.openclaw/clawline/denylist.json 2>/dev/null
 ```
 
 ## When You Need to Change userId
 
 Tokens are bound to the `userId` stored in allowlist. To migrate a device:
+
 1. Remove the allowlist entry.
 2. Re-pair the device from the app.
 3. Approve the new pending request with the desired `userId`.

@@ -1,6 +1,7 @@
 import {
   createActionGate,
   readNumberParam,
+  readStringArrayParam,
   readStringOrNumberParam,
   readStringParam,
 } from "../../../agents/tools/common.js";
@@ -22,6 +23,7 @@ function readTelegramSendParams(params: Record<string, unknown>) {
   const buttons = params.buttons;
   const asVoice = typeof params.asVoice === "boolean" ? params.asVoice : undefined;
   const silent = typeof params.silent === "boolean" ? params.silent : undefined;
+  const quoteText = readStringParam(params, "quoteText");
   return {
     to,
     content,
@@ -31,6 +33,7 @@ function readTelegramSendParams(params: Record<string, unknown>) {
     buttons,
     asVoice,
     silent,
+    quoteText: quoteText ?? undefined,
   };
 }
 
@@ -39,28 +42,46 @@ export const telegramMessageActions: ChannelMessageActionAdapter = {
     const accounts = listEnabledTelegramAccounts(cfg).filter(
       (account) => account.tokenSource !== "none",
     );
-    if (accounts.length === 0) return [];
+    if (accounts.length === 0) {
+      return [];
+    }
     const gate = createActionGate(cfg.channels?.telegram?.actions);
     const actions = new Set<ChannelMessageActionName>(["send"]);
-    if (gate("reactions")) actions.add("react");
-    if (gate("deleteMessage")) actions.add("delete");
-    if (gate("editMessage")) actions.add("edit");
+    if (gate("reactions")) {
+      actions.add("react");
+    }
+    if (gate("deleteMessage")) {
+      actions.add("delete");
+    }
+    if (gate("editMessage")) {
+      actions.add("edit");
+    }
+    if (gate("sticker", false)) {
+      actions.add("sticker");
+      actions.add("sticker-search");
+    }
     return Array.from(actions);
   },
   supportsButtons: ({ cfg }) => {
     const accounts = listEnabledTelegramAccounts(cfg).filter(
       (account) => account.tokenSource !== "none",
     );
-    if (accounts.length === 0) return false;
+    if (accounts.length === 0) {
+      return false;
+    }
     return accounts.some((account) =>
       isTelegramInlineButtonsEnabled({ cfg, accountId: account.accountId }),
     );
   },
   extractToolSend: ({ args }) => {
     const action = typeof args.action === "string" ? args.action.trim() : "";
-    if (action !== "sendMessage") return null;
+    if (action !== "sendMessage") {
+      return null;
+    }
     const to = typeof args.to === "string" ? args.to : undefined;
-    if (!to) return null;
+    if (!to) {
+      return null;
+    }
     const accountId = typeof args.accountId === "string" ? args.accountId.trim() : undefined;
     return { to, accountId };
   },
@@ -78,7 +99,7 @@ export const telegramMessageActions: ChannelMessageActionAdapter = {
     }
 
     if (action === "react") {
-      const messageId = readStringParam(params, "messageId", {
+      const messageId = readStringOrNumberParam(params, "messageId", {
         required: true,
       });
       const emoji = readStringParam(params, "emoji", { allowEmpty: true });
@@ -87,7 +108,9 @@ export const telegramMessageActions: ChannelMessageActionAdapter = {
         {
           action: "react",
           chatId:
-            readStringParam(params, "chatId") ?? readStringParam(params, "to", { required: true }),
+            readStringOrNumberParam(params, "chatId") ??
+            readStringOrNumberParam(params, "channelId") ??
+            readStringParam(params, "to", { required: true }),
           messageId,
           emoji,
           remove,
@@ -135,6 +158,41 @@ export const telegramMessageActions: ChannelMessageActionAdapter = {
           messageId,
           content: message,
           buttons,
+          accountId: accountId ?? undefined,
+        },
+        cfg,
+      );
+    }
+
+    if (action === "sticker") {
+      const to =
+        readStringParam(params, "to") ?? readStringParam(params, "target", { required: true });
+      // Accept stickerId (array from shared schema) and use first element as fileId
+      const stickerIds = readStringArrayParam(params, "stickerId");
+      const fileId = stickerIds?.[0] ?? readStringParam(params, "fileId", { required: true });
+      const replyToMessageId = readNumberParam(params, "replyTo", { integer: true });
+      const messageThreadId = readNumberParam(params, "threadId", { integer: true });
+      return await handleTelegramAction(
+        {
+          action: "sendSticker",
+          to,
+          fileId,
+          replyToMessageId: replyToMessageId ?? undefined,
+          messageThreadId: messageThreadId ?? undefined,
+          accountId: accountId ?? undefined,
+        },
+        cfg,
+      );
+    }
+
+    if (action === "sticker-search") {
+      const query = readStringParam(params, "query", { required: true });
+      const limit = readNumberParam(params, "limit", { integer: true });
+      return await handleTelegramAction(
+        {
+          action: "searchSticker",
+          query,
+          limit: limit ?? undefined,
           accountId: accountId ?? undefined,
         },
         cfg,

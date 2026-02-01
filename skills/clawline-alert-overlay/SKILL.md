@@ -1,7 +1,7 @@
 ---
 name: clawline-alert-overlay
 description: Explain and control the Clawline alert-instructions overlay appended to alerts.
-metadata: {"clawdbot":{"skillKey":"clawline-alert-overlay"}}
+metadata: { "openclaw": { "skillKey": "clawline-alert-overlay" } }
 ---
 
 # Clawline Alert Instructions Overlay
@@ -10,7 +10,7 @@ Clawline can append a short operator note to every alert.
 
 ## What It Is
 
-- File: `~/.clawdbot/clawline/alert-instructions.md` (override with `clawline.alertInstructionsPath`).
+- File: `~/.openclaw/clawline/alert-instructions.md` (override with `clawline.alertInstructionsPath`).
 - The provider reads this file on each alert and appends it to the alert body, separated by a blank line.
 - The file is created automatically if missing, using the default alert text.
 

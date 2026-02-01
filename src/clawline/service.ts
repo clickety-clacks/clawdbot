@@ -1,4 +1,4 @@
-import type { ClawdbotConfig } from "../config/config.js";
+import type { OpenClawConfig } from "../config/config.js";
 import {
   resolveStorePath,
   resolveMainSessionKey,
@@ -14,7 +14,7 @@ export type ClawlineServiceHandle = {
 };
 
 export async function startClawlineService(params: {
-  config: ClawdbotConfig;
+  config: OpenClawConfig;
   logger?: Logger;
 }): Promise<ClawlineServiceHandle | null> {
   const logger = params.logger ?? console;
@@ -33,7 +33,7 @@ export async function startClawlineService(params: {
   });
   const server: ProviderServer = await createProviderServer({
     config: providerConfig,
-    clawdbotConfig: params.config,
+    openClawConfig: params.config,
     logger,
     sessionStorePath,
     mainSessionKey,

@@ -1,5 +1,5 @@
-import type { ChannelPlugin, ClawdbotConfig } from "clawdbot/plugin-sdk";
-import { DEFAULT_ACCOUNT_ID } from "clawdbot/plugin-sdk";
+import type { ChannelPlugin, OpenClawConfig } from "openclaw/plugin-sdk";
+import { DEFAULT_ACCOUNT_ID } from "openclaw/plugin-sdk";
 
 import { clawlineMessageActions } from "./actions.js";
 import { clawlineOnboardingAdapter } from "./onboarding.js";
@@ -13,28 +13,44 @@ type ResolvedClawlineAccount = {
 
 function parseClawlineUserId(raw?: string | null): string | undefined {
   const trimmed = raw?.trim();
-  if (!trimmed) return undefined;
+  if (!trimmed) {
+    return undefined;
+  }
   const colonIndex = trimmed.indexOf(":");
-  if (colonIndex < 0) return stripClawlineChannelSuffix(trimmed);
+  if (colonIndex < 0) {
+    return stripClawlineChannelSuffix(trimmed);
+  }
   const value = trimmed.slice(colonIndex + 1).trim();
   return stripClawlineChannelSuffix(value || undefined);
 }
 
 function stripClawlineChannelSuffix(value?: string): string | undefined {
   const trimmed = value?.trim();
-  if (!trimmed) return undefined;
+  if (!trimmed) {
+    return undefined;
+  }
   const lower = trimmed.toLowerCase();
-  if (lower.endsWith("-admin")) return trimmed.slice(0, -"-admin".length);
-  if (lower.endsWith("-personal")) return trimmed.slice(0, -"-personal".length);
+  if (lower.endsWith("-admin")) {
+    return trimmed.slice(0, -"-admin".length);
+  }
+  if (lower.endsWith("-personal")) {
+    return trimmed.slice(0, -"-personal".length);
+  }
   return trimmed;
 }
 
 function normalizeClawlineTarget(raw: string): string | undefined {
   const trimmed = raw.trim();
-  if (!trimmed) return undefined;
+  if (!trimmed) {
+    return undefined;
+  }
   const lower = trimmed.toLowerCase();
-  if (lower.startsWith("user:")) return `user:${trimmed.slice("user:".length).trim()}`;
-  if (lower.startsWith("device:")) return `device:${trimmed.slice("device:".length).trim()}`;
+  if (lower.startsWith("user:")) {
+    return `user:${trimmed.slice("user:".length).trim()}`;
+  }
+  if (lower.startsWith("device:")) {
+    return `device:${trimmed.slice("device:".length).trim()}`;
+  }
   return trimmed;
 }
 
@@ -50,7 +66,7 @@ const meta = {
 } as const;
 
 function resolveClawlineAccount(params: {
-  cfg: ClawdbotConfig;
+  cfg: OpenClawConfig;
   accountId?: string | null;
 }): ResolvedClawlineAccount {
   const resolvedAccountId = params.accountId ?? DEFAULT_ACCOUNT_ID;
@@ -88,7 +104,9 @@ export const clawlinePlugin: ChannelPlugin<ResolvedClawlineAccount> = {
     buildToolContext: ({ context, hasRepliedRef }) => {
       const userId =
         parseClawlineUserId(context.OriginatingTo) ?? parseClawlineUserId(context.From);
-      if (!userId) return undefined;
+      if (!userId) {
+        return undefined;
+      }
       return {
         currentChannelId: `user:${userId}`,
         hasRepliedRef,
@@ -109,9 +127,9 @@ export const clawlinePlugin: ChannelPlugin<ResolvedClawlineAccount> = {
     setAccountEnabled: ({ cfg, enabled }) => ({
       ...cfg,
       channels: {
-        ...(cfg.channels ?? {}),
+        ...cfg.channels,
         clawline: {
-          ...(cfg.channels?.clawline ?? {}),
+          ...cfg.channels?.clawline,
           enabled,
         },
       },

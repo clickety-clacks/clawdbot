@@ -46,6 +46,8 @@ type TelegramSendOpts = {
   silent?: boolean;
   /** Message ID to reply to (for threading) */
   replyToMessageId?: number;
+  /** Quote text for Telegram reply_parameters. */
+  quoteText?: string;
   /** Forum topic thread ID (for forum supergroups) */
   messageThreadId?: number;
   /** Inline keyboard buttons (reply markup). */
@@ -75,7 +77,9 @@ function createTelegramHttpLogger(cfg: ReturnType<typeof loadConfig>) {
     return () => {};
   }
   return (label: string, err: unknown) => {
-    if (!(err instanceof HttpError)) return;
+    if (!(err instanceof HttpError)) {
+      return;
+    }
     const detail = redactSensitiveText(formatUncaughtError(err.error ?? err));
     diagLogger.warn(`telegram http error (${label}): ${detail}`);
   };
@@ -103,7 +107,9 @@ function resolveTelegramClientOptions(
 }
 
 function resolveToken(explicit: string | undefined, params: { accountId: string; token: string }) {
-  if (explicit?.trim()) return explicit.trim();
+  if (explicit?.trim()) {
+    return explicit.trim();
+  }
   if (!params.token) {
     throw new Error(
       `Telegram bot token missing for account "${params.accountId}" (set channels.telegram.accounts.${params.accountId}.botToken/tokenFile or TELEGRAM_BOT_TOKEN for default).`,
@@ -114,7 +120,9 @@ function resolveToken(explicit: string | undefined, params: { accountId: string;
 
 function normalizeChatId(to: string): string {
   const trimmed = to.trim();
-  if (!trimmed) throw new Error("Recipient is required for Telegram sends");
+  if (!trimmed) {
+    throw new Error("Recipient is required for Telegram sends");
+  }
 
   // Common internal prefixes that sometimes leak into outbound sends.
   // - ctx.To uses `telegram:<id>`
@@ -126,14 +134,24 @@ function normalizeChatId(to: string): string {
   const m =
     /^https?:\/\/t\.me\/([A-Za-z0-9_]+)$/i.exec(normalized) ??
     /^t\.me\/([A-Za-z0-9_]+)$/i.exec(normalized);
-  if (m?.[1]) normalized = `@${m[1]}`;
+  if (m?.[1]) {
+    normalized = `@${m[1]}`;
+  }
 
-  if (!normalized) throw new Error("Recipient is required for Telegram sends");
-  if (normalized.startsWith("@")) return normalized;
-  if (/^-?\d+$/.test(normalized)) return normalized;
+  if (!normalized) {
+    throw new Error("Recipient is required for Telegram sends");
+  }
+  if (normalized.startsWith("@")) {
+    return normalized;
+  }
+  if (/^-?\d+$/.test(normalized)) {
+    return normalized;
+  }
 
   // If the user passed a username without `@`, assume they meant a public chat/channel.
-  if (/^[A-Za-z0-9_]{5,}$/i.test(normalized)) return `@${normalized}`;
+  if (/^[A-Za-z0-9_]{5,}$/i.test(normalized)) {
+    return `@${normalized}`;
+  }
 
   return normalized;
 }
@@ -148,7 +166,9 @@ function normalizeMessageId(raw: string | number): number {
       throw new Error("Message id is required for Telegram actions");
     }
     const parsed = Number.parseInt(value, 10);
-    if (Number.isFinite(parsed)) return parsed;
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
   }
   throw new Error("Message id is required for Telegram actions");
 }
@@ -156,7 +176,9 @@ function normalizeMessageId(raw: string | number): number {
 export function buildInlineKeyboard(
   buttons?: TelegramSendOpts["buttons"],
 ): InlineKeyboardMarkup | undefined {
-  if (!buttons?.length) return undefined;
+  if (!buttons?.length) {
+    return undefined;
+  }
   const rows = buttons
     .map((row) =>
       row
@@ -169,7 +191,9 @@ export function buildInlineKeyboard(
         ),
     )
     .filter((row) => row.length > 0);
-  if (rows.length === 0) return undefined;
+  if (rows.length === 0) {
+    return undefined;
+  }
   return { inline_keyboard: rows };
 }
 
@@ -198,9 +222,17 @@ export async function sendMessageTelegram(
   const messageThreadId =
     opts.messageThreadId != null ? opts.messageThreadId : target.messageThreadId;
   const threadIdParams = buildTelegramThreadParams(messageThreadId);
-  const threadParams: Record<string, number> = threadIdParams ? { ...threadIdParams } : {};
+  const threadParams: Record<string, unknown> = threadIdParams ? { ...threadIdParams } : {};
+  const quoteText = opts.quoteText?.trim();
   if (opts.replyToMessageId != null) {
-    threadParams.reply_to_message_id = Math.trunc(opts.replyToMessageId);
+    if (quoteText) {
+      threadParams.reply_parameters = {
+        message_id: Math.trunc(opts.replyToMessageId),
+        quote: quoteText,
+      };
+    } else {
+      threadParams.reply_to_message_id = Math.trunc(opts.replyToMessageId);
+    }
   }
   const hasThreadParams = Object.keys(threadParams).length > 0;
   const request = createTelegramRetryRunner({
@@ -219,7 +251,9 @@ export async function sendMessageTelegram(
       throw err;
     });
   const wrapChatNotFound = (err: unknown) => {
-    if (!/400: Bad Request: chat not found/i.test(formatErrorMessage(err))) return err;
+    if (!/400: Bad Request: chat not found/i.test(formatErrorMessage(err))) {
+      return err;
+    }
     return new Error(
       [
         `Telegram send failed: chat not found (chat_id=${chatId}).`,
@@ -618,4 +652,99 @@ function inferFilename(kind: ReturnType<typeof mediaKindFromMime>) {
     default:
       return "file.bin";
   }
+}
+
+type TelegramStickerOpts = {
+  token?: string;
+  accountId?: string;
+  verbose?: boolean;
+  api?: Bot["api"];
+  retry?: RetryConfig;
+  /** Message ID to reply to (for threading) */
+  replyToMessageId?: number;
+  /** Forum topic thread ID (for forum supergroups) */
+  messageThreadId?: number;
+};
+
+/**
+ * Send a sticker to a Telegram chat by file_id.
+ * @param to - Chat ID or username (e.g., "123456789" or "@username")
+ * @param fileId - Telegram file_id of the sticker to send
+ * @param opts - Optional configuration
+ */
+export async function sendStickerTelegram(
+  to: string,
+  fileId: string,
+  opts: TelegramStickerOpts = {},
+): Promise<TelegramSendResult> {
+  if (!fileId?.trim()) {
+    throw new Error("Telegram sticker file_id is required");
+  }
+
+  const cfg = loadConfig();
+  const account = resolveTelegramAccount({
+    cfg,
+    accountId: opts.accountId,
+  });
+  const token = resolveToken(opts.token, account);
+  const target = parseTelegramTarget(to);
+  const chatId = normalizeChatId(target.chatId);
+  const client = resolveTelegramClientOptions(account);
+  const api = opts.api ?? new Bot(token, client ? { client } : undefined).api;
+
+  const messageThreadId =
+    opts.messageThreadId != null ? opts.messageThreadId : target.messageThreadId;
+  const threadIdParams = buildTelegramThreadParams(messageThreadId);
+  const threadParams: Record<string, number> = threadIdParams ? { ...threadIdParams } : {};
+  if (opts.replyToMessageId != null) {
+    threadParams.reply_to_message_id = Math.trunc(opts.replyToMessageId);
+  }
+  const hasThreadParams = Object.keys(threadParams).length > 0;
+
+  const request = createTelegramRetryRunner({
+    retry: opts.retry,
+    configRetry: account.config.retry,
+    verbose: opts.verbose,
+  });
+  const logHttpError = createTelegramHttpLogger(cfg);
+  const requestWithDiag = <T>(fn: () => Promise<T>, label?: string) =>
+    request(fn, label).catch((err) => {
+      logHttpError(label ?? "request", err);
+      throw err;
+    });
+
+  const wrapChatNotFound = (err: unknown) => {
+    if (!/400: Bad Request: chat not found/i.test(formatErrorMessage(err))) {
+      return err;
+    }
+    return new Error(
+      [
+        `Telegram send failed: chat not found (chat_id=${chatId}).`,
+        "Likely: bot not started in DM, bot removed from group/channel, group migrated (new -100… id), or wrong bot token.",
+        `Input was: ${JSON.stringify(to)}.`,
+      ].join(" "),
+    );
+  };
+
+  const stickerParams = hasThreadParams ? threadParams : undefined;
+
+  const result = await requestWithDiag(
+    () => api.sendSticker(chatId, fileId.trim(), stickerParams),
+    "sticker",
+  ).catch((err) => {
+    throw wrapChatNotFound(err);
+  });
+
+  const messageId = String(result?.message_id ?? "unknown");
+  const resolvedChatId = String(result?.chat?.id ?? chatId);
+  if (result?.message_id) {
+    recordSentMessage(chatId, result.message_id);
+  }
+  recordChannelActivity({
+    channel: "telegram",
+    accountId: account.accountId,
+    direction: "outbound",
+  });
+
+  return { messageId, chatId: resolvedChatId };
 }

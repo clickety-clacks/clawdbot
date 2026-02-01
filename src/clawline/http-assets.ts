@@ -84,7 +84,9 @@ export function createAssetHandlers(deps: AssetHandlerDeps) {
               reject(new ClientMessageError("payload_too_large", "Upload too large"));
             }
           });
-          file.on("limit", () => reject(new ClientMessageError("payload_too_large", "Upload too large")));
+          file.on("limit", () =>
+            reject(new ClientMessageError("payload_too_large", "Upload too large")),
+          );
           file.on("error", reject);
           writeStream.on("error", reject);
           file.pipe(writeStream);
@@ -105,7 +107,9 @@ export function createAssetHandlers(deps: AssetHandlerDeps) {
       }
       const finalPath = path.join(assetsDir, assetId);
       await fs.rename(tmpPath, finalPath);
-      await enqueueWriteTask(() => insertAssetStmt.run(assetId, auth.userId, detectedMime, size, nowMs(), auth.deviceId));
+      await enqueueWriteTask(() =>
+        insertAssetStmt.run(assetId, auth.userId, detectedMime, size, nowMs(), auth.deviceId),
+      );
       res.setHeader("Content-Type", "application/json");
       res.writeHead(200);
       res.end(JSON.stringify({ assetId, mimeType: detectedMime, size }));
@@ -127,7 +131,11 @@ export function createAssetHandlers(deps: AssetHandlerDeps) {
     }
   }
 
-  async function handleDownload(req: http.IncomingMessage, res: http.ServerResponse, assetId: string) {
+  async function handleDownload(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    assetId: string,
+  ) {
     try {
       const auth = authenticateHttpRequest(req);
       if (!assetIdRegex.test(assetId)) {
@@ -142,9 +150,10 @@ export function createAssetHandlers(deps: AssetHandlerDeps) {
         return;
       }
       const ownsAsset = asset.userId === auth.userId;
-      const hasSharedAccess = !ownsAsset && typeof canAccessAsset === "function"
-        ? canAccessAsset({ assetOwnerId: asset.userId, auth })
-        : false;
+      const hasSharedAccess =
+        !ownsAsset && typeof canAccessAsset === "function"
+          ? canAccessAsset({ assetOwnerId: asset.userId, auth })
+          : false;
       if (!ownsAsset && !hasSharedAccess) {
         sendHttpError(res, 404, "asset_not_found", "Asset not found");
         return;
@@ -206,9 +215,13 @@ export function createAssetHandlers(deps: AssetHandlerDeps) {
       for (let i = 0; i < entries.length; i += batchSize) {
         const batch = entries.slice(i, i + batchSize);
         for (const entry of batch) {
-          if (!assetIdRegex.test(entry)) continue;
+          if (!assetIdRegex.test(entry)) {
+            continue;
+          }
           const asset = selectAssetStmt.get(entry);
-          if (asset) continue;
+          if (asset) {
+            continue;
+          }
           const filePath = path.join(assetsDir, entry);
           if (config.media.unreferencedUploadTtlSeconds > 0) {
             try {
@@ -239,7 +252,7 @@ export function createAssetHandlers(deps: AssetHandlerDeps) {
       return;
     }
     const cutoff = nowMs() - config.media.unreferencedUploadTtlSeconds * 1000;
-    const deletedAssetIds = (await enqueueWriteTask(() => {
+    const deletedAssetIds = await enqueueWriteTask(() => {
       const rows = selectExpiredAssetsStmt.all(cutoff) as { assetId: string }[];
       const deleted: string[] = [];
       for (const row of rows) {
@@ -249,7 +262,7 @@ export function createAssetHandlers(deps: AssetHandlerDeps) {
         }
       }
       return deleted;
-    })) as string[];
+    });
     for (const assetId of deletedAssetIds) {
       const assetPath = path.join(assetsDir, assetId);
       await safeUnlink(assetPath);

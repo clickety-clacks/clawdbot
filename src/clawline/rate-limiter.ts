@@ -2,7 +2,10 @@ export class SlidingWindowRateLimiter {
   private readonly history = new Map<string, number[]>();
   private cleanupCounter = 0;
 
-  constructor(private readonly limit: number, private readonly windowMs: number) {}
+  constructor(
+    private readonly limit: number,
+    private readonly windowMs: number,
+  ) {}
 
   attempt(key: string): boolean {
     if (this.limit <= 0) {

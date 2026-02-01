@@ -158,6 +158,8 @@ export type GroupToolPolicyConfig = {
   deny?: string[];
 };
 
+export type GroupToolPolicyBySenderConfig = Record<string, GroupToolPolicyConfig>;
+
 export type ExecToolConfig = {
   /** Exec host routing (default: sandbox). */
   host?: "sandbox" | "gateway" | "node";
@@ -224,6 +226,8 @@ export type MemorySearchConfig = {
   enabled?: boolean;
   /** Sources to index and search (default: ["memory"]). */
   sources?: Array<"memory" | "sessions">;
+  /** Extra paths to include in memory search (directories or .md files). */
+  extraPaths?: string[];
   /** Experimental memory search settings. */
   experimental?: {
     /** Enable session transcript indexing (experimental, default: false). */

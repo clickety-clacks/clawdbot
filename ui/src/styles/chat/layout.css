@@ -77,7 +77,10 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: background 150ms ease-out, color 150ms ease-out, border-color 150ms ease-out;
+  transition:
+    background 150ms ease-out,
+    color 150ms ease-out,
+    border-color 150ms ease-out;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
 }
 
@@ -250,7 +253,8 @@
   max-height: 150px;
   padding: 9px 12px;
   border-radius: 8px;
-  resize: vertical;
+  overflow-y: auto;
+  resize: none;
   white-space: pre-wrap;
   font-family: var(--font-body);
   font-size: 14px;

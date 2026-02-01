@@ -1,8 +1,6 @@
 import type { ClawlineOutboundSendParams, ClawlineOutboundSendResult } from "./domain.js";
 
-type ClawlineSendFn = (
-  params: ClawlineOutboundSendParams,
-) => Promise<ClawlineOutboundSendResult>;
+type ClawlineSendFn = (params: ClawlineOutboundSendParams) => Promise<ClawlineOutboundSendResult>;
 
 let currentSender: ClawlineSendFn | null = null;
 

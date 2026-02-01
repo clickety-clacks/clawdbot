@@ -1,0 +1,3 @@
+module ClawdbotKit {
+    header "/Users/mike/src/clawdbot/apps/shared/ClawdbotKit/.build/arm64-apple-macosx/debug/ClawdbotKit.build/include/ClawdbotKit-Swift.h"
+}
