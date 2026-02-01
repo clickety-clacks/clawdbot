@@ -17,11 +17,6 @@ vi.mock("../gateway/call.js", () => ({
   callGateway: (...args: unknown[]) => gatewayCallMock(...args),
 }));
 
-const sendDirectAgentMessageMock = vi.fn();
-vi.mock("../agents/direct-agent-message.js", () => ({
-  sendDirectAgentMessage: (...args: unknown[]) => sendDirectAgentMessageMock(...args),
-}));
-
 const sendMessageMock = vi.fn();
 vi.mock("../infra/outbound/message.js", () => ({
   sendMessage: (...args: unknown[]) => sendMessageMock(...args),
@@ -65,8 +60,6 @@ const decodeRawData = (data: WebSocket.RawData): string => {
 beforeEach(() => {
   gatewayCallMock.mockReset();
   gatewayCallMock.mockResolvedValue({ ok: true });
-  sendDirectAgentMessageMock.mockReset();
-  sendDirectAgentMessageMock.mockResolvedValue({ outcome: "sent" });
   sendMessageMock.mockReset();
   sendMessageMock.mockResolvedValue({
     channel: "clawline",
@@ -593,15 +586,14 @@ describe.sequential("clawline provider server", () => {
       expect(response.status).toBe(200);
       const payload = await response.json();
       expect(payload).toEqual({ ok: true });
-      expect(sendDirectAgentMessageMock).toHaveBeenCalledTimes(1);
-      const call = sendDirectAgentMessageMock.mock.calls[0]?.[0] as {
-        sessionKey?: string;
-        message?: string;
-        deliveryContext?: { channel?: string; to?: string };
+      expect(gatewayCallMock).toHaveBeenCalledTimes(1);
+      const call = gatewayCallMock.mock.calls[0]?.[0] as {
+        method?: string;
+        params?: { sessionKey?: string; message?: string };
       };
-      expect(call?.sessionKey).toBe("agent:main:main");
-      expect(call?.message).toBe("System Alert: [codex] Check on Flynn");
-      expect(call?.deliveryContext).toBeUndefined();
+      expect(call?.method).toBe("agent");
+      expect(call?.params?.sessionKey).toBe("agent:main:main");
+      expect(call?.params?.message).toBe("System Alert: [codex] Check on Flynn");
     } finally {
       await ctx.cleanup();
     }
@@ -620,14 +612,15 @@ describe.sequential("clawline provider server", () => {
         }),
       });
       expect(response.status).toBe(200);
-      expect(sendDirectAgentMessageMock).toHaveBeenCalledTimes(1);
-      const call = sendDirectAgentMessageMock.mock.calls[0]?.[0] as {
-        sessionKey?: string;
-        message?: string;
-        deliveryContext?: { channel?: string; to?: string };
+      expect(gatewayCallMock).toHaveBeenCalledTimes(1);
+      const call = gatewayCallMock.mock.calls[0]?.[0] as {
+        method?: string;
+        params?: { sessionKey?: string; channel?: string; to?: string };
       };
-      expect(call?.sessionKey).toBe("agent:main:clawline:flynn:main");
-      expect(call?.deliveryContext).toEqual({ channel: "clawline", to: "flynn" });
+      expect(call?.method).toBe("agent");
+      expect(call?.params?.sessionKey).toBe("agent:main:clawline:flynn:main");
+      expect(call?.params?.channel).toBe("clawline");
+      expect(call?.params?.to).toBe("flynn");
     } finally {
       await ctx.cleanup();
     }
@@ -646,14 +639,15 @@ describe.sequential("clawline provider server", () => {
         }),
       });
       expect(response.status).toBe(200);
-      expect(sendDirectAgentMessageMock).toHaveBeenCalledTimes(1);
-      const call = sendDirectAgentMessageMock.mock.calls[0]?.[0] as {
-        sessionKey?: string;
-        message?: string;
-        deliveryContext?: { channel?: string; to?: string };
+      expect(gatewayCallMock).toHaveBeenCalledTimes(1);
+      const call = gatewayCallMock.mock.calls[0]?.[0] as {
+        method?: string;
+        params?: { sessionKey?: string; channel?: string; to?: string };
       };
-      expect(call?.sessionKey).toBe("agent:main:main");
-      expect(call?.deliveryContext).toBeUndefined();
+      expect(call?.method).toBe("agent");
+      expect(call?.params?.sessionKey).toBe("agent:main:main");
+      expect(call?.params?.channel).toBeUndefined();
+      expect(call?.params?.to).toBeUndefined();
     } finally {
       await ctx.cleanup();
     }
@@ -671,10 +665,10 @@ describe.sequential("clawline provider server", () => {
       const payload = await response.json();
       expect(payload).toEqual({ ok: true });
       const expected = "[codex] Check on Flynn\n\nFollow up with Flynn ASAP.";
-      const call = sendDirectAgentMessageMock.mock.calls[0]?.[0] as
-        | { message?: string }
+      const call = gatewayCallMock.mock.calls[0]?.[0] as
+        | { params?: { message?: string } }
         | undefined;
-      expect(call?.message).toBe(`System Alert: ${expected}`);
+      expect(call?.params?.message).toBe(`System Alert: ${expected}`);
     } finally {
       await ctx.cleanup();
     }
@@ -692,10 +686,10 @@ describe.sequential("clawline provider server", () => {
       });
       expect(response.status).toBe(200);
       const expected = `[codex] Check on Flynn\n\n${DEFAULT_ALERT_INSTRUCTIONS_TEXT}`;
-      const call = sendDirectAgentMessageMock.mock.calls[0]?.[0] as
-        | { message?: string }
+      const call = gatewayCallMock.mock.calls[0]?.[0] as
+        | { params?: { message?: string } }
         | undefined;
-      expect(call?.message).toBe(`System Alert: ${expected}`);
+      expect(call?.params?.message).toBe(`System Alert: ${expected}`);
     } finally {
       await ctx.cleanup();
     }
@@ -712,7 +706,6 @@ describe.sequential("clawline provider server", () => {
       expect(response.status).toBe(400);
       const data = (await response.json()) as { code?: string };
       expect(data.code).toBe("invalid_message");
-      expect(sendDirectAgentMessageMock).not.toHaveBeenCalled();
       expect(gatewayCallMock).not.toHaveBeenCalled();
       expect(sendMessageMock).not.toHaveBeenCalled();
     } finally {
