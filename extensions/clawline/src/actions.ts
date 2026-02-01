@@ -84,7 +84,7 @@ async function readClawlineMessages(params: {
 
   let db: BetterSqlite3.Database | null = null;
   try {
-    db = new BetterSqlite3(dbPath, { readonly: true, fileMustExist: true });
+    db = new BetterSqlite3(dbPath, { readonly: true, fileMustExist: true, timeout: 5000 });
 
     // Query recent events (messages are stored as events)
     let query = `
@@ -143,7 +143,7 @@ async function listClawlineUsers(params: {
 
   let db: BetterSqlite3.Database | null = null;
   try {
-    db = new BetterSqlite3(dbPath, { readonly: true, fileMustExist: true });
+    db = new BetterSqlite3(dbPath, { readonly: true, fileMustExist: true, timeout: 5000 });
 
     const stmt = db.prepare(`
       SELECT userId, COUNT(*) as messageCount

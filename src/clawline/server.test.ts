@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import { FormData, fetch } from "undici";
+import jwt from "jsonwebtoken";
 
 import type { getReplyFromConfig } from "../auto-reply/reply.js";
 import type { OpenClawConfig } from "../config/config.js";
@@ -84,6 +85,36 @@ type TestServerContext = {
   mediaPath: string;
   alertInstructionsPath: string;
   cleanup: () => Promise<void>;
+};
+
+const createAllowlistEntry = (overrides: Partial<AllowlistEntry> = {}): AllowlistEntry => ({
+  deviceId: "device-1",
+  claimedName: "flynn",
+  deviceInfo: {
+    platform: "iOS",
+    model: "iPhone",
+    osVersion: "17.0",
+    appVersion: "1.0",
+  },
+  userId: "flynn",
+  isAdmin: true,
+  tokenDelivered: true,
+  createdAt: Date.now(),
+  lastSeenAt: Date.now(),
+  ...overrides,
+});
+
+const createAuthHeader = async (ctx: TestServerContext, entry: AllowlistEntry): Promise<string> => {
+  const statePath = path.dirname(ctx.allowlistPath);
+  const jwtKey = (await fs.readFile(path.join(statePath, "jwt.key"), "utf8")).trim();
+  const payload: jwt.JwtPayload = {
+    sub: entry.userId,
+    deviceId: entry.deviceId,
+    isAdmin: entry.isAdmin,
+    iat: Math.floor(Date.now() / 1000),
+  };
+  const token = jwt.sign(payload, jwtKey, { algorithm: "HS256" });
+  return `Bearer ${token}`;
 };
 
 async function setupTestServer(
@@ -589,11 +620,13 @@ describe.sequential("clawline provider server", () => {
   });
 
   it("handles alert endpoint by waking gateway", async () => {
-    const ctx = await setupTestServer();
+    const entry = createAllowlistEntry();
+    const ctx = await setupTestServer([entry]);
+    const authHeader = await createAuthHeader(ctx, entry);
     try {
       const response = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", Authorization: authHeader },
         body: JSON.stringify({ message: "Check on Flynn", source: "codex" }),
       });
       expect(response.status).toBe(200);
@@ -614,11 +647,13 @@ describe.sequential("clawline provider server", () => {
   });
 
   it("routes alerts to personal session keys with explicit channel/to", async () => {
-    const ctx = await setupTestServer();
+    const entry = createAllowlistEntry();
+    const ctx = await setupTestServer([entry]);
+    const authHeader = await createAuthHeader(ctx, entry);
     try {
       const response = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", Authorization: authHeader },
         body: JSON.stringify({
           message: "Check personal channel",
           source: "codex",
@@ -640,11 +675,13 @@ describe.sequential("clawline provider server", () => {
   });
 
   it("routes alerts to main session keys without explicit channel/to", async () => {
-    const ctx = await setupTestServer();
+    const entry = createAllowlistEntry();
+    const ctx = await setupTestServer([entry]);
+    const authHeader = await createAuthHeader(ctx, entry);
     try {
       const response = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", Authorization: authHeader },
         body: JSON.stringify({
           message: "Check main session",
           source: "codex",
@@ -666,11 +703,15 @@ describe.sequential("clawline provider server", () => {
   });
 
   it("appends alert instructions text to alert payloads", async () => {
-    const ctx = await setupTestServer([], { alertInstructionsText: "Follow up with Flynn ASAP." });
+    const entry = createAllowlistEntry();
+    const ctx = await setupTestServer([entry], {
+      alertInstructionsText: "Follow up with Flynn ASAP.",
+    });
+    const authHeader = await createAuthHeader(ctx, entry);
     try {
       const response = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", Authorization: authHeader },
         body: JSON.stringify({ message: "Check on Flynn", source: "codex" }),
       });
       expect(response.status).toBe(200);

@@ -23,11 +23,7 @@ import {
   resolveHumanDelayConfig,
   resolveIdentityName,
 } from "../agents/identity.js";
-import {
-  resolveAgentIdFromSessionKey,
-  resolveMainSessionKeyFromConfig,
-  updateLastRoute,
-} from "../config/sessions.js";
+import { resolveAgentIdFromSessionKey, updateLastRoute } from "../config/sessions.js";
 import { rawDataToString } from "../infra/ws.js";
 import { recordClawlineSessionActivity } from "./session-store.js";
 import type { ClawlineAdapterOverrides } from "./config.js";
@@ -807,7 +803,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     if (db) {
       return false;
     }
-    const newDb = new BetterSqlite3(dbPath, { fileMustExist: false });
+    const newDb = new BetterSqlite3(dbPath, { fileMustExist: false, timeout: 5000 });
     newDb.exec("PRAGMA journal_mode = WAL");
     newDb.exec("PRAGMA foreign_keys = ON");
     newDb.exec(`
@@ -1504,7 +1500,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       const trimmedSessionKey = rawSessionKey?.trim() ?? "";
       const hasSessionKey = typeof rawSessionKey === "string";
       const isValid = isValidAlertSessionKey(trimmedSessionKey);
-      let resolvedSessionKey = resolveMainSessionKeyFromConfig();
+      let resolvedSessionKey = mainSessionKey;
       let decisionReason = "missing_session_key";
       let decisionAction = "fallback_main_session";
 
@@ -1718,11 +1714,16 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
   function runPerUserTask<T>(userId: string, task: () => Promise<T>): Promise<T> {
     const previous = perUserQueue.get(userId) ?? Promise.resolve();
-    const next = previous.then(task, task).finally(() => {
-      if (perUserQueue.get(userId) === next) {
-        perUserQueue.delete(userId);
-      }
-    });
+    const next = previous
+      .catch((err) => {
+        logger.warn?.("per_user_task_failed", err);
+      })
+      .then(task)
+      .finally(() => {
+        if (perUserQueue.get(userId) === next) {
+          perUserQueue.delete(userId);
+        }
+      });
     perUserQueue.set(userId, next);
     return next;
   }
