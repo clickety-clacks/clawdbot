@@ -81,6 +81,7 @@ const INLINE_IMAGE_MIME_TYPES = new Set([
 const MAX_ALERT_BODY_BYTES = 4 * 1024;
 const MAX_MEDIA_REDIRECTS = 5;
 const REDIRECT_STATUS_CODES = new Set([301, 302, 303, 307, 308]);
+const MEDIA_FETCH_TIMEOUT_MS = 30_000;
 type ChannelType = "personal" | "admin";
 const DEFAULT_CHANNEL_TYPE: ChannelType = "personal";
 const ADMIN_CHANNEL_TYPE: ChannelType = "admin";
@@ -1155,15 +1156,27 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           }
           const dispatcher = createPinnedDispatcher(currentPinned);
           let response: Response;
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), MEDIA_FETCH_TIMEOUT_MS);
+          if (init?.signal) {
+            if (init.signal.aborted) {
+              controller.abort();
+            } else {
+              init.signal.addEventListener("abort", () => controller.abort(), { once: true });
+            }
+          }
           try {
             response = await fetch(currentUrl, {
               ...init,
               dispatcher,
+              signal: controller.signal,
               redirect: "manual",
             } as RequestInit & { dispatcher: Dispatcher });
           } catch (err) {
             await closeDispatcher(dispatcher);
             throw err;
+          } finally {
+            clearTimeout(timeoutId);
           }
           if (isRedirectStatus(response.status)) {
             const location = response.headers.get("location");
@@ -1173,7 +1186,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               ] = () => closeDispatcher(dispatcher);
               return response;
             }
-            void response.body?.cancel();
+            if (response.body) {
+              try {
+                await response.body.cancel();
+              } catch {}
+            }
             await closeDispatcher(dispatcher);
             redirectCount += 1;
             if (redirectCount > MAX_MEDIA_REDIRECTS) {
