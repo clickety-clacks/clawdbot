@@ -13,7 +13,7 @@ import type { Database as SqliteDatabase, Statement as SqliteStatement } from "b
 import { finalizeInboundContext } from "../auto-reply/reply/inbound-context.js";
 import { dispatchReplyFromConfig } from "../auto-reply/reply/dispatch-from-config.js";
 import { createReplyDispatcherWithTyping } from "../auto-reply/reply/reply-dispatcher.js";
-import { getFollowupQueueDepth } from "../auto-reply/reply/queue.js";
+import { getFollowupQueueDepth, resolveQueueSettings } from "../auto-reply/reply/queue.js";
 import { extractShortModelName } from "../auto-reply/reply/response-prefix-template.js";
 import type { ResponsePrefixContext } from "../auto-reply/reply/response-prefix-template.js";
 import type { ReplyPayload } from "../auto-reply/types.js";
@@ -26,8 +26,11 @@ import {
 import {
   resolveAgentIdFromSessionKey,
   resolveMainSessionKeyFromConfig,
+  loadSessionStore,
+  resolveStorePath,
   updateLastRoute,
 } from "../config/sessions.js";
+import { loadConfig } from "../config/config.js";
 import { rawDataToString } from "../infra/ws.js";
 import { recordClawlineSessionActivity } from "./session-store.js";
 import type { ClawlineAdapterOverrides } from "./config.js";
@@ -55,7 +58,13 @@ import { callGateway } from "../gateway/call.js";
 import { GATEWAY_CLIENT_MODES, GATEWAY_CLIENT_NAMES } from "../gateway/protocol/client-info.js";
 import { loadWebMedia } from "../web/media.js";
 import { clawlineAttachmentsToImages } from "./attachments.js";
-import { sendDirectAgentMessage } from "../agents/direct-agent-message.js";
+import { enqueueAnnounce, type AnnounceQueueItem } from "../agents/subagent-announce-queue.js";
+import {
+  deliveryContextFromSession,
+  mergeDeliveryContext,
+  normalizeDeliveryContext,
+} from "../utils/delivery-context.js";
+import { isEmbeddedPiRunActive } from "../agents/pi-embedded.js";
 
 export const PROTOCOL_VERSION = 1;
 
@@ -1537,14 +1546,118 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
       alertLog("alert_wake_start");
 
-      const result = await sendDirectAgentMessage({
+      const cfg = loadConfig();
+      const agentId = resolveAgentIdFromSessionKey(resolvedSessionKey);
+      const storePath = resolveStorePath(cfg.session?.store, { agentId });
+      const store = loadSessionStore(storePath);
+      const entry = store[resolvedSessionKey];
+      const sessionId = entry?.sessionId;
+
+      alertLog("direct_agent_resolve", {
         sessionKey: resolvedSessionKey,
-        message: `System Alert: ${text}`,
-        deliveryContext,
-        summaryLine: "System Alert",
-        timeoutMs: 60_000,
-        log: alertLog,
+        hasEntry: Boolean(entry),
+        sessionId,
       });
+
+      const explicitContext = normalizeDeliveryContext(deliveryContext);
+      const sessionContext = deliveryContextFromSession(entry);
+      const merged = mergeDeliveryContext(explicitContext, sessionContext);
+
+      const channel = merged?.channel;
+      const to = merged?.to;
+      const accountId = merged?.accountId;
+      const threadId =
+        merged?.threadId != null && merged.threadId !== "" ? String(merged.threadId) : undefined;
+
+      let result: { outcome: "queued" | "sent" | "error"; error?: string };
+      try {
+        if (!sessionId) {
+          await callGateway({
+            method: "agent",
+            params: {
+              sessionKey: resolvedSessionKey,
+              message: `System Alert: ${text}`,
+              deliver: true,
+              channel,
+              accountId,
+              to,
+              threadId,
+              idempotencyKey: randomUUID(),
+            },
+            expectFinal: true,
+            timeoutMs: 60_000,
+          });
+          alertLog("direct_agent_sent", { sessionKey: resolvedSessionKey, channel, to });
+          result = { outcome: "sent" };
+        } else {
+          const queueSettings = resolveQueueSettings({
+            cfg,
+            channel: entry?.channel ?? entry?.lastChannel,
+            sessionEntry: entry,
+          });
+          const isActive = isEmbeddedPiRunActive(sessionId);
+
+          if (isActive) {
+            const item: AnnounceQueueItem = {
+              prompt: `System Alert: ${text}`,
+              summaryLine: "System Alert",
+              enqueuedAt: Date.now(),
+              sessionKey: resolvedSessionKey,
+              origin: merged,
+            };
+            enqueueAnnounce({
+              key: resolvedSessionKey,
+              item,
+              settings: queueSettings,
+              send: async (queued) => {
+                const origin = queued.origin;
+                const queuedThreadId =
+                  origin?.threadId != null && origin.threadId !== ""
+                    ? String(origin.threadId)
+                    : undefined;
+                await callGateway({
+                  method: "agent",
+                  params: {
+                    sessionKey: queued.sessionKey,
+                    message: queued.prompt,
+                    channel: origin?.channel,
+                    accountId: origin?.accountId,
+                    to: origin?.to,
+                    threadId: queuedThreadId,
+                    deliver: true,
+                    idempotencyKey: randomUUID(),
+                  },
+                  expectFinal: true,
+                  timeoutMs: 60_000,
+                });
+              },
+            });
+            alertLog("direct_agent_queued", { sessionKey: resolvedSessionKey, sessionId });
+            result = { outcome: "queued" };
+          } else {
+            await callGateway({
+              method: "agent",
+              params: {
+                sessionKey: resolvedSessionKey,
+                message: `System Alert: ${text}`,
+                deliver: true,
+                channel,
+                accountId,
+                to,
+                threadId,
+                idempotencyKey: randomUUID(),
+              },
+              expectFinal: true,
+              timeoutMs: 60_000,
+            });
+            alertLog("direct_agent_sent", { sessionKey: resolvedSessionKey, channel, to });
+            result = { outcome: "sent" };
+          }
+        }
+      } catch (err) {
+        alertLog("direct_agent_error", { error: String(err) });
+        result = { outcome: "error", error: String(err) };
+      }
 
       alertLog("alert_wake_result", { outcome: result.outcome, error: result.error });
 
