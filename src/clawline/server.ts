@@ -1,5 +1,4 @@
 import http from "node:http";
-import dns from "node:dns";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -11,6 +10,7 @@ import WebSocket, { WebSocketServer } from "ws";
 import jwt from "jsonwebtoken";
 import BetterSqlite3 from "better-sqlite3";
 import type { Database as SqliteDatabase, Statement as SqliteStatement } from "better-sqlite3";
+import { type Dispatcher } from "undici";
 import { finalizeInboundContext } from "../auto-reply/reply/inbound-context.js";
 import { dispatchReplyFromConfig } from "../auto-reply/reply/dispatch-from-config.js";
 import { createReplyDispatcherWithTyping } from "../auto-reply/reply/reply-dispatcher.js";
@@ -51,6 +51,12 @@ import { createAssetHandlers } from "./http-assets.js";
 import { callGateway } from "../gateway/call.js";
 import { GATEWAY_CLIENT_MODES, GATEWAY_CLIENT_NAMES } from "../gateway/protocol/client-info.js";
 import { loadWebMedia } from "../web/media.js";
+import {
+  createPinnedDispatcher,
+  resolvePinnedHostname,
+  closeDispatcher,
+  type PinnedHostname,
+} from "../infra/net/ssrf.js";
 import { clawlineAttachmentsToImages } from "./attachments.js";
 import { type AnnounceQueueItem, enqueueAnnounce } from "../agents/subagent-announce-queue.js";
 
@@ -1132,33 +1138,42 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       .map((url) => (typeof url === "string" ? url.trim() : ""))
       .filter((url) => url.length > 0);
     for (const url of trimmedUrls) {
-      const validatedUrl = await validateOutboundMediaUrl(url);
-      const media = await loadWebMedia(validatedUrl, config.media.maxUploadBytes);
-      const mimeType = (media.contentType ?? "application/octet-stream").toLowerCase();
-      const buffer = media.buffer;
-      if (buffer.length === 0) {
-        continue;
+      const { url: validatedUrl, pinned } = await validateOutboundMediaUrl(url);
+      let dispatcher: Dispatcher | null = null;
+      try {
+        dispatcher = createPinnedDispatcher(pinned);
+        const media = await loadWebMedia(validatedUrl, config.media.maxUploadBytes, {
+          fetchImpl: (input, init) =>
+            fetch(input, { ...init, dispatcher } as RequestInit & { dispatcher: Dispatcher }),
+        });
+        const mimeType = (media.contentType ?? "application/octet-stream").toLowerCase();
+        const buffer = media.buffer;
+        if (buffer.length === 0) {
+          continue;
+        }
+        const isInlineImage = INLINE_IMAGE_MIME_TYPES.has(mimeType);
+        if (isInlineImage) {
+          resolved.push({ type: "image", mimeType, data: buffer.toString("base64") });
+          continue;
+        }
+        const assetId = `a_${randomUUID()}`;
+        const assetPath = path.join(assetsDir, assetId);
+        await fs.writeFile(assetPath, buffer);
+        await enqueueWriteTask(() =>
+          insertAssetStmt.run(
+            assetId,
+            params.ownerUserId,
+            mimeType,
+            buffer.length,
+            nowMs(),
+            params.uploaderDeviceId,
+          ),
+        );
+        resolved.push({ type: "asset", assetId });
+        assetIds.push(assetId);
+      } finally {
+        await closeDispatcher(dispatcher);
       }
-      const isInlineImage = INLINE_IMAGE_MIME_TYPES.has(mimeType);
-      if (isInlineImage) {
-        resolved.push({ type: "image", mimeType, data: buffer.toString("base64") });
-        continue;
-      }
-      const assetId = `a_${randomUUID()}`;
-      const assetPath = path.join(assetsDir, assetId);
-      await fs.writeFile(assetPath, buffer);
-      await enqueueWriteTask(() =>
-        insertAssetStmt.run(
-          assetId,
-          params.ownerUserId,
-          mimeType,
-          buffer.length,
-          nowMs(),
-          params.uploaderDeviceId,
-        ),
-      );
-      resolved.push({ type: "asset", assetId });
-      assetIds.push(assetId);
     }
     return { attachments: resolved, assetIds };
   }
@@ -1446,46 +1461,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     return cleaned ?? DEFAULT_ALERT_SOURCE;
   }
 
-  function isPrivateIpv4(ip: string): boolean {
-    if (ip.startsWith("10.")) {
-      return true;
-    }
-    if (ip.startsWith("127.")) {
-      return true;
-    }
-    if (ip.startsWith("169.254.")) {
-      return true;
-    }
-    if (ip.startsWith("192.168.")) {
-      return true;
-    }
-    const parts = ip.split(".").map((part) => Number(part));
-    return parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31;
-  }
-
-  function isPrivateIp(ip: string): boolean {
-    if (net.isIP(ip) === 4) {
-      return isPrivateIpv4(ip);
-    }
-    if (net.isIP(ip) === 6) {
-      const normalized = ip.toLowerCase();
-      if (normalized.startsWith("::ffff:")) {
-        const mapped = normalized.slice("::ffff:".length);
-        if (net.isIP(mapped) === 4) {
-          return isPrivateIpv4(mapped);
-        }
-      }
-      return (
-        normalized === "::1" ||
-        normalized.startsWith("fe80:") ||
-        normalized.startsWith("fc") ||
-        normalized.startsWith("fd")
-      );
-    }
-    return false;
-  }
-
-  async function validateOutboundMediaUrl(rawUrl: string): Promise<string> {
+  async function validateOutboundMediaUrl(
+    rawUrl: string,
+  ): Promise<{ url: string; pinned: PinnedHostname }> {
     let parsed: URL;
     try {
       parsed = new URL(rawUrl);
@@ -1495,35 +1473,20 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
       throw new ClientMessageError("invalid_message", "Unsupported mediaUrl protocol");
     }
-    const rawHostname = parsed.hostname;
-    const normalizedHostname =
-      rawHostname.startsWith("[") && rawHostname.endsWith("]")
-        ? rawHostname.slice(1, -1)
-        : rawHostname;
-    const hostname = normalizedHostname.toLowerCase();
+    const hostname = parsed.hostname.toLowerCase();
     if (hostname === "localhost" || hostname.endsWith(".localhost")) {
       throw new ClientMessageError("invalid_message", "mediaUrl points to localhost");
     }
-    if (net.isIP(hostname) && isPrivateIp(hostname)) {
-      throw new ClientMessageError("invalid_message", "mediaUrl points to a private address");
+    let pinned;
+    try {
+      pinned = await resolvePinnedHostname(hostname);
+    } catch {
+      throw new ClientMessageError(
+        "invalid_message",
+        "mediaUrl hostname could not be resolved or is blocked",
+      );
     }
-    if (!net.isIP(hostname)) {
-      let records: dns.LookupAddress[];
-      try {
-        records = await dns.promises.lookup(hostname, { all: true, verbatim: true });
-      } catch {
-        throw new ClientMessageError("invalid_message", "mediaUrl hostname could not be resolved");
-      }
-      if (!records.length) {
-        throw new ClientMessageError("invalid_message", "mediaUrl hostname could not be resolved");
-      }
-      for (const record of records) {
-        if (isPrivateIp(record.address)) {
-          throw new ClientMessageError("invalid_message", "mediaUrl points to a private address");
-        }
-      }
-    }
-    return parsed.toString();
+    return { url: parsed.toString(), pinned };
   }
 
   async function applyAlertInstructions(text: string): Promise<string> {
