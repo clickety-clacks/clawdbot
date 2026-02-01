@@ -107,6 +107,7 @@ async function readClawlineMessages(params: {
     const messages: ParsedMessage[] = [];
     const batchSize = 100;
     let offset = 0;
+    const maxRowsToScan = Math.max(targetLimit * 20, 500);
 
     while (messages.length < targetLimit) {
       const rows = stmt.all(...queryParams, batchSize, offset) as EventRow[];
@@ -126,6 +127,9 @@ async function readClawlineMessages(params: {
         if (messages.length >= targetLimit) {
           break;
         }
+      }
+      if (offset >= maxRowsToScan) {
+        break;
       }
     }
 

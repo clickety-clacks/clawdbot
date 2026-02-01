@@ -489,6 +489,7 @@ const SESSION_REPLACED_CODE = 1000;
 const FACE_SPEAK_MAX_CHARS = 500;
 const FACE_SPEAK_DEDUPE_TTL_MS = 5 * 60 * 1000;
 const FACE_SPEAK_DEDUPE_MAX = 1000;
+const FACE_SPEAK_PENDING_MAX = 1000;
 
 // Experimental: best-effort hook for local "face speak" tooling.
 // - OFF unless CLU_FACE_SPEAK_URL is set
@@ -1351,11 +1352,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         source: payload.source,
         hasSessionKey: Boolean(payload.sessionKey),
       });
-      logger.info?.(
-        `[clawline] alert_payload_received raw=${JSON.stringify(
-          payload.raw,
-        )} sessionKey=${payload.sessionKey ?? "undefined"}`,
-      );
+      logger.info?.("[clawline] alert_payload_received", {
+        bytes: Buffer.byteLength(payload.raw, "utf8"),
+        sessionKey: payload.sessionKey ?? "undefined",
+      });
       let text = buildAlertText(payload.message, payload.source);
       text = await applyAlertInstructions(text);
       await wakeGatewayForAlert(text, payload.sessionKey);
@@ -1463,25 +1463,35 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     return cleaned ?? DEFAULT_ALERT_SOURCE;
   }
 
+  function isPrivateIpv4(ip: string): boolean {
+    if (ip.startsWith("10.")) {
+      return true;
+    }
+    if (ip.startsWith("127.")) {
+      return true;
+    }
+    if (ip.startsWith("169.254.")) {
+      return true;
+    }
+    if (ip.startsWith("192.168.")) {
+      return true;
+    }
+    const parts = ip.split(".").map((part) => Number(part));
+    return parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31;
+  }
+
   function isPrivateIp(ip: string): boolean {
     if (net.isIP(ip) === 4) {
-      if (ip.startsWith("10.")) {
-        return true;
-      }
-      if (ip.startsWith("127.")) {
-        return true;
-      }
-      if (ip.startsWith("169.254.")) {
-        return true;
-      }
-      if (ip.startsWith("192.168.")) {
-        return true;
-      }
-      const parts = ip.split(".").map((part) => Number(part));
-      return parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31;
+      return isPrivateIpv4(ip);
     }
     if (net.isIP(ip) === 6) {
       const normalized = ip.toLowerCase();
+      if (normalized.startsWith("::ffff:")) {
+        const mapped = normalized.slice("::ffff:".length);
+        if (net.isIP(mapped) === 4) {
+          return isPrivateIpv4(mapped);
+        }
+      }
       return (
         normalized === "::1" ||
         normalized.startsWith("fe80:") ||
@@ -1503,7 +1513,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
       throw new ClientMessageError("invalid_message", "Unsupported mediaUrl protocol");
     }
-    const hostname = parsed.hostname.toLowerCase();
+    const rawHostname = parsed.hostname;
+    const normalizedHostname =
+      rawHostname.startsWith("[") && rawHostname.endsWith("]")
+        ? rawHostname.slice(1, -1)
+        : rawHostname;
+    const hostname = normalizedHostname.toLowerCase();
     if (hostname === "localhost" || hostname.endsWith(".localhost")) {
       throw new ClientMessageError("invalid_message", "mediaUrl points to localhost");
     }
@@ -2341,6 +2356,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       if (streaming) {
         if (pendingKey && payloadTextLen > 0) {
           faceSpeakPending.set(pendingKey, payloadText);
+          while (faceSpeakPending.size > FACE_SPEAK_PENDING_MAX) {
+            const oldest = faceSpeakPending.keys().next().value;
+            if (!oldest) {
+              break;
+            }
+            faceSpeakPending.delete(oldest);
+          }
         }
         logDecision("skip", "streaming", payloadTextLen);
         return;
@@ -3013,6 +3035,14 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         }).catch(() => {});
         return;
       }
+      if (err instanceof HttpError) {
+        await sendJson(session.socket, {
+          type: "error",
+          code: err.code,
+          message: err.message,
+        }).catch(() => {});
+        return;
+      }
       // Log unexpected errors and notify client so UI can show failure
       logger.error?.("[clawline] processClientMessage_unexpected_error", {
         error: err instanceof Error ? err.message : String(err),
@@ -3467,6 +3497,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
     if (typeof decoded.sub !== "string" || !timingSafeStringEqual(decoded.sub, entry.userId)) {
       await sendJson(ws, { type: "auth_result", success: false, reason: "auth_failed" });
+      ws.close();
+      return;
+    }
+    if (isDenylisted(entry.deviceId)) {
+      await sendJson(ws, { type: "auth_result", success: false, reason: "token_revoked" });
       ws.close();
       return;
     }
