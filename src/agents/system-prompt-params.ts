@@ -10,7 +10,6 @@ import {
 
 export type RuntimeInfoInput = {
   agentId?: string;
-  sessionKey?: string;
   host: string;
   os: string;
   arch: string;
@@ -35,7 +34,6 @@ export type SystemPromptRuntimeParams = {
 export function buildSystemPromptParams(params: {
   config?: OpenClawConfig;
   agentId?: string;
-  sessionKey?: string;
   runtime: Omit<RuntimeInfoInput, "agentId">;
   workspaceDir?: string;
   cwd?: string;
@@ -51,7 +49,6 @@ export function buildSystemPromptParams(params: {
   return {
     runtimeInfo: {
       agentId: params.agentId,
-      sessionKey: params.sessionKey,
       ...params.runtime,
       repoRoot,
     },
