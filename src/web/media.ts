@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { logVerbose, shouldLogVerbose } from "../globals.js";
 import { type MediaKind, maxBytesForKind, mediaKindFromMime } from "../media/constants.js";
 import { resolveUserPath } from "../utils.js";
-import { fetchRemoteMedia } from "../media/fetch.js";
+import { fetchRemoteMedia, type FetchLike } from "../media/fetch.js";
 import {
   convertHeicToJpeg,
   hasAlphaChannel,
@@ -24,6 +24,7 @@ export type WebMediaResult = {
 type WebMediaOptions = {
   maxBytes?: number;
   optimizeImages?: boolean;
+  fetchImpl?: FetchLike;
 };
 
 const HEIC_MIME_RE = /^image\/hei[cf]$/i;
@@ -220,7 +221,7 @@ async function loadWebMediaInternal(
   }
 
   if (/^https?:\/\//i.test(mediaUrl)) {
-    const fetched = await fetchRemoteMedia({ url: mediaUrl });
+    const fetched = await fetchRemoteMedia({ url: mediaUrl, fetchImpl: options.fetchImpl });
     const { buffer, contentType, fileName } = fetched;
     const kind = mediaKindFromMime(contentType);
     return await clampAndFinalize({ buffer, contentType, kind, fileName });
@@ -250,20 +251,27 @@ async function loadWebMediaInternal(
   });
 }
 
-export async function loadWebMedia(mediaUrl: string, maxBytes?: number): Promise<WebMediaResult> {
+export async function loadWebMedia(
+  mediaUrl: string,
+  maxBytes?: number,
+  options?: { fetchImpl?: FetchLike },
+): Promise<WebMediaResult> {
   return await loadWebMediaInternal(mediaUrl, {
     maxBytes,
     optimizeImages: true,
+    fetchImpl: options?.fetchImpl,
   });
 }
 
 export async function loadWebMediaRaw(
   mediaUrl: string,
   maxBytes?: number,
+  options?: { fetchImpl?: FetchLike },
 ): Promise<WebMediaResult> {
   return await loadWebMediaInternal(mediaUrl, {
     maxBytes,
     optimizeImages: false,
+    fetchImpl: options?.fetchImpl,
   });
 }
 
