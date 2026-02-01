@@ -75,6 +75,7 @@ type ChannelType = "personal" | "admin";
 const DEFAULT_CHANNEL_TYPE: ChannelType = "personal";
 const ADMIN_CHANNEL_TYPE: ChannelType = "admin";
 const DEFAULT_ALERT_SOURCE = "notify";
+const JWT_ISSUER = "clawline";
 const USER_ID_MAX_LENGTH = 48;
 const COMBINING_MARKS_REGEX = /[\u0300-\u036f]/g;
 
@@ -275,10 +276,7 @@ function buildClawlinePersonalSessionKey(agentId: string, userId: string): strin
   return `agent:${normalizedAgentId}:clawline:${normalizedUserId}:main`;
 }
 
-function describeClawlineAttachments(
-  attachments: NormalizedAttachment[],
-  assetsDir: string,
-): string | null {
+function describeClawlineAttachments(attachments: NormalizedAttachment[]): string | null {
   if (attachments.length === 0) {
     return null;
   }
@@ -517,6 +515,35 @@ function triggerFaceSpeak(
     });
     return;
   }
+  const resolvedEndpoint = (() => {
+    try {
+      const parsed = new URL(endpoint);
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        return null;
+      }
+      const host = parsed.hostname.toLowerCase();
+      if (host === "localhost" || host === "::1") {
+        return parsed.toString();
+      }
+      if (net.isIP(host) === 4 && host.startsWith("127.")) {
+        return parsed.toString();
+      }
+      if (net.isIP(host) === 6 && host.startsWith("::ffff:127.")) {
+        return parsed.toString();
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  })();
+  if (!resolvedEndpoint) {
+    logger.info?.("[clawline] face_speak_skipped", {
+      reason: "invalid_endpoint",
+      sessionKey: meta?.sessionKey,
+      messageId: meta?.messageId,
+    });
+    return;
+  }
   const trimmed = text.trim();
   if (!trimmed) {
     logger.info?.("[clawline] face_speak_skipped", {
@@ -530,7 +557,7 @@ function triggerFaceSpeak(
     trimmed.length > FACE_SPEAK_MAX_CHARS ? trimmed.slice(0, FACE_SPEAK_MAX_CHARS) : trimmed;
   const redactedHost = (() => {
     try {
-      const host = new URL(endpoint).host;
+      const host = new URL(resolvedEndpoint).host;
       if (!host) {
         return "redacted";
       }
@@ -549,7 +576,7 @@ function triggerFaceSpeak(
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 1500);
     try {
-      await fetch(endpoint, {
+      await fetch(resolvedEndpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: capped }),
@@ -1110,7 +1137,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       .map((url) => (typeof url === "string" ? url.trim() : ""))
       .filter((url) => url.length > 0);
     for (const url of trimmedUrls) {
-      const media = await loadWebMedia(url, config.media.maxUploadBytes);
+      const validatedUrl = validateOutboundMediaUrl(url);
+      const media = await loadWebMedia(validatedUrl, config.media.maxUploadBytes);
       const mimeType = (media.contentType ?? "application/octet-stream").toLowerCase();
       const buffer = media.buffer;
       if (buffer.length === 0) {
@@ -1435,6 +1463,56 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     return cleaned ?? DEFAULT_ALERT_SOURCE;
   }
 
+  function isPrivateIp(ip: string): boolean {
+    if (net.isIP(ip) === 4) {
+      if (ip.startsWith("10.")) {
+        return true;
+      }
+      if (ip.startsWith("127.")) {
+        return true;
+      }
+      if (ip.startsWith("169.254.")) {
+        return true;
+      }
+      if (ip.startsWith("192.168.")) {
+        return true;
+      }
+      const parts = ip.split(".").map((part) => Number(part));
+      return parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31;
+    }
+    if (net.isIP(ip) === 6) {
+      const normalized = ip.toLowerCase();
+      return (
+        normalized === "::1" ||
+        normalized.startsWith("fe80:") ||
+        normalized.startsWith("fc") ||
+        normalized.startsWith("fd") ||
+        normalized.startsWith("::ffff:127.")
+      );
+    }
+    return false;
+  }
+
+  function validateOutboundMediaUrl(rawUrl: string): string {
+    let parsed: URL;
+    try {
+      parsed = new URL(rawUrl);
+    } catch {
+      throw new ClientMessageError("invalid_message", "Invalid mediaUrl");
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      throw new ClientMessageError("invalid_message", "Unsupported mediaUrl protocol");
+    }
+    const hostname = parsed.hostname.toLowerCase();
+    if (hostname === "localhost" || hostname.endsWith(".localhost")) {
+      throw new ClientMessageError("invalid_message", "mediaUrl points to localhost");
+    }
+    if (net.isIP(hostname) && isPrivateIp(hostname)) {
+      throw new ClientMessageError("invalid_message", "mediaUrl points to a private address");
+    }
+    return parsed.toString();
+  }
+
   async function applyAlertInstructions(text: string): Promise<string> {
     const instructions = await readAlertInstructionsFromDisk();
     if (!instructions) {
@@ -1733,7 +1811,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   if (assetCleanupInterval && typeof assetCleanupInterval.unref === "function") {
     assetCleanupInterval.unref();
   }
+  let allowlistWritePending = 0;
   const allowlistWatcher: FSWatcher = watch(allowlistPath, { persistent: false }, () => {
+    if (allowlistWritePending > 0) {
+      allowlistWritePending -= 1;
+      return;
+    }
     void refreshAllowlistFromDisk();
   });
   allowlistWatcher.on("error", (err) => logger.warn?.("allowlist_watch_failed", err));
@@ -1771,7 +1854,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     const result = writeQueue.then(run, run);
     writeQueue = result.then(
       () => undefined,
-      () => undefined,
+      (err) => {
+        logger.warn?.("write_queue_failed", err);
+        return undefined;
+      },
     );
     return result.finally(() => {
       writeQueueDepth = Math.max(0, writeQueueDepth - 1);
@@ -1779,6 +1865,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   }
 
   async function persistAllowlist() {
+    allowlistWritePending += 1;
     await fs.writeFile(allowlistPath, JSON.stringify(allowlist, null, 2));
     handleAllowlistChanged();
   }
@@ -1944,7 +2031,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     if (config.auth.tokenTtlSeconds != null && config.auth.tokenTtlSeconds > 0) {
       payload.exp = payload.iat! + config.auth.tokenTtlSeconds;
     }
-    const token = jwt.sign(payload, jwtKey, { algorithm: "HS256" });
+    const token = jwt.sign(payload, jwtKey, { algorithm: "HS256", issuer: JWT_ISSUER });
     return token;
   }
 
@@ -2005,7 +2092,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
     let decoded: jwt.JwtPayload;
     try {
-      decoded = jwt.verify(token, jwtKey, { algorithms: ["HS256"] }) as jwt.JwtPayload;
+      decoded = jwt.verify(token, jwtKey, {
+        algorithms: ["HS256"],
+        issuer: JWT_ISSUER,
+      }) as jwt.JwtPayload;
     } catch {
       throw new HttpError(401, "auth_failed", "Invalid token");
     }
@@ -2710,7 +2800,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         });
         broadcastToChannelSessions(channelType, session, event);
 
-        const attachmentSummary = describeClawlineAttachments(ownership.attachments, assetsDir);
+        const attachmentSummary = describeClawlineAttachments(ownership.attachments);
         const inboundBody = attachmentSummary
           ? `${rawContent}\n\n${attachmentSummary}`
           : rawContent;
@@ -3223,52 +3313,32 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       const newUserId = normalizedUserId ?? entry.userId;
       const isSwitchingAccount = newUserId !== entry.userId;
       if (isSwitchingAccount) {
-        const isAdminSwitch = isAdminUserId(newUserId, adminUserId) && !entry.isAdmin;
-        if (isAdminSwitch) {
-          const existingPendingEntry = findPendingEntry(deviceId);
-          const pendingCount = pendingFile.entries.length + (existingPendingEntry ? 0 : 1);
-          if (pendingCount > config.pairing.maxPendingRequests) {
-            await sendJson(ws, {
-              type: "error",
-              code: "rate_limited",
-              message: "Too many pending pair requests",
-            });
-            return;
-          }
-          const pendingEntry: PendingEntry = {
-            deviceId,
-            claimedName: sanitizedClaimedName,
-            deviceInfo: sanitizedInfo,
-            requestedAt: existingPendingEntry ? existingPendingEntry.requestedAt : nowMs(),
-          };
-          await upsertPendingEntry(pendingEntry);
-          await notifyGatewayOfPending(pendingEntry).catch(() => {});
-          await sendJson(ws, { type: "pair_result", success: false, reason: "pair_pending" });
-          ws.close();
-          return;
-        }
         logger.info?.("[clawline:http] pair_request_account_switch", {
           deviceId,
           oldUserId: entry.userId,
           newUserId,
         });
-        // Terminate any active sessions for this device (they have the old userId)
-        const existingSession = sessionsByDevice.get(deviceId);
-        if (existingSession) {
-          sendJson(existingSession.socket, {
+        const existingPendingEntry = findPendingEntry(deviceId);
+        const pendingCount = pendingFile.entries.length + (existingPendingEntry ? 0 : 1);
+        if (pendingCount > config.pairing.maxPendingRequests) {
+          await sendJson(ws, {
             type: "error",
-            code: "session_invalidated",
-            message: "Account switched",
-          }).catch(() => {});
-          existingSession.socket.close();
-          removeSession(existingSession);
+            code: "rate_limited",
+            message: "Too many pending pair requests",
+          });
+          return;
         }
-        // Update entry with new account info (isAdmin based on new userId)
-        entry.userId = newUserId;
-        entry.claimedName = sanitizedClaimedName;
-        entry.deviceInfo = sanitizedInfo;
-        entry.isAdmin = isAdminUserId(newUserId, adminUserId);
-        await persistAllowlist();
+        const pendingEntry: PendingEntry = {
+          deviceId,
+          claimedName: sanitizedClaimedName,
+          deviceInfo: sanitizedInfo,
+          requestedAt: existingPendingEntry ? existingPendingEntry.requestedAt : nowMs(),
+        };
+        await upsertPendingEntry(pendingEntry);
+        await notifyGatewayOfPending(pendingEntry).catch(() => {});
+        await sendJson(ws, { type: "pair_result", success: false, reason: "pair_pending" });
+        ws.close();
+        return;
       } else {
         logger.info?.("[clawline:http] pair_request_token_redispatch", { deviceId });
       }
@@ -3372,7 +3442,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
     let decoded: jwt.JwtPayload;
     try {
-      decoded = jwt.verify(payload.token, jwtKey, { algorithms: ["HS256"] }) as jwt.JwtPayload;
+      decoded = jwt.verify(payload.token, jwtKey, {
+        algorithms: ["HS256"],
+        issuer: JWT_ISSUER,
+      }) as jwt.JwtPayload;
     } catch {
       await sendJson(ws, { type: "auth_result", success: false, reason: "auth_failed" });
       ws.close();

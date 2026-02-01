@@ -113,7 +113,7 @@ const createAuthHeader = async (ctx: TestServerContext, entry: AllowlistEntry): 
     isAdmin: entry.isAdmin,
     iat: Math.floor(Date.now() / 1000),
   };
-  const token = jwt.sign(payload, jwtKey, { algorithm: "HS256" });
+  const token = jwt.sign(payload, jwtKey, { algorithm: "HS256", issuer: "clawline" });
   return `Bearer ${token}`;
 };
 
