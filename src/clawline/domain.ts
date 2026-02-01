@@ -42,6 +42,7 @@ export interface ProviderConfig {
   port: number;
   statePath: string;
   alertInstructionsPath?: string | null;
+  adminUserId: string;
   network: {
     bindAddress: string;
     allowInsecurePublic: boolean;

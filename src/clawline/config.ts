@@ -56,6 +56,7 @@ const DEFAULTS: ResolvedClawlineConfig = {
   port: 18800,
   statePath: defaultStatePath,
   alertInstructionsPath: defaultAlertInstructionsPath,
+  adminUserId: "flynn",
   network: {
     bindAddress: "127.0.0.1",
     allowInsecurePublic: false,
@@ -104,10 +105,17 @@ export function resolveClawlineConfig(cfg: OpenClawConfig): ResolvedClawlineConf
   const merged = deepMerge(structuredClone(DEFAULTS), input as Partial<ResolvedClawlineConfig>);
   merged.statePath = resolvePathValue(merged.statePath, defaultStatePath);
   merged.media.storagePath = resolvePathValue(merged.media.storagePath, defaultMediaPath);
-  merged.alertInstructionsPath = resolvePathValue(
-    merged.alertInstructionsPath ?? defaultAlertInstructionsPath,
-    defaultAlertInstructionsPath,
-  );
+  if (
+    Object.prototype.hasOwnProperty.call(input, "alertInstructionsPath") &&
+    input.alertInstructionsPath === null
+  ) {
+    merged.alertInstructionsPath = null;
+  } else {
+    merged.alertInstructionsPath = resolvePathValue(
+      merged.alertInstructionsPath ?? defaultAlertInstructionsPath,
+      defaultAlertInstructionsPath,
+    );
+  }
   const adapterOverrides: ClawlineAdapterOverrides = input.adapter ? { ...input.adapter } : {};
   merged.adapterOverrides = adapterOverrides;
   merged.enabled = input.enabled === true;

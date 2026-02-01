@@ -1,9 +1,10 @@
-import type { AgentToolResult, OpenClawConfig } from "openclaw/plugin-sdk";
-import { jsonResult } from "openclaw/plugin-sdk";
 import type {
+  AgentToolResult,
   ChannelMessageActionAdapter,
   ChannelMessageActionName,
-} from "../../../src/channels/plugins/types.js";
+  OpenClawConfig,
+} from "openclaw/plugin-sdk";
+import { jsonResult } from "openclaw/plugin-sdk";
 import BetterSqlite3 from "better-sqlite3";
 import path from "node:path";
 import os from "node:os";
@@ -38,7 +39,7 @@ function resolveClawlineDbPath(cfg: OpenClawConfig): string {
   }
   // Default path
   const homeDir = os.homedir();
-  return path.join(homeDir, ".clawdbot", "clawline", "clawline.sqlite");
+  return path.join(homeDir, ".openclaw", "clawline", "clawline.sqlite");
 }
 
 function parseEventPayload(row: EventRow): ParsedMessage {
@@ -99,26 +100,36 @@ async function readClawlineMessages(params: {
       queryParams.push(params.userId);
     }
 
-    query += ` ORDER BY timestamp DESC LIMIT ?`;
-    queryParams.push(Math.min(limit, 100)); // Cap at 100
+    const targetLimit = Math.min(limit, 100);
+    query += ` ORDER BY timestamp DESC LIMIT ? OFFSET ?`;
 
     const stmt = db.prepare(query);
-    const rows = stmt.all(...queryParams) as EventRow[];
+    const messages: ParsedMessage[] = [];
+    const batchSize = 100;
+    let offset = 0;
 
-    // Parse and filter messages
-    let messages = rows.map(parseEventPayload);
-
-    // Filter by channelType if specified
-    if (params.channelType) {
-      messages = messages.filter((m) => m.channelType === params.channelType);
+    while (messages.length < targetLimit) {
+      const rows = stmt.all(...queryParams, batchSize, offset) as EventRow[];
+      if (rows.length === 0) {
+        break;
+      }
+      offset += rows.length;
+      for (const row of rows) {
+        const parsed = parseEventPayload(row);
+        if (params.channelType && parsed.channelType !== params.channelType) {
+          continue;
+        }
+        if (parsed.type !== "user_message" && parsed.type !== "server_message") {
+          continue;
+        }
+        messages.push(parsed);
+        if (messages.length >= targetLimit) {
+          break;
+        }
+      }
     }
 
-    // Filter to only actual messages (user_message, server_message)
-    messages = messages.filter((m) => m.type === "user_message" || m.type === "server_message");
-
-    // Reverse to get chronological order
     messages.reverse();
-
     return { ok: true, messages };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

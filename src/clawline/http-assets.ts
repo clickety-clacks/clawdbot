@@ -63,17 +63,34 @@ export function createAssetHandlers(deps: AssetHandlerDeps) {
           limits: { files: 1, fileSize: config.media.maxUploadBytes },
         });
         let handled = false;
+        let settled = false;
+        let writeDone: Promise<void> | null = null;
+        const finish = (err?: Error) => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          if (err) {
+            reject(err);
+            return;
+          }
+          resolve();
+        };
         busboy.on("file", (fieldname, file, info) => {
           if (handled || fieldname !== "file") {
             handled = true;
             file.resume();
-            reject(new ClientMessageError("invalid_message", "Invalid upload field"));
+            finish(new ClientMessageError("invalid_message", "Invalid upload field"));
             return;
           }
           handled = true;
           detectedMime = info.mimeType || "application/octet-stream";
           const writeStream = createWriteStream(tmpPath!);
           let aborted = false;
+          writeDone = new Promise<void>((writeResolve, writeReject) => {
+            writeStream.on("finish", writeResolve);
+            writeStream.on("error", writeReject);
+          });
           file.on("data", (chunk) => {
             size += chunk.length;
             if (!aborted && size > config.media.maxUploadBytes) {
@@ -81,25 +98,28 @@ export function createAssetHandlers(deps: AssetHandlerDeps) {
               file.unpipe(writeStream);
               writeStream.destroy();
               file.resume();
-              reject(new ClientMessageError("payload_too_large", "Upload too large"));
+              finish(new ClientMessageError("payload_too_large", "Upload too large"));
             }
           });
           file.on("limit", () =>
-            reject(new ClientMessageError("payload_too_large", "Upload too large")),
+            finish(new ClientMessageError("payload_too_large", "Upload too large")),
           );
-          file.on("error", reject);
-          writeStream.on("error", reject);
+          file.on("error", finish);
           file.pipe(writeStream);
           file.on("end", () => writeStream.end());
         });
         busboy.on("finish", () => {
           if (!handled) {
-            reject(new ClientMessageError("invalid_message", "Missing file field"));
+            finish(new ClientMessageError("invalid_message", "Missing file field"));
             return;
           }
-          resolve();
+          if (writeDone) {
+            writeDone.then(() => finish(), finish);
+          } else {
+            finish();
+          }
         });
-        busboy.on("error", reject);
+        busboy.on("error", finish);
         req.pipe(busboy);
       });
       if (size === 0) {

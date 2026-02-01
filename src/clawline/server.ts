@@ -79,7 +79,6 @@ type ChannelType = "personal" | "admin";
 const DEFAULT_CHANNEL_TYPE: ChannelType = "personal";
 const ADMIN_CHANNEL_TYPE: ChannelType = "admin";
 const DEFAULT_ALERT_SOURCE = "notify";
-const ADMIN_USER_ID = "flynn";
 const USER_ID_MAX_LENGTH = 48;
 const COMBINING_MARKS_REGEX = /[\u0300-\u036f]/g;
 
@@ -160,18 +159,19 @@ function sanitizeUserId(userId: string | undefined): string {
   return (userId ?? "").trim();
 }
 
-function isAdminUserId(userId: string): boolean {
-  return sanitizeUserId(userId).toLowerCase() === ADMIN_USER_ID;
+function isAdminUserId(userId: string, adminUserId: string): boolean {
+  return sanitizeUserId(userId).toLowerCase() === adminUserId;
 }
 
-function applyIdentityPolicy(entry: AllowlistEntry) {
+function applyIdentityPolicy(entry: AllowlistEntry, adminUserId: string) {
+  const sanitizedUserId = sanitizeUserId(entry.userId);
   const normalizedFromName = normalizeUserIdFromClaimedName(entry.claimedName);
-  let nextUserId = normalizedFromName ?? sanitizeUserId(entry.userId);
+  let nextUserId = sanitizedUserId || normalizedFromName;
   if (!nextUserId) {
     nextUserId = generateUserId();
   }
   entry.userId = nextUserId;
-  entry.isAdmin = isAdminUserId(entry.userId);
+  entry.isAdmin = isAdminUserId(entry.userId, adminUserId);
 }
 
 async function notifyGatewayOfPending(entry: PendingEntry) {
@@ -194,7 +194,7 @@ async function notifyGatewayOfPending(entry: PendingEntry) {
 
 function normalizeAttachmentsInput(
   raw: unknown,
-  _mediaConfig: ProviderConfig["media"],
+  mediaConfig: ProviderConfig["media"],
 ): { attachments: NormalizedAttachment[]; inlineBytes: number; assetIds: string[] } {
   if (raw === undefined) {
     return { attachments: [], inlineBytes: 0, assetIds: [] };
@@ -238,6 +238,9 @@ function normalizeAttachmentsInput(
     } else {
       throw new ClientMessageError("invalid_message", "Unknown attachment type");
     }
+  }
+  if (inlineBytes > mediaConfig.maxInlineBytes) {
+    throw new ClientMessageError("invalid_message", "Inline attachments exceed maxInlineBytes");
   }
   return { attachments, inlineBytes, assetIds };
 }
@@ -286,8 +289,7 @@ function describeClawlineAttachments(
   const lines = attachments.map((attachment, index) => {
     const label = `Attachment ${index + 1}`;
     if (attachment.type === "asset") {
-      const assetPath = path.join(assetsDir, attachment.assetId);
-      return `${label}: uploaded asset ${attachment.assetId} at ${assetPath}`;
+      return `${label}: uploaded asset ${attachment.assetId}`;
     }
     const approxBytes = Math.round((attachment.data.length / 4) * 3);
     return `${label}: inline image (${attachment.mimeType}, ~${approxBytes} bytes)`;
@@ -357,10 +359,13 @@ function buildAssistantTextFromPayload(payload: ReplyPayload, fallback: string):
 function timingSafeStringEqual(a: string, b: string): boolean {
   const bufA = Buffer.from(a);
   const bufB = Buffer.from(b);
-  if (bufA.length !== bufB.length) {
-    return false;
-  }
-  return timingSafeEqual(bufA, bufB);
+  const maxLength = Math.max(bufA.length, bufB.length);
+  const paddedA = Buffer.alloc(maxLength);
+  const paddedB = Buffer.alloc(maxLength);
+  bufA.copy(paddedA);
+  bufB.copy(paddedB);
+  const equal = timingSafeEqual(paddedA, paddedB);
+  return equal && bufA.length === bufB.length;
 }
 
 function validateDeviceInfo(value: any): value is DeviceInfo {
@@ -613,7 +618,7 @@ async function ensureJwtKey(filePath: string, provided?: string | null): Promise
   const validateKey = (value: string) => {
     const trimmed = value.trim();
     if (Buffer.byteLength(trimmed, "utf8") < 64) {
-      throw new Error("JWT signing key must be at least 32 bytes (64 hex characters)");
+      throw new Error("JWT signing key must be at least 64 bytes");
     }
     return trimmed;
   };
@@ -671,8 +676,13 @@ function generateUserId(): string {
   return `user_${randomUUID()}`;
 }
 
-function parseServerMessage(json: string): ServerMessage {
-  return JSON.parse(json) as ServerMessage;
+function parseServerMessage(json: string, logger: Logger): ServerMessage | null {
+  try {
+    return JSON.parse(json) as ServerMessage;
+  } catch (err) {
+    logger.warn?.("replay_parse_failed", err);
+    return null;
+  }
 }
 
 export async function createProviderServer(options: ProviderOptions): Promise<ProviderServer> {
@@ -685,6 +695,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const sessionStorePath = options.sessionStorePath;
   const mainSessionKey = options.mainSessionKey?.trim() || "agent:main:main";
   const mainSessionAgentId = resolveAgentIdFromSessionKey(mainSessionKey);
+  const adminUserId = sanitizeUserId(config.adminUserId).toLowerCase() || "flynn";
   const alertInstructionsPath =
     typeof config.alertInstructionsPath === "string" &&
     config.alertInstructionsPath.trim().length > 0
@@ -721,7 +732,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const dbPath = path.join(config.statePath, DB_FILENAME);
 
   let allowlist = await loadAllowlist(allowlistPath);
-  allowlist.entries.forEach(applyIdentityPolicy);
+  allowlist.entries.forEach((entry) => applyIdentityPolicy(entry, adminUserId));
   let pendingFile = await loadPending(pendingPath);
   let denylist = await loadDenylist(denylistPath);
   const jwtKey = await ensureJwtKey(jwtKeyPath, config.auth.jwtSigningKey);
@@ -1043,11 +1054,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
   }
 
-  if (initializeDatabaseResources()) {
-    await cleanupTmpDirectory();
-    await cleanupOrphanedAssetFiles();
-  }
-
   async function materializeOutboundAttachments(params: {
     attachments: ClawlineOutboundAttachmentInput[];
     ownerUserId: string;
@@ -1306,7 +1312,17 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   async function handleAlertHttpRequest(req: http.IncomingMessage, res: http.ServerResponse) {
     logHttpRequest("alert_request_start");
     try {
+      const auth = authenticateHttpRequest(req);
       const payload = await parseAlertPayload(req);
+      if (payload.sessionKey) {
+        if (!auth.isAdmin) {
+          if (
+            !isAlertSessionKeyAllowedForUser(payload.sessionKey, auth.userId, mainSessionAgentId)
+          ) {
+            throw new HttpError(403, "forbidden", "Not allowed to target session");
+          }
+        }
+      }
       logger.info?.("[clawline] alert_received", {
         source: payload.source,
         hasSessionKey: Boolean(payload.sessionKey),
@@ -1382,6 +1398,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         size += chunk.length;
         if (size > limit) {
           cleanup();
+          chunks.length = 0;
           req.destroy();
           reject(new HttpError(413, "payload_too_large", "Alert payload too large"));
           return;
@@ -1496,6 +1513,18 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       /^agent:[^:]+:clawline:[^:]+:main$/i.test(trimmed) ||
       /^agent:[^:]+:clawline:dm:[^:]+$/i.test(trimmed)
     );
+  }
+
+  function isAlertSessionKeyAllowedForUser(
+    sessionKey: string,
+    userId: string,
+    agentId: string,
+  ): boolean {
+    const normalizedUserId = sanitizeUserId(userId).toLowerCase();
+    const normalizedSessionKey = sessionKey.trim().toLowerCase();
+    const personalKey = buildClawlinePersonalSessionKey(agentId, userId).toLowerCase();
+    const dmKey = `agent:${agentId}:clawline:dm:${normalizedUserId}`.toLowerCase();
+    return normalizedSessionKey === personalKey || normalizedSessionKey === dmKey;
   }
 
   async function wakeGatewayForAlert(text: string, sessionKey?: string) {
@@ -1632,7 +1661,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     socket.on("close", () => sockets.delete(socket));
   });
 
-  const wss = new WebSocketServer({ noServer: true });
+  const maxPayload = Math.max(
+    config.sessions.maxMessageBytes + config.media.maxInlineBytes,
+    256 * 1024,
+  );
+  const wss = new WebSocketServer({ noServer: true, maxPayload });
 
   httpServer.on("upgrade", (request, socket, head) => {
     const origin = request.headers.origin ?? "null";
@@ -1686,6 +1719,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     1_000,
   );
   let writeQueue: Promise<void> = Promise.resolve();
+  let writeQueueDepth = 0;
   const pendingCleanupInterval = setInterval(() => expirePendingPairs(), 1_000);
   if (typeof pendingCleanupInterval.unref === "function") {
     pendingCleanupInterval.unref();
@@ -1718,23 +1752,34 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
   function runPerUserTask<T>(userId: string, task: () => Promise<T>): Promise<T> {
     const previous = perUserQueue.get(userId) ?? Promise.resolve();
-    const next = previous.then(task, task).finally(() => {
-      if (perUserQueue.get(userId) === next) {
-        perUserQueue.delete(userId);
-      }
-    });
+    const next = previous
+      .then(task, (err) => {
+        logger.warn?.("per_user_task_failed", err);
+        return task();
+      })
+      .finally(() => {
+        if (perUserQueue.get(userId) === next) {
+          perUserQueue.delete(userId);
+        }
+      });
     perUserQueue.set(userId, next);
     return next;
   }
 
   function enqueueWriteTask<T>(task: () => T | Promise<T>): Promise<T> {
+    if (writeQueueDepth >= config.sessions.maxWriteQueueDepth) {
+      return Promise.reject(new Error("write_queue_full"));
+    }
+    writeQueueDepth += 1;
     const run = () => Promise.resolve().then(task);
     const result = writeQueue.then(run, run);
     writeQueue = result.then(
       () => undefined,
       () => undefined,
     );
-    return result;
+    return result.finally(() => {
+      writeQueueDepth = Math.max(0, writeQueueDepth - 1);
+    });
   }
 
   async function persistAllowlist() {
@@ -1749,7 +1794,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   async function refreshAllowlistFromDisk() {
     try {
       allowlist = await loadAllowlist(allowlistPath);
-      allowlist.entries.forEach(applyIdentityPolicy);
+      allowlist.entries.forEach((entry) => applyIdentityPolicy(entry, adminUserId));
       handleAllowlistChanged();
     } catch (err) {
       logger.warn?.("allowlist_reload_failed", err);
@@ -1881,9 +1926,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       success: true,
       token,
       userId: entry.userId,
-    })
-      .then(() => true)
-      .catch(() => false);
+    });
     if (delivered) {
       await setTokenDelivered(entry.deviceId, true);
     }
@@ -1902,7 +1945,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       isAdmin: entry.isAdmin,
       iat: Math.floor(Date.now() / 1000),
     };
-    if (config.auth.tokenTtlSeconds) {
+    if (config.auth.tokenTtlSeconds != null && config.auth.tokenTtlSeconds > 0) {
       payload.exp = payload.iat! + config.auth.tokenTtlSeconds;
     }
     const token = jwt.sign(payload, jwtKey, { algorithm: "HS256" });
@@ -1927,18 +1970,20 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     await persistAllowlist();
   }
 
-  function sendJson(ws: WebSocket, payload: unknown): Promise<void> {
+  function sendJson(ws: WebSocket, payload: unknown): Promise<boolean> {
     return new Promise((resolve) => {
       if (ws.readyState !== WebSocket.OPEN) {
         logger.warn?.("[clawline:http] send_json_socket_not_open");
-        resolve();
+        resolve(false);
         return;
       }
       ws.send(JSON.stringify(payload), (err) => {
         if (err) {
           logger.warn?.("[clawline:http] send_json_failed", err);
+          resolve(false);
+          return;
         }
-        resolve();
+        resolve(true);
       });
     });
   }
@@ -1981,9 +2026,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
     if (typeof decoded.sub !== "string" || !timingSafeStringEqual(decoded.sub, entry.userId)) {
       throw new HttpError(401, "auth_failed", "Invalid token subject");
-    }
-    if (typeof decoded.exp === "number" && decoded.exp * 1000 < Date.now()) {
-      throw new HttpError(401, "auth_failed", "Token expired");
     }
     return { deviceId, userId: entry.userId, isAdmin: entry.isAdmin };
   }
@@ -2071,7 +2113,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         rows = selectEventsAfterTimestampStmt.all(target.userId, anchor.timestamp) as EventRow[];
       }
       const parsed = rows
-        .map((row) => parseServerMessage(row.payloadJson))
+        .map((row) => parseServerMessage(row.payloadJson, logger))
+        .filter((event): event is ServerMessage => Boolean(event))
         .map((event) => {
           if (!event.channelType && !event.sessionKey) {
             event.channelType = target.channelType;
@@ -2104,7 +2147,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       firstEventId: limited[0]?.id,
       lastEventId: limited[limited.length - 1]?.id,
     });
-    await sendJson(session.socket, payload);
+    await sendJson(session.socket, payload).catch(() => {});
     for (const event of limited) {
       if (event.channelType === ADMIN_CHANNEL_TYPE && !session.isAdmin) {
         continue;
@@ -2136,7 +2179,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           },
         );
       }
-      await sendJson(session.socket, event);
+      await sendJson(session.socket, event).catch(() => {});
     }
   }
 
@@ -2743,7 +2786,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               sessionKey: route.sessionKey,
               channelType,
             },
-          });
+          }).catch(() => {});
         };
 
         const { dispatcher, replyOptions, markDispatchIdle } = createReplyDispatcherWithTyping({
@@ -2864,7 +2907,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             code: "server_error",
             message: "Unable to deliver reply",
             messageId: payload.id,
-          });
+          }).catch(() => {});
           return;
         }
 
@@ -2877,7 +2920,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       });
     } catch (err) {
       if (err instanceof ClientMessageError) {
-        await sendJson(session.socket, { type: "error", code: err.code, message: err.message });
+        await sendJson(session.socket, {
+          type: "error",
+          code: err.code,
+          message: err.message,
+        }).catch(() => {});
         return;
       }
       // Log unexpected errors and notify client so UI can show failure
@@ -2891,7 +2938,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         code: "server_error",
         message: "Message processing failed",
         messageId: payload?.id,
-      });
+      }).catch(() => {});
     }
   }
 
@@ -3120,9 +3167,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         success: true,
         token,
         userId: entry.userId,
-      })
-        .then(() => true)
-        .catch(() => false);
+      });
       if (delivered) {
         await setTokenDelivered(deviceId, true);
       }
@@ -3139,9 +3184,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           success: true,
           token,
           userId: entry.userId,
-        })
-          .then(() => true)
-          .catch(() => false);
+        });
         if (delivered) {
           await updateLastSeen(entry.deviceId, now);
         }
@@ -3149,9 +3192,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         return;
       }
     }
-    const shouldBootstrapAdmin = !hasAdmin() && normalizedUserId === ADMIN_USER_ID;
+    const shouldBootstrapAdmin = !hasAdmin() && normalizedUserId === adminUserId;
     if (shouldBootstrapAdmin) {
-      const userId = ADMIN_USER_ID;
+      const userId = adminUserId;
       const newEntry: AllowlistEntry = {
         deviceId,
         claimedName: sanitizedClaimedName,
@@ -3162,13 +3205,16 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         createdAt: nowMs(),
         lastSeenAt: null,
       };
-      applyIdentityPolicy(newEntry);
+      applyIdentityPolicy(newEntry, adminUserId);
       allowlist.entries.push(newEntry);
       await persistAllowlist();
       const token = issueToken(newEntry);
-      const delivered = await sendJson(ws, { type: "pair_result", success: true, token, userId })
-        .then(() => true)
-        .catch(() => false);
+      const delivered = await sendJson(ws, {
+        type: "pair_result",
+        success: true,
+        token,
+        userId,
+      });
       if (delivered) {
         await setTokenDelivered(deviceId, true);
       }
@@ -3181,6 +3227,30 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       const newUserId = normalizedUserId ?? entry.userId;
       const isSwitchingAccount = newUserId !== entry.userId;
       if (isSwitchingAccount) {
+        const isAdminSwitch = isAdminUserId(newUserId, adminUserId) && !entry.isAdmin;
+        if (isAdminSwitch) {
+          const existingPendingEntry = findPendingEntry(deviceId);
+          const pendingCount = pendingFile.entries.length + (existingPendingEntry ? 0 : 1);
+          if (pendingCount > config.pairing.maxPendingRequests) {
+            await sendJson(ws, {
+              type: "error",
+              code: "rate_limited",
+              message: "Too many pending pair requests",
+            });
+            return;
+          }
+          const pendingEntry: PendingEntry = {
+            deviceId,
+            claimedName: sanitizedClaimedName,
+            deviceInfo: sanitizedInfo,
+            requestedAt: existingPendingEntry ? existingPendingEntry.requestedAt : nowMs(),
+          };
+          await upsertPendingEntry(pendingEntry);
+          await notifyGatewayOfPending(pendingEntry).catch(() => {});
+          await sendJson(ws, { type: "pair_result", success: false, reason: "pair_pending" });
+          ws.close();
+          return;
+        }
         logger.info?.("[clawline:http] pair_request_account_switch", {
           deviceId,
           oldUserId: entry.userId,
@@ -3201,7 +3271,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         entry.userId = newUserId;
         entry.claimedName = sanitizedClaimedName;
         entry.deviceInfo = sanitizedInfo;
-        entry.isAdmin = newUserId === ADMIN_USER_ID;
+        entry.isAdmin = isAdminUserId(newUserId, adminUserId);
         await persistAllowlist();
       } else {
         logger.info?.("[clawline:http] pair_request_token_redispatch", { deviceId });
@@ -3212,9 +3282,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         success: true,
         token,
         userId: entry.userId,
-      })
-        .then(() => true)
-        .catch(() => false);
+      });
       if (delivered) {
         await updateLastSeen(entry.deviceId, nowMs());
         await setTokenDelivered(entry.deviceId, true);

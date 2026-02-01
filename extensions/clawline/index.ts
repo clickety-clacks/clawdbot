@@ -3,6 +3,7 @@ import { startClawlineService } from "openclaw/plugin-sdk";
 import { clawlinePlugin } from "./src/channel.js";
 
 let serviceHandle: Awaited<ReturnType<typeof startClawlineService>> = null;
+let serviceStart: Promise<void> | null = null;
 
 const plugin = {
   id: "clawline",
@@ -21,15 +22,20 @@ const plugin = {
           logger.info?.("skipping clawline service start (clawline disabled in config)");
           return;
         }
-        if (serviceHandle) {
+        if (serviceHandle || serviceStart) {
           return;
         }
-        try {
-          serviceHandle = await startClawlineService({ config, logger });
-        } catch (err) {
-          logger.error?.(`clawline service failed to start: ${String(err)}`);
-          serviceHandle = null;
-        }
+        serviceStart = (async () => {
+          try {
+            serviceHandle = await startClawlineService({ config, logger });
+          } catch (err) {
+            logger.error?.(`clawline service failed to start: ${String(err)}`);
+            serviceHandle = null;
+          } finally {
+            serviceStart = null;
+          }
+        })();
+        await serviceStart;
       },
       stop: async () => {
         if (!serviceHandle) {
