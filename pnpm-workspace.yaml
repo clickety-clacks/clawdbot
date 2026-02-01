@@ -6,6 +6,7 @@ packages:
 
 onlyBuiltDependencies:
   - "@whiskeysockets/baileys"
+  - better-sqlite3
   - "@lydell/node-pty"
   - "@matrix-org/matrix-sdk-crypto-nodejs"
   - authenticate-pam

@@ -179,6 +179,7 @@ export function buildAgentSystemPrompt(params: {
   promptMode?: PromptMode;
   runtimeInfo?: {
     agentId?: string;
+    sessionKey?: string;
     host?: string;
     os?: string;
     arch?: string;
@@ -189,6 +190,7 @@ export function buildAgentSystemPrompt(params: {
     capabilities?: string[];
     repoRoot?: string;
   };
+  sessionKey?: string;
   messageToolHints?: string[];
   sandboxInfo?: {
     enabled: boolean;
@@ -577,9 +579,19 @@ export function buildAgentSystemPrompt(params: {
     );
   }
 
+  // Surface the active sessionKey to the agent so it can self-route notifications/alerts.
+  // - Necessary for Clawline: external tmux coding agents need the sessionKey to target notify.
+  const runtimeSessionKey = params.sessionKey ?? runtimeInfo?.sessionKey;
+
   lines.push(
     "## Runtime",
-    buildRuntimeLine(runtimeInfo, runtimeChannel, runtimeCapabilities, params.defaultThinkLevel),
+    buildRuntimeLine(
+      runtimeInfo,
+      runtimeChannel,
+      runtimeCapabilities,
+      params.defaultThinkLevel,
+      runtimeSessionKey,
+    ),
     `Reasoning: ${reasoningLevel} (hidden unless on/stream). Toggle /reasoning; /status shows Reasoning when enabled.`,
   );
 
@@ -589,6 +601,7 @@ export function buildAgentSystemPrompt(params: {
 export function buildRuntimeLine(
   runtimeInfo?: {
     agentId?: string;
+    sessionKey?: string;
     host?: string;
     os?: string;
     arch?: string;
@@ -600,6 +613,7 @@ export function buildRuntimeLine(
   runtimeChannel?: string,
   runtimeCapabilities: string[] = [],
   defaultThinkLevel?: ThinkLevel,
+  sessionKey?: string,
 ): string {
   return `Runtime: ${[
     runtimeInfo?.agentId ? `agent=${runtimeInfo.agentId}` : "",
@@ -618,6 +632,9 @@ export function buildRuntimeLine(
       ? `capabilities=${runtimeCapabilities.length > 0 ? runtimeCapabilities.join(",") : "none"}`
       : "",
     `thinking=${defaultThinkLevel ?? "off"}`,
+    sessionKey || runtimeInfo?.sessionKey
+      ? `sessionKey=${sessionKey ?? runtimeInfo?.sessionKey}`
+      : "",
   ]
     .filter(Boolean)
     .join(" | ")}`;

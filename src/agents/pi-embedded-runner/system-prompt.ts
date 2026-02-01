@@ -26,6 +26,7 @@ export function buildEmbeddedSystemPrompt(params: {
   promptMode?: PromptMode;
   runtimeInfo: {
     agentId?: string;
+    sessionKey?: string;
     host: string;
     os: string;
     arch: string;
@@ -61,6 +62,7 @@ export function buildEmbeddedSystemPrompt(params: {
     reactionGuidance: params.reactionGuidance,
     promptMode: params.promptMode,
     runtimeInfo: params.runtimeInfo,
+    sessionKey: params.runtimeInfo.sessionKey,
     messageToolHints: params.messageToolHints,
     sandboxInfo: params.sandboxInfo,
     toolNames: params.tools.map((tool) => tool.name),
