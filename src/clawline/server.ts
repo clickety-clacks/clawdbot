@@ -1158,13 +1158,20 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           let response: Response;
           const controller = new AbortController();
           const timeoutId = setTimeout(() => controller.abort(), MEDIA_FETCH_TIMEOUT_MS);
+          const abortListener = () => controller.abort();
           if (init?.signal) {
             if (init.signal.aborted) {
               controller.abort();
             } else {
-              init.signal.addEventListener("abort", () => controller.abort(), { once: true });
+              init.signal.addEventListener("abort", abortListener);
             }
           }
+          const clearFetchTimeout = () => {
+            clearTimeout(timeoutId);
+            if (init?.signal) {
+              init.signal.removeEventListener("abort", abortListener);
+            }
+          };
           try {
             response = await fetch(currentUrl, {
               ...init,
@@ -1173,17 +1180,19 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               redirect: "manual",
             } as RequestInit & { dispatcher: Dispatcher });
           } catch (err) {
+            clearFetchTimeout();
             await closeDispatcher(dispatcher);
             throw err;
-          } finally {
-            clearTimeout(timeoutId);
           }
           if (isRedirectStatus(response.status)) {
             const location = response.headers.get("location");
             if (!location) {
               (response as { [FETCH_CLEANUP_SYMBOL]?: () => Promise<void> | void })[
                 FETCH_CLEANUP_SYMBOL
-              ] = () => closeDispatcher(dispatcher);
+              ] = () => {
+                clearFetchTimeout();
+                return closeDispatcher(dispatcher);
+              };
               return response;
             }
             if (response.body) {
@@ -1191,6 +1200,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
                 await response.body.cancel();
               } catch {}
             }
+            clearFetchTimeout();
             await closeDispatcher(dispatcher);
             redirectCount += 1;
             if (redirectCount > MAX_MEDIA_REDIRECTS) {
@@ -1202,7 +1212,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           }
           (response as { [FETCH_CLEANUP_SYMBOL]?: () => Promise<void> | void })[
             FETCH_CLEANUP_SYMBOL
-          ] = () => closeDispatcher(dispatcher);
+          ] = () => {
+            clearFetchTimeout();
+            return closeDispatcher(dispatcher);
+          };
           return response;
         }
       };
