@@ -412,6 +412,17 @@ describe("buildAgentSystemPrompt", () => {
     expect(line).toContain("thinking=low");
   });
 
+  it("includes sessionKey in runtime line when provided", () => {
+    const line = buildRuntimeLine(
+      { agentId: "main", host: "host", os: "macOS", arch: "arm64", node: "v20", model: "claude" },
+      "telegram",
+      ["inlineButtons"],
+      "low",
+      "main:main:telegram",
+    );
+    expect(line).toContain("sessionKey=main:main:telegram");
+  });
+
   it("describes sandboxed runtime and elevated when allowed", () => {
     const prompt = buildAgentSystemPrompt({
       workspaceDir: "/tmp/openclaw",

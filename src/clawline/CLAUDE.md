@@ -1,10 +1,10 @@
 # Clawline Module Guidelines
 
-Clawline is a first-party local gateway provider that connects devices (iOS, macOS clients) to Clawdbot over WebSocket.
+Clawline is a first-party local gateway provider that connects devices (iOS, macOS clients) to OpenClaw over WebSocket.
 
-## Clawline to Clawdbot Channel Mapping
+## Clawline to OpenClaw Channel Mapping
 
-Clawline maps to Clawdbot's session/routing model. Understanding this mapping is key:
+Clawline maps to OpenClaw's session/routing model. Understanding this mapping is key:
 
 **Core concept**: SESSION = conversation memory, CHANNEL = delivery pipe.
 
@@ -21,24 +21,25 @@ Admin access is enforced by allowlist `isAdmin`.
 
 ### Session Routing Summary
 
-| Clawline | Clawdbot Equivalent | Session Key | Memory |
-|----------|---------------------|-------------|--------|
-| Admin channel | Main DM session | `agent:main:main` | Shared main |
-| Personal channel | Per-user Clawline session | `agent:main:clawline:{userId}:main` | Isolated |
+| Clawline         | OpenClaw Equivalent       | Session Key                         | Memory      |
+| ---------------- | ------------------------- | ----------------------------------- | ----------- |
+| Admin channel    | Main DM session           | `agent:main:main`                   | Shared main |
+| Personal channel | Per-user Clawline session | `agent:main:clawline:{userId}:main` | Isolated    |
 
 ### Comparison with Other Providers
 
-| Source | Session | Reply Goes To |
-|--------|---------|---------------|
-| Discord DM | `agent:main:main` | That Discord user |
-| Telegram DM | `agent:main:main` | That Telegram chat |
-| Clawline admin | `agent:main:main` | Admin devices only |
-| Clawline personal | `agent:main:clawline:userId:main` | That user's devices |
-| Discord `#channel` | `agent:main:discord:channel:id` | That Discord channel |
+| Source             | Session                           | Reply Goes To        |
+| ------------------ | --------------------------------- | -------------------- |
+| Discord DM         | `agent:main:main`                 | That Discord user    |
+| Telegram DM        | `agent:main:main`                 | That Telegram chat   |
+| Clawline admin     | `agent:main:main`                 | Admin devices only   |
+| Clawline personal  | `agent:main:clawline:userId:main` | That user's devices  |
+| Discord `#channel` | `agent:main:discord:channel:id`   | That Discord channel |
 
 ### Reply Routing
 
 All Clawline channels use the same pattern:
+
 - `OriginatingTo: "user:{userId}"` → `broadcastToUser(userId)` (all user's devices)
 
 ## Key Files
@@ -60,10 +61,11 @@ The channel type affects session routing and UI separation, not storage.
 
 ## Upstream Merge Protocol
 
-When merging or rebasing upstream clawdbot changes into our fork:
+When merging or rebasing upstream openclaw changes into our fork:
 
 **Why this matters:** Blind merging causes problems:
-- Reintroducing deprecated clawdbot features just to make clawline compile
+
+- Reintroducing deprecated openclaw features just to make clawline compile
 - Missing new patterns we should adopt (better extension points, refactored infra)
 - Duplicating functionality that upstream now provides differently
 - Coupling clawline too tightly to internals that will change

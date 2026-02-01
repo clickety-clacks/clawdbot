@@ -120,6 +120,7 @@ export async function routeReply(params: RouteReplyParams): Promise<RouteReplyRe
       channel: channelId,
       to,
       accountId: accountId ?? undefined,
+      sessionKey: params.sessionKey,
       payloads: [normalized],
       replyToId: resolvedReplyToId ?? null,
       threadId: resolvedThreadId,

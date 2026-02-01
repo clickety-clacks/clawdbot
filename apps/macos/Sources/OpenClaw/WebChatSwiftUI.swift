@@ -128,7 +128,7 @@ struct MacGatewayChatTransport: OpenClawChatTransport, Sendable {
             case "activity":
                 guard let payload = evt.payload else { return nil }
                 guard let activity = try? JSONDecoder().decode(
-                    ClawdbotActivityEventPayload.self,
+                    OpenClawActivityEventPayload.self,
                     from: JSONEncoder().encode(payload))
                 else {
                     return nil

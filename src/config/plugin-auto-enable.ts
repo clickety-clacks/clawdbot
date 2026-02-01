@@ -39,7 +39,7 @@ const PROVIDER_PLUGIN_IDS: Array<{ pluginId: string; providerId: string }> = [
 
 const SERVICE_PLUGIN_CHECKS: Array<{
   pluginId: string;
-  isConfigured: (cfg: ClawdbotConfig) => boolean;
+  isConfigured: (cfg: OpenClawConfig) => boolean;
 }> = [
   {
     pluginId: "clawline",

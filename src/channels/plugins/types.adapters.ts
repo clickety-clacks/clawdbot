@@ -80,7 +80,8 @@ export type ChannelOutboundContext = {
   replyToId?: string | null;
   threadId?: string | number | null;
   accountId?: string | null;
-  identity?: OutboundIdentity;
+  /** Session key for the delivery context. Used by clawline to determine channel type. */
+  sessionKey?: string;
   deps?: OutboundSendDeps;
 };
 

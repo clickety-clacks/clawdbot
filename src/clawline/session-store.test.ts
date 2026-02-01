@@ -24,13 +24,13 @@ describe("recordClawlineSessionActivity", () => {
     const initialStore = loadSessionStore(storePath);
     const entry = initialStore[sessionKey];
     expect(entry).toBeDefined();
-    expect(entry.provider).toBe("clawline");
+    expect(entry.channel).toBe("clawline");
     expect(entry.chatType).toBe("direct");
     expect(entry.displayName).toBe("Alice");
     expect(entry.label).toBe("Alice");
     expect(entry.sessionFile).toBe("/tmp/clawline-session.jsonl");
     expect(entry.sessionId).toBe("session_1");
-    expect(entry.lastProvider).toBe("clawline");
+    expect(entry.lastChannel).toBe("clawline");
     const firstUpdatedAt = entry.updatedAt;
 
     await recordClawlineSessionActivity({

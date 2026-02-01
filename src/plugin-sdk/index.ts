@@ -386,3 +386,7 @@ export type { ProcessedLineMessage } from "../line/markdown-to-line.js";
 
 // Media utilities
 export { loadWebMedia, type WebMediaResult } from "../web/media.js";
+
+// Clawline service
+export { sendClawlineOutboundMessage } from "../clawline/outbound.js";
+export { startClawlineService, type ClawlineServiceHandle } from "../clawline/service.js";

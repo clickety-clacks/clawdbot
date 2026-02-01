@@ -1,14 +1,30 @@
 {
-  "name": "@clawdbot/clawline",
+  "name": "@openclaw/clawline",
   "version": "2026.1.17-1",
+  "description": "OpenClaw Clawline channel plugin",
   "type": "module",
-  "description": "Clawdbot Clawline channel plugin",
   "dependencies": {
     "better-sqlite3": "12.6.2",
     "busboy": "1.6.0",
     "jsonwebtoken": "9.0.3"
   },
-  "clawdbot": {
-    "extensions": ["./index.ts"]
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "channel": {
+      "id": "clawline",
+      "label": "Clawline",
+      "selectionLabel": "Clawline (local devices)",
+      "docsPath": "/providers/clawline",
+      "docsLabel": "clawline",
+      "blurb": "first-party local gateway; enable via config/onboarding.",
+      "order": 10
+    },
+    "install": {
+      "npmSpec": "@openclaw/clawline",
+      "localPath": "extensions/clawline",
+      "defaultChoice": "local"
+    }
   }
 }

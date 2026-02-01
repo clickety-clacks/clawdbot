@@ -119,7 +119,7 @@ struct IOSGatewayChatTransport: OpenClawChatTransport, Sendable {
                         guard let payload = evt.payload else { break }
                         if let activityPayload = try? GatewayPayloadDecoding.decode(
                             payload,
-                            as: ClawdbotActivityEventPayload.self)
+                            as: OpenClawActivityEventPayload.self)
                         {
                             continuation.yield(.activity(
                                 isActive: activityPayload.isActive,

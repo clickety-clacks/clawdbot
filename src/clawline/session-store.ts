@@ -1,7 +1,7 @@
 import type { SessionChannelId, SessionEntry } from "../config/sessions.js";
 import { mergeSessionEntry, updateSessionStore } from "../config/sessions.js";
 
-export const CLAWLINE_SESSION_PROVIDER = "clawline" as SessionProviderId;
+export const CLAWLINE_SESSION_CHANNEL = "clawline" as SessionChannelId;
 
 type LoggerLike = { warn?: (...args: unknown[]) => void };
 

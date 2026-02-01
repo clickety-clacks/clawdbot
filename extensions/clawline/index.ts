@@ -1,14 +1,14 @@
-import type { ClawdbotPluginApi } from "clawdbot/plugin-sdk";
-import { startClawlineService, type ClawlineServiceHandle } from "clawdbot/plugin-sdk";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import { startClawlineService } from "openclaw/plugin-sdk";
 import { clawlinePlugin } from "./src/channel.js";
 
-let serviceHandle: ClawlineServiceHandle | null = null;
+let serviceHandle: Awaited<ReturnType<typeof startClawlineService>> = null;
 
 const plugin = {
   id: "clawline",
   name: "Clawline",
   description: "Clawline channel plugin",
-  register(api: ClawdbotPluginApi) {
+  register(api: OpenClawPluginApi) {
     api.registerChannel({ plugin: clawlinePlugin });
     api.registerService({
       id: "clawline",
@@ -21,7 +21,9 @@ const plugin = {
           logger.info?.("skipping clawline service start (clawline disabled in config)");
           return;
         }
-        if (serviceHandle) return;
+        if (serviceHandle) {
+          return;
+        }
         try {
           serviceHandle = await startClawlineService({ config, logger });
         } catch (err) {
@@ -30,7 +32,9 @@ const plugin = {
         }
       },
       stop: async () => {
-        if (!serviceHandle) return;
+        if (!serviceHandle) {
+          return;
+        }
         try {
           await serviceHandle.stop();
         } finally {

@@ -29,10 +29,10 @@ public final class OpenClawChatViewModel {
     public private(set) var sessionKey: String
     public private(set) var sessionId: String?
     public private(set) var streamingAssistantText: String?
-    public private(set) var pendingToolCalls: [ClawdbotChatPendingToolCall] = []
-    public private(set) var sessions: [ClawdbotChatSessionEntry] = []
+    public private(set) var pendingToolCalls: [OpenClawChatPendingToolCall] = []
+    public private(set) var sessions: [OpenClawChatSessionEntry] = []
     public private(set) var isAssistantTyping: Bool = false
-    private let transport: any ClawdbotChatTransport
+    private let transport: any OpenClawChatTransport
 
     @ObservationIgnored
     private nonisolated(unsafe) var eventTask: Task<Void, Never>?

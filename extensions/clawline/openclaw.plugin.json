@@ -1,0 +1,9 @@
+{
+  "id": "clawline",
+  "channels": ["clawline"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

@@ -1,5 +1,5 @@
-import type { ChannelOnboardingAdapter, ClawdbotConfig } from "clawdbot/plugin-sdk";
-import { formatDocsLink } from "clawdbot/plugin-sdk";
+import type { ChannelOnboardingAdapter, OpenClawConfig } from "openclaw/plugin-sdk";
+import { formatDocsLink } from "openclaw/plugin-sdk";
 
 const DOCS_PATH = "/providers/clawline";
 const DEFAULT_PORT = 18800;
@@ -19,8 +19,8 @@ function sanitizeOrigins(input: string): string[] {
 }
 
 function ensureClawlineBlock(
-  cfg: ClawdbotConfig,
-): NonNullable<NonNullable<ClawdbotConfig["channels"]>["clawline"]> {
+  cfg: OpenClawConfig,
+): NonNullable<NonNullable<OpenClawConfig["channels"]>["clawline"]> {
   return cfg.channels?.clawline ?? {};
 }
 
@@ -57,7 +57,7 @@ export const clawlineOnboardingAdapter: ChannelOnboardingAdapter = {
         cfg: {
           ...cfg,
           channels: {
-            ...(cfg.channels ?? {}),
+            ...cfg.channels,
             clawline: {
               ...current,
               enabled: false,
@@ -79,7 +79,9 @@ export const clawlineOnboardingAdapter: ChannelOnboardingAdapter = {
       initialValue: String(current.port ?? DEFAULT_PORT),
       validate: (value) => {
         const trimmed = value.trim();
-        if (!trimmed) return "Port is required";
+        if (!trimmed) {
+          return "Port is required";
+        }
         const num = Number.parseInt(trimmed, 10);
         if (!Number.isInteger(num) || num < 1 || num > 65535) {
           return "Enter a port between 1-65535";
@@ -109,10 +111,10 @@ export const clawlineOnboardingAdapter: ChannelOnboardingAdapter = {
       allowedOrigins = DEFAULT_ORIGINS;
     }
 
-    const next: ClawdbotConfig = {
+    const next: OpenClawConfig = {
       ...cfg,
       channels: {
-        ...(cfg.channels ?? {}),
+        ...cfg.channels,
         clawline: {
           ...current,
           enabled: true,
@@ -132,9 +134,9 @@ export const clawlineOnboardingAdapter: ChannelOnboardingAdapter = {
   disable: (cfg) => ({
     ...cfg,
     channels: {
-      ...(cfg.channels ?? {}),
+      ...cfg.channels,
       clawline: {
-        ...(cfg.channels?.clawline ?? {}),
+        ...cfg.channels?.clawline,
         enabled: false,
       },
     },

@@ -1,7 +1,7 @@
 import os from "node:os";
 import path from "node:path";
 
-import type { ClawdbotConfig } from "../config/config.js";
+import type { OpenClawConfig } from "../config/config.js";
 import type { ProviderConfig } from "./domain.js";
 import { deepMerge } from "./utils/deep-merge.js";
 
@@ -25,11 +25,11 @@ export type ClawlineConfigInput = {
   adapter?: ClawlineAdapterOverrides;
 } & Partial<ProviderConfigBase>;
 
-const defaultStatePath = path.join(os.homedir(), ".clawdbot", "clawline");
-const defaultMediaPath = path.join(os.homedir(), ".clawdbot", "clawline-media");
+const defaultStatePath = path.join(os.homedir(), ".openclaw", "clawline");
+const defaultMediaPath = path.join(os.homedir(), ".openclaw", "clawline-media");
 const defaultAlertInstructionsPath = path.join(
   os.homedir(),
-  ".clawdbot",
+  ".openclaw",
   "clawline",
   "alert-instructions.md",
 );
@@ -52,7 +52,7 @@ function resolvePathValue(value: string | undefined, fallback: string): string {
 }
 
 const DEFAULTS: ResolvedClawlineConfig = {
-  enabled: true,
+  enabled: false,
   port: 18800,
   statePath: defaultStatePath,
   alertInstructionsPath: defaultAlertInstructionsPath,
@@ -99,12 +99,9 @@ const DEFAULTS: ResolvedClawlineConfig = {
   },
 };
 
-export function resolveClawlineConfig(cfg: ClawdbotConfig): ResolvedClawlineConfig {
+export function resolveClawlineConfig(cfg: OpenClawConfig): ResolvedClawlineConfig {
   const input = (cfg.channels?.clawline ?? {}) as ClawlineConfigInput;
-  const merged = deepMerge(
-    structuredClone(DEFAULTS) as ResolvedClawlineConfig,
-    input as Partial<ResolvedClawlineConfig>,
-  );
+  const merged = deepMerge(structuredClone(DEFAULTS), input as Partial<ResolvedClawlineConfig>);
   merged.statePath = resolvePathValue(merged.statePath, defaultStatePath);
   merged.media.storagePath = resolvePathValue(merged.media.storagePath, defaultMediaPath);
   merged.alertInstructionsPath = resolvePathValue(
@@ -113,6 +110,6 @@ export function resolveClawlineConfig(cfg: ClawdbotConfig): ResolvedClawlineConf
   );
   const adapterOverrides: ClawlineAdapterOverrides = input.adapter ? { ...input.adapter } : {};
   merged.adapterOverrides = adapterOverrides;
-  merged.enabled = input.enabled ?? true;
+  merged.enabled = input.enabled === true;
   return merged;
 }

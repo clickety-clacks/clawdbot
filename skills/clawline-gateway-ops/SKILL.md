@@ -1,7 +1,7 @@
 ---
 name: clawline-gateway-ops
 description: Restart and validate the Clawline provider, plus key health checks and rate-limit knobs.
-metadata: {"clawdbot":{"skillKey":"clawline-gateway-ops"}}
+metadata: { "openclaw": { "skillKey": "clawline-gateway-ops" } }
 ---
 
 # Clawline Gateway Ops
@@ -26,9 +26,10 @@ Send any invalid message and expect `invalid_message`.
 
 ## Rate Limits and Session Limits
 
-Configuration lives under `channels.clawline` in `~/.clawdbot/clawdbot.json`.
+Configuration lives under `channels.clawline` in `~/.openclaw/openclaw.json`.
 
 Common keys:
+
 - `pairing.maxRequestsPerMinute`
 - `pairing.maxPendingRequests`
 - `sessions.maxMessagesPerSecond`
@@ -37,5 +38,5 @@ Common keys:
 Inspect current overrides:
 
 ```bash
-jq ".channels.clawline" ~/.clawdbot/clawdbot.json
+jq ".channels.clawline" ~/.openclaw/openclaw.json
 ```

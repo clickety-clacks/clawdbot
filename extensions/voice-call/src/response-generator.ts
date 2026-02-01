@@ -72,7 +72,9 @@ export async function generateVoiceResponse(
   // Load or create session entry atomically to avoid race conditions.
   const sessionEntry = await deps.updateSessionStore(storePath, (store) => {
     const existing = store[sessionKey] as SessionEntry | undefined;
-    if (existing) return existing;
+    if (existing) {
+      return existing;
+    }
     const newEntry: SessionEntry = {
       sessionId: crypto.randomUUID(),
       updatedAt: Date.now(),

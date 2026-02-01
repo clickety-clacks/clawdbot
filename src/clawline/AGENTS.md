@@ -1,6 +1,6 @@
 # Clawline Agent Guidelines
 
-Clawline is a WebSocket-based local gateway connecting devices to Clawdbot.
+Clawline is a WebSocket-based local gateway connecting devices to OpenClaw.
 
 ## Channel Mapping
 
@@ -8,10 +8,10 @@ Clawline is a WebSocket-based local gateway connecting devices to Clawdbot.
 
 Clawline follows the canonical session key spec:
 
-| Clawline | Clawdbot Equivalent | Session Key | Reply Goes To |
-|----------|---------------------|-------------|---------------|
-| Admin channel | Main DM session | `agent:main:main` | Admin devices only |
-| Personal channel | Per-user Clawline session | `agent:main:clawline:{userId}:main` | User's devices |
+| Clawline         | OpenClaw Equivalent       | Session Key                         | Reply Goes To      |
+| ---------------- | ------------------------- | ----------------------------------- | ------------------ |
+| Admin channel    | Main DM session           | `agent:main:main`                   | Admin devices only |
+| Personal channel | Per-user Clawline session | `agent:main:clawline:{userId}:main` | User's devices     |
 
 ### Admin Channel (Main Session)
 
@@ -27,8 +27,8 @@ Clawline follows the canonical session key spec:
 ## Key Constants
 
 ```typescript
-ADMIN_CHANNEL_TYPE = "admin"  // admin-only channel (access control + UI)
-DEFAULT_CHANNEL_TYPE = "personal"  // personal channel
+ADMIN_CHANNEL_TYPE = "admin"; // admin-only channel (access control + UI)
+DEFAULT_CHANNEL_TYPE = "personal"; // personal channel
 ```
 
 Messages and assets are stored under the real user's ID for all channel types.
@@ -42,6 +42,7 @@ If `CLU_FACE_SPEAK_URL` is set, the provider POSTs `{"text":"..."}` after succes
 This is best-effort (non-blocking, errors swallowed). Empty text is skipped; long text is capped.
 
 Example (local only):
+
 ```bash
 export CLU_FACE_SPEAK_URL="http://127.0.0.1:9001/speak"
 ```
@@ -57,7 +58,7 @@ export CLU_FACE_SPEAK_URL="http://127.0.0.1:9001/speak"
 
 ## Upstream Merge Protocol
 
-When merging upstream clawdbot changes:
+When merging upstream openclaw changes:
 
 ### Principles
 

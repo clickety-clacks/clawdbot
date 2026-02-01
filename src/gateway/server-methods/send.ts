@@ -156,7 +156,8 @@ export const sendHandlers: GatewayRequestHandlers = {
           channel: outboundChannel,
           to: resolved.to,
           accountId,
-          payloads: [{ text: message, mediaUrl, mediaUrls }],
+          sessionKey: providedSessionKey ?? derivedRoute?.sessionKey,
+          payloads: [{ text: message, mediaUrl: request.mediaUrl, mediaUrls }],
           gifPlayback: request.gifPlayback,
           deps: outboundDeps,
           mirror: providedSessionKey

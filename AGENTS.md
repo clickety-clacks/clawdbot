@@ -117,7 +117,8 @@
 - Release flow: always read `docs/reference/RELEASING.md` and `docs/platforms/mac/release.md` before any release work; do not ask routine questions once those docs answer them.
 
 ## Clawline Alert Instructions Overlay
-- The provider appends `~/.clawdbot/clawline/alert-instructions.md` (overridable via `clawline.alertInstructionsPath`) to every Clawline alert, separated by a blank line. The overlay appears because the file is read on each alert and appended to the alert body.
+
+- The provider appends `~/.openclaw/clawline/alert-instructions.md` (overridable via `clawline.alertInstructionsPath`) to every Clawline alert, separated by a blank line. The overlay appears because the file is read on each alert and appended to the alert body.
 - Disable the overlay by leaving the file empty/whitespace-only; deleting the file recreates the default text on next startup.
 - Keep the text under `sessions.maxMessageBytes` (default 65,536 bytes) or Clawline skips the overlay and logs `alert_instructions_skipped`.
 - No restart needed; edits are picked up on the next alert.

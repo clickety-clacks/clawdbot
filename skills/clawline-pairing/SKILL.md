@@ -1,28 +1,30 @@
 ---
 name: clawline-pairing
 description: Approve or deny pending Clawline devices by moving entries between pending, allowlist, and denylist.
-metadata: {"clawdbot":{"skillKey":"clawline-pairing"}}
+metadata: { "openclaw": { "skillKey": "clawline-pairing" } }
 ---
 
 # Clawline Pairing: Approve or Deny
 
 Clawline uses a pending -> allowlist flow:
+
 1. Device sends `pair_request`.
 2. Provider writes `pending.json` and keeps the socket open.
 3. Approving moves the entry to `allowlist.json`.
 4. The provider issues the JWT and the client finishes pairing.
 
 Paths (configurable via `clawline.statePath`):
-- `~/.clawdbot/clawline/pending.json`
-- `~/.clawdbot/clawline/allowlist.json`
-- `~/.clawdbot/clawline/denylist.json`
+
+- `~/.openclaw/clawline/pending.json`
+- `~/.openclaw/clawline/allowlist.json`
+- `~/.openclaw/clawline/denylist.json`
 
 The provider watches pending/allowlist for changes, so edits apply immediately without a restart.
 
 ## Inspect Pending
 
 ```bash
-jq ".entries" ~/.clawdbot/clawline/pending.json 2>/dev/null
+jq ".entries" ~/.openclaw/clawline/pending.json 2>/dev/null
 ```
 
 ## Approve a Device
@@ -32,7 +34,7 @@ Move the entry from `pending.json` to `allowlist.json` and set a `userId`. The s
 ```bash
 python3 - <<'PY'
 import json, pathlib, time, uuid, re, unicodedata
-root = pathlib.Path.home() / ".clawdbot" / "clawline"
+root = pathlib.Path.home() / ".openclaw" / "clawline"
 pending = json.loads((root / "pending.json").read_text())
 allowlist_path = root / "allowlist.json"
 allowlist = json.loads(allowlist_path.read_text()) if allowlist_path.exists() else {"version": 1, "entries": []}
@@ -79,7 +81,7 @@ Remove the device from pending, then optionally add it to `denylist.json` so fut
 ```bash
 python3 - <<'PY'
 import json, pathlib, time
-root = pathlib.Path.home() / ".clawdbot" / "clawline"
+root = pathlib.Path.home() / ".openclaw" / "clawline"
 
 device_id = "E3F4..."  # fill in
 

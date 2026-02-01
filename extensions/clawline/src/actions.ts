@@ -1,5 +1,5 @@
-import type { AgentToolResult, ClawdbotConfig } from "clawdbot/plugin-sdk";
-import { jsonResult } from "clawdbot/plugin-sdk";
+import type { AgentToolResult, OpenClawConfig } from "openclaw/plugin-sdk";
+import { jsonResult } from "openclaw/plugin-sdk";
 import type {
   ChannelMessageActionAdapter,
   ChannelMessageActionName,
@@ -31,7 +31,7 @@ type ParsedMessage = {
   channelType?: string;
 };
 
-function resolveClawlineDbPath(cfg: ClawdbotConfig): string {
+function resolveClawlineDbPath(cfg: OpenClawConfig): string {
   const clawlineStatePath = cfg.channels?.clawline?.statePath;
   if (clawlineStatePath) {
     return path.join(clawlineStatePath, "clawline.sqlite");
@@ -74,7 +74,7 @@ function parseEventPayload(row: EventRow): ParsedMessage {
 }
 
 async function readClawlineMessages(params: {
-  cfg: ClawdbotConfig;
+  cfg: OpenClawConfig;
   userId?: string;
   limit?: number;
   channelType?: string;
@@ -123,7 +123,11 @@ async function readClawlineMessages(params: {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (message.includes("SQLITE_CANTOPEN") || message.includes("no such file")) {
-      return { ok: false, messages: [], error: "Clawline database not found. Is Clawline running?" };
+      return {
+        ok: false,
+        messages: [],
+        error: "Clawline database not found. Is Clawline running?",
+      };
     }
     return { ok: false, messages: [], error: message };
   } finally {
@@ -132,7 +136,7 @@ async function readClawlineMessages(params: {
 }
 
 async function listClawlineUsers(params: {
-  cfg: ClawdbotConfig;
+  cfg: OpenClawConfig;
 }): Promise<{ ok: boolean; users: { userId: string; messageCount: number }[]; error?: string }> {
   const { cfg } = params;
   const dbPath = resolveClawlineDbPath(cfg);
@@ -160,7 +164,9 @@ async function listClawlineUsers(params: {
 
 export const clawlineMessageActions: ChannelMessageActionAdapter = {
   listActions: ({ cfg }) => {
-    if (!cfg.channels?.clawline?.enabled) return [];
+    if (!cfg.channels?.clawline?.enabled) {
+      return [];
+    }
     const actions: ChannelMessageActionName[] = ["send", "read", "list-users"];
     return actions;
   },
