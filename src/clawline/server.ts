@@ -26,11 +26,8 @@ import {
 import {
   resolveAgentIdFromSessionKey,
   resolveMainSessionKeyFromConfig,
-  loadSessionStore,
-  resolveStorePath,
   updateLastRoute,
 } from "../config/sessions.js";
-import { loadConfig } from "../config/config.js";
 import { rawDataToString } from "../infra/ws.js";
 import { recordClawlineSessionActivity } from "./session-store.js";
 import type { ClawlineAdapterOverrides } from "./config.js";
@@ -58,13 +55,7 @@ import { callGateway } from "../gateway/call.js";
 import { GATEWAY_CLIENT_MODES, GATEWAY_CLIENT_NAMES } from "../gateway/protocol/client-info.js";
 import { loadWebMedia } from "../web/media.js";
 import { clawlineAttachmentsToImages } from "./attachments.js";
-import { enqueueAnnounce, type AnnounceQueueItem } from "../agents/subagent-announce-queue.js";
-import {
-  deliveryContextFromSession,
-  mergeDeliveryContext,
-  normalizeDeliveryContext,
-} from "../utils/delivery-context.js";
-import { isEmbeddedPiRunActive } from "../agents/pi-embedded.js";
+import { type AnnounceQueueItem, enqueueAnnounce } from "../agents/subagent-announce-queue.js";
 
 export const PROTOCOL_VERSION = 1;
 
@@ -1546,124 +1537,51 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
       alertLog("alert_wake_start");
 
-      const cfg = loadConfig();
-      const agentId = resolveAgentIdFromSessionKey(resolvedSessionKey);
-      const storePath = resolveStorePath(cfg.session?.store, { agentId });
-      const store = loadSessionStore(storePath);
-      const entry = store[resolvedSessionKey];
-      const sessionId = entry?.sessionId;
+      const queueSettings = resolveQueueSettings({
+        cfg: openClawCfg,
+        channel: deliveryContext?.channel,
+      });
+      const sendQueuedAlert = async (item: AnnounceQueueItem) => {
+        const origin = item.origin;
+        const threadId =
+          origin?.threadId != null && origin.threadId !== "" ? String(origin.threadId) : undefined;
+        await callGateway({
+          method: "agent",
+          params: {
+            sessionKey: item.sessionKey,
+            message: item.prompt,
+            channel: origin?.channel,
+            accountId: origin?.accountId,
+            to: origin?.to,
+            threadId,
+            deliver: true,
+            idempotencyKey: randomUUID(),
+          },
+          expectFinal: true,
+          timeoutMs: 60_000,
+        });
+      };
 
-      alertLog("direct_agent_resolve", {
-        sessionKey: resolvedSessionKey,
-        hasEntry: Boolean(entry),
-        sessionId,
+      // Always enqueue — never send directly to the agent, even if it appears idle.
+      // The gateway has no session-level locking. isEmbeddedPiRunActive has a race window:
+      // the agent turn can finish writing JSONL but not yet clear the active-runs Map,
+      // so a 'direct' send can hit the JSONL lock and timeout, losing the message.
+      // Enqueuing unconditionally eliminates this race. The queue drains when the agent
+      // is truly idle. The latency cost is negligible vs message loss.
+      enqueueAnnounce({
+        key: resolvedSessionKey,
+        item: {
+          prompt: `System Alert: ${text}`,
+          summaryLine: "System Alert",
+          enqueuedAt: Date.now(),
+          sessionKey: resolvedSessionKey,
+          origin: deliveryContext,
+        },
+        settings: queueSettings,
+        send: sendQueuedAlert,
       });
 
-      const explicitContext = normalizeDeliveryContext(deliveryContext);
-      const sessionContext = deliveryContextFromSession(entry);
-      const merged = mergeDeliveryContext(explicitContext, sessionContext);
-
-      const channel = merged?.channel;
-      const to = merged?.to;
-      const accountId = merged?.accountId;
-      const threadId =
-        merged?.threadId != null && merged.threadId !== "" ? String(merged.threadId) : undefined;
-
-      let result: { outcome: "queued" | "sent" | "error"; error?: string };
-      try {
-        if (!sessionId) {
-          await callGateway({
-            method: "agent",
-            params: {
-              sessionKey: resolvedSessionKey,
-              message: `System Alert: ${text}`,
-              deliver: true,
-              channel,
-              accountId,
-              to,
-              threadId,
-              idempotencyKey: randomUUID(),
-            },
-            expectFinal: true,
-            timeoutMs: 60_000,
-          });
-          alertLog("direct_agent_sent", { sessionKey: resolvedSessionKey, channel, to });
-          result = { outcome: "sent" };
-        } else {
-          const queueSettings = resolveQueueSettings({
-            cfg,
-            channel: entry?.channel ?? entry?.lastChannel,
-            sessionEntry: entry,
-          });
-          const isActive = isEmbeddedPiRunActive(sessionId);
-
-          if (isActive) {
-            const item: AnnounceQueueItem = {
-              prompt: `System Alert: ${text}`,
-              summaryLine: "System Alert",
-              enqueuedAt: Date.now(),
-              sessionKey: resolvedSessionKey,
-              origin: merged,
-            };
-            enqueueAnnounce({
-              key: resolvedSessionKey,
-              item,
-              settings: queueSettings,
-              send: async (queued) => {
-                const origin = queued.origin;
-                const queuedThreadId =
-                  origin?.threadId != null && origin.threadId !== ""
-                    ? String(origin.threadId)
-                    : undefined;
-                await callGateway({
-                  method: "agent",
-                  params: {
-                    sessionKey: queued.sessionKey,
-                    message: queued.prompt,
-                    channel: origin?.channel,
-                    accountId: origin?.accountId,
-                    to: origin?.to,
-                    threadId: queuedThreadId,
-                    deliver: true,
-                    idempotencyKey: randomUUID(),
-                  },
-                  expectFinal: true,
-                  timeoutMs: 60_000,
-                });
-              },
-            });
-            alertLog("direct_agent_queued", { sessionKey: resolvedSessionKey, sessionId });
-            result = { outcome: "queued" };
-          } else {
-            await callGateway({
-              method: "agent",
-              params: {
-                sessionKey: resolvedSessionKey,
-                message: `System Alert: ${text}`,
-                deliver: true,
-                channel,
-                accountId,
-                to,
-                threadId,
-                idempotencyKey: randomUUID(),
-              },
-              expectFinal: true,
-              timeoutMs: 60_000,
-            });
-            alertLog("direct_agent_sent", { sessionKey: resolvedSessionKey, channel, to });
-            result = { outcome: "sent" };
-          }
-        }
-      } catch (err) {
-        alertLog("direct_agent_error", { error: String(err) });
-        result = { outcome: "error", error: String(err) };
-      }
-
-      alertLog("alert_wake_result", { outcome: result.outcome, error: result.error });
-
-      if (result.outcome === "error") {
-        throw new HttpError(502, "wake_failed", result.error ?? "agent call failed");
-      }
+      alertLog("alert_wake_result", { outcome: "queued" });
     } catch (err) {
       logger.error("alert_gateway_wake_failed", err);
       throw err instanceof HttpError
