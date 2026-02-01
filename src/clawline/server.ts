@@ -80,6 +80,7 @@ const INLINE_IMAGE_MIME_TYPES = new Set([
 ]);
 const MAX_ALERT_BODY_BYTES = 4 * 1024;
 const MAX_MEDIA_REDIRECTS = 5;
+const REDIRECT_STATUS_CODES = new Set([301, 302, 303, 307, 308]);
 type ChannelType = "personal" | "admin";
 const DEFAULT_CHANNEL_TYPE: ChannelType = "personal";
 const ADMIN_CHANNEL_TYPE: ChannelType = "admin";
@@ -1153,11 +1154,17 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             currentPinned = resolved.pinned;
           }
           const dispatcher = createPinnedDispatcher(currentPinned);
-          const response = await fetch(currentUrl, {
-            ...init,
-            dispatcher,
-            redirect: "manual",
-          } as RequestInit & { dispatcher: Dispatcher });
+          let response: Response;
+          try {
+            response = await fetch(currentUrl, {
+              ...init,
+              dispatcher,
+              redirect: "manual",
+            } as RequestInit & { dispatcher: Dispatcher });
+          } catch (err) {
+            await closeDispatcher(dispatcher);
+            throw err;
+          }
           if (isRedirectStatus(response.status)) {
             const location = response.headers.get("location");
             if (!location) {
@@ -1498,7 +1505,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   }
 
   function isRedirectStatus(status: number): boolean {
-    return status >= 300 && status < 400;
+    return REDIRECT_STATUS_CODES.has(status);
   }
 
   async function validateOutboundMediaUrl(
