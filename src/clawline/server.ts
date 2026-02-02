@@ -2210,7 +2210,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     if (config.auth.tokenTtlSeconds) {
       payload.exp = payload.iat! + config.auth.tokenTtlSeconds;
     }
-    const token = jwt.sign(payload, jwtKey, { algorithm: "HS256", issuer: JWT_ISSUER });
+    const token = jwt.sign(payload, jwtKey, { algorithm: "HS256" });
     return token;
   }
 
@@ -2269,10 +2269,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
     let decoded: jwt.JwtPayload;
     try {
-      decoded = jwt.verify(token, jwtKey, {
-        algorithms: ["HS256"],
-        issuer: JWT_ISSUER,
-      }) as jwt.JwtPayload;
+      decoded = jwt.verify(token, jwtKey, { algorithms: ["HS256"] }) as jwt.JwtPayload;
     } catch {
       throw new HttpError(401, "auth_failed", "Invalid token");
     }
@@ -3630,10 +3627,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
     let decoded: jwt.JwtPayload;
     try {
-      decoded = jwt.verify(payload.token, jwtKey, {
-        algorithms: ["HS256"],
-        issuer: JWT_ISSUER,
-      }) as jwt.JwtPayload;
+      decoded = jwt.verify(payload.token, jwtKey, { algorithms: ["HS256"] }) as jwt.JwtPayload;
     } catch {
       await sendJson(ws, { type: "auth_result", success: false, reason: "auth_failed" });
       ws.close();
