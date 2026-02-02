@@ -84,9 +84,6 @@ const MAX_ALERT_BODY_BYTES = 4 * 1024;
 const MAX_MEDIA_REDIRECTS = 5;
 const REDIRECT_STATUS_CODES = new Set([301, 302, 303, 307, 308]);
 const MEDIA_FETCH_TIMEOUT_MS = 30_000;
-type ChannelType = "personal" | "admin";
-const DEFAULT_CHANNEL_TYPE: ChannelType = "personal";
-const ADMIN_CHANNEL_TYPE: ChannelType = "admin";
 const DEFAULT_ALERT_SOURCE = "notify";
 const USER_ID_MAX_LENGTH = 48;
 const COMBINING_MARKS_REGEX = /[\u0300-\u036f]/g;
@@ -272,13 +269,6 @@ function normalizeOutboundAttachmentData(input: ClawlineOutboundAttachmentInput)
   return { data, mimeType: mimeType.toLowerCase() };
 }
 
-function normalizeChannelType(value: unknown): ChannelType {
-  if (typeof value === "string" && value.trim().toLowerCase() === ADMIN_CHANNEL_TYPE) {
-    return ADMIN_CHANNEL_TYPE;
-  }
-  return DEFAULT_CHANNEL_TYPE;
-}
-
 function buildClawlinePersonalSessionKey(agentId: string, userId: string): string {
   const normalizedAgentId = (agentId ?? "").trim().toLowerCase() || "main";
   const normalizedUserId = sanitizeUserId(userId).toLowerCase();
@@ -431,7 +421,6 @@ type ServerMessage = {
   sessionKey?: string;
   attachments?: unknown[];
   deviceId?: string;
-  channelType?: ChannelType;
 };
 
 enum MessageStreamingState {
@@ -986,7 +975,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         attachments: NormalizedAttachment[],
         attachmentsHash: string,
         assetIds: string[],
-        channelType: ChannelType,
         sessionKey: string,
       ) => {
         for (const assetId of assetIds) {
@@ -1012,7 +1000,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           streaming: false,
           deviceId: session.deviceId,
           attachments: attachments.length > 0 ? attachments : undefined,
-          channelType,
           sessionKey,
         };
         const payloadJson = JSON.stringify(event);
@@ -1247,7 +1234,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     attachments: NormalizedAttachment[];
     assetIds: string[];
     session: Session;
-    channelType: ChannelType;
   }): Promise<{ attachments: NormalizedAttachment[]; assetIds: string[] }> {
     // All channel types work the same: verify assets are owned by the session user.
     // (Ownership is also checked in insertUserMessageTx; this is an early validation.)
@@ -2310,11 +2296,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   }
 
   async function sendReplay(session: Session, lastMessageId: string | null) {
-    // All messages are stored under the real userId; sessionKey/channelType separate admin/personal views.
+    // All messages are stored under the real userId; sessionKey determines routing.
     // Query once to get all messages for this user.
-    const transcriptTargets: Array<{ userId: string; channelType: ChannelType }> = [
-      { userId: session.userId, channelType: DEFAULT_CHANNEL_TYPE },
-    ];
+    const transcriptTargets: Array<{ userId: string }> = [{ userId: session.userId }];
     const expectedPersonalSessionKey = buildClawlinePersonalSessionKey(
       mainSessionAgentId,
       session.userId,
@@ -2421,7 +2405,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         deviceId: session.deviceId,
         userId: session.userId,
         messageId: event.id,
-        channelType: event.channelType,
         sessionKey: event.sessionKey,
         streaming: event.streaming,
         attachmentCount: Array.isArray(event.attachments) ? event.attachments.length : 0,
@@ -2438,7 +2421,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             attachmentCount: stats.count,
             inlineBytes: stats.inlineBytes,
             assetCount: stats.assetCount,
-            channelType: event.channelType,
             streaming: event.streaming,
             replay: true,
           },
@@ -2474,7 +2456,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           attachmentCount: stats.count,
           inlineBytes: stats.inlineBytes,
           assetCount: stats.assetCount,
-          channelType: payload.channelType ?? DEFAULT_CHANNEL_TYPE,
           streaming: payload.streaming,
           replay: false,
         },
@@ -2621,7 +2602,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     attachments: NormalizedAttachment[],
     attachmentsHash: string,
     assetIds: string[],
-    channelType: ChannelType,
     sessionKey: string,
   ): Promise<{ event: ServerMessage; sequence: number }> {
     const timestamp = nowMs();
@@ -2637,7 +2617,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             attachments,
             attachmentsHash,
             assetIds,
-            channelType,
             sessionKey,
           ) as { event: ServerMessage; sequence: number },
       );
@@ -2653,7 +2632,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     session: Session,
     targetUserId: string,
     content: string,
-    channelType: ChannelType,
     sessionKey: string,
     attachments?: NormalizedAttachment[],
   ): Promise<ServerMessage> {
@@ -2665,7 +2643,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       content,
       timestamp,
       streaming: false,
-      channelType,
       sessionKey,
       attachments: attachments && attachments.length > 0 ? attachments : undefined,
     };
@@ -2730,11 +2707,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     await runPerUserTask(target.userId, async () => {
       await appendEvent(event, target.userId);
     });
-    if (target.kind === "device") {
-      deliverToDevice(target.deviceId, event);
-    } else {
-      broadcastToUser(target.userId, event);
-    }
+    broadcastToSessionKey(resolvedSessionKey, event);
     return {
       messageId: event.id,
       userId: target.userId,
@@ -2808,14 +2781,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         throw new ClientMessageError("payload_too_large", "Message too large");
       }
       const attachmentsHash = hashAttachments(attachmentsInfo.attachments);
-      const expectedPersonalSessionKey = buildClawlinePersonalSessionKey(
-        mainSessionAgentId,
-        session.userId,
-      );
       const payloadSessionKey =
         typeof payload.sessionKey === "string" ? payload.sessionKey.trim() : "";
       const resolvedSessionKey = session.sessionKey;
-      const channelType: ChannelType = session.isAdmin ? ADMIN_CHANNEL_TYPE : DEFAULT_CHANNEL_TYPE;
       if (
         payloadSessionKey &&
         payloadSessionKey.toLowerCase() !== resolvedSessionKey.toLowerCase()
@@ -2824,7 +2792,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       }
       logger.info?.("[clawline] inbound message routing", {
         messageId: payload.id,
-        payloadChannelType: payload.channelType,
         payloadSessionKey: payload.sessionKey,
         resolvedSessionKey,
         sessionIsAdmin: session.isAdmin,
@@ -2884,7 +2851,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           attachments: materialized.attachments,
           assetIds,
           session,
-          channelType,
         });
 
         const { event } = await persistUserMessage(
@@ -2895,7 +2861,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           ownership.attachments,
           attachmentsHash,
           ownership.assetIds,
-          channelType,
           resolvedSessionKey,
         );
         await new Promise<void>((resolve) => {
@@ -2956,7 +2921,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             isActive,
             messageId: payload.id,
             sessionKey: route.sessionKey,
-            channelType,
           });
           await sendJson(session.socket, {
             type: "event",
@@ -2965,7 +2929,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               isActive,
               messageId: payload.id,
               sessionKey: route.sessionKey,
-              channelType,
             },
           }).catch(() => {});
         };
@@ -3012,7 +2975,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               session,
               targetUserId,
               assistantText,
-              channelType,
               route.sessionKey,
               attachments,
             );
