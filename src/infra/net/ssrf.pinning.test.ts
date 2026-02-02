@@ -1,9 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import {
-  createPinnedLookup,
-  resolvePinnedHostname,
-  resolvePinnedHostnameWithPolicy,
-} from "./ssrf.js";
+import { createPinnedLookup, resolvePinnedHostname } from "./ssrf.js";
 
 describe("ssrf pinning", () => {
   it("pins resolved addresses for the target hostname", async () => {
@@ -45,20 +41,6 @@ describe("ssrf pinning", () => {
 
   it("rejects private DNS results", async () => {
     const lookup = vi.fn(async () => [{ address: "10.0.0.8", family: 4 }]);
-    await expect(resolvePinnedHostname("example.com", lookup)).rejects.toThrow(/private|internal/i);
-  });
-
-  it.each([
-    "192.0.0.1",
-    "192.0.2.5",
-    "198.18.0.1",
-    "198.19.255.255",
-    "198.51.100.10",
-    "203.0.113.42",
-    "240.0.0.1",
-    "255.255.255.255",
-  ])("rejects reserved address %s", async (address) => {
-    const lookup = vi.fn(async () => [{ address, family: 4 }]);
     await expect(resolvePinnedHostname("example.com", lookup)).rejects.toThrow(/private|internal/i);
   });
 

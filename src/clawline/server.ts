@@ -50,8 +50,10 @@ import { SlidingWindowRateLimiter } from "./rate-limiter.js";
 import { createAssetHandlers } from "./http-assets.js";
 import { callGateway } from "../gateway/call.js";
 import { GATEWAY_CLIENT_MODES, GATEWAY_CLIENT_NAMES } from "../gateway/protocol/client-info.js";
-import { FETCH_CLEANUP_SYMBOL } from "../media/fetch.js";
-import { loadWebMedia } from "../web/media.js";
+import { detectMime } from "../media/mime.js";
+import { mediaKindFromMime, maxBytesForKind } from "../media/constants.js";
+import { hasAlphaChannel, optimizeImageToPng } from "../media/image-ops.js";
+import { optimizeImageToJpeg } from "../web/media.js";
 import {
   createPinnedDispatcher,
   resolvePinnedHostname,
@@ -1142,91 +1144,18 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       .map((url) => (typeof url === "string" ? url.trim() : ""))
       .filter((url) => url.length > 0);
     for (const url of trimmedUrls) {
-      const validated = await validateOutboundMediaUrl(url);
-      const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit) => {
-        let currentUrl = typeof input === "string" ? input : input.toString();
-        let currentPinned: PinnedHostname | null = null;
-        let redirectCount = 0;
-        while (true) {
-          if (!currentPinned) {
-            const resolved =
-              currentUrl === validated.url ? validated : await validateOutboundMediaUrl(currentUrl);
-            currentUrl = resolved.url;
-            currentPinned = resolved.pinned;
-          }
-          const dispatcher = createPinnedDispatcher(currentPinned);
-          let response: Response;
-          const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), MEDIA_FETCH_TIMEOUT_MS);
-          const abortListener = () => controller.abort();
-          if (init?.signal) {
-            if (init.signal.aborted) {
-              controller.abort();
-            } else {
-              init.signal.addEventListener("abort", abortListener);
-            }
-          }
-          const clearFetchTimeout = () => {
-            clearTimeout(timeoutId);
-            if (init?.signal) {
-              init.signal.removeEventListener("abort", abortListener);
-            }
-          };
-          try {
-            response = await fetch(currentUrl, {
-              ...init,
-              dispatcher,
-              signal: controller.signal,
-              redirect: "manual",
-            } as RequestInit & { dispatcher: Dispatcher });
-          } catch (err) {
-            clearFetchTimeout();
-            await closeDispatcher(dispatcher);
-            throw err;
-          }
-          if (isRedirectStatus(response.status)) {
-            const location = response.headers.get("location");
-            if (!location) {
-              (response as { [FETCH_CLEANUP_SYMBOL]?: () => Promise<void> | void })[
-                FETCH_CLEANUP_SYMBOL
-              ] = () => {
-                clearFetchTimeout();
-                return closeDispatcher(dispatcher);
-              };
-              return response;
-            }
-            if (response.body) {
-              try {
-                await response.body.cancel();
-              } catch {}
-            }
-            clearFetchTimeout();
-            await closeDispatcher(dispatcher);
-            redirectCount += 1;
-            if (redirectCount > MAX_MEDIA_REDIRECTS) {
-              throw new ClientMessageError("invalid_message", "mediaUrl redirects too many times");
-            }
-            currentUrl = new URL(location, currentUrl).toString();
-            currentPinned = null;
-            continue;
-          }
-          (response as { [FETCH_CLEANUP_SYMBOL]?: () => Promise<void> | void })[
-            FETCH_CLEANUP_SYMBOL
-          ] = () => {
-            clearFetchTimeout();
-            return closeDispatcher(dispatcher);
-          };
-          return response;
-        }
-      };
-      const media = await loadWebMedia(validated.url, config.media.maxUploadBytes, {
-        fetchImpl,
-      });
-      const mimeType = (media.contentType ?? "application/octet-stream").toLowerCase();
-      const buffer = media.buffer;
-      if (buffer.length === 0) {
+      const media = await fetchPinnedMedia(url, config.media.maxUploadBytes);
+      if (media.buffer.length === 0) {
         continue;
       }
+      const processed = await clampAndOptimizeMedia({
+        buffer: media.buffer,
+        contentType: media.contentType,
+        fileName: media.fileName,
+        maxBytes: config.media.maxUploadBytes,
+      });
+      const mimeType = (processed.contentType ?? "application/octet-stream").toLowerCase();
+      const buffer = processed.buffer;
       const isInlineImage = INLINE_IMAGE_MIME_TYPES.has(mimeType);
       if (isInlineImage) {
         resolved.push({ type: "image", mimeType, data: buffer.toString("base64") });
@@ -1538,6 +1467,78 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     return REDIRECT_STATUS_CODES.has(status);
   }
 
+  function stripQuotes(value: string): string {
+    return value.replace(/^["']|["']$/g, "");
+  }
+
+  function parseContentDispositionFileName(header?: string | null): string | undefined {
+    if (!header) {
+      return undefined;
+    }
+    const starMatch = /filename\*\s*=\s*([^;]+)/i.exec(header);
+    if (starMatch?.[1]) {
+      const cleaned = stripQuotes(starMatch[1].trim());
+      const encoded = cleaned.split("''").slice(1).join("''") || cleaned;
+      try {
+        return path.basename(decodeURIComponent(encoded));
+      } catch {
+        return path.basename(encoded);
+      }
+    }
+    const match = /filename\s*=\s*([^;]+)/i.exec(header);
+    if (match?.[1]) {
+      return path.basename(stripQuotes(match[1].trim()));
+    }
+    return undefined;
+  }
+
+  async function readResponseWithLimit(res: Response, maxBytes: number): Promise<Buffer> {
+    const body = res.body;
+    if (!body || typeof body.getReader !== "function") {
+      const fallback = Buffer.from(await res.arrayBuffer());
+      if (fallback.length > maxBytes) {
+        throw new ClientMessageError(
+          "payload_too_large",
+          `mediaUrl payload exceeds maxBytes ${maxBytes}`,
+        );
+      }
+      return fallback;
+    }
+
+    const reader = body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          break;
+        }
+        if (value?.length) {
+          total += value.length;
+          if (total > maxBytes) {
+            try {
+              await reader.cancel();
+            } catch {}
+            throw new ClientMessageError(
+              "payload_too_large",
+              `mediaUrl payload exceeds maxBytes ${maxBytes}`,
+            );
+          }
+          chunks.push(value);
+        }
+      }
+    } finally {
+      try {
+        reader.releaseLock();
+      } catch {}
+    }
+    return Buffer.concat(
+      chunks.map((chunk) => Buffer.from(chunk)),
+      total,
+    );
+  }
+
   async function validateOutboundMediaUrl(
     rawUrl: string,
   ): Promise<{ url: string; pinned: PinnedHostname }> {
@@ -1564,6 +1565,154 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       );
     }
     return { url: parsed.toString(), pinned };
+  }
+
+  async function fetchPinnedMedia(
+    rawUrl: string,
+    maxBytes: number,
+  ): Promise<{ buffer: Buffer; contentType?: string; fileName?: string }> {
+    let currentUrl = rawUrl;
+    let redirectCount = 0;
+
+    while (true) {
+      const validated = await validateOutboundMediaUrl(currentUrl);
+      const dispatcher = createPinnedDispatcher(validated.pinned);
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), MEDIA_FETCH_TIMEOUT_MS);
+      let res: Response;
+      try {
+        res = await fetch(validated.url, {
+          dispatcher,
+          signal: controller.signal,
+          redirect: "manual",
+        } as RequestInit & { dispatcher: Dispatcher });
+      } catch (err) {
+        clearTimeout(timeoutId);
+        await closeDispatcher(dispatcher);
+        throw err;
+      }
+
+      if (isRedirectStatus(res.status)) {
+        const location = res.headers.get("location");
+        if (!location) {
+          clearTimeout(timeoutId);
+          await closeDispatcher(dispatcher);
+          throw new ClientMessageError("invalid_message", "mediaUrl redirect missing location");
+        }
+        if (res.body) {
+          try {
+            await res.body.cancel();
+          } catch {}
+        }
+        clearTimeout(timeoutId);
+        await closeDispatcher(dispatcher);
+        redirectCount += 1;
+        if (redirectCount > MAX_MEDIA_REDIRECTS) {
+          throw new ClientMessageError("invalid_message", "mediaUrl redirects too many times");
+        }
+        currentUrl = new URL(location, validated.url).toString();
+        continue;
+      }
+
+      if (!res.ok) {
+        clearTimeout(timeoutId);
+        await closeDispatcher(dispatcher);
+        throw new ClientMessageError(
+          "invalid_message",
+          `mediaUrl fetch failed (HTTP ${res.status})`,
+        );
+      }
+
+      const contentLength = res.headers.get("content-length");
+      if (contentLength) {
+        const length = Number(contentLength);
+        if (Number.isFinite(length) && length > maxBytes) {
+          clearTimeout(timeoutId);
+          await closeDispatcher(dispatcher);
+          throw new ClientMessageError(
+            "payload_too_large",
+            `mediaUrl payload exceeds maxBytes ${maxBytes}`,
+          );
+        }
+      }
+
+      let buffer: Buffer;
+      try {
+        buffer = await readResponseWithLimit(res, maxBytes);
+      } finally {
+        clearTimeout(timeoutId);
+        await closeDispatcher(dispatcher);
+      }
+
+      const headerFileName = parseContentDispositionFileName(
+        res.headers.get("content-disposition"),
+      );
+      let fileNameFromUrl: string | undefined;
+      try {
+        const parsed = new URL(validated.url);
+        const base = path.basename(parsed.pathname);
+        fileNameFromUrl = base || undefined;
+      } catch {
+        fileNameFromUrl = undefined;
+      }
+      return {
+        buffer,
+        contentType: res.headers.get("content-type") ?? undefined,
+        fileName: headerFileName || fileNameFromUrl,
+      };
+    }
+  }
+
+  async function clampAndOptimizeMedia(params: {
+    buffer: Buffer;
+    contentType?: string;
+    fileName?: string;
+    maxBytes: number;
+  }): Promise<{ buffer: Buffer; contentType?: string }> {
+    const { buffer, contentType, fileName, maxBytes } = params;
+    const detected = await detectMime({
+      buffer,
+      headerMime: contentType,
+      filePath: fileName,
+    });
+    const kind = detected ? mediaKindFromMime(detected) : undefined;
+    const cap = maxBytes ?? (kind ? maxBytesForKind(kind) : maxBytes);
+    if (kind !== "image") {
+      if (buffer.length > cap) {
+        throw new ClientMessageError(
+          "payload_too_large",
+          `mediaUrl payload exceeds maxBytes ${cap}`,
+        );
+      }
+      return { buffer, contentType: detected ?? contentType };
+    }
+    const isGif = detected === "image/gif";
+    if (isGif) {
+      if (buffer.length > cap) {
+        throw new ClientMessageError(
+          "payload_too_large",
+          `mediaUrl payload exceeds maxBytes ${cap}`,
+        );
+      }
+      return { buffer, contentType: detected ?? contentType };
+    }
+    const isPng = detected === "image/png" || fileName?.toLowerCase().endsWith(".png");
+    if (isPng) {
+      try {
+        const hasAlpha = await hasAlphaChannel(buffer);
+        if (hasAlpha) {
+          const optimized = await optimizeImageToPng(buffer, cap);
+          if (optimized.buffer.length <= cap) {
+            return { buffer: optimized.buffer, contentType: "image/png" };
+          }
+        }
+      } catch {}
+    }
+    const optimized = await optimizeImageToJpeg(buffer, cap, { contentType, fileName });
+    if (optimized.buffer.length > cap) {
+      throw new ClientMessageError("payload_too_large", `mediaUrl payload exceeds maxBytes ${cap}`);
+    }
+    return { buffer: optimized.buffer, contentType: "image/jpeg" };
   }
 
   async function applyAlertInstructions(text: string): Promise<string> {

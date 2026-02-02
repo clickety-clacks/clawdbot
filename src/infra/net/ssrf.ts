@@ -116,7 +116,7 @@ function parseIpv4FromMappedIpv6(mapped: string): number[] | null {
 }
 
 function isPrivateIpv4(parts: number[]): boolean {
-  const [octet1, octet2, octet3] = parts;
+  const [octet1, octet2] = parts;
   if (octet1 === 0) {
     return true;
   }
@@ -133,24 +133,6 @@ function isPrivateIpv4(parts: number[]): boolean {
     return true;
   }
   if (octet1 === 192 && octet2 === 168) {
-    return true;
-  }
-  if (octet1 === 192 && octet2 === 0 && octet3 === 0) {
-    return true;
-  }
-  if (octet1 === 192 && octet2 === 0 && octet3 === 2) {
-    return true;
-  }
-  if (octet1 === 198 && (octet2 === 18 || octet2 === 19)) {
-    return true;
-  }
-  if (octet1 === 198 && octet2 === 51 && octet3 === 100) {
-    return true;
-  }
-  if (octet1 === 203 && octet2 === 0 && octet3 === 113) {
-    return true;
-  }
-  if (octet1 >= 240) {
     return true;
   }
   if (octet1 === 100 && octet2 >= 64 && octet2 <= 127) {

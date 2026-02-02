@@ -2,11 +2,9 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { SsrFPolicy } from "../infra/net/ssrf.js";
 import { logVerbose, shouldLogVerbose } from "../globals.js";
 import { type MediaKind, maxBytesForKind, mediaKindFromMime } from "../media/constants.js";
-import { resolveUserPath } from "../utils.js";
-import { fetchRemoteMedia, type FetchLike } from "../media/fetch.js";
+import { fetchRemoteMedia } from "../media/fetch.js";
 import {
   convertHeicToJpeg,
   hasAlphaChannel,
@@ -26,7 +24,6 @@ export type WebMediaResult = {
 type WebMediaOptions = {
   maxBytes?: number;
   optimizeImages?: boolean;
-  fetchImpl?: FetchLike;
 };
 
 function getDefaultLocalRoots(): string[] {
@@ -250,27 +247,8 @@ async function loadWebMediaInternal(
     };
   };
 
-  if (mediaUrl.startsWith("data:")) {
-    const match = /^data:([^;]+);base64,(.*)$/i.exec(mediaUrl.trim());
-    if (!match) {
-      throw new Error("Invalid data URL (expected base64 payload)");
-    }
-    const [, mime, payload] = match;
-    const buffer = Buffer.from(payload, "base64");
-    const contentType = mime.trim().toLowerCase();
-    const kind = mediaKindFromMime(contentType);
-    const ext = extensionForMime(contentType);
-    const fileName = ext ? `inline${ext}` : "inline";
-    return await clampAndFinalize({
-      buffer,
-      contentType,
-      kind,
-      fileName,
-    });
-  }
-
   if (/^https?:\/\//i.test(mediaUrl)) {
-    const fetched = await fetchRemoteMedia({ url: mediaUrl, fetchImpl: options.fetchImpl });
+    const fetched = await fetchRemoteMedia({ url: mediaUrl });
     const { buffer, contentType, fileName } = fetched;
     const kind = mediaKindFromMime(contentType);
     return await clampAndFinalize({ buffer, contentType, kind, fileName });
@@ -303,22 +281,16 @@ async function loadWebMediaInternal(
   });
 }
 
-export async function loadWebMedia(
-  mediaUrl: string,
-  maxBytes?: number,
-  options?: { fetchImpl?: FetchLike },
-): Promise<WebMediaResult> {
+export async function loadWebMedia(mediaUrl: string, maxBytes?: number): Promise<WebMediaResult> {
   return await loadWebMediaInternal(mediaUrl, {
     maxBytes,
     optimizeImages: true,
-    fetchImpl: options?.fetchImpl,
   });
 }
 
 export async function loadWebMediaRaw(
   mediaUrl: string,
   maxBytes?: number,
-  options?: { fetchImpl?: FetchLike },
 ): Promise<WebMediaResult> {
   if (typeof maxBytesOrOptions === "number" || maxBytesOrOptions === undefined) {
     return await loadWebMediaInternal(mediaUrl, {
@@ -331,7 +303,6 @@ export async function loadWebMediaRaw(
   return await loadWebMediaInternal(mediaUrl, {
     ...maxBytesOrOptions,
     optimizeImages: false,
-    fetchImpl: options?.fetchImpl,
   });
 }
 
