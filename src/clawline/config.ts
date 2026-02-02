@@ -56,7 +56,6 @@ const DEFAULTS: ResolvedClawlineConfig = {
   port: 18800,
   statePath: defaultStatePath,
   alertInstructionsPath: defaultAlertInstructionsPath,
-  adminUserId: "flynn",
   network: {
     bindAddress: "127.0.0.1",
     allowInsecurePublic: false,
