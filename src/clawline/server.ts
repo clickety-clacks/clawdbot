@@ -88,7 +88,6 @@ type ChannelType = "personal" | "admin";
 const DEFAULT_CHANNEL_TYPE: ChannelType = "personal";
 const ADMIN_CHANNEL_TYPE: ChannelType = "admin";
 const DEFAULT_ALERT_SOURCE = "notify";
-const JWT_ISSUER = "clawline";
 const USER_ID_MAX_LENGTH = 48;
 const COMBINING_MARKS_REGEX = /[\u0300-\u036f]/g;
 
@@ -169,18 +168,16 @@ function sanitizeUserId(userId: string | undefined): string {
   return (userId ?? "").trim();
 }
 
-function isAdminUserId(userId: string): boolean {
-  return sanitizeUserId(userId).toLowerCase() === ADMIN_USER_ID;
-}
-
-function applyIdentityPolicy(entry: AllowlistEntry) {
+function normalizeAllowlistEntry(entry: AllowlistEntry) {
   const normalizedFromName = normalizeUserIdFromClaimedName(entry.claimedName);
   let nextUserId = normalizedFromName ?? sanitizeUserId(entry.userId);
   if (!nextUserId) {
     nextUserId = generateUserId();
   }
   entry.userId = nextUserId;
-  entry.isAdmin = isAdminUserId(entry.userId);
+  if (typeof entry.isAdmin !== "boolean") {
+    entry.isAdmin = false;
+  }
 }
 
 async function notifyGatewayOfPending(entry: PendingEntry) {
@@ -758,7 +755,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const dbPath = path.join(config.statePath, DB_FILENAME);
 
   let allowlist = await loadAllowlist(allowlistPath);
-  allowlist.entries.forEach(applyIdentityPolicy);
+  allowlist.entries.forEach(normalizeAllowlistEntry);
   let pendingFile = await loadPending(pendingPath);
   let denylist = await loadDenylist(denylistPath);
   const jwtKey = await ensureJwtKey(jwtKeyPath, config.auth.jwtSigningKey);
@@ -2057,7 +2054,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   async function refreshAllowlistFromDisk() {
     try {
       allowlist = await loadAllowlist(allowlistPath);
-      allowlist.entries.forEach(applyIdentityPolicy);
+      allowlist.entries.forEach(normalizeAllowlistEntry);
       handleAllowlistChanged();
     } catch (err) {
       logger.warn?.("allowlist_reload_failed", err);
@@ -3476,9 +3473,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         return;
       }
     }
-    const shouldBootstrapAdmin = !hasAdmin() && normalizedUserId === ADMIN_USER_ID;
+    const shouldBootstrapAdmin = !hasAdmin();
     if (shouldBootstrapAdmin) {
-      const userId = ADMIN_USER_ID;
+      const userId = normalizedUserId ?? generateUserId();
       const newEntry: AllowlistEntry = {
         deviceId,
         claimedName: sanitizedClaimedName,
@@ -3489,7 +3486,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         createdAt: nowMs(),
         lastSeenAt: null,
       };
-      applyIdentityPolicy(newEntry);
+      normalizeAllowlistEntry(newEntry);
       allowlist.entries.push(newEntry);
       await persistAllowlist();
       const token = issueToken(newEntry);
@@ -3523,17 +3520,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           });
           return;
         }
-        const pendingEntry: PendingEntry = {
-          deviceId,
-          claimedName: sanitizedClaimedName,
-          deviceInfo: sanitizedInfo,
-          requestedAt: existingPendingEntry ? existingPendingEntry.requestedAt : nowMs(),
-        };
-        await upsertPendingEntry(pendingEntry);
-        await notifyGatewayOfPending(pendingEntry).catch(() => {});
-        await sendJson(ws, { type: "pair_result", success: false, reason: "pair_pending" });
-        ws.close();
-        return;
+        // Update entry with new account info (preserve isAdmin flag)
+        entry.userId = newUserId;
+        entry.claimedName = sanitizedClaimedName;
+        entry.deviceInfo = sanitizedInfo;
+        await persistAllowlist();
       } else {
         logger.info?.("[clawline:http] pair_request_token_redispatch", { deviceId });
       }
