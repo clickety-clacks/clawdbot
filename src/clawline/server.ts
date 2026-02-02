@@ -2423,31 +2423,16 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   }
 
   function sendPayloadToSession(session: Session, payload: ServerMessage) {
-    const expectedPersonalSessionKey = buildClawlinePersonalSessionKey(
-      mainSessionAgentId,
-      session.userId,
-    );
-    const payloadSessionKey =
-      typeof payload.sessionKey === "string" ? payload.sessionKey.trim() : "";
-    const normalizedPayloadSessionKey = payloadSessionKey.toLowerCase();
     const normalizedMainKey = mainSessionKey.toLowerCase();
-    let resolvedChannelType = normalizeChannelType(payload.channelType);
-    if (payloadSessionKey) {
-      if (normalizedPayloadSessionKey === normalizedMainKey) {
-        resolvedChannelType = ADMIN_CHANNEL_TYPE;
-      } else if (normalizedPayloadSessionKey === expectedPersonalSessionKey.toLowerCase()) {
-        resolvedChannelType = DEFAULT_CHANNEL_TYPE;
-      }
-    }
-    if (resolvedChannelType === ADMIN_CHANNEL_TYPE && !session.isAdmin) {
-      return;
-    }
-    if (!payload.channelType) {
-      payload.channelType = resolvedChannelType;
-    }
     if (!payload.sessionKey) {
-      payload.sessionKey =
-        resolvedChannelType === ADMIN_CHANNEL_TYPE ? mainSessionKey : expectedPersonalSessionKey;
+      payload.sessionKey = session.sessionKey;
+    }
+    if (
+      typeof payload.sessionKey === "string" &&
+      payload.sessionKey.toLowerCase() === normalizedMainKey &&
+      !session.isAdmin
+    ) {
+      return;
     }
     if (session.socket.readyState !== WebSocket.OPEN) {
       return;
@@ -2585,25 +2570,17 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     return true;
   }
 
-  function broadcastToChannelSessions(
-    channelType: ChannelType,
-    session: Session,
-    payload: ServerMessage,
-  ) {
-    if (!payload.channelType) {
-      payload.channelType = channelType;
-    }
+  function broadcastToSessionKey(sessionKey: string, payload: ServerMessage) {
     if (!payload.sessionKey) {
-      payload.sessionKey =
-        channelType === ADMIN_CHANNEL_TYPE
-          ? mainSessionKey
-          : buildClawlinePersonalSessionKey(mainSessionAgentId, session.userId);
+      payload.sessionKey = sessionKey;
     }
-    if (channelType === ADMIN_CHANNEL_TYPE) {
-      broadcastToAdmins(payload);
-      return;
+    const normalizedKey = payload.sessionKey.toLowerCase();
+    for (const target of sessionsByDevice.values()) {
+      if (target.sessionKey.toLowerCase() !== normalizedKey) {
+        continue;
+      }
+      sendPayloadToSession(target, payload);
     }
-    broadcastToUser(session.userId, payload);
   }
 
   async function appendEvent(event: ServerMessage, userId: string, originatingDeviceId?: string) {
@@ -2824,6 +2801,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       const payloadSessionKey =
         typeof payload.sessionKey === "string" ? payload.sessionKey.trim() : "";
       const resolvedSessionKey = session.sessionKey;
+      const channelType: ChannelType = session.isAdmin ? ADMIN_CHANNEL_TYPE : DEFAULT_CHANNEL_TYPE;
       if (
         payloadSessionKey &&
         payloadSessionKey.toLowerCase() !== resolvedSessionKey.toLowerCase()
@@ -2914,7 +2892,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             resolve();
           });
         });
-        broadcastToChannelSessions(channelType, session, event);
+        broadcastToSessionKey(resolvedSessionKey, event);
 
         const attachmentSummary = describeClawlineAttachments(ownership.attachments);
         const inboundBody = attachmentSummary
@@ -3024,7 +3002,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               route.sessionKey,
               attachments,
             );
-            broadcastToChannelSessions(channelType, session, assistantEvent);
+            broadcastToSessionKey(resolvedSessionKey, assistantEvent);
           },
           onError: (err, info) => {
             logger.error?.("[clawline] reply_delivery_failed", {
