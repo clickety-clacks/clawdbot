@@ -2666,23 +2666,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
     const target = resolveSendTarget(targetInput);
 
-    const expectedPersonalSessionKey = buildClawlinePersonalSessionKey(
-      mainSessionAgentId,
-      target.userId,
-    );
-    const normalizedMainKey = mainSessionKey.toLowerCase();
-    const normalizedPersonalKey = expectedPersonalSessionKey.toLowerCase();
-
     const sessionKeyRaw = typeof params.sessionKey === "string" ? params.sessionKey.trim() : "";
-    let resolvedSessionKey = sessionKeyRaw || expectedPersonalSessionKey;
-    const normalizedSessionKey = resolvedSessionKey.toLowerCase();
-    if (normalizedSessionKey === normalizedMainKey) {
-      resolvedSessionKey = mainSessionKey;
-    } else if (normalizedSessionKey === normalizedPersonalKey) {
-      resolvedSessionKey = expectedPersonalSessionKey;
-    } else {
-      throw new Error(`Invalid clawline sessionKey: ${resolvedSessionKey}`);
+    if (!sessionKeyRaw) {
+      throw new Error("Delivering to clawline requires --session <sessionKey>");
     }
+    const resolvedSessionKey = sessionKeyRaw;
 
     let outboundAttachments = {
       attachments: [] as NormalizedAttachment[],
