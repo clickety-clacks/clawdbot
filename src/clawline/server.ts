@@ -1350,15 +1350,21 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   async function handleAlertHttpRequest(req: http.IncomingMessage, res: http.ServerResponse) {
     logHttpRequest("alert_request_start");
     try {
-      const auth = authenticateHttpRequest(req);
+      const authHeader = req.headers.authorization;
+      const auth =
+        authHeader && authHeader.startsWith("Bearer ") ? authenticateHttpRequest(req) : null;
       const payload = await parseAlertPayload(req);
       if (payload.sessionKey) {
-        if (!auth.isAdmin) {
-          if (
-            !isAlertSessionKeyAllowedForUser(payload.sessionKey, auth.userId, mainSessionAgentId)
-          ) {
+        if (!auth) {
+          const trimmed = payload.sessionKey.trim();
+          if (!trimmed || trimmed !== mainSessionKey) {
             throw new HttpError(403, "forbidden", "Not allowed to target session");
           }
+        } else if (
+          !auth.isAdmin &&
+          !isAlertSessionKeyAllowedForUser(payload.sessionKey, auth.userId, mainSessionAgentId)
+        ) {
+          throw new HttpError(403, "forbidden", "Not allowed to target session");
         }
       }
       logger.info?.("[clawline] alert_received", {
