@@ -445,6 +445,7 @@ const DEFAULT_CONFIG: ProviderConfig = {
   port: 18800,
   statePath: path.join(os.homedir(), ".openclaw", "clawline"),
   alertInstructionsPath: path.join(os.homedir(), ".openclaw", "clawline", "alert-instructions.md"),
+  adminUserId: "flynn",
   network: {
     bindAddress: "127.0.0.1",
     allowInsecurePublic: false,
