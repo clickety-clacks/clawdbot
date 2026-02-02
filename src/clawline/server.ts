@@ -88,7 +88,6 @@ type ChannelType = "personal" | "admin";
 const DEFAULT_CHANNEL_TYPE: ChannelType = "personal";
 const ADMIN_CHANNEL_TYPE: ChannelType = "admin";
 const DEFAULT_ALERT_SOURCE = "notify";
-const JWT_ISSUER = "clawline";
 const USER_ID_MAX_LENGTH = 48;
 const COMBINING_MARKS_REGEX = /[\u0300-\u036f]/g;
 
@@ -2247,7 +2246,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     if (config.auth.tokenTtlSeconds != null && config.auth.tokenTtlSeconds > 0) {
       payload.exp = payload.iat! + config.auth.tokenTtlSeconds;
     }
-    const token = jwt.sign(payload, jwtKey, { algorithm: "HS256", issuer: JWT_ISSUER });
+    const token = jwt.sign(payload, jwtKey, { algorithm: "HS256" });
     return token;
   }
 
@@ -2308,10 +2307,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
     let decoded: jwt.JwtPayload;
     try {
-      decoded = jwt.verify(token, jwtKey, {
-        algorithms: ["HS256"],
-        issuer: JWT_ISSUER,
-      }) as jwt.JwtPayload;
+      decoded = jwt.verify(token, jwtKey, { algorithms: ["HS256"] }) as jwt.JwtPayload;
     } catch {
       throw new HttpError(401, "auth_failed", "Invalid token");
     }
@@ -3674,10 +3670,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
     let decoded: jwt.JwtPayload;
     try {
-      decoded = jwt.verify(payload.token, jwtKey, {
-        algorithms: ["HS256"],
-        issuer: JWT_ISSUER,
-      }) as jwt.JwtPayload;
+      decoded = jwt.verify(payload.token, jwtKey, { algorithms: ["HS256"] }) as jwt.JwtPayload;
     } catch {
       await sendJson(ws, { type: "auth_result", success: false, reason: "auth_failed" });
       ws.close();
