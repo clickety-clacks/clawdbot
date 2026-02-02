@@ -60,10 +60,7 @@
 - Node remains supported for running built output (`dist/*`) and production installs.
 - Mac packaging (dev): `scripts/package-mac-app.sh` defaults to current arch. Release checklist: `docs/platforms/mac/release.md`.
 - Type-check/build: `pnpm build`
-- TypeScript checks: `pnpm tsgo`
 - Lint/format: `pnpm check`
-- Format check: `pnpm format` (oxfmt --check)
-- Format fix: `pnpm format:fix` (oxfmt --write)
 - Tests: `pnpm test` (vitest); coverage: `pnpm test:coverage`
 
 ## Coding Style & Naming Conventions
@@ -106,7 +103,8 @@
 
 ## Git Notes
 
-- If `git branch -d/-D <branch>` is policy-blocked, delete the local ref directly: `git update-ref -d refs/heads/<branch>`.
+- **Review mode (PR link only):** read `gh pr view/diff`; **do not** switch branches; **do not** change code.
+- **Landing mode:** create an integration branch from `main`, bring in PR commits (**prefer rebase** for linear history; **merge allowed** when complexity/conflicts make it safer), apply fixes, add changelog (+ thanks + PR #), run full gate **locally before committing** (`pnpm build && pnpm check && pnpm test`), commit, merge back to `main`, then `git switch main` (never stay on a topic branch after landing). Important: contributor needs to be in git graph after this!
 
 ## Security & Configuration Tips
 
