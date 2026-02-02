@@ -24,7 +24,7 @@ import {
   resolveHumanDelayConfig,
   resolveIdentityName,
 } from "../agents/identity.js";
-import { resolveAgentIdFromSessionKey, updateLastRoute } from "../config/sessions.js";
+import { resolveAgentIdFromSessionKey } from "../config/sessions.js";
 import { rawDataToString } from "../infra/ws.js";
 import { recordClawlineSessionActivity } from "./session-store.js";
 import type { ClawlineAdapterOverrides } from "./config.js";
@@ -1840,50 +1840,15 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         logger.warn?.("alert_session_key_invalid", { sessionKey: rawSessionKey });
       }
 
-      // Parse the session key to extract channel and userId for explicit delivery.
-      // This ensures the response goes to the targeted session's channel, not lastTo.
-      // Formats:
-      // - agent:main:main (DM/main session) -> no explicit channel/to
-      // - agent:main:clawline:{userId}:main -> channel=clawline, to={userId}
-      const sessionParts = resolvedSessionKey.split(":");
-      const isClawlineSession =
-        sessionParts.length >= 5 && sessionParts[0] === "agent" && sessionParts[2] === "clawline";
-      let alertChannel: string | undefined;
-      let alertTo: string | undefined;
-      if (isClawlineSession) {
-        const specPersonal = sessionParts[4] === "main" && sessionParts[3];
-        const isLegacyDm = sessionParts[3] === "dm" && sessionParts[4];
-        if (specPersonal || isLegacyDm) {
-          alertChannel = "clawline";
-          const userSegment = specPersonal ? sessionParts[3] : sessionParts[4];
-          const normalizedUserId = sanitizeUserId(userSegment).toLowerCase();
-          if (normalizedUserId) {
-            alertTo = normalizedUserId;
-            resolvedSessionKey = buildClawlinePersonalSessionKey(
-              mainSessionAgentId,
-              normalizedUserId,
-            );
-          }
-        }
-      }
-
-      const deliveryContext =
-        alertChannel || alertTo ? { channel: alertChannel, to: alertTo } : undefined;
-
       const alertLog = (event: string, detail?: Record<string, unknown>) =>
         logger.info?.(`[clawline] ${event}`, {
           ...detail,
           sessionKey: resolvedSessionKey,
-          alertChannel,
-          alertTo,
         });
 
       alertLog("alert_wake_start");
 
-      const queueSettings = resolveQueueSettings({
-        cfg: openClawCfg,
-        channel: deliveryContext?.channel,
-      });
+      const queueSettings = resolveQueueSettings({ cfg: openClawCfg });
       const sendQueuedAlert = async (item: AnnounceQueueItem) => {
         const origin = item.origin;
         const threadId =
@@ -1918,7 +1883,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           summaryLine: "System Alert",
           enqueuedAt: Date.now(),
           sessionKey: resolvedSessionKey,
-          origin: deliveryContext,
         },
         settings: queueSettings,
         send: sendQueuedAlert,
@@ -2332,30 +2296,26 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     );
     const normalizedMainKey = mainSessionKey.toLowerCase();
     const normalizedPersonalKey = expectedPersonalSessionKey.toLowerCase();
-    const normalizeEventRouting = (event: ServerMessage): ChannelType => {
+    const normalizeEventRouting = (event: ServerMessage): void => {
       const rawSessionKey = typeof event.sessionKey === "string" ? event.sessionKey.trim() : "";
-      const normalizedSessionKey = rawSessionKey.toLowerCase();
-      if (rawSessionKey) {
-        if (normalizedSessionKey === normalizedMainKey) {
-          event.sessionKey = mainSessionKey;
-          event.channelType = ADMIN_CHANNEL_TYPE;
-          return ADMIN_CHANNEL_TYPE;
-        }
-        if (normalizedSessionKey === normalizedPersonalKey) {
-          event.sessionKey = expectedPersonalSessionKey;
-          event.channelType = DEFAULT_CHANNEL_TYPE;
-          return DEFAULT_CHANNEL_TYPE;
-        }
-        logger.warn?.("[clawline] replay_session_key_unrecognized", {
-          messageId: event.id,
-          sessionKey: rawSessionKey,
-        });
+      if (!rawSessionKey) {
+        event.sessionKey = expectedPersonalSessionKey;
+        return;
       }
-      const channelType = normalizeChannelType(event.channelType);
-      event.channelType = channelType;
-      event.sessionKey =
-        channelType === ADMIN_CHANNEL_TYPE ? mainSessionKey : expectedPersonalSessionKey;
-      return channelType;
+      const normalizedSessionKey = rawSessionKey.toLowerCase();
+      if (normalizedSessionKey === normalizedMainKey) {
+        event.sessionKey = mainSessionKey;
+        return;
+      }
+      if (normalizedSessionKey === normalizedPersonalKey) {
+        event.sessionKey = expectedPersonalSessionKey;
+        return;
+      }
+      logger.warn?.("[clawline] replay_session_key_unrecognized", {
+        messageId: event.id,
+        sessionKey: rawSessionKey,
+      });
+      event.sessionKey = rawSessionKey;
     };
     let anchor: { userId: string; sequence: number; timestamp: number } | null = null;
     if (lastMessageId) {
@@ -2394,9 +2354,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       const parsed = rows
         .map((row) => parseServerMessage(row.payloadJson))
         .map((event) => {
-          if (!event.channelType && !event.sessionKey) {
-            event.channelType = target.channelType;
-          }
           normalizeEventRouting(event);
           return event;
         });
@@ -2427,7 +2384,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     });
     await sendJson(session.socket, payload);
     for (const event of limited) {
-      if (event.channelType === ADMIN_CHANNEL_TYPE && !session.isAdmin) {
+      if (
+        typeof event.sessionKey === "string" &&
+        event.sessionKey.toLowerCase() === normalizedMainKey &&
+        !session.isAdmin
+      ) {
         continue;
       }
       logger.info("replay_send", {
@@ -2735,41 +2696,15 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     const normalizedMainKey = mainSessionKey.toLowerCase();
     const normalizedPersonalKey = expectedPersonalSessionKey.toLowerCase();
 
-    // Determine channelType/sessionKey in order of precedence:
-    // 1. Explicit sessionKey parameter (preferred if present)
-    // 2. Explicit channelType parameter
-    // 3. Default to personal
-    let channelType: ChannelType = DEFAULT_CHANNEL_TYPE;
     const sessionKeyRaw = typeof params.sessionKey === "string" ? params.sessionKey.trim() : "";
-    const normalizedSessionKey = sessionKeyRaw.toLowerCase();
-    let resolvedSessionKey = "";
-    if (sessionKeyRaw) {
-      if (normalizedSessionKey === normalizedMainKey) {
-        channelType = ADMIN_CHANNEL_TYPE;
-        resolvedSessionKey = mainSessionKey;
-        logger.info?.(
-          `[clawline] sendOutboundMessage using admin channel from sessionKey=${sessionKeyRaw}`,
-        );
-      } else if (normalizedSessionKey === normalizedPersonalKey) {
-        channelType = DEFAULT_CHANNEL_TYPE;
-        resolvedSessionKey = expectedPersonalSessionKey;
-        logger.info?.(
-          `[clawline] sendOutboundMessage using personal channel from sessionKey=${sessionKeyRaw}`,
-        );
-      } else {
-        throw new Error(`Invalid clawline sessionKey: ${sessionKeyRaw}`);
-      }
-    }
-    if (!resolvedSessionKey) {
-      if (params.channelType === "admin") {
-        channelType = ADMIN_CHANNEL_TYPE;
-        logger.info?.("[clawline] sendOutboundMessage using explicit channelType=admin");
-      } else if (params.channelType === "personal") {
-        channelType = DEFAULT_CHANNEL_TYPE;
-        logger.info?.("[clawline] sendOutboundMessage using explicit channelType=personal");
-      }
-      resolvedSessionKey =
-        channelType === ADMIN_CHANNEL_TYPE ? mainSessionKey : expectedPersonalSessionKey;
+    let resolvedSessionKey = sessionKeyRaw || expectedPersonalSessionKey;
+    const normalizedSessionKey = resolvedSessionKey.toLowerCase();
+    if (normalizedSessionKey === normalizedMainKey) {
+      resolvedSessionKey = mainSessionKey;
+    } else if (normalizedSessionKey === normalizedPersonalKey) {
+      resolvedSessionKey = expectedPersonalSessionKey;
+    } else {
+      throw new Error(`Invalid clawline sessionKey: ${resolvedSessionKey}`);
     }
 
     let outboundAttachments = {
@@ -2797,7 +2732,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       content: text,
       timestamp: nowMs(),
       streaming: false,
-      channelType,
       sessionKey: resolvedSessionKey,
       attachments:
         outboundAttachments.attachments.length > 0 ? outboundAttachments.attachments : undefined,
@@ -2883,48 +2817,30 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         throw new ClientMessageError("payload_too_large", "Message too large");
       }
       const attachmentsHash = hashAttachments(attachmentsInfo.attachments);
-      const payloadSessionKey =
-        typeof payload.sessionKey === "string" ? payload.sessionKey.trim() : "";
       const expectedPersonalSessionKey = buildClawlinePersonalSessionKey(
         mainSessionAgentId,
         session.userId,
       );
-      const normalizedMainKey = mainSessionKey.toLowerCase();
-      const normalizedPersonalKey = expectedPersonalSessionKey.toLowerCase();
-      let channelType: ChannelType;
-      let resolvedSessionKey: string;
-      let routingSource: "sessionKey" | "channelType";
-      if (payloadSessionKey) {
-        const normalizedPayloadSessionKey = payloadSessionKey.toLowerCase();
-        if (normalizedPayloadSessionKey === normalizedMainKey) {
-          channelType = ADMIN_CHANNEL_TYPE;
-          resolvedSessionKey = mainSessionKey;
-        } else if (normalizedPayloadSessionKey === normalizedPersonalKey) {
-          channelType = DEFAULT_CHANNEL_TYPE;
-          resolvedSessionKey = expectedPersonalSessionKey;
-        } else {
-          throw new ClientMessageError("invalid_message", "Invalid sessionKey");
-        }
-        routingSource = "sessionKey";
-      } else {
-        channelType = normalizeChannelType(payload.channelType);
-        resolvedSessionKey =
-          channelType === ADMIN_CHANNEL_TYPE ? mainSessionKey : expectedPersonalSessionKey;
-        routingSource = "channelType";
+      const payloadSessionKey =
+        typeof payload.sessionKey === "string" ? payload.sessionKey.trim() : "";
+      const resolvedSessionKey = session.sessionKey;
+      if (
+        payloadSessionKey &&
+        payloadSessionKey.toLowerCase() !== resolvedSessionKey.toLowerCase()
+      ) {
+        throw new ClientMessageError("invalid_message", "Invalid sessionKey");
       }
       logger.info?.("[clawline] inbound message routing", {
         messageId: payload.id,
         payloadChannelType: payload.channelType,
         payloadSessionKey: payload.sessionKey,
-        normalizedChannelType: channelType,
         resolvedSessionKey,
-        routingSource,
         sessionIsAdmin: session.isAdmin,
         userId: session.userId,
         deviceId: session.deviceId,
         sessionKey: session.sessionKey,
       });
-      if (channelType === ADMIN_CHANNEL_TYPE && !session.isAdmin) {
+      if (resolvedSessionKey.toLowerCase() === mainSessionKey.toLowerCase() && !session.isAdmin) {
         throw new ClientMessageError("forbidden", "Admin channel requires admin access");
       }
       const targetUserId = session.userId;
@@ -3035,19 +2951,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           OriginatingTo: `user:${session.userId}`,
           CommandAuthorized: true,
         });
-
-        logger.info?.(
-          `[clawline] updateLastRoute call: sessionStorePath=${sessionStorePath} sessionKey=${route.sessionKey} channel=${channelLabel} to=${session.userId}`,
-        );
-        await updateLastRoute({
-          storePath: sessionStorePath,
-          sessionKey: route.sessionKey,
-          channel: channelLabel,
-          // Use canonical userId for routing, not peerId (which may be bindingId with different casing)
-          to: session.userId,
-          accountId: route.accountId,
-        });
-        logger.info?.("[clawline] updateLastRoute completed");
 
         const fallbackText = adapterOverrides.responseFallback?.trim() ?? "";
         const prefixContext: ResponsePrefixContext = {
