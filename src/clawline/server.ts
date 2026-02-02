@@ -2969,6 +2969,14 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           },
         });
 
+        logger.info?.("[clawline] agent_run_start", {
+          messageId: payload.id,
+          sessionId: session.sessionId,
+          sessionKey: resolvedSessionKey,
+          userId: session.userId,
+          deviceId: session.deviceId,
+        });
+
         let queuedFinal = false;
         let deliveredCount = 0;
         try {
@@ -3012,6 +3020,19 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         const queueDepth = getFollowupQueueDepth(queueKey);
         const wasDelivered = queuedFinal || deliveredCount > 0;
         const wasQueued = !wasDelivered && queueDepth > 0;
+
+        logger.info?.("[clawline] agent_run_end", {
+          messageId: payload.id,
+          sessionId: session.sessionId,
+          sessionKey: resolvedSessionKey,
+          userId: session.userId,
+          deviceId: session.deviceId,
+          deliveredCount,
+          queuedFinal,
+          queueDepth,
+          wasDelivered,
+          wasQueued,
+        });
 
         if (!wasDelivered && !wasQueued) {
           updateMessageStreamingStmt.run(
