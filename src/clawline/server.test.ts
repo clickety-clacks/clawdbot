@@ -473,7 +473,7 @@ describe.sequential("clawline provider server", () => {
         JSON.stringify({
           type: "message",
           id: `c_${randomUUID()}`,
-          channelType: "admin",
+          sessionKey: "agent:main:main",
           content: "secret-admin-update",
         }),
       );
@@ -554,7 +554,6 @@ describe.sequential("clawline provider server", () => {
           type: "message",
           id: `c_${randomUUID()}`,
           sessionKey: "agent:main:main",
-          channelType: "personal",
           content: "secret-admin-update",
         }),
       );

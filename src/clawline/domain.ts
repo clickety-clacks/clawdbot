@@ -107,10 +107,6 @@ export type ClawlineOutboundSendParams = {
   text: string;
   mediaUrl?: string;
   attachments?: ClawlineOutboundAttachmentInput[];
-  /**
-   * Override channel type for delivery (backward compat if sessionKey is omitted).
-   */
-  channelType?: "admin" | "personal";
   /** Session key for this delivery (preferred when provided). */
   sessionKey?: string;
 };
