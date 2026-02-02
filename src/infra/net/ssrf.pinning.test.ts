@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+
 import { createPinnedLookup, resolvePinnedHostname } from "./ssrf.js";
 
 describe("ssrf pinning", () => {
