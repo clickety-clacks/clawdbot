@@ -66,6 +66,7 @@ export interface ProviderConfig {
     maxUploadBytes: number;
     unreferencedUploadTtlSeconds: number;
   };
+  webRootPath: string;
   sessions: {
     maxMessageBytes: number;
     maxReplayMessages: number;
@@ -107,7 +108,7 @@ export type ClawlineOutboundSendParams = {
   text: string;
   mediaUrl?: string;
   attachments?: ClawlineOutboundAttachmentInput[];
-  /** Session key for this delivery (preferred when provided). */
+  /** Session key for this delivery (optional; otherwise derived from target). */
   sessionKey?: string;
 };
 
