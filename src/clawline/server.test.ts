@@ -314,7 +314,16 @@ async function authenticateDevice(port: number, deviceId: string, token: string)
       `Auth failed for ${deviceId}: ${typeof auth === "object" ? JSON.stringify(auth) : auth}`,
     );
   }
-  return { ws, auth };
+  let sessionInfo: any | null = null;
+  if (Array.isArray(auth.features) && auth.features.includes("session_info")) {
+    const next = await waitForMessage(ws);
+    if (next?.type !== "session_info") {
+      ws.terminate();
+      throw new Error(`Expected session_info after auth_result, got ${JSON.stringify(next)}`);
+    }
+    sessionInfo = next;
+  }
+  return { ws, auth, sessionInfo };
 }
 
 describe.sequential("clawline provider server", () => {
@@ -598,6 +607,45 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("accepts messages without sessionKey for legacy clients", async () => {
+    const deviceId = randomUUID();
+    const ctx = await setupTestServer([
+      {
+        deviceId,
+        claimedName: "Legacy Client",
+        deviceInfo: {
+          platform: "iOS",
+          model: "iPhone",
+          osVersion: "17.0",
+          appVersion: "1.0",
+        },
+        userId: "legacy",
+        isAdmin: false,
+        tokenDelivered: true,
+        createdAt: Date.now() - 10_000,
+        lastSeenAt: Date.now() - 5_000,
+      },
+    ]);
+    try {
+      const pair = await performPairRequest(ctx.port, deviceId);
+      const { ws } = await authenticateDevice(ctx.port, deviceId, pair.token as string);
+      const messageId = `c_${randomUUID()}`;
+      ws.send(
+        JSON.stringify({
+          type: "message",
+          id: messageId,
+          content: "hello",
+        }),
+      );
+      const first = await waitForMessage(ws);
+      const ack = first?.type === "ack" ? first : await waitForMessage(ws);
+      expect(ack).toMatchObject({ type: "ack", id: messageId });
+      ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("includes isAdmin in auth_result based on allowlist entry", async () => {
     const adminDeviceId = randomUUID();
     const userDeviceId = randomUUID();
@@ -630,18 +678,27 @@ describe.sequential("clawline provider server", () => {
     try {
       const adminPair = await performPairRequest(ctx.port, adminDeviceId);
       const userPair = await performPairRequest(ctx.port, userDeviceId);
-      const { ws: adminWs, auth: adminAuth } = await authenticateDevice(
-        ctx.port,
-        adminDeviceId,
-        adminPair.token as string,
-      );
-      const { ws: userWs, auth: userAuth } = await authenticateDevice(
-        ctx.port,
-        userDeviceId,
-        userPair.token as string,
-      );
+      const {
+        ws: adminWs,
+        auth: adminAuth,
+        sessionInfo: adminSessionInfo,
+      } = await authenticateDevice(ctx.port, adminDeviceId, adminPair.token as string);
+      const {
+        ws: userWs,
+        auth: userAuth,
+        sessionInfo: userSessionInfo,
+      } = await authenticateDevice(ctx.port, userDeviceId, userPair.token as string);
       expect(adminAuth.isAdmin).toBe(true);
       expect(userAuth.isAdmin).toBe(false);
+      expect(adminAuth.features).toContain("session_info");
+      expect(userAuth.features).toContain("session_info");
+      expect(adminSessionInfo?.sessions).toEqual([
+        { stream: "personal", sessionKey: "agent:main:clawline:flynn:main" },
+        { stream: "admin", sessionKey: "agent:main:main" },
+      ]);
+      expect(userSessionInfo?.sessions).toEqual([
+        { stream: "personal", sessionKey: "agent:main:clawline:qa_sim:main" },
+      ]);
       adminWs.terminate();
       userWs.terminate();
     } finally {
