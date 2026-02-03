@@ -402,6 +402,8 @@ type Session = {
   isAdmin: boolean;
   sessionId: string;
   sessionKey: string;
+  sessionKeys: string[];
+  personalSessionKey: string;
   peerId: string;
   claimedName?: string;
   deviceInfo?: DeviceInfo;
@@ -718,6 +720,34 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const sessionStorePath = options.sessionStorePath;
   const mainSessionKey = options.mainSessionKey?.trim() || "agent:main:main";
   const mainSessionAgentId = resolveAgentIdFromSessionKey(mainSessionKey);
+  type SessionInfoEntry = { stream: "personal" | "admin"; sessionKey: string };
+  const buildSessionInfo = (userId: string, isAdmin: boolean) => {
+    const personalSessionKey = buildClawlinePersonalSessionKey(mainSessionAgentId, userId);
+    const sessions: SessionInfoEntry[] = [{ stream: "personal", sessionKey: personalSessionKey }];
+    if (isAdmin) {
+      sessions.push({ stream: "admin", sessionKey: mainSessionKey });
+    }
+    return {
+      personalSessionKey,
+      sessionKeys: sessions.map((session) => session.sessionKey),
+      sessions,
+    };
+  };
+  const applySessionInfo = (session: Session, isAdmin: boolean) => {
+    const info = buildSessionInfo(session.userId, isAdmin);
+    session.isAdmin = isAdmin;
+    session.personalSessionKey = info.personalSessionKey;
+    session.sessionKeys = info.sessionKeys;
+    session.sessionKey = isAdmin ? mainSessionKey : info.personalSessionKey;
+    return info;
+  };
+  const sendSessionInfo = async (session: Session, info?: ReturnType<typeof buildSessionInfo>) => {
+    const payload = {
+      type: "session_info",
+      sessions: (info ?? buildSessionInfo(session.userId, session.isAdmin)).sessions,
+    };
+    await sendJson(session.socket, payload).catch(() => {});
+  };
   const alertInstructionsPath =
     typeof config.alertInstructionsPath === "string" &&
     config.alertInstructionsPath.trim().length > 0
@@ -2247,11 +2277,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         continue;
       }
       if (session.isAdmin !== entry.isAdmin) {
-        session.isAdmin = entry.isAdmin;
+        const info = applySessionInfo(session, entry.isAdmin);
         const state = connectionState.get(session.socket);
         if (state && state.authenticated) {
           state.isAdmin = entry.isAdmin;
         }
+        void sendSessionInfo(session, info);
       }
     }
   }
@@ -2481,6 +2512,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       combined.length > config.sessions.maxReplayMessages
         ? combined.slice(combined.length - config.sessions.maxReplayMessages)
         : combined;
+    const sessionInfo = buildSessionInfo(session.userId, session.isAdmin);
     const payload = {
       type: "auth_result",
       success: true,
@@ -2490,6 +2522,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       replayCount: limited.length,
       replayTruncated: combined.length > limited.length,
       historyReset: !lastMessageId,
+      features: ["session_info"],
+      sessions: sessionInfo.sessions,
     };
     // Debug logging for duplicate investigation
     logger.info("replay_complete", {
@@ -2499,7 +2533,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       firstEventId: limited[0]?.id,
       lastEventId: limited[limited.length - 1]?.id,
     });
-    await sendJson(session.socket, payload);
+    await sendJson(session.socket, payload).catch(() => {});
+    await sendSessionInfo(session, sessionInfo);
     for (const event of limited) {
       if (
         typeof event.sessionKey === "string" &&
@@ -2690,7 +2725,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
     const normalizedKey = payload.sessionKey.toLowerCase();
     for (const target of sessionsByDevice.values()) {
-      if (target.sessionKey.toLowerCase() !== normalizedKey) {
+      const keys = target.sessionKeys?.length ? target.sessionKeys : [target.sessionKey];
+      if (!keys.some((key) => key.toLowerCase() === normalizedKey)) {
         continue;
       }
       sendPayloadToSession(target, payload);
@@ -2898,10 +2934,15 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       const attachmentsHash = hashAttachments(attachmentsInfo.attachments);
       const payloadSessionKey =
         typeof payload.sessionKey === "string" ? payload.sessionKey.trim() : "";
-      const resolvedSessionKey = session.sessionKey;
+      const allowedSessionKeys = session.sessionKeys?.length
+        ? session.sessionKeys
+        : [session.sessionKey];
+      const resolvedSessionKey = payloadSessionKey || session.personalSessionKey;
       if (
         payloadSessionKey &&
-        payloadSessionKey.toLowerCase() !== resolvedSessionKey.toLowerCase()
+        !allowedSessionKeys.some(
+          (sessionKey) => sessionKey.toLowerCase() === payloadSessionKey.toLowerCase(),
+        )
       ) {
         throw new ClientMessageError("invalid_message", "Invalid sessionKey");
       }
@@ -3672,10 +3713,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       ws.close();
       return;
     }
+    const sessionInfo = buildSessionInfo(entry.userId, entry.isAdmin);
     // Track device activity under the spec session keys (DM or personal).
-    const sessionKey = entry.isAdmin
-      ? mainSessionKey
-      : buildClawlinePersonalSessionKey(mainSessionAgentId, entry.userId);
+    const sessionKey = entry.isAdmin ? mainSessionKey : sessionInfo.personalSessionKey;
     const peerId = derivePeerId(entry);
     const session: Session = {
       socket: ws,
@@ -3684,6 +3724,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       isAdmin: entry.isAdmin,
       sessionId: `session_${randomUUID()}`,
       sessionKey,
+      sessionKeys: sessionInfo.sessionKeys,
+      personalSessionKey: sessionInfo.personalSessionKey,
       peerId,
       claimedName: entry.claimedName,
       deviceInfo: entry.deviceInfo,
