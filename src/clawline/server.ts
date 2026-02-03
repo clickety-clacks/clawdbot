@@ -167,7 +167,10 @@ function sanitizeUserId(userId: string | undefined): string {
 
 function normalizeAllowlistEntry(entry: AllowlistEntry) {
   const normalizedFromName = normalizeUserIdFromClaimedName(entry.claimedName);
-  let nextUserId = normalizedFromName ?? sanitizeUserId(entry.userId);
+  let nextUserId = sanitizeUserId(entry.userId);
+  if (!nextUserId) {
+    nextUserId = normalizedFromName ?? "";
+  }
   if (!nextUserId) {
     nextUserId = generateUserId();
   }
