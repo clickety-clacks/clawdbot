@@ -21,14 +21,14 @@ The provider watches allowlist/pending for changes, so edits take effect without
 - `deviceId`: stable per device/app install.
 - `claimedName`: human-friendly label from the device; display-only.
 - `userId`: server-assigned routing identity; authoritative.
-- `isAdmin`: computed from `userId` by the server policy when allowlist reloads.
+- `isAdmin`: **manual flag** in allowlist. Controls access to `agent:main:main`.
 - `bindingId`: optional secondary identifier for devices that migrate.
 
 UserId policy:
 
 - If `claimedName` is present, the server normalizes it (lowercase, punctuation -> `_`).
 - If the normalized name is empty, the server generates `user_<uuid>`.
-- Admin status is derived from the deployment's reserved admin userId; do not set `isAdmin` manually.
+- Admin status is **not** derived automatically. Set `isAdmin` manually for the devices/users that should access `agent:main:main`.
 
 ## Inspect Entries
 

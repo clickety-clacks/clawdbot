@@ -84,11 +84,12 @@ type TestServerContext = {
   pendingPath: string;
   mediaPath: string;
   alertInstructionsPath: string;
+  webRootPath: string;
   cleanup: () => Promise<void>;
 };
 
 const createAllowlistEntry = (overrides: Partial<AllowlistEntry> = {}): AllowlistEntry => ({
-  deviceId: "device-1",
+  deviceId: "cb76ad36-1e3b-4ff0-8249-ad8e4104bfa1",
   claimedName: "flynn",
   deviceInfo: {
     platform: "iOS",
@@ -126,6 +127,10 @@ async function setupTestServer(
   const mediaPath = path.join(root, "media");
   await fs.mkdir(statePath, { recursive: true });
   await fs.mkdir(mediaPath, { recursive: true });
+  const webRootPath = path.join(root, "www");
+  await fs.mkdir(webRootPath, { recursive: true });
+  await fs.mkdir(path.join(webRootPath, "media"), { recursive: true });
+  await fs.writeFile(path.join(webRootPath, "index.html"), "<html><body>root index</body></html>");
   await fs.mkdir(path.join(mediaPath, "assets"), { recursive: true });
   await fs.mkdir(path.join(mediaPath, "tmp"), { recursive: true });
   const sessionStoreDir = path.join(root, "sessions");
@@ -151,6 +156,7 @@ async function setupTestServer(
       statePath,
       media: { storagePath: mediaPath },
       alertInstructionsPath,
+      webRootPath,
     },
     openClawConfig: testOpenClawConfig,
     replyResolver: testReplyResolver,
@@ -169,6 +175,7 @@ async function setupTestServer(
     pendingPath,
     mediaPath,
     alertInstructionsPath,
+    webRootPath,
     cleanup,
   };
 }
@@ -331,7 +338,9 @@ describe.sequential("clawline provider server", () => {
     };
     const ctx = await setupTestServer([entry]);
     try {
+      console.log("allowlist before pair", await fs.readFile(ctx.allowlistPath, "utf8"));
       const response = await performPairRequest(ctx.port, deviceId);
+      console.log("pair response", response);
       expect(response).toMatchObject({
         type: "pair_result",
         success: true,
@@ -351,21 +360,37 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
-  it("bootstraps Flynn as admin when first pairing uses that claimed name", async () => {
+  it("retains pending pairing entry after websocket disconnect", async () => {
+    const deviceId = randomUUID();
+    const ctx = await setupTestServer();
+    try {
+      const response = await performPairRequest(ctx.port, deviceId);
+      expect(response).toMatchObject({
+        type: "pair_result",
+        success: false,
+        reason: "pair_pending",
+      });
+      const contents = await fs.readFile(ctx.pendingPath, "utf8");
+      const pending = JSON.parse(contents);
+      expect(pending.entries).toEqual(
+        expect.arrayContaining([expect.objectContaining({ deviceId })]),
+      );
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("does not bootstrap admin when no admin exists", async () => {
     const ctx = await setupTestServer();
     const deviceId = randomUUID();
     try {
       const response = await performPairRequest(ctx.port, deviceId, { claimedName: "Flynn " });
-      expect(response).toMatchObject({
-        success: true,
-        userId: "flynn",
-      });
+      expect(response).toMatchObject({ success: false, reason: "pair_pending" });
       const allowlist = JSON.parse(await fs.readFile(ctx.allowlistPath, "utf8")) as {
         entries: AllowlistEntry[];
       };
       const entry = allowlist.entries.find((item) => item.deviceId === deviceId);
-      expect(entry?.userId).toBe("flynn");
-      expect(entry?.isAdmin).toBe(true);
+      expect(entry).toBeUndefined();
     } finally {
       await ctx.cleanup();
     }
@@ -390,9 +415,15 @@ describe.sequential("clawline provider server", () => {
   });
 
   it("stores uploaded assets on disk", async () => {
-    const ctx = await setupTestServer();
+    const deviceId = randomUUID();
+    const entry = createAllowlistEntry({
+      deviceId,
+      isAdmin: true,
+      tokenDelivered: false,
+      lastSeenAt: null,
+    });
+    const ctx = await setupTestServer([entry]);
     try {
-      const deviceId = randomUUID();
       const pairResponse = await performPairRequest(ctx.port, deviceId, { claimedName: "Flynn" });
       expect(pairResponse.success).toBe(true);
       const token = pairResponse.token as string;
@@ -637,9 +668,9 @@ describe.sequential("clawline provider server", () => {
         message?: string;
         deliveryContext?: { channel?: string; to?: string };
       };
-      expect(call?.sessionKey).toBe("agent:main:main");
-      expect(call?.message).toBe("System Alert: [codex] Check on Flynn");
-      expect(call?.deliveryContext).toBeUndefined();
+      expect(call?.key).toBe("agent:main:main");
+      expect(call?.item?.prompt).toBe("System Alert: [codex] Check on Flynn");
+      expect(call?.item?.origin).toEqual({ channel: "clawline", to: "agent:main:main" });
     } finally {
       await ctx.cleanup();
     }
@@ -666,8 +697,11 @@ describe.sequential("clawline provider server", () => {
         message?: string;
         deliveryContext?: { channel?: string; to?: string };
       };
-      expect(call?.sessionKey).toBe("agent:main:clawline:flynn:main");
-      expect(call?.deliveryContext).toEqual({ channel: "clawline", to: "flynn" });
+      expect(call?.key).toBe("agent:main:clawline:flynn:main");
+      expect(call?.item?.origin).toEqual({
+        channel: "clawline",
+        to: "agent:main:clawline:flynn:main",
+      });
     } finally {
       await ctx.cleanup();
     }
@@ -694,8 +728,8 @@ describe.sequential("clawline provider server", () => {
         message?: string;
         deliveryContext?: { channel?: string; to?: string };
       };
-      expect(call?.sessionKey).toBe("agent:main:main");
-      expect(call?.deliveryContext).toBeUndefined();
+      expect(call?.key).toBe("agent:main:main");
+      expect(call?.item?.origin).toEqual({ channel: "clawline", to: "agent:main:main" });
     } finally {
       await ctx.cleanup();
     }
@@ -765,6 +799,56 @@ describe.sequential("clawline provider server", () => {
       expect(sendDirectAgentMessageMock).not.toHaveBeenCalled();
       expect(gatewayCallMock).not.toHaveBeenCalled();
       expect(sendMessageMock).not.toHaveBeenCalled();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("serves /www root index with caching headers and HEAD support", async () => {
+    const ctx = await setupTestServer();
+    try {
+      const response = await fetch(`http://127.0.0.1:${ctx.port}/www`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("cache-control")).toContain("max-age=60");
+      expect(response.headers.get("content-type")).toContain("text/html");
+      expect(await response.text()).toContain("root index");
+      const indexResponse = await fetch(`http://127.0.0.1:${ctx.port}/www/index.html`);
+      expect(await indexResponse.text()).toContain("root index");
+      const headResponse = await fetch(`http://127.0.0.1:${ctx.port}/www`, { method: "HEAD" });
+      expect(headResponse.status).toBe(200);
+      expect(await headResponse.text()).toBe("");
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("/www blocks dotfiles, traversal, symlink escapes, and directories without index", async () => {
+    const ctx = await setupTestServer();
+    try {
+      await fs.writeFile(path.join(ctx.webRootPath, ".secret"), "hidden");
+      const dotResponse = await fetch(`http://127.0.0.1:${ctx.port}/www/.secret`);
+      expect(dotResponse.status).toBe(404);
+      const traversalResponse = await fetch(
+        `http://127.0.0.1:${ctx.port}/www/../state/allowlist.json`,
+      );
+      expect(traversalResponse.status).toBe(404);
+      const emptyDir = path.join(ctx.webRootPath, "emptydir");
+      await fs.mkdir(emptyDir, { recursive: true });
+      const emptyDirResponse = await fetch(`http://127.0.0.1:${ctx.port}/www/emptydir/`);
+      expect(emptyDirResponse.status).toBe(404);
+      const subdirPath = path.join(ctx.webRootPath, "subdir");
+      await fs.mkdir(subdirPath, { recursive: true });
+      await fs.writeFile(path.join(subdirPath, "index.html"), "sub index");
+      const subdirResponse = await fetch(`http://127.0.0.1:${ctx.port}/www/subdir`);
+      expect(await subdirResponse.text()).toBe("sub index");
+      if (process.platform !== "win32") {
+        const outsideFile = path.join(path.dirname(ctx.webRootPath), "outside.txt");
+        await fs.writeFile(outsideFile, "leak");
+        const linkPath = path.join(ctx.webRootPath, "leak");
+        await fs.symlink(outsideFile, linkPath);
+        const symlinkResponse = await fetch(`http://127.0.0.1:${ctx.port}/www/leak`);
+        expect(symlinkResponse.status).toBe(404);
+      }
     } finally {
       await ctx.cleanup();
     }

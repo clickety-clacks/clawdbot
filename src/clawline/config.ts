@@ -4,6 +4,8 @@ import path from "node:path";
 import type { OpenClawConfig } from "../config/config.js";
 import type { ProviderConfig } from "./domain.js";
 import { deepMerge } from "./utils/deep-merge.js";
+import { resolveUserPath } from "../utils.js";
+import { DEFAULT_AGENT_WORKSPACE_DIR } from "../agents/workspace.js";
 
 export type ClawlineAdapterOverrides = {
   provider?: string;
@@ -23,6 +25,7 @@ type ProviderConfigBase = Omit<ProviderConfig, "adapter">;
 export type ClawlineConfigInput = {
   enabled?: boolean;
   adapter?: ClawlineAdapterOverrides;
+  webRootPath?: string;
 } & Partial<ProviderConfigBase>;
 
 const defaultStatePath = path.join(os.homedir(), ".openclaw", "clawline");
@@ -81,6 +84,7 @@ const DEFAULTS: ResolvedClawlineConfig = {
     maxUploadBytes: 104_857_600,
     unreferencedUploadTtlSeconds: 3600,
   },
+  webRootPath: path.join(DEFAULT_AGENT_WORKSPACE_DIR, "www"),
   sessions: {
     maxMessageBytes: 65_536,
     maxReplayMessages: 500,
@@ -104,10 +108,24 @@ export function resolveClawlineConfig(cfg: OpenClawConfig): ResolvedClawlineConf
   const merged = deepMerge(structuredClone(DEFAULTS), input as Partial<ResolvedClawlineConfig>);
   merged.statePath = resolvePathValue(merged.statePath, defaultStatePath);
   merged.media.storagePath = resolvePathValue(merged.media.storagePath, defaultMediaPath);
-  merged.alertInstructionsPath = resolvePathValue(
-    merged.alertInstructionsPath ?? defaultAlertInstructionsPath,
-    defaultAlertInstructionsPath,
-  );
+  const workspaceDefault =
+    typeof cfg.agents?.defaults?.workspace === "string" &&
+    cfg.agents.defaults.workspace.trim().length > 0
+      ? resolveUserPath(cfg.agents.defaults.workspace)
+      : DEFAULT_AGENT_WORKSPACE_DIR;
+  const defaultWebRootPath = path.join(workspaceDefault, "www");
+  merged.webRootPath = resolvePathValue(merged.webRootPath, defaultWebRootPath);
+  if (
+    Object.prototype.hasOwnProperty.call(input, "alertInstructionsPath") &&
+    input.alertInstructionsPath === null
+  ) {
+    merged.alertInstructionsPath = null;
+  } else {
+    merged.alertInstructionsPath = resolvePathValue(
+      merged.alertInstructionsPath ?? defaultAlertInstructionsPath,
+      defaultAlertInstructionsPath,
+    );
+  }
   const adapterOverrides: ClawlineAdapterOverrides = input.adapter ? { ...input.adapter } : {};
   merged.adapterOverrides = adapterOverrides;
   merged.enabled = input.enabled === true;

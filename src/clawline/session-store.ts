@@ -11,10 +11,9 @@ export async function recordClawlineSessionActivity(params: {
   sessionId: string;
   sessionFile?: string;
   displayName?: string | null;
-  userId?: string;
   logger?: LoggerLike;
 }): Promise<void> {
-  const { storePath, sessionKey, sessionId, sessionFile, displayName, userId } = params;
+  const { storePath, sessionKey, sessionId, sessionFile, displayName } = params;
   const label = displayName?.trim() ? displayName.trim() : undefined;
   try {
     // Use updateSessionStore to atomically load-modify-write under lock.
@@ -29,12 +28,32 @@ export async function recordClawlineSessionActivity(params: {
         label,
         sessionFile,
         lastChannel: CLAWLINE_SESSION_CHANNEL,
-        // Set lastTo to userId if provided, enabling responses even without prior messages
-        ...(userId ? { lastTo: userId } : {}),
       };
+      // Don't set lastTo on connect; only update it after an actual user message.
       store[sessionKey] = mergeSessionEntry(existing, patch);
     });
   } catch (err) {
     params.logger?.warn?.("[clawline] failed to update session store", err);
+  }
+}
+
+export async function updateClawlineSessionDeliveryTarget(params: {
+  storePath: string;
+  sessionKey: string;
+  logger?: LoggerLike;
+}): Promise<void> {
+  const { storePath, sessionKey } = params;
+  try {
+    await updateSessionStore(storePath, (store) => {
+      const existing = store[sessionKey];
+      const patch: Partial<SessionEntry> = {
+        lastChannel: CLAWLINE_SESSION_CHANNEL,
+        lastTo: sessionKey,
+      };
+      // Set lastTo only when the user actually sends from this session.
+      store[sessionKey] = mergeSessionEntry(existing, patch);
+    });
+  } catch (err) {
+    params.logger?.warn?.("[clawline] failed to update session delivery target", err);
   }
 }

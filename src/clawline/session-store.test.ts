@@ -47,7 +47,7 @@ describe("recordClawlineSessionActivity", () => {
     expect(updatedEntry.updatedAt).toBeGreaterThanOrEqual(firstUpdatedAt);
   });
 
-  it("sets lastTo when userId is provided", async () => {
+  it("does not set lastTo on connect", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "clawline-session-lastto-"));
     const storePath = path.join(dir, "sessions.json");
     const sessionKey = "clawline:user:device";
@@ -57,13 +57,12 @@ describe("recordClawlineSessionActivity", () => {
       sessionKey,
       sessionId: "session_2",
       displayName: "Bob",
-      userId: "bob123",
     });
 
     const store = loadSessionStore(storePath);
     const entry = store[sessionKey];
     expect(entry).toBeDefined();
-    expect(entry.lastTo).toBe("bob123");
+    expect(entry.lastTo).toBeUndefined();
     expect(entry.lastChannel).toBe("clawline");
   });
 });

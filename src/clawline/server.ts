@@ -3,7 +3,8 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs/promises";
-import { watch, type FSWatcher } from "node:fs";
+import { watch, type FSWatcher, createReadStream } from "node:fs";
+import type { Stats } from "node:fs";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 
 import WebSocket, { WebSocketServer } from "ws";
@@ -26,7 +27,11 @@ import {
 } from "../agents/identity.js";
 import { resolveAgentIdFromSessionKey } from "../config/sessions.js";
 import { rawDataToString } from "../infra/ws.js";
-import { recordClawlineSessionActivity } from "./session-store.js";
+import {
+  recordClawlineSessionActivity,
+  updateClawlineSessionDeliveryTarget,
+} from "./session-store.js";
+import { DEFAULT_AGENT_WORKSPACE_DIR } from "../agents/workspace.js";
 import type { ClawlineAdapterOverrides } from "./config.js";
 import { clawlineSessionFileName } from "./session-key.js";
 import { deepMerge } from "./utils/deep-merge.js";
@@ -87,6 +92,7 @@ const MEDIA_FETCH_TIMEOUT_MS = 30_000;
 const DEFAULT_ALERT_SOURCE = "notify";
 const USER_ID_MAX_LENGTH = 48;
 const COMBINING_MARKS_REGEX = /[\u0300-\u036f]/g;
+const WEBROOT_PREFIX = "/www";
 
 function truncateUtf8(value: string, maxBytes: number): string {
   if (Buffer.byteLength(value, "utf8") <= maxBytes) {
@@ -459,6 +465,7 @@ const DEFAULT_CONFIG: ProviderConfig = {
     maxUploadBytes: 104_857_600,
     unreferencedUploadTtlSeconds: 3600,
   },
+  webRootPath: path.join(DEFAULT_AGENT_WORKSPACE_DIR, "www"),
   sessions: {
     maxMessageBytes: 65_536,
     maxReplayMessages: 500,
@@ -730,12 +737,19 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
   await ensureDir(config.statePath);
   await ensureDir(config.media.storagePath);
+  await ensureDir(config.webRootPath);
+  const webRootMediaDir = path.join(config.webRootPath, "media");
+  await ensureDir(webRootMediaDir);
   const assetsDir = path.join(config.media.storagePath, "assets");
   const sessionTranscriptsDir = path.join(config.statePath, "sessions");
   const tmpDir = path.join(config.media.storagePath, "tmp");
   await ensureDir(assetsDir);
   await ensureDir(tmpDir);
   await ensureDir(sessionTranscriptsDir);
+  const webRootRealPath = await fs.realpath(config.webRootPath);
+  const webRootRealPrefix = webRootRealPath.endsWith(path.sep)
+    ? webRootRealPath
+    : `${webRootRealPath}${path.sep}`;
   if (alertInstructionsPath) {
     await ensureAlertInstructionsFileIfMissing();
   }
@@ -1313,6 +1327,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         logHttpRequest("download_complete", { assetId });
         return;
       }
+      if (
+        parsedUrl.pathname === WEBROOT_PREFIX ||
+        parsedUrl.pathname.startsWith(`${WEBROOT_PREFIX}/`)
+      ) {
+        await handleWebRootRequest(req, res, parsedUrl.pathname);
+        return;
+      }
       if (req.method === "POST" && parsedUrl.pathname === "/alert") {
         await handleAlertHttpRequest(req, res);
         return;
@@ -1331,6 +1352,109 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       }
     }
   });
+
+  async function handleWebRootRequest(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    pathname: string,
+  ) {
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      res.setHeader("Allow", "GET, HEAD");
+      sendHttpError(res, 405, "invalid_message", "Method not allowed on /www");
+      return;
+    }
+    const rawRelative = pathname.slice(WEBROOT_PREFIX.length);
+    let decodedRelative = "";
+    try {
+      decodedRelative = decodeURIComponent(rawRelative || "");
+    } catch {
+      sendHttpError(res, 400, "invalid_message", "Invalid path");
+      return;
+    }
+    const trimmed = decodedRelative.replace(/^\/+/, "");
+    const sanitizedSegments =
+      trimmed.length === 0 ? [] : trimmed.split("/").filter((segment) => segment.length > 0);
+    for (const segment of sanitizedSegments) {
+      if (segment === "." || segment === ".." || segment.startsWith(".")) {
+        sendHttpError(res, 404, "not_found", "File not found");
+        return;
+      }
+    }
+    const basePath = config.webRootPath;
+    let targetPath =
+      sanitizedSegments.length > 0 ? path.join(basePath, ...sanitizedSegments) : basePath;
+    let fileStat: Stats;
+    try {
+      fileStat = await fs.stat(targetPath);
+    } catch (err: any) {
+      if (err && (err.code === "ENOENT" || err.code === "ENOTDIR")) {
+        sendHttpError(res, 404, "not_found", "File not found");
+        return;
+      }
+      logger.error?.("[clawline] webroot_stat_failed", err);
+      sendHttpError(res, 500, "server_error", "Failed to read static file");
+      return;
+    }
+    let finalPath = targetPath;
+    if (fileStat.isDirectory()) {
+      const indexPath = path.join(targetPath, "index.html");
+      try {
+        const indexStat = await fs.stat(indexPath);
+        if (!indexStat.isFile()) {
+          sendHttpError(res, 404, "not_found", "File not found");
+          return;
+        }
+        fileStat = indexStat;
+        finalPath = indexPath;
+      } catch (err: any) {
+        if (err && (err.code === "ENOENT" || err.code === "ENOTDIR")) {
+          sendHttpError(res, 404, "not_found", "File not found");
+          return;
+        }
+        logger.error?.("[clawline] webroot_index_failed", err);
+        sendHttpError(res, 500, "server_error", "Failed to read static file");
+        return;
+      }
+    } else if (!fileStat.isFile()) {
+      sendHttpError(res, 404, "not_found", "File not found");
+      return;
+    }
+    let finalRealPath: string;
+    try {
+      finalRealPath = await fs.realpath(finalPath);
+    } catch (err) {
+      logger.error?.("[clawline] webroot_realpath_failed", err);
+      sendHttpError(res, 500, "server_error", "Failed to read static file");
+      return;
+    }
+    if (finalRealPath !== webRootRealPath && !finalRealPath.startsWith(webRootRealPrefix)) {
+      sendHttpError(res, 404, "not_found", "File not found");
+      return;
+    }
+    const contentType = finalPath.toLowerCase().endsWith(".html")
+      ? "text/html"
+      : "application/octet-stream";
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Content-Length", fileStat.size.toString());
+    res.setHeader("Cache-Control", "public, max-age=60, stale-while-revalidate=30");
+    res.setHeader("Expires", new Date(Date.now() + 60_000).toUTCString());
+    res.setHeader("Last-Modified", new Date(fileStat.mtimeMs).toUTCString());
+    res.writeHead(200);
+    if (req.method === "HEAD") {
+      res.end();
+      return;
+    }
+    const stream = createReadStream(finalPath);
+    stream.on("error", (err) => {
+      logger.error?.("[clawline] webroot_stream_failed", err);
+      if (!res.headersSent) {
+        sendHttpError(res, 500, "server_error", "Failed to stream file");
+      } else {
+        res.end();
+      }
+    });
+    stream.pipe(res);
+  }
 
   async function handleAlertHttpRequest(req: http.IncomingMessage, res: http.ServerResponse) {
     logHttpRequest("alert_request_start");
@@ -1865,6 +1989,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       // so a 'direct' send can hit the JSONL lock and timeout, losing the message.
       // Enqueuing unconditionally eliminates this race. The queue drains when the agent
       // is truly idle. The latency cost is negligible vs message loss.
+      // Explicit origin prevents core fallback to lastTo (which could target a different session).
+      const alertOrigin =
+        resolvedSessionKey.trim().toLowerCase() === "global"
+          ? undefined
+          : { channel: "clawline", to: resolvedSessionKey };
       enqueueAnnounce({
         key: resolvedSessionKey,
         item: {
@@ -1872,6 +2001,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           summaryLine: "System Alert",
           enqueuedAt: Date.now(),
           sessionKey: resolvedSessionKey,
+          origin: alertOrigin,
         },
         settings: queueSettings,
         send: sendQueuedAlert,
@@ -2644,13 +2774,22 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     if (bytes > config.sessions.maxMessageBytes) {
       throw new Error("Clawline message exceeds max size");
     }
-    const target = resolveSendTarget(targetInput);
+
+    const normalizedTargetInput = targetInput.trim();
+    const sessionKeyHint = normalizedTargetInput.toLowerCase().startsWith("agent:")
+      ? normalizedTargetInput
+      : undefined;
+    const target = sessionKeyHint
+      ? resolveSessionTargetFromSessionKey(normalizedTargetInput)
+      : resolveSendTarget(normalizedTargetInput);
 
     const sessionKeyRaw = typeof params.sessionKey === "string" ? params.sessionKey.trim() : "";
-    if (!sessionKeyRaw) {
-      throw new Error("Delivering to clawline requires --session <sessionKey>");
-    }
-    const resolvedSessionKey = sessionKeyRaw;
+    const resolvedSessionKey =
+      sessionKeyRaw ||
+      sessionKeyHint ||
+      // Boundary normalization: accept user/device targets, but use fully-qualified session keys
+      // internally so all Clawline routing stays session-key-based.
+      buildClawlinePersonalSessionKey(mainSessionAgentId, target.userId);
 
     let outboundAttachments = {
       attachments: [] as NormalizedAttachment[],
@@ -2734,7 +2873,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         `${clawlineSessionFileName(session.sessionKey)}.jsonl`,
       ),
       displayName: session.claimedName ?? session.deviceInfo?.model ?? null,
-      userId: session.userId,
       logger,
     });
   }
@@ -2847,6 +2985,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             }
             resolve();
           });
+        });
+        await updateClawlineSessionDeliveryTarget({
+          storePath: sessionStorePath,
+          sessionKey: resolvedSessionKey,
+          logger,
         });
         broadcastToSessionKey(resolvedSessionKey, event);
 
@@ -3111,11 +3254,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           });
       }
     }
-    const nextEntries = pendingFile.entries.filter((entry) => now - entry.requestedAt < entryTtlMs);
-    if (nextEntries.length !== pendingFile.entries.length) {
-      pendingFile = { ...pendingFile, entries: nextEntries };
-      void persistPendingFile().catch((err) => logger.warn?.("pending_prune_failed", err));
-    }
   }
 
   function handleSocketClose(socket: WebSocket) {
@@ -3147,6 +3285,39 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   type ResolvedSendTarget =
     | { kind: "user"; userId: string }
     | { kind: "device"; userId: string; deviceId: string };
+
+  function resolveSessionTargetFromSessionKey(sessionKey: string): ResolvedSendTarget {
+    const trimmed = sessionKey.trim();
+    if (!trimmed) {
+      throw new Error("Delivering to clawline requires --to <userId|deviceId>");
+    }
+    const lower = trimmed.toLowerCase();
+    if (lower === mainSessionKey.toLowerCase()) {
+      const adminEntry = allowlist.entries.find((entry) => entry.isAdmin);
+      if (!adminEntry) {
+        throw new Error("No admin allowlist entry found for main session routing");
+      }
+      return resolveUserTarget(adminEntry.userId);
+    }
+    // Parse for storage only (userId); routing continues to rely on the session key itself.
+    const userId = extractUserIdFromSessionKey(trimmed);
+    if (!userId) {
+      throw new Error("Invalid clawline session key");
+    }
+    return resolveUserTarget(userId);
+  }
+
+  function extractUserIdFromSessionKey(sessionKey: string): string | null {
+    const parts = sessionKey.split(":");
+    if (parts.length < 5) {
+      return null;
+    }
+    if (parts[0]?.toLowerCase() !== "agent" || parts[2]?.toLowerCase() !== "clawline") {
+      return null;
+    }
+    const userId = parts[3]?.trim();
+    return userId ? userId : null;
+  }
 
   function resolveSendTarget(raw: string): ResolvedSendTarget {
     const trimmed = raw.trim();
@@ -3341,33 +3512,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         return;
       }
     }
-    const shouldBootstrapAdmin = !hasAdmin();
-    if (shouldBootstrapAdmin) {
-      const userId = normalizedUserId ?? generateUserId();
-      const newEntry: AllowlistEntry = {
-        deviceId,
-        claimedName: sanitizedClaimedName,
-        deviceInfo: sanitizedInfo,
-        userId,
-        isAdmin: true,
-        tokenDelivered: false,
-        createdAt: nowMs(),
-        lastSeenAt: null,
-      };
-      normalizeAllowlistEntry(newEntry);
-      allowlist.entries.push(newEntry);
-      await persistAllowlist();
-      const token = issueToken(newEntry);
-      const delivered = await sendJson(ws, { type: "pair_result", success: true, token, userId })
-        .then(() => true)
-        .catch(() => false);
-      if (delivered) {
-        await setTokenDelivered(deviceId, true);
-      }
-      ws.close();
-      return;
-    }
-
     if (entry && entry.tokenDelivered) {
       // Check if user is switching accounts (different claimedName → different userId)
       const newUserId = normalizedUserId ?? entry.userId;
