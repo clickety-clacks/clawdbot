@@ -10,12 +10,13 @@ The Clawline provider serves static files from a local directory.
 
 ## Configuration
 - Config key: channels.clawline.webRootPath
-- Default: ~/clawd/www (or <workspace>/www)
+- Discover the resolved path with: `openclaw gateway config.get channels.clawline.webRootPath`
 - URL prefix: /www on Clawline port (default 18800)
 
 ## Usage
-mkdir -p ~/clawd/www
-echo '<h1>Hello</h1>' > ~/clawd/www/index.html
+webRootPath="$(openclaw gateway config.get channels.clawline.webRootPath)"
+mkdir -p "$webRootPath"
+echo '<h1>Hello</h1>' > "$webRootPath/index.html"
 curl http://localhost:18800/www/index.html
 
 ## Security
@@ -24,5 +25,11 @@ curl http://localhost:18800/www/index.html
 - Methods: GET and HEAD only
 
 ## Custom Path
-Override in config:
-channels.clawline.webRootPath: '/path/to/custom/www'
+Override in config (JSON):
+{
+  "channels": {
+    "clawline": {
+      "webRootPath": "/path/to/custom/www"
+    }
+  }
+}
