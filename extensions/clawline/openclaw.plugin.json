@@ -1,6 +1,7 @@
 {
   "id": "clawline",
   "channels": ["clawline"],
+  "skills": ["./skills"],
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
