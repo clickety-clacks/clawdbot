@@ -27,6 +27,7 @@ import {
 } from "../agents/identity.js";
 import { resolveAgentIdFromSessionKey } from "../config/sessions.js";
 import { rawDataToString } from "../infra/ws.js";
+import { peekSystemEvents } from "../infra/system-events.js";
 import {
   recordClawlineSessionActivity,
   updateClawlineSessionDeliveryTarget,
@@ -90,6 +91,8 @@ const MAX_MEDIA_REDIRECTS = 5;
 const REDIRECT_STATUS_CODES = new Set([301, 302, 303, 307, 308]);
 const MEDIA_FETCH_TIMEOUT_MS = 30_000;
 const DEFAULT_ALERT_SOURCE = "notify";
+const EXEC_COMPLETION_ALERT_PROMPT =
+  "These items completed. Execute the next task, or identify what is blocking.";
 const USER_ID_MAX_LENGTH = 48;
 const COMBINING_MARKS_REGEX = /[\u0300-\u036f]/g;
 const WEBROOT_PREFIX = "/www";
@@ -1499,6 +1502,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         sessionKey: payload.sessionKey ?? "undefined",
       });
       let text = buildAlertText(payload.message, payload.source);
+      const alertResolution = resolveAlertSessionKey(payload.sessionKey);
+      const pendingEvents = peekSystemEvents(alertResolution.resolvedSessionKey);
+      const hasExecCompletion = pendingEvents.some((event) => event.includes("Exec finished"));
+      if (hasExecCompletion) {
+        text = `${EXEC_COMPLETION_ALERT_PROMPT}\n\n${text}`;
+      }
       text = await applyAlertInstructions(text);
       await wakeGatewayForAlert(text, payload.sessionKey);
       res.setHeader("Content-Type", "application/json");
@@ -1932,33 +1941,60 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     );
   }
 
+  function resolveAlertSessionKey(rawSessionKey?: string) {
+    const trimmedSessionKey = rawSessionKey?.trim() ?? "";
+    const hasSessionKey = typeof rawSessionKey === "string";
+    const isValid = isValidAlertSessionKey(trimmedSessionKey);
+    let resolvedSessionKey = mainSessionKey;
+    let decisionReason = "missing_session_key";
+    let decisionAction = "fallback_main_session";
+
+    const normalizedMainKey = mainSessionKey.toLowerCase();
+    if (hasSessionKey) {
+      if (trimmedSessionKey.length === 0) {
+        decisionReason = "empty_session_key";
+      } else if (isValid) {
+        const normalized = trimmedSessionKey.toLowerCase();
+        if (normalized === normalizedMainKey) {
+          resolvedSessionKey = mainSessionKey;
+        } else {
+          resolvedSessionKey = trimmedSessionKey;
+        }
+        decisionReason = "valid_session_key";
+        decisionAction = "use_provided_session_key";
+      } else {
+        decisionReason = "invalid_session_key";
+      }
+    }
+
+    return {
+      rawSessionKey,
+      trimmedSessionKey,
+      hasSessionKey,
+      isValid,
+      resolvedSessionKey,
+      decisionReason,
+      decisionAction,
+    };
+  }
+
+  function isAlertSessionKeyAllowedForUser(
+    sessionKey: string,
+    userId: string,
+    agentId: string,
+  ): boolean {
+    const normalizedUserId = sanitizeUserId(userId).toLowerCase();
+    const normalizedSessionKey = sessionKey.trim().toLowerCase();
+    const personalKey = buildClawlinePersonalSessionKey(agentId, userId).toLowerCase();
+    const dmKey = `agent:${agentId}:clawline:dm:${normalizedUserId}`.toLowerCase();
+    return normalizedSessionKey === personalKey || normalizedSessionKey === dmKey;
+  }
+
   async function wakeGatewayForAlert(text: string, sessionKey?: string) {
     try {
       const rawSessionKey = typeof sessionKey === "string" ? sessionKey : undefined;
-      const trimmedSessionKey = rawSessionKey?.trim() ?? "";
-      const hasSessionKey = typeof rawSessionKey === "string";
-      const isValid = isValidAlertSessionKey(trimmedSessionKey);
-      let resolvedSessionKey = mainSessionKey;
-      let decisionReason = "missing_session_key";
-      let decisionAction = "fallback_main_session";
-
-      const normalizedMainKey = mainSessionKey.toLowerCase();
-      if (hasSessionKey) {
-        if (trimmedSessionKey.length === 0) {
-          decisionReason = "empty_session_key";
-        } else if (isValid) {
-          const normalized = trimmedSessionKey.toLowerCase();
-          if (normalized === normalizedMainKey) {
-            resolvedSessionKey = mainSessionKey;
-          } else {
-            resolvedSessionKey = trimmedSessionKey;
-          }
-          decisionReason = "valid_session_key";
-          decisionAction = "use_provided_session_key";
-        } else {
-          decisionReason = "invalid_session_key";
-        }
-      }
+      const { trimmedSessionKey, isValid, resolvedSessionKey, decisionReason, decisionAction } =
+        resolveAlertSessionKey(rawSessionKey);
 
       logger.info?.(
         `[clawline] alert_session_key_decision raw=${rawSessionKey ?? "undefined"} trimmed=${trimmedSessionKey || "undefined"} valid=${isValid} action=${decisionAction} reason=${decisionReason} resolved=${resolvedSessionKey}`,
