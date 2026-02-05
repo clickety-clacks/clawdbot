@@ -36,24 +36,3 @@ export async function recordClawlineSessionActivity(params: {
     params.logger?.warn?.("[clawline] failed to update session store", err);
   }
 }
-
-export async function updateClawlineSessionDeliveryTarget(params: {
-  storePath: string;
-  sessionKey: string;
-  logger?: LoggerLike;
-}): Promise<void> {
-  const { storePath, sessionKey } = params;
-  try {
-    await updateSessionStore(storePath, (store) => {
-      const existing = store[sessionKey];
-      const patch: Partial<SessionEntry> = {
-        lastChannel: CLAWLINE_SESSION_CHANNEL,
-        lastTo: sessionKey,
-      };
-      // Set lastTo only when the user actually sends from this session.
-      store[sessionKey] = mergeSessionEntry(existing, patch);
-    });
-  } catch (err) {
-    params.logger?.warn?.("[clawline] failed to update session delivery target", err);
-  }
-}
