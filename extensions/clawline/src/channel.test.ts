@@ -9,15 +9,15 @@ describe("clawline plugin", () => {
       accountId: "default",
       context: {
         From: "clawline:flynn-admin",
-        OriginatingTo: "user:Flynn",
+        OriginatingTo: "Flynn:main",
       },
       hasRepliedRef: { value: false },
     });
 
-    expect(context?.currentChannelId).toBe("user:Flynn");
+    expect(context?.currentChannelId).toBe("Flynn:main");
   });
 
-  it("strips channel suffix when OriginatingTo is unavailable", () => {
+  it("skips tool context when OriginatingTo is missing", () => {
     const context = clawlinePlugin.threading?.buildToolContext?.({
       cfg: {} as any,
       accountId: "default",
@@ -27,7 +27,7 @@ describe("clawline plugin", () => {
       hasRepliedRef: { value: false },
     });
 
-    expect(context?.currentChannelId).toBe("user:flynn");
+    expect(context).toBeUndefined();
   });
 
   it("normalizes targets without lowercasing ids", () => {

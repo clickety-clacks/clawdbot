@@ -1,5 +1,5 @@
 import type { ChannelPlugin, OpenClawConfig } from "openclaw/plugin-sdk";
-import { DEFAULT_ACCOUNT_ID } from "openclaw/plugin-sdk";
+import { ClawlineDeliveryTarget, DEFAULT_ACCOUNT_ID } from "openclaw/plugin-sdk";
 
 import { clawlineMessageActions } from "./actions.js";
 import { clawlineOnboardingAdapter } from "./onboarding.js";
@@ -10,34 +10,6 @@ type ResolvedClawlineAccount = {
   enabled: boolean;
   configured: boolean;
 };
-
-function parseClawlineUserId(raw?: string | null): string | undefined {
-  const trimmed = raw?.trim();
-  if (!trimmed) {
-    return undefined;
-  }
-  const colonIndex = trimmed.indexOf(":");
-  if (colonIndex < 0) {
-    return stripClawlineChannelSuffix(trimmed);
-  }
-  const value = trimmed.slice(colonIndex + 1).trim();
-  return stripClawlineChannelSuffix(value || undefined);
-}
-
-function stripClawlineChannelSuffix(value?: string): string | undefined {
-  const trimmed = value?.trim();
-  if (!trimmed) {
-    return undefined;
-  }
-  const lower = trimmed.toLowerCase();
-  if (lower.endsWith("-admin")) {
-    return trimmed.slice(0, -"-admin".length);
-  }
-  if (lower.endsWith("-personal")) {
-    return trimmed.slice(0, -"-personal".length);
-  }
-  return trimmed;
-}
 
 function normalizeClawlineTarget(raw: string): string | undefined {
   const trimmed = raw.trim();
@@ -102,13 +74,17 @@ export const clawlinePlugin: ChannelPlugin<ResolvedClawlineAccount> = {
   },
   threading: {
     buildToolContext: ({ context, hasRepliedRef }) => {
-      const userId =
-        parseClawlineUserId(context.OriginatingTo) ?? parseClawlineUserId(context.From);
-      if (!userId) {
+      if (!context.OriginatingTo) {
+        return undefined;
+      }
+      let target: ClawlineDeliveryTarget;
+      try {
+        target = ClawlineDeliveryTarget.fromString(context.OriginatingTo);
+      } catch {
         return undefined;
       }
       return {
-        currentChannelId: `user:${userId}`,
+        currentChannelId: target.toString(),
         hasRepliedRef,
       };
     },

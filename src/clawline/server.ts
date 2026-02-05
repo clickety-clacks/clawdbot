@@ -28,10 +28,9 @@ import {
 import { resolveAgentIdFromSessionKey } from "../config/sessions.js";
 import { rawDataToString } from "../infra/ws.js";
 import { peekSystemEvents } from "../infra/system-events.js";
-import {
-  recordClawlineSessionActivity,
-  updateClawlineSessionDeliveryTarget,
-} from "./session-store.js";
+import { recordInboundSession } from "../channels/session.js";
+import { ClawlineDeliveryTarget } from "./routing.js";
+import { recordClawlineSessionActivity } from "./session-store.js";
 import { DEFAULT_AGENT_WORKSPACE_DIR } from "../agents/workspace.js";
 import type { ClawlineAdapterOverrides } from "./config.js";
 import { clawlineSessionFileName } from "./session-key.js";
@@ -3045,11 +3044,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             resolve();
           });
         });
-        await updateClawlineSessionDeliveryTarget({
-          storePath: sessionStorePath,
-          sessionKey: resolvedSessionKey,
-          logger,
-        });
         broadcastToSessionKey(resolvedSessionKey, event);
 
         const attachmentSummary = describeClawlineAttachments(ownership.attachments);
@@ -3069,6 +3063,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         };
         const peerId = session.peerId;
 
+        // Only 'main' sessionLabel is currently supported. See routing.ts namespace design.
+        const deliveryTarget = ClawlineDeliveryTarget.fromParts(session.userId, "main");
         const ctxPayload = finalizeInboundContext({
           Body: inboundBody,
           RawBody: rawContent,
@@ -3084,8 +3080,22 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           Provider: "clawline",
           Surface: channelLabel,
           OriginatingChannel: channelLabel,
-          OriginatingTo: `user:${session.userId}`,
+          OriginatingTo: deliveryTarget.toString(),
           CommandAuthorized: true,
+        });
+        await recordInboundSession({
+          storePath: sessionStorePath,
+          sessionKey: route.sessionKey,
+          ctx: ctxPayload,
+          updateLastRoute: {
+            sessionKey: route.sessionKey,
+            channel: "clawline",
+            to: deliveryTarget.toString(),
+            accountId: route.accountId,
+          },
+          onRecordError: (err) => {
+            logger.warn?.("[clawline] failed recording inbound session", err);
+          },
         });
 
         const fallbackText = adapterOverrides.responseFallback?.trim() ?? "";

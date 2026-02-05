@@ -184,6 +184,7 @@ export {
   resolveWhatsAppGroupToolPolicy,
 } from "../channels/plugins/group-mentions.js";
 export { recordInboundSession } from "../channels/session.js";
+export { ClawlineDeliveryTarget } from "../clawline/routing.js";
 export {
   buildChannelKeyCandidates,
   normalizeChannelSlug,
