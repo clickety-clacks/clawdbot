@@ -11,6 +11,7 @@ import jwt from "jsonwebtoken";
 
 import type { getReplyFromConfig } from "../auto-reply/reply.js";
 import type { OpenClawConfig } from "../config/config.js";
+import { enqueueSystemEvent, resetSystemEventsForTest } from "../infra/system-events.js";
 import type { AllowlistEntry, Logger, ProviderServer } from "./domain.js";
 
 const gatewayCallMock = vi.fn();
@@ -75,6 +76,7 @@ beforeEach(() => {
     via: "direct",
     mediaUrl: null,
   });
+  resetSystemEventsForTest();
 });
 
 type TestServerContext = {
@@ -787,6 +789,28 @@ describe.sequential("clawline provider server", () => {
       };
       expect(call?.key).toBe("agent:main:main");
       expect(call?.item?.origin).toEqual({ channel: "clawline", to: "agent:main:main" });
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("prepends exec completion prompt when system events are pending", async () => {
+    const entry = createAllowlistEntry();
+    const ctx = await setupTestServer([entry]);
+    const authHeader = await createAuthHeader(ctx, entry);
+    enqueueSystemEvent("Exec finished: voicemail", { sessionKey: "agent:main:main" });
+    try {
+      const response = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: authHeader },
+        body: JSON.stringify({ message: "Check on Flynn", source: "codex" }),
+      });
+      expect(response.status).toBe(200);
+      const call = enqueueAnnounceMock.mock.calls[0]?.[0] as
+        | { item?: { prompt?: string } }
+        | undefined;
+      const expected = `System Alert: These items completed. Execute the next task, or identify what is blocking.\n\n[codex] Check on Flynn`;
+      expect(call?.item?.prompt).toBe(expected);
     } finally {
       await ctx.cleanup();
     }
