@@ -1508,6 +1508,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       if (hasExecCompletion) {
         text = `${EXEC_COMPLETION_ALERT_PROMPT}\n\n${text}`;
       }
+      // Apply alert instructions last so they stay at the end and include the exec prompt in size checks.
       text = await applyAlertInstructions(text);
       await wakeGatewayForAlert(text, payload.sessionKey);
       res.setHeader("Content-Type", "application/json");
@@ -1943,14 +1944,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
   function resolveAlertSessionKey(rawSessionKey?: string) {
     const trimmedSessionKey = rawSessionKey?.trim() ?? "";
-    const hasSessionKey = typeof rawSessionKey === "string";
     const isValid = isValidAlertSessionKey(trimmedSessionKey);
     let resolvedSessionKey = mainSessionKey;
     let decisionReason = "missing_session_key";
     let decisionAction = "fallback_main_session";
 
     const normalizedMainKey = mainSessionKey.toLowerCase();
-    if (hasSessionKey) {
+    if (typeof rawSessionKey === "string") {
       if (trimmedSessionKey.length === 0) {
         decisionReason = "empty_session_key";
       } else if (isValid) {
@@ -1968,9 +1968,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
 
     return {
-      rawSessionKey,
       trimmedSessionKey,
-      hasSessionKey,
       isValid,
       resolvedSessionKey,
       decisionReason,
