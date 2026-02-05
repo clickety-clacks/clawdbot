@@ -115,18 +115,16 @@ export async function promptAuthConfig(
   const anthropicOAuth =
     authChoice === "setup-token" || authChoice === "token" || authChoice === "oauth";
 
-  if (authChoice !== "custom-api-key") {
-    const allowlistSelection = await promptModelAllowlist({
-      config: next,
-      prompter,
-      allowedKeys: anthropicOAuth ? ANTHROPIC_OAUTH_MODEL_KEYS : undefined,
-      initialSelections: anthropicOAuth ? ["anthropic/claude-opus-4-6"] : undefined,
-      message: anthropicOAuth ? "Anthropic OAuth models" : undefined,
-    });
-    if (allowlistSelection.models) {
-      next = applyModelAllowlist(next, allowlistSelection.models);
-      next = applyModelFallbacksFromSelection(next, allowlistSelection.models);
-    }
+  const allowlistSelection = await promptModelAllowlist({
+    config: next,
+    prompter,
+    allowedKeys: anthropicOAuth ? ANTHROPIC_OAUTH_MODEL_KEYS : undefined,
+    initialSelections: anthropicOAuth ? ["anthropic/claude-opus-4-6"] : undefined,
+    message: anthropicOAuth ? "Anthropic OAuth models" : undefined,
+  });
+  if (allowlistSelection.models) {
+    next = applyModelAllowlist(next, allowlistSelection.models);
+    next = applyModelFallbacksFromSelection(next, allowlistSelection.models);
   }
 
   return next;

@@ -65,7 +65,19 @@ function normalizeAnthropicModelId(model: string): string {
     return trimmed;
   }
   const lower = trimmed.toLowerCase();
-  return ANTHROPIC_MODEL_ALIASES[lower] ?? trimmed;
+  if (lower === "opus-4.6") {
+    return "claude-opus-4-6";
+  }
+  if (lower === "opus-4.5") {
+    return "claude-opus-4-5";
+  }
+  if (lower === "opus-4.6") {
+    return "claude-opus-4-6";
+  }
+  if (lower === "sonnet-4.5") {
+    return "claude-sonnet-4-5";
+  }
+  return trimmed;
 }
 
 function normalizeProviderModelId(provider: string, model: string): string {
