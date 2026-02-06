@@ -19,6 +19,8 @@ import { jsonResult } from "./tools/common.js";
 // oxlint-disable-next-line typescript/no-explicit-any
 type AnyAgentTool = AgentTool<any, unknown>;
 
+// pi-coding-agent changed the ToolDefinition.execute signature/order over time.
+// We normalize args here so our AgentTool.execute implementation stays stable.
 type ToolExecuteArgsCurrent = [
   string,
   unknown,
@@ -95,7 +97,6 @@ export function toToolDefinitions(tools: AnyAgentTool[]): ToolDefinition[] {
       parameters: tool.parameters,
       execute: async (...args: ToolExecuteArgs): Promise<AgentToolResult<unknown>> => {
         const { toolCallId, params, onUpdate, signal } = splitToolExecuteArgs(args);
-        let executeParams = params;
         try {
           if (!beforeHookWrapped) {
             const hookOutcome = await runBeforeToolCallHook({
@@ -201,18 +202,7 @@ export function toClientToolDefinitions(
       // oxlint-disable-next-line typescript/no-explicit-any
       parameters: func.parameters as any,
       execute: async (...args: ToolExecuteArgs): Promise<AgentToolResult<unknown>> => {
-        const { toolCallId, params } = splitToolExecuteArgs(args);
-        const outcome = await runBeforeToolCallHook({
-          toolName: func.name,
-          params,
-          toolCallId,
-          ctx: hookContext,
-        });
-        if (outcome.blocked) {
-          throw new Error(outcome.reason);
-        }
-        const adjustedParams = outcome.params;
-        const paramsRecord = isPlainObject(adjustedParams) ? adjustedParams : {};
+        const { params } = splitToolExecuteArgs(args);
         // Notify handler that a client tool was called
         if (onClientToolCall) {
           onClientToolCall(func.name, paramsRecord);
