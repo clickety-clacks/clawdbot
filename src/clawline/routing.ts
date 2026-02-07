@@ -24,11 +24,11 @@
  * NAMESPACE DESIGN
  *
  * CURRENTLY SUPPORTED:
- * - User sessions: {userId}:{sessionLabel} (e.g., flynn:main)
- * - Only 'main' sessionLabel is implemented; others reserved for future use
+ * - User streams: {userId}:{streamSuffix} (e.g., flynn:main)
+ * - streamSuffix values are limited to: main, dm, global
  *
  * NOT YET IMPLEMENTED (future):
- * - Additional user session labels (e.g., flynn:secondary, flynn:hobby)
+ * - Additional user session labels (e.g., flynn:secondary, flynn:hobby) beyond the stream suffixes
  * - Group channels: {groupName} with no colon (e.g., general)
  *
  * The colon distinguishes user sessions from groups.
