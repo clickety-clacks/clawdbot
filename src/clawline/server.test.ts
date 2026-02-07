@@ -694,13 +694,11 @@ describe.sequential("clawline provider server", () => {
       expect(userAuth.isAdmin).toBe(false);
       expect(adminAuth.features).toContain("session_info");
       expect(userAuth.features).toContain("session_info");
-      expect(adminSessionInfo?.sessions).toEqual([
-        { stream: "personal", sessionKey: "agent:main:clawline:flynn:main" },
-        { stream: "admin", sessionKey: "agent:main:main" },
+      expect(adminSessionInfo?.sessionKeys).toEqual([
+        "agent:main:clawline:flynn:main",
+        "agent:main:main",
       ]);
-      expect(userSessionInfo?.sessions).toEqual([
-        { stream: "personal", sessionKey: "agent:main:clawline:qa_sim:main" },
-      ]);
+      expect(userSessionInfo?.sessionKeys).toEqual(["agent:main:clawline:qa_sim:main"]);
       adminWs.terminate();
       userWs.terminate();
     } finally {

@@ -418,12 +418,10 @@ type Session = {
   personalSessionKey: string;
   /** dmScope in effect when session was provisioned (debug/UX only). */
   dmScope: string;
-  /** Provisioned stream session keys. */
-  streams: {
-    main: { sessionKey: string };
-    dm: { sessionKey: string };
-    global: { sessionKey: string };
-  };
+  /** DM session key (resolved via core; may alias to agent:main:main when dmScope=main). */
+  dmSessionKey: string;
+  /** Global DM session key (shared operator session; admin-only). */
+  globalSessionKey: string;
   peerId: string;
   claimedName?: string;
   deviceInfo?: DeviceInfo;
@@ -746,12 +744,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const mainSessionAgentId = resolveAgentIdFromSessionKey(mainSessionKey);
   type SessionInfo = {
     dmScope: string;
-    streams: {
-      main: { sessionKey: string };
-      dm: { sessionKey: string };
-      global: { sessionKey: string };
-    };
+    mainSessionKey: string;
+    dmSessionKey: string;
+    globalSessionKey: string;
+    /** All provisioned session keys (may include admin-only keys). */
     provisionedSessionKeys: string[];
+    /** Session keys this socket is subscribed to for outbound delivery. */
     subscribedSessionKeys: string[];
   };
 
@@ -772,13 +770,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             peer: { kind: "dm", id: userId },
           }).sessionKey;
 
-    const streams: SessionInfo["streams"] = {
-      main: { sessionKey: mainStreamSessionKey },
-      dm: { sessionKey: dmSessionKey },
-      global: { sessionKey: globalSessionKey },
-    };
-
-    const provisioned = [streams.main.sessionKey, streams.dm.sessionKey, streams.global.sessionKey];
+    const provisioned = [mainStreamSessionKey, dmSessionKey, globalSessionKey];
     const provisionedSessionKeys = Array.from(
       new Map(provisioned.map((key) => [normalizeSessionKey(key), key])).values(),
     );
@@ -787,12 +779,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     // - Main stream is always visible.
     // - DM stream is visible only when dmScope != main (otherwise it aliases the global session).
     // - Global stream is admin-only.
-    const subscribed: string[] = [streams.main.sessionKey];
+    const subscribed: string[] = [mainStreamSessionKey];
     if (dmScope !== "main") {
-      subscribed.push(streams.dm.sessionKey);
+      subscribed.push(dmSessionKey);
     }
     if (isAdmin) {
-      subscribed.push(streams.global.sessionKey);
+      subscribed.push(globalSessionKey);
     }
     const subscribedSessionKeys = Array.from(
       new Map(subscribed.map((key) => [normalizeSessionKey(key), key])).values(),
@@ -800,7 +792,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
     return {
       dmScope,
-      streams,
+      mainSessionKey: mainStreamSessionKey,
+      dmSessionKey,
+      globalSessionKey,
       provisionedSessionKeys,
       subscribedSessionKeys,
     } satisfies SessionInfo;
@@ -808,12 +802,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const applySessionInfo = (session: Session, isAdmin: boolean) => {
     const info = buildSessionInfo(session.userId, isAdmin);
     session.isAdmin = isAdmin;
-    session.personalSessionKey = info.streams.main.sessionKey;
-    session.streams = info.streams;
+    session.personalSessionKey = info.mainSessionKey;
     session.dmScope = info.dmScope;
+    session.dmSessionKey = info.dmSessionKey;
+    session.globalSessionKey = info.globalSessionKey;
     session.provisionedSessionKeys = info.provisionedSessionKeys;
     session.sessionKeys = info.subscribedSessionKeys;
-    session.sessionKey = info.streams.main.sessionKey;
+    session.sessionKey = info.mainSessionKey;
     return info;
   };
   const sendSessionInfo = async (session: Session, info?: ReturnType<typeof buildSessionInfo>) => {
@@ -823,7 +818,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       userId: session.userId,
       isAdmin: session.isAdmin,
       dmScope: resolved.dmScope,
-      streams: resolved.streams,
+      sessionKeys: resolved.subscribedSessionKeys,
     };
     await sendJson(session.socket, payload).catch(() => {});
   };
@@ -2537,10 +2532,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     // Query once to get all messages for this user.
     const transcriptTargets: Array<{ userId: string }> = [{ userId: session.userId }];
     const expectedMainStreamSessionKey =
-      session.streams?.main?.sessionKey ??
+      session.personalSessionKey ??
       buildClawlinePersonalSessionKey(mainSessionAgentId, session.userId);
-    const expectedDmSessionKey = session.streams?.dm?.sessionKey;
-    const expectedGlobalSessionKey = session.streams?.global?.sessionKey ?? mainSessionKey;
+    const expectedDmSessionKey = session.dmSessionKey;
+    const expectedGlobalSessionKey = session.globalSessionKey ?? mainSessionKey;
     const normalizedMainKey = mainSessionKey.toLowerCase();
     const normalizedMainStreamKey = expectedMainStreamSessionKey.toLowerCase();
     const normalizedDmKey = expectedDmSessionKey ? expectedDmSessionKey.toLowerCase() : null;
@@ -2629,7 +2624,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       historyReset: !lastMessageId,
       features: ["session_info"],
       dmScope: sessionInfo.dmScope,
-      streams: sessionInfo.streams,
+      sessionKeys: sessionInfo.subscribedSessionKeys,
     };
     // Debug logging for duplicate investigation
     logger.info("replay_complete", {
@@ -3097,14 +3092,14 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         throw new ClientMessageError("invalid_message", "Invalid sessionKey");
       }
       let streamSuffix: "main" | "dm" | "global" = "main";
-      if (sessionKeyEq(resolvedSessionKey, session.streams.main.sessionKey)) {
+      if (sessionKeyEq(resolvedSessionKey, session.personalSessionKey)) {
         streamSuffix = "main";
       } else if (
         session.dmScope !== "main" &&
-        sessionKeyEq(resolvedSessionKey, session.streams.dm.sessionKey)
+        sessionKeyEq(resolvedSessionKey, session.dmSessionKey)
       ) {
         streamSuffix = "dm";
-      } else if (sessionKeyEq(resolvedSessionKey, session.streams.global.sessionKey)) {
+      } else if (sessionKeyEq(resolvedSessionKey, session.globalSessionKey)) {
         streamSuffix = "global";
       } else if (payloadSessionKey) {
         throw new ClientMessageError("invalid_message", "Invalid sessionKey");
@@ -3908,11 +3903,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       provisionedSessionKeys: [],
       personalSessionKey: "",
       dmScope: "main",
-      streams: {
-        main: { sessionKey: "" },
-        dm: { sessionKey: "" },
-        global: { sessionKey: "" },
-      },
+      dmSessionKey: "",
+      globalSessionKey: "",
       peerId,
       claimedName: entry.claimedName,
       deviceInfo: entry.deviceInfo,
