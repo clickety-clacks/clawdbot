@@ -2,6 +2,7 @@
 summary: "Agent loop lifecycle, streams, and wait semantics"
 read_when:
   - You need an exact walkthrough of the agent loop or lifecycle events
+title: "Agent Loop"
 ---
 
 # Agent Loop (OpenClaw)
@@ -74,7 +75,7 @@ OpenClaw has two hook systems:
   Use this to add/remove bootstrap context files.
 - **Command hooks**: `/new`, `/reset`, `/stop`, and other command events (see Hooks doc).
 
-See [Hooks](/hooks) for setup and examples.
+See [Hooks](/automation/hooks) for setup and examples.
 
 ### Plugin hooks (agent + gateway lifecycle)
 
@@ -89,7 +90,7 @@ These run inside the agent loop or gateway pipeline:
 - **`session_start` / `session_end`**: session lifecycle boundaries.
 - **`gateway_start` / `gateway_stop`**: gateway lifecycle events.
 
-See [Plugins](/plugin#plugin-hooks) for the hook API and registration details.
+See [Plugins](/tools/plugin#plugin-hooks) for the hook API and registration details.
 
 ## Streaming + partial replies
 

@@ -1,9 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { EventEmitter } from "node:events";
-
-import { removeAckReactionAfterReply, shouldAckReaction } from "openclaw/plugin-sdk";
 import type { OpenClawConfig, PluginRuntime } from "openclaw/plugin-sdk";
+import { EventEmitter } from "node:events";
+import { removeAckReactionAfterReply, shouldAckReaction } from "openclaw/plugin-sdk";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ResolvedBlueBubblesAccount } from "./accounts.js";
 import {
   handleBlueBubblesWebhookRequest,
   registerBlueBubblesWebhookTarget,
@@ -11,7 +11,6 @@ import {
   _resetBlueBubblesShortIdState,
 } from "./monitor.js";
 import { setBlueBubblesRuntime } from "./runtime.js";
-import type { ResolvedBlueBubblesAccount } from "./accounts.js";
 
 // Mock dependencies
 vi.mock("./send.js", () => ({
@@ -392,6 +391,48 @@ describe("BlueBubbles webhook monitor", () => {
 
       expect(handled).toBe(true);
       expect(res.statusCode).toBe(400);
+    });
+
+    it("returns 400 when request body times out (Slow-Loris protection)", async () => {
+      vi.useFakeTimers();
+      try {
+        const account = createMockAccount();
+        const config: OpenClawConfig = {};
+        const core = createMockRuntime();
+        setBlueBubblesRuntime(core);
+
+        unregister = registerBlueBubblesWebhookTarget({
+          account,
+          config,
+          runtime: { log: vi.fn(), error: vi.fn() },
+          core,
+          path: "/bluebubbles-webhook",
+        });
+
+        // Create a request that never sends data or ends (simulates slow-loris)
+        const req = new EventEmitter() as IncomingMessage;
+        req.method = "POST";
+        req.url = "/bluebubbles-webhook";
+        req.headers = {};
+        (req as unknown as { socket: { remoteAddress: string } }).socket = {
+          remoteAddress: "127.0.0.1",
+        };
+        req.destroy = vi.fn();
+
+        const res = createMockResponse();
+
+        const handledPromise = handleBlueBubblesWebhookRequest(req, res);
+
+        // Advance past the 30s timeout
+        await vi.advanceTimersByTimeAsync(31_000);
+
+        const handled = await handledPromise;
+        expect(handled).toBe(true);
+        expect(res.statusCode).toBe(400);
+        expect(req.destroy).toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("authenticates via password query parameter", async () => {
@@ -1217,7 +1258,9 @@ describe("BlueBubbles webhook monitor", () => {
         const core = createMockRuntime();
 
         // Use a timing-aware debouncer test double that respects debounceMs/buildKey/shouldDebounce.
+        // oxlint-disable-next-line typescript/no-explicit-any
         core.channel.debounce.createInboundDebouncer = vi.fn((params: any) => {
+          // oxlint-disable-next-line typescript/no-explicit-any
           type Item = any;
           const buckets = new Map<
             string,

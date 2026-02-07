@@ -2,6 +2,7 @@
 summary: "Runbook for the Gateway service, lifecycle, and operations"
 read_when:
   - Running or debugging the gateway process
+title: "Gateway Runbook"
 ---
 
 # Gateway service runbook
@@ -48,9 +49,11 @@ pnpm gateway:watch
 ## Remote access
 
 - Tailscale/VPN preferred; otherwise SSH tunnel:
+
   ```bash
   ssh -N -L 18789:127.0.0.1:18789 user@host
   ```
+
 - Clients then connect to `ws://127.0.0.1:18789` through the tunnel.
 - If a token is configured, clients must include it in `connect.params.auth.token` even over the tunnel.
 

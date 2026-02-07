@@ -1,19 +1,19 @@
+import type { AgentTool } from "@mariozechner/pi-agent-core";
+import type { ImageContent } from "@mariozechner/pi-ai";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-
-import type { AgentTool } from "@mariozechner/pi-agent-core";
-import type { ImageContent } from "@mariozechner/pi-ai";
 import type { ThinkLevel } from "../../auto-reply/thinking.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import type { CliBackendConfig } from "../../config/types.js";
-import { runExec } from "../../process/exec.js";
 import type { EmbeddedContextFile } from "../pi-embedded-helpers.js";
-import { buildSystemPromptParams } from "../system-prompt-params.js";
-import { resolveDefaultModelForAgent } from "../model-selection.js";
-import { buildAgentSystemPrompt } from "../system-prompt.js";
+import { runExec } from "../../process/exec.js";
 import { buildTtsSystemPromptHint } from "../../tts/tts.js";
+import { resolveDefaultModelForAgent } from "../model-selection.js";
+import { detectRuntimeShell } from "../shell-utils.js";
+import { buildSystemPromptParams } from "../system-prompt-params.js";
+import { buildAgentSystemPrompt } from "../system-prompt.js";
 
 const CLI_RUN_QUEUE = new Map<string, Promise<unknown>>();
 
@@ -227,6 +227,7 @@ export function buildSystemPrompt(params: {
       node: process.version,
       model: params.modelDisplay,
       defaultModel: defaultModelLabel,
+      shell: detectRuntimeShell(),
     },
   });
   const ttsHint = params.config ? buildTtsSystemPromptHint(params.config) : undefined;
@@ -246,6 +247,7 @@ export function buildSystemPrompt(params: {
     userTimeFormat,
     contextFiles: params.contextFiles,
     ttsHint,
+    memoryCitationsMode: params.config?.memory?.citations,
   });
 }
 

@@ -3,6 +3,7 @@ summary: "CLI reference for `openclaw plugins` (list, install, enable/disable, d
 read_when:
   - You want to install or manage in-process Gateway plugins
   - You want to debug plugin load failures
+title: "plugins"
 ---
 
 # `openclaw plugins`
@@ -11,7 +12,7 @@ Manage Gateway plugins/extensions (loaded in-process).
 
 Related:
 
-- Plugin system: [Plugins](/plugin)
+- Plugin system: [Plugins](/tools/plugin)
 - Plugin manifest + schema: [Plugin manifest](/plugins/manifest)
 - Security hardening: [Security](/gateway/security)
 

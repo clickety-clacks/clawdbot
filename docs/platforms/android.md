@@ -4,6 +4,7 @@ read_when:
   - Pairing or reconnecting the Android node
   - Debugging Android gateway discovery or auth
   - Verifying chat history parity across clients
+title: "Android App"
 ---
 
 # Android App (Node)
@@ -97,10 +98,13 @@ Pairing details: [Gateway pairing](/gateway/pairing).
 ### 5) Verify the node is connected
 
 - Via nodes status:
+
   ```bash
   openclaw nodes status
   ```
+
 - Via Gateway:
+
   ```bash
   openclaw gateway call node.list --params "{}"
   ```

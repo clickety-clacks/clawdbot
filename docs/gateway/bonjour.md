@@ -3,6 +3,7 @@ summary: "Bonjour/mDNS discovery + debugging (Gateway beacons, clients, and comm
 read_when:
   - Debugging Bonjour discovery issues on macOS/iOS
   - Changing mDNS service types, TXT records, or discovery UX
+title: "Bonjour Discovery"
 ---
 
 # Bonjour / mDNS discovery
@@ -104,10 +105,13 @@ The Gateway advertises small non‑secret hints to make UI flows convenient:
 Useful built‑in tools:
 
 - Browse instances:
+
   ```bash
   dns-sd -B _openclaw-gw._tcp local.
   ```
+
 - Resolve one instance (replace `<instance>`):
+
   ```bash
   dns-sd -L "<instance>" _openclaw-gw._tcp local.
   ```
