@@ -146,22 +146,6 @@ git fetch origin '+refs/pull/*/head:refs/remotes/origin/pr/*'
 bash pty:true workdir:~/project background:true command:"codex exec 'Review PR #86. git diff origin/main...origin/pr/86'"
 bash pty:true workdir:~/project background:true command:"codex exec 'Review PR #87. git diff origin/main...origin/pr/87'"
 
-
-### Claude adversarial review hygiene
-
-- When running Claude CLI for adversarial reviews: do NOT create diffs and paste them into the Claude prompt.
-- Do NOT concatenate or chunk files to send to Claude.
-- Claude already has full repo access when you use `--add-dir`. It can run `git diff`, read files, `grep`—everything on its own.
-- Just tell Claude what to review; it accesses the code directly.
-- Wait at least 10 minutes—do NOT time out the process.
-### Claude adversarial review hygiene
-
-- When running Claude CLI for adversarial reviews: do NOT create diffs and paste them into the Claude prompt.
-- Do NOT concatenate or chunk files to send to Claude.
-- Claude already has full repo access when you use `--add-dir`. It can run `git diff`, read files, `grep`—everything on its own.
-- Just tell Claude what to review; it accesses the code directly.
-- Wait at least 10 minutes—do NOT time out the process.
-
 # Monitor all
 process action:list
 

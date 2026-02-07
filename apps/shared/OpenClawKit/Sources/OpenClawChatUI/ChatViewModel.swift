@@ -31,7 +31,6 @@ public final class OpenClawChatViewModel {
     public private(set) var streamingAssistantText: String?
     public private(set) var pendingToolCalls: [OpenClawChatPendingToolCall] = []
     public private(set) var sessions: [OpenClawChatSessionEntry] = []
-    public private(set) var isAssistantTyping: Bool = false
     private let transport: any OpenClawChatTransport
 
     @ObservationIgnored
@@ -157,7 +156,6 @@ public final class OpenClawChatViewModel {
         self.clearPendingRuns(reason: nil)
         self.pendingToolCallsById = [:]
         self.streamingAssistantText = nil
-        self.isAssistantTyping = false
         self.sessionId = nil
         defer { self.isLoading = false }
         do {
@@ -369,12 +367,6 @@ public final class OpenClawChatViewModel {
         case .seqGap:
             self.errorText = "Event stream interrupted; try refreshing."
             self.clearPendingRuns(reason: nil)
-        case let .activity(isActive, _, sessionKey):
-            // Only show typing indicator for the current session
-            if let sessionKey, sessionKey != self.sessionKey {
-                return
-            }
-            self.isAssistantTyping = isActive
         }
     }
 
@@ -390,7 +382,6 @@ public final class OpenClawChatViewModel {
             case "final", "aborted", "error":
                 self.streamingAssistantText = nil
                 self.pendingToolCallsById = [:]
-                self.isAssistantTyping = false
                 Task { await self.refreshHistoryAfterRun() }
             default:
                 break
@@ -410,7 +401,6 @@ public final class OpenClawChatViewModel {
             }
             self.pendingToolCallsById = [:]
             self.streamingAssistantText = nil
-            self.isAssistantTyping = false
             Task { await self.refreshHistoryAfterRun() }
         default:
             break

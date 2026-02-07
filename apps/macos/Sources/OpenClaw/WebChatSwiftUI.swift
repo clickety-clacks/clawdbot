@@ -125,18 +125,6 @@ struct MacGatewayChatTransport: OpenClawChatTransport, Sendable {
                     return nil
                 }
                 return .agent(agent)
-            case "activity":
-                guard let payload = evt.payload else { return nil }
-                guard let activity = try? JSONDecoder().decode(
-                    OpenClawActivityEventPayload.self,
-                    from: JSONEncoder().encode(payload))
-                else {
-                    return nil
-                }
-                return .activity(
-                    isActive: activity.isActive,
-                    messageId: activity.messageId,
-                    sessionKey: activity.sessionKey)
             default:
                 return nil
             }

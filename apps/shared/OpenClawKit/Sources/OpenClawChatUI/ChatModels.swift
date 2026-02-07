@@ -278,13 +278,6 @@ public struct OpenClawAgentEventPayload: Codable, Sendable, Identifiable {
     public let data: [String: AnyCodable]
 }
 
-public struct OpenClawActivityEventPayload: Codable, Sendable {
-    public let isActive: Bool
-    public let messageId: String?
-    public let sessionKey: String?
-    public let channelType: String?
-}
-
 public struct OpenClawChatPendingToolCall: Identifiable, Hashable, Sendable {
     public var id: String { self.toolCallId }
     public let toolCallId: String

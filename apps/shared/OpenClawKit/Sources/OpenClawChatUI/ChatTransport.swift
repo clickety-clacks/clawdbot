@@ -6,7 +6,6 @@ public enum OpenClawChatTransportEvent: Sendable {
     case chat(OpenClawChatEventPayload)
     case agent(OpenClawAgentEventPayload)
     case seqGap
-    case activity(isActive: Bool, messageId: String?, sessionKey: String?)
 }
 
 public protocol OpenClawChatTransport: Sendable {
