@@ -19,7 +19,7 @@ import { getFollowupQueueDepth, resolveQueueSettings } from "../auto-reply/reply
 import { extractShortModelName } from "../auto-reply/reply/response-prefix-template.js";
 import type { ResponsePrefixContext } from "../auto-reply/reply/response-prefix-template.js";
 import type { ReplyPayload } from "../auto-reply/types.js";
-import { DEFAULT_ACCOUNT_ID } from "../routing/resolve-route.js";
+import { DEFAULT_ACCOUNT_ID, resolveAgentRoute } from "../routing/resolve-route.js";
 import {
   resolveEffectiveMessagesConfig,
   resolveHumanDelayConfig,
@@ -403,9 +403,22 @@ type Session = {
   userId: string;
   isAdmin: boolean;
   sessionId: string;
+  /** Default session key for legacy clients that omit payload.sessionKey (routes to Main stream). */
   sessionKey: string;
+  /** Session keys this socket is subscribed to for outbound delivery. */
   sessionKeys: string[];
+  /** Session keys the client is allowed to reference on inbound (may include admin-only keys). */
+  provisionedSessionKeys: string[];
+  /** Main stream session key (agent:<id>:clawline:<userId>:main). */
   personalSessionKey: string;
+  /** dmScope in effect when session was provisioned (debug/UX only). */
+  dmScope: string;
+  /** Provisioned stream session keys. */
+  streams: {
+    main: { sessionKey: string };
+    dm: { sessionKey: string };
+    global: { sessionKey: string };
+  };
   peerId: string;
   claimedName?: string;
   deviceInfo?: DeviceInfo;
@@ -722,31 +735,86 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const sessionStorePath = options.sessionStorePath;
   const mainSessionKey = options.mainSessionKey?.trim() || "agent:main:main";
   const mainSessionAgentId = resolveAgentIdFromSessionKey(mainSessionKey);
-  type SessionInfoEntry = { stream: "personal" | "admin"; sessionKey: string };
-  const buildSessionInfo = (userId: string, isAdmin: boolean) => {
-    const personalSessionKey = buildClawlinePersonalSessionKey(mainSessionAgentId, userId);
-    const sessions: SessionInfoEntry[] = [{ stream: "personal", sessionKey: personalSessionKey }];
-    if (isAdmin) {
-      sessions.push({ stream: "admin", sessionKey: mainSessionKey });
-    }
-    return {
-      personalSessionKey,
-      sessionKeys: sessions.map((session) => session.sessionKey),
-      sessions,
+  type SessionInfo = {
+    dmScope: string;
+    streams: {
+      main: { sessionKey: string };
+      dm: { sessionKey: string };
+      global: { sessionKey: string };
     };
+    provisionedSessionKeys: string[];
+    subscribedSessionKeys: string[];
+  };
+
+  const normalizeSessionKey = (key: string) => key.trim().toLowerCase();
+  const sessionKeyEq = (a: string, b: string) => normalizeSessionKey(a) === normalizeSessionKey(b);
+
+  const buildSessionInfo = (userId: string, isAdmin: boolean) => {
+    const dmScope = openClawCfg.session?.dmScope ?? "main";
+    const mainStreamSessionKey = buildClawlinePersonalSessionKey(mainSessionAgentId, userId);
+    const globalSessionKey = mainSessionKey;
+    const dmSessionKey =
+      dmScope === "main"
+        ? mainSessionKey
+        : resolveAgentRoute({
+            cfg: openClawCfg,
+            channel: "clawline",
+            accountId: DEFAULT_ACCOUNT_ID,
+            peer: { kind: "dm", id: userId },
+          }).sessionKey;
+
+    const streams: SessionInfo["streams"] = {
+      main: { sessionKey: mainStreamSessionKey },
+      dm: { sessionKey: dmSessionKey },
+      global: { sessionKey: globalSessionKey },
+    };
+
+    const provisioned = [streams.main.sessionKey, streams.dm.sessionKey, streams.global.sessionKey];
+    const provisionedSessionKeys = Array.from(
+      new Map(provisioned.map((key) => [normalizeSessionKey(key), key])).values(),
+    );
+
+    // Only subscribe sockets to sessions they are allowed to receive.
+    // - Main stream is always visible.
+    // - DM stream is visible only when dmScope != main (otherwise it aliases the global session).
+    // - Global stream is admin-only.
+    const subscribed: string[] = [streams.main.sessionKey];
+    if (dmScope !== "main") {
+      subscribed.push(streams.dm.sessionKey);
+    }
+    if (isAdmin) {
+      subscribed.push(streams.global.sessionKey);
+    }
+    const subscribedSessionKeys = Array.from(
+      new Map(subscribed.map((key) => [normalizeSessionKey(key), key])).values(),
+    );
+
+    return {
+      dmScope,
+      streams,
+      provisionedSessionKeys,
+      subscribedSessionKeys,
+    } satisfies SessionInfo;
   };
   const applySessionInfo = (session: Session, isAdmin: boolean) => {
     const info = buildSessionInfo(session.userId, isAdmin);
     session.isAdmin = isAdmin;
-    session.personalSessionKey = info.personalSessionKey;
-    session.sessionKeys = info.sessionKeys;
-    session.sessionKey = isAdmin ? mainSessionKey : info.personalSessionKey;
+    session.personalSessionKey = info.streams.main.sessionKey;
+    session.streams = info.streams;
+    session.dmScope = info.dmScope;
+    session.provisionedSessionKeys = info.provisionedSessionKeys;
+    session.sessionKeys = info.subscribedSessionKeys;
+    session.sessionKey = info.streams.main.sessionKey;
     return info;
   };
   const sendSessionInfo = async (session: Session, info?: ReturnType<typeof buildSessionInfo>) => {
+    const resolved = info ?? buildSessionInfo(session.userId, session.isAdmin);
     const payload = {
       type: "session_info",
-      sessions: (info ?? buildSessionInfo(session.userId, session.isAdmin)).sessions,
+      userId: session.userId,
+      isAdmin: session.isAdmin,
+      dmScope: resolved.dmScope,
+      streams: resolved.streams,
     };
     await sendJson(session.socket, payload).catch(() => {});
   };
@@ -2455,25 +2523,31 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     // All messages are stored under the real userId; sessionKey determines routing.
     // Query once to get all messages for this user.
     const transcriptTargets: Array<{ userId: string }> = [{ userId: session.userId }];
-    const expectedPersonalSessionKey = buildClawlinePersonalSessionKey(
-      mainSessionAgentId,
-      session.userId,
-    );
+    const expectedMainStreamSessionKey =
+      session.streams?.main?.sessionKey ??
+      buildClawlinePersonalSessionKey(mainSessionAgentId, session.userId);
+    const expectedDmSessionKey = session.streams?.dm?.sessionKey;
+    const expectedGlobalSessionKey = session.streams?.global?.sessionKey ?? mainSessionKey;
     const normalizedMainKey = mainSessionKey.toLowerCase();
-    const normalizedPersonalKey = expectedPersonalSessionKey.toLowerCase();
+    const normalizedMainStreamKey = expectedMainStreamSessionKey.toLowerCase();
+    const normalizedDmKey = expectedDmSessionKey ? expectedDmSessionKey.toLowerCase() : null;
     const normalizeEventRouting = (event: ServerMessage): void => {
       const rawSessionKey = typeof event.sessionKey === "string" ? event.sessionKey.trim() : "";
       if (!rawSessionKey) {
-        event.sessionKey = expectedPersonalSessionKey;
+        event.sessionKey = expectedMainStreamSessionKey;
         return;
       }
       const normalizedSessionKey = rawSessionKey.toLowerCase();
       if (normalizedSessionKey === normalizedMainKey) {
-        event.sessionKey = mainSessionKey;
+        event.sessionKey = expectedGlobalSessionKey;
         return;
       }
-      if (normalizedSessionKey === normalizedPersonalKey) {
-        event.sessionKey = expectedPersonalSessionKey;
+      if (normalizedSessionKey === normalizedMainStreamKey) {
+        event.sessionKey = expectedMainStreamSessionKey;
+        return;
+      }
+      if (normalizedDmKey && normalizedSessionKey === normalizedDmKey) {
+        event.sessionKey = expectedDmSessionKey;
         return;
       }
       logger.warn?.("[clawline] replay_session_key_unrecognized", {
@@ -2540,7 +2614,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       replayTruncated: combined.length > limited.length,
       historyReset: !lastMessageId,
       features: ["session_info"],
-      sessions: sessionInfo.sessions,
+      dmScope: sessionInfo.dmScope,
+      streams: sessionInfo.streams,
     };
     // Debug logging for duplicate investigation
     logger.info("replay_complete", {
@@ -2829,12 +2904,55 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
 
     const normalizedTargetInput = targetInput.trim();
-    const sessionKeyHint = normalizedTargetInput.toLowerCase().startsWith("agent:")
-      ? normalizedTargetInput
-      : undefined;
-    const target = sessionKeyHint
-      ? resolveSessionTargetFromSessionKey(normalizedTargetInput)
-      : resolveSendTarget(normalizedTargetInput);
+    const lowerTargetInput = normalizedTargetInput.toLowerCase();
+    let sessionKeyHint: string | undefined;
+    let target: ReturnType<typeof resolveSendTarget>;
+
+    // For core-driven delivery, `params.target` is `deliveryContext.to` (e.g., "flynn:main").
+    // Treat that as a delivery target, not a raw userId.
+    let deliveryTarget: ClawlineDeliveryTarget | undefined;
+    if (
+      !lowerTargetInput.startsWith("agent:") &&
+      !lowerTargetInput.startsWith("user:") &&
+      !lowerTargetInput.startsWith("device:")
+    ) {
+      try {
+        const parsed = ClawlineDeliveryTarget.fromString(normalizedTargetInput);
+        const suffix = parsed.sessionLabel();
+        if (suffix === "main" || suffix === "dm" || suffix === "global") {
+          deliveryTarget = parsed;
+        }
+      } catch {
+        // Not a delivery target.
+      }
+    }
+
+    if (lowerTargetInput.startsWith("agent:")) {
+      sessionKeyHint = normalizedTargetInput;
+      target = resolveSessionTargetFromSessionKey(normalizedTargetInput);
+    } else if (deliveryTarget) {
+      const suffix = deliveryTarget.sessionLabel();
+      const userId = deliveryTarget.userId();
+      target = resolveSendTarget(userId);
+      const dmScope = openClawCfg.session?.dmScope ?? "main";
+      if (suffix === "main") {
+        sessionKeyHint = buildClawlinePersonalSessionKey(mainSessionAgentId, userId);
+      } else if (suffix === "global") {
+        sessionKeyHint = mainSessionKey;
+      } else {
+        sessionKeyHint =
+          dmScope === "main"
+            ? mainSessionKey
+            : resolveAgentRoute({
+                cfg: openClawCfg,
+                channel: "clawline",
+                accountId: DEFAULT_ACCOUNT_ID,
+                peer: { kind: "dm", id: userId },
+              }).sessionKey;
+      }
+    } else {
+      target = resolveSendTarget(normalizedTargetInput);
+    }
 
     const sessionKeyRaw = typeof params.sessionKey === "string" ? params.sessionKey.trim() : "";
     const resolvedSessionKey =
@@ -2951,10 +3069,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       const attachmentsHash = hashAttachments(attachmentsInfo.attachments);
       const payloadSessionKey =
         typeof payload.sessionKey === "string" ? payload.sessionKey.trim() : "";
-      const allowedSessionKeys = session.sessionKeys?.length
-        ? session.sessionKeys
+      const allowedSessionKeys = session.provisionedSessionKeys?.length
+        ? session.provisionedSessionKeys
         : [session.sessionKey];
-      const resolvedSessionKey = payloadSessionKey || session.personalSessionKey;
+      // Legacy clients may omit sessionKey; default to the Main stream session key.
+      const resolvedSessionKey = payloadSessionKey || session.sessionKey;
       if (
         payloadSessionKey &&
         !allowedSessionKeys.some(
@@ -2963,16 +3082,30 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       ) {
         throw new ClientMessageError("invalid_message", "Invalid sessionKey");
       }
+      let streamSuffix: "main" | "dm" | "global" = "main";
+      if (sessionKeyEq(resolvedSessionKey, session.streams.main.sessionKey)) {
+        streamSuffix = "main";
+      } else if (
+        session.dmScope !== "main" &&
+        sessionKeyEq(resolvedSessionKey, session.streams.dm.sessionKey)
+      ) {
+        streamSuffix = "dm";
+      } else if (sessionKeyEq(resolvedSessionKey, session.streams.global.sessionKey)) {
+        streamSuffix = "global";
+      } else if (payloadSessionKey) {
+        throw new ClientMessageError("invalid_message", "Invalid sessionKey");
+      }
       logger.info?.("[clawline] inbound message routing", {
         messageId: payload.id,
         payloadSessionKey: payload.sessionKey,
         resolvedSessionKey,
+        streamSuffix,
         sessionIsAdmin: session.isAdmin,
         userId: session.userId,
         deviceId: session.deviceId,
         sessionKey: session.sessionKey,
       });
-      if (resolvedSessionKey.toLowerCase() === mainSessionKey.toLowerCase() && !session.isAdmin) {
+      if (streamSuffix === "global" && !session.isAdmin) {
         throw new ClientMessageError("forbidden", "Admin channel requires admin access");
       }
       const targetUserId = session.userId;
@@ -3063,8 +3196,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         };
         const peerId = session.peerId;
 
-        // Only 'main' sessionLabel is currently supported. See routing.ts namespace design.
-        const deliveryTarget = ClawlineDeliveryTarget.fromParts(session.userId, "main");
+        const deliveryTarget = ClawlineDeliveryTarget.fromParts(session.userId, streamSuffix);
         const ctxPayload = finalizeInboundContext({
           Body: inboundBody,
           RawBody: rawContent,
@@ -3083,16 +3215,21 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           OriginatingTo: deliveryTarget.toString(),
           CommandAuthorized: true,
         });
+        const updateLastRoute =
+          streamSuffix === "dm" && session.dmScope !== "main"
+            ? {
+                // DM cross-session "follow me" write: tell agent:main:main where this user is currently talking.
+                sessionKey: route.mainSessionKey,
+                channel: "clawline",
+                to: deliveryTarget.toString(),
+                accountId: route.accountId,
+              }
+            : undefined;
         await recordInboundSession({
           storePath: sessionStorePath,
           sessionKey: route.sessionKey,
           ctx: ctxPayload,
-          updateLastRoute: {
-            sessionKey: route.sessionKey,
-            channel: "clawline",
-            to: deliveryTarget.toString(),
-            accountId: route.accountId,
-          },
+          updateLastRoute,
           onRecordError: (err) => {
             logger.warn?.("[clawline] failed recording inbound session", err);
           },
@@ -3741,9 +3878,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       ws.close();
       return;
     }
-    const sessionInfo = buildSessionInfo(entry.userId, entry.isAdmin);
-    // Track device activity under the spec session keys (DM or personal).
-    const sessionKey = entry.isAdmin ? mainSessionKey : sessionInfo.personalSessionKey;
     const peerId = derivePeerId(entry);
     const session: Session = {
       socket: ws,
@@ -3751,13 +3885,21 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       userId: entry.userId,
       isAdmin: entry.isAdmin,
       sessionId: `session_${randomUUID()}`,
-      sessionKey,
-      sessionKeys: sessionInfo.sessionKeys,
-      personalSessionKey: sessionInfo.personalSessionKey,
+      sessionKey: "",
+      sessionKeys: [],
+      provisionedSessionKeys: [],
+      personalSessionKey: "",
+      dmScope: "main",
+      streams: {
+        main: { sessionKey: "" },
+        dm: { sessionKey: "" },
+        global: { sessionKey: "" },
+      },
       peerId,
       claimedName: entry.claimedName,
       deviceInfo: entry.deviceInfo,
     };
+    applySessionInfo(session, entry.isAdmin);
     registerSession(session);
     connectionState.set(ws, {
       authenticated: true,
