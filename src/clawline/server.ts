@@ -439,6 +439,11 @@ type ServerMessage = {
   type: "message";
   id: string;
   role: "user" | "assistant";
+  /**
+   * Display-only sender label for UI (e.g., configured agent identity name like "CLU").
+   * Not used for routing.
+   */
+  sender?: string;
   content: string;
   timestamp: number;
   streaming: boolean;
@@ -742,6 +747,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const sessionStorePath = options.sessionStorePath;
   const mainSessionKey = options.mainSessionKey?.trim() || "agent:main:main";
   const mainSessionAgentId = resolveAgentIdFromSessionKey(mainSessionKey);
+
+  const resolveAssistantSenderName = (sessionKey: string) =>
+    resolveIdentityName(openClawCfg, resolveAgentIdFromSessionKey(sessionKey));
+
   type SessionInfo = {
     dmScope: string;
     mainSessionKey: string;
@@ -2884,6 +2893,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       type: "message",
       id: generateServerMessageId(),
       role: "assistant",
+      sender: resolveAssistantSenderName(sessionKey),
       content,
       timestamp,
       streaming: false,
@@ -2993,6 +3003,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       type: "message",
       id: generateServerMessageId(),
       role: "assistant",
+      sender: resolveAssistantSenderName(resolvedSessionKey),
       content: text,
       timestamp: nowMs(),
       streaming: false,
