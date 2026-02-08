@@ -73,6 +73,106 @@ export const PROTOCOL_VERSION = 1;
 
 const execFile = promisify(execFileCb);
 
+type TerminalTmuxBackend = {
+  execTmux(
+    args: string[],
+    options: { timeout: number; maxBuffer: number },
+  ): Promise<{ stdout: any }>;
+  spawnAttachPty(params: {
+    sessionName: string;
+    cols: number;
+    rows: number;
+  }): Promise<{ pty: any }>;
+};
+
+function buildSshBaseArgs(cfg: ProviderConfig["terminal"]["tmux"]["ssh"]): string[] {
+  const args: string[] = [];
+  if (cfg.port && Number.isFinite(cfg.port)) {
+    args.push("-p", String(cfg.port));
+  }
+  const identityFile = typeof cfg.identityFile === "string" ? cfg.identityFile.trim() : "";
+  if (identityFile) {
+    args.push("-i", identityFile, "-o", "IdentitiesOnly=yes");
+  }
+  const knownHostsFile = typeof cfg.knownHostsFile === "string" ? cfg.knownHostsFile.trim() : "";
+  if (knownHostsFile) {
+    args.push("-o", `UserKnownHostsFile=${knownHostsFile}`);
+  }
+  const strict =
+    typeof cfg.strictHostKeyChecking === "string" ? cfg.strictHostKeyChecking.trim() : "";
+  if (strict) {
+    args.push("-o", `StrictHostKeyChecking=${strict}`);
+  }
+  // Prevent interactive prompts.
+  args.push("-o", "BatchMode=yes");
+  // Keep SSH failure modes predictable.
+  args.push("-o", "ConnectTimeout=5");
+
+  if (Array.isArray(cfg.extraArgs) && cfg.extraArgs.length > 0) {
+    for (const item of cfg.extraArgs) {
+      if (typeof item === "string" && item.trim().length > 0) {
+        args.push(item);
+      }
+    }
+  }
+  return args;
+}
+
+function createTerminalTmuxBackend(config: ProviderConfig, logger: Logger): TerminalTmuxBackend {
+  const tmuxMode = config.terminal?.tmux?.mode ?? "local";
+  const sshCfg = config.terminal?.tmux?.ssh;
+  const sshTarget = typeof sshCfg?.target === "string" ? sshCfg.target.trim() : "";
+  const sshBaseArgs = sshCfg ? buildSshBaseArgs(sshCfg) : [];
+
+  const isRemote = tmuxMode === "ssh";
+  if (isRemote && !sshTarget) {
+    logger.warn?.(
+      "[clawline:terminal] tmux remote mode enabled but ssh target is empty; falling back to local",
+    );
+  }
+
+  const useRemote = isRemote && sshTarget.length > 0;
+
+  return {
+    async execTmux(args: string[], options: { timeout: number; maxBuffer: number }) {
+      if (!useRemote) {
+        return execFile("tmux", args, options);
+      }
+      return execFile("ssh", [...sshBaseArgs, sshTarget, "--", "tmux", ...args], options);
+    },
+    async spawnAttachPty(params: { sessionName: string; cols: number; rows: number }) {
+      const ptyModule = (await import("@lydell/node-pty")) as unknown as {
+        spawn: (file: string, args: string[], options: any) => any;
+      };
+      if (!useRemote) {
+        const pty = ptyModule.spawn("tmux", ["attach-session", "-t", params.sessionName], {
+          name: "xterm-256color",
+          cols: params.cols,
+          rows: params.rows,
+        });
+        return { pty };
+      }
+      // Force a remote TTY so tmux attach behaves like a real client.
+      const sshArgs = [
+        "-tt",
+        ...sshBaseArgs,
+        sshTarget,
+        "--",
+        "tmux",
+        "attach-session",
+        "-t",
+        params.sessionName,
+      ];
+      const pty = ptyModule.spawn("ssh", sshArgs, {
+        name: "xterm-256color",
+        cols: params.cols,
+        rows: params.rows,
+      });
+      return { pty };
+    },
+  };
+}
+
 // eslint-disable-next-line no-control-regex
 const CONTROL_CHARS_REGEX = /[\u0000-\u001F\u007F]/g;
 const UUID_V4_REGEX =
@@ -523,7 +623,7 @@ type TerminalSessionRecord = {
   title?: string;
   createdAt: number;
   lastSeenAt: number;
-  // MVP: terminalSessionId maps directly to a tmux session name on the provider host.
+  // MVP: terminalSessionId maps directly to a tmux session name on the terminal host.
   tmuxSessionName: string;
 };
 
@@ -533,7 +633,19 @@ const DEFAULT_CONFIG: ProviderConfig = {
   port: 18800,
   statePath: path.join(os.homedir(), ".openclaw", "clawline"),
   alertInstructionsPath: path.join(os.homedir(), ".openclaw", "clawline", "alert-instructions.md"),
-  adminUserId: "flynn",
+  terminal: {
+    tmux: {
+      mode: "local",
+      ssh: {
+        target: "",
+        identityFile: null,
+        port: null,
+        knownHostsFile: null,
+        strictHostKeyChecking: "accept-new",
+        extraArgs: [],
+      },
+    },
+  },
   network: {
     bindAddress: "127.0.0.1",
     allowInsecurePublic: false,
@@ -818,6 +930,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       ?.adapterOverrides ?? {};
   const openClawCfg = options.openClawConfig;
   const logger: Logger = options.logger ?? console;
+  const tmuxBackend = createTerminalTmuxBackend(config, logger);
   const sessionStorePath = options.sessionStorePath;
   const mainSessionKey = options.mainSessionKey?.trim() || "agent:main:main";
   const mainSessionAgentId = resolveAgentIdFromSessionKey(mainSessionKey);
@@ -4087,11 +4200,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       await sendJson(ws, { type: "terminal_backfill_end" });
     }
 
-    const ptyModule = (await import("@lydell/node-pty")) as unknown as {
-      spawn: (file: string, args: string[], options: any) => any;
-    };
-    const pty = ptyModule.spawn("tmux", ["attach-session", "-t", record.tmuxSessionName], {
-      name: "xterm-256color",
+    const { pty } = await tmuxBackend.spawnAttachPty({
+      sessionName: record.tmuxSessionName,
       cols,
       rows,
     });
@@ -4128,13 +4238,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
   async function resolveTmuxPaneId(tmuxSessionName: string): Promise<string | null> {
     try {
-      const { stdout } = await execFile(
-        "tmux",
+      const { stdout } = await tmuxBackend.execTmux(
         ["list-panes", "-t", tmuxSessionName, "-F", "#{pane_id}"],
-        {
-          timeout: 2_000,
-          maxBuffer: 1024 * 1024,
-        },
+        { timeout: 2_000, maxBuffer: 1024 * 1024 },
       );
       const paneId = String(stdout).trim().split(/\s+/)[0];
       return paneId ? paneId : null;
@@ -4148,8 +4254,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       return Buffer.alloc(0);
     }
     try {
-      const { stdout } = await execFile(
-        "tmux",
+      const { stdout } = await tmuxBackend.execTmux(
         ["capture-pane", "-p", "-e", "-t", paneId, "-S", `-${backfillLines}`],
         { timeout: 3_000, maxBuffer: 10 * 1024 * 1024 },
       );
@@ -4161,13 +4266,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
   async function resizeTmuxPane(paneId: string, cols: number, rows: number) {
     try {
-      await execFile(
-        "tmux",
+      await tmuxBackend.execTmux(
         ["resize-pane", "-t", paneId, "-x", String(cols), "-y", String(rows)],
-        {
-          timeout: 2_000,
-          maxBuffer: 1024 * 1024,
-        },
+        { timeout: 2_000, maxBuffer: 1024 * 1024 },
       );
     } catch {
       // ignore
@@ -4176,7 +4277,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
   async function killTmuxSession(tmuxSessionName: string) {
     try {
-      await execFile("tmux", ["kill-session", "-t", tmuxSessionName], {
+      await tmuxBackend.execTmux(["kill-session", "-t", tmuxSessionName], {
         timeout: 2_000,
         maxBuffer: 1024 * 1024,
       });

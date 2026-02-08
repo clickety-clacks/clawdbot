@@ -1,11 +1,10 @@
 import os from "node:os";
 import path from "node:path";
-
 import type { OpenClawConfig } from "../config/config.js";
 import type { ProviderConfig } from "./domain.js";
-import { deepMerge } from "./utils/deep-merge.js";
-import { resolveUserPath } from "../utils.js";
 import { DEFAULT_AGENT_WORKSPACE_DIR } from "../agents/workspace.js";
+import { resolveUserPath } from "../utils.js";
+import { deepMerge } from "./utils/deep-merge.js";
 
 export type ClawlineAdapterOverrides = {
   provider?: string;
@@ -59,6 +58,19 @@ const DEFAULTS: ResolvedClawlineConfig = {
   port: 18800,
   statePath: defaultStatePath,
   alertInstructionsPath: defaultAlertInstructionsPath,
+  terminal: {
+    tmux: {
+      mode: "local",
+      ssh: {
+        target: "",
+        identityFile: null,
+        port: null,
+        knownHostsFile: null,
+        strictHostKeyChecking: "accept-new",
+        extraArgs: [],
+      },
+    },
+  },
   network: {
     bindAddress: "127.0.0.1",
     allowInsecurePublic: false,

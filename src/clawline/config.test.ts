@@ -1,7 +1,6 @@
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-
 import type { OpenClawConfig } from "../config/config.js";
 import { resolveClawlineConfig } from "./config.js";
 
@@ -17,6 +16,8 @@ describe("resolveClawlineConfig", () => {
     expect(cfg.alertInstructionsPath).toBe(
       path.join(home, ".openclaw", "clawline", "alert-instructions.md"),
     );
+    expect(cfg.terminal.tmux.mode).toBe("local");
+    expect(cfg.terminal.tmux.ssh.target).toBe("");
     expect(cfg.network.bindAddress).toBe("127.0.0.1");
     expect(cfg.network.allowInsecurePublic).toBe(false);
   });
