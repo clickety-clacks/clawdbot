@@ -1,7 +1,11 @@
 import type { ChannelPlugin, OpenClawConfig } from "openclaw/plugin-sdk";
-import { ClawlineDeliveryTarget, DEFAULT_ACCOUNT_ID } from "openclaw/plugin-sdk";
-
+import {
+  buildChannelConfigSchema,
+  ClawlineDeliveryTarget,
+  DEFAULT_ACCOUNT_ID,
+} from "openclaw/plugin-sdk";
 import { clawlineMessageActions } from "./actions.js";
+import { ClawlineConfigSchema } from "./config-schema.js";
 import { clawlineOnboardingAdapter } from "./onboarding.js";
 import { clawlineOutbound } from "./outbound.js";
 
@@ -62,6 +66,7 @@ export const clawlinePlugin: ChannelPlugin<ResolvedClawlineAccount> = {
     media: true,
   },
   reload: { configPrefixes: ["channels.clawline"] },
+  configSchema: buildChannelConfigSchema(ClawlineConfigSchema),
   actions: clawlineMessageActions,
   // Accept any target as valid - Clawline actions do their own filtering
   // via userId/channelType params, not standard target resolution.
