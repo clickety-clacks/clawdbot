@@ -2,6 +2,7 @@ import type { Database as SqliteDatabase, Statement as SqliteStatement } from "b
 import type { Stats } from "node:fs";
 import BetterSqlite3 from "better-sqlite3";
 import jwt from "jsonwebtoken";
+import { execFile as execFileCb } from "node:child_process";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { watch, type FSWatcher, createReadStream } from "node:fs";
 import fs from "node:fs/promises";
@@ -9,6 +10,7 @@ import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { type Dispatcher } from "undici";
 import WebSocket, { WebSocketServer } from "ws";
 import type { ResponsePrefixContext } from "../auto-reply/reply/response-prefix-template.js";
@@ -69,6 +71,8 @@ import { deepMerge } from "./utils/deep-merge.js";
 
 export const PROTOCOL_VERSION = 1;
 
+const execFile = promisify(execFileCb);
+
 // eslint-disable-next-line no-control-regex
 const CONTROL_CHARS_REGEX = /[\u0000-\u001F\u007F]/g;
 const UUID_V4_REGEX =
@@ -84,6 +88,7 @@ const INLINE_IMAGE_MIME_TYPES = new Set([
   "image/webp",
   "image/heic",
 ]);
+const TERMINAL_SESSION_MIME = "application/vnd.clawline.terminal-session+json";
 const MAX_ALERT_BODY_BYTES = 4 * 1024;
 const MAX_MEDIA_REDIRECTS = 5;
 const REDIRECT_STATUS_CODES = new Set([301, 302, 303, 307, 308]);
@@ -297,6 +302,46 @@ function buildClawlinePersonalSessionKey(agentId: string, userId: string): strin
   return `agent:${normalizedAgentId}:clawline:${normalizedUserId}:main`;
 }
 
+function isClawlinePersonalDMSessionKey(sessionKey: string): boolean {
+  // MVP policy: terminal bubbles are DM-only.
+  // Required pattern: `agent:<agentId>:clawline:<userId>:main`
+  const parts = sessionKey.split(":");
+  if (parts.length !== 5) {
+    return false;
+  }
+  if (parts[0] !== "agent") {
+    return false;
+  }
+  if (!parts[1]) {
+    return false;
+  }
+  if (parts[2] !== "clawline") {
+    return false;
+  }
+  if (!parts[3]) {
+    return false;
+  }
+  return parts[4] === "main";
+}
+
+function decodeTerminalSessionDescriptorFromBase64(data: string): {
+  terminalSessionId: string;
+  title?: string;
+} | null {
+  try {
+    const decoded = Buffer.from(data, "base64").toString("utf8");
+    const obj = JSON.parse(decoded) as { terminalSessionId?: unknown; title?: unknown };
+    const id = typeof obj.terminalSessionId === "string" ? obj.terminalSessionId.trim() : "";
+    if (!id) {
+      return null;
+    }
+    const title = typeof obj.title === "string" ? obj.title.trim() : undefined;
+    return { terminalSessionId: id, title };
+  } catch {
+    return null;
+  }
+}
+
 function describeClawlineAttachments(attachments: NormalizedAttachment[]): string | null {
   if (attachments.length === 0) {
     return null;
@@ -308,6 +353,9 @@ function describeClawlineAttachments(attachments: NormalizedAttachment[]): strin
       return `${label}: uploaded asset ${attachment.assetId} at ${assetPath}`;
     }
     const approxBytes = Math.round((attachment.data.length / 4) * 3);
+    if (attachment.type === "document") {
+      return `${label}: inline document (${attachment.mimeType}, ~${approxBytes} bytes)`;
+    }
     return `${label}: inline image (${attachment.mimeType}, ~${approxBytes} bytes)`;
   });
   return `Attachments:\n${lines.join("\n")}`;
@@ -329,7 +377,7 @@ function summarizeAttachmentStats(attachments?: unknown[]): {
       continue;
     }
     const typed = attachment as { type?: unknown; data?: unknown };
-    if (typed.type === "image") {
+    if (typed.type === "image" || typed.type === "document") {
       const data = typeof typed.data === "string" ? typed.data : "";
       if (!data) {
         continue;
@@ -467,6 +515,17 @@ enum MessageStreamingState {
   Failed = 2,
   Queued = 3,
 }
+
+type TerminalSessionRecord = {
+  terminalSessionId: string;
+  ownerUserId: string;
+  sessionKey: string;
+  title?: string;
+  createdAt: number;
+  lastSeenAt: number;
+  // MVP: terminalSessionId maps directly to a tmux session name on the provider host.
+  tmuxSessionName: string;
+};
 
 export const DEFAULT_ALERT_INSTRUCTIONS_TEXT = `After handling this alert, evaluate: would Flynn want to know what happened? If yes, report to him. Don't just process silently.`;
 
@@ -718,11 +777,16 @@ function hashAttachments(attachments: NormalizedAttachment[]): string {
   if (attachments.length === 0) {
     return sha256("[]");
   }
-  const parts = attachments.map((attachment) =>
-    attachment.type === "image"
-      ? `{"type":"image","mimeType":${quote(attachment.mimeType)},"data":${quote(attachment.data)}}`
-      : `{"type":"asset","assetId":${quote(attachment.assetId)}}`,
-  );
+  const parts = attachments.map((attachment) => {
+    switch (attachment.type) {
+      case "image":
+        return `{"type":"image","mimeType":${quote(attachment.mimeType)},"data":${quote(attachment.data)}}`;
+      case "document":
+        return `{"type":"document","mimeType":${quote(attachment.mimeType)},"data":${quote(attachment.data)}}`;
+      case "asset":
+        return `{"type":"asset","assetId":${quote(attachment.assetId)}}`;
+    }
+  });
   return sha256(`[${parts.join(",")}]`);
 }
 
@@ -1234,6 +1298,15 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       const isInlineImage = INLINE_IMAGE_MIME_TYPES.has(mimeType);
       if (isInlineImage) {
         resolved.push({ type: "image", mimeType, data });
+        continue;
+      }
+      if (mimeType === TERMINAL_SESSION_MIME) {
+        // Terminal sessions must be delivered inline so the client can decode the descriptor without
+        // fetching an asset. Keep this small (descriptor JSON only).
+        if (buffer.length > config.media.maxInlineBytes) {
+          throw new Error("Clawline terminal session descriptor exceeds maxInlineBytes");
+        }
+        resolved.push({ type: "document", mimeType, data });
         continue;
       }
       const assetId = `a_${randomUUID()}`;
@@ -2160,7 +2233,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     socket.on("close", () => sockets.delete(socket));
   });
 
-  const wss = new WebSocketServer({ noServer: true });
+  const maxPayload = Math.max(
+    config.sessions.maxMessageBytes + config.media.maxInlineBytes,
+    256 * 1024,
+  );
+  const wss = new WebSocketServer({ noServer: true, maxPayload });
+  const terminalWss = new WebSocketServer({ noServer: true, maxPayload });
 
   httpServer.on("upgrade", (request, socket, head) => {
     const origin = request.headers.origin ?? "null";
@@ -2168,7 +2246,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       url: request.url,
       origin,
     });
-    if (request.url !== "/ws") {
+    let server: WebSocketServer | null = null;
+    if (request.url === "/ws") {
+      server = wss;
+    } else if (request.url === "/ws/terminal") {
+      server = terminalWss;
+    } else {
       logger.info?.("[clawline:http] ws_upgrade_rejected_path", { url: request.url });
       socket.destroy();
       return;
@@ -2194,13 +2277,26 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       });
     }
     logger.info?.("[clawline:http] ws_upgrade_forward", { origin });
-    wss.handleUpgrade(request, socket, head, (ws) => {
+    server.handleUpgrade(request, socket, head, (ws) => {
       logger.info?.("[clawline:http] ws_handle_upgrade_complete", { origin });
-      wss.emit("connection", ws, request);
+      server.emit("connection", ws, request);
     });
   });
 
   const connectionState = new WeakMap<WebSocket, ConnectionState>();
+  type TerminalConnectionState =
+    | { authenticated: false }
+    | {
+        authenticated: true;
+        deviceId: string;
+        userId: string;
+        terminalSessionId: string;
+        tmuxSessionName: string;
+        paneId: string;
+        pty: any;
+      };
+  const terminalConnectionState = new WeakMap<WebSocket, TerminalConnectionState>();
+  const terminalSessions = new Map<string, TerminalSessionRecord>();
   const pendingSockets = new Map<string, PendingConnection>();
   const faceSpeakPending = new Map<string, string>();
   const faceSpeakDedupe = new Map<string, number>();
@@ -2254,6 +2350,43 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     void refreshDenylist();
   });
   denylistWatcher.on("error", (err) => logger.warn?.(`denylist_watch_failed: ${formatError(err)}`));
+
+  function filterOutboundAttachmentsForTerminalPolicy(params: {
+    attachments: NormalizedAttachment[];
+    ownerUserId: string;
+    sessionKey: string;
+  }): NormalizedAttachment[] {
+    if (params.attachments.length === 0) {
+      return params.attachments;
+    }
+    const terminalAllowed = isClawlinePersonalDMSessionKey(params.sessionKey);
+    const filtered: NormalizedAttachment[] = [];
+    for (const attachment of params.attachments) {
+      if (attachment.type === "document" && attachment.mimeType === TERMINAL_SESSION_MIME) {
+        if (!terminalAllowed) {
+          continue;
+        }
+        const descriptor = decodeTerminalSessionDescriptorFromBase64(attachment.data);
+        if (!descriptor) {
+          continue;
+        }
+        const now = nowMs();
+        terminalSessions.set(descriptor.terminalSessionId, {
+          terminalSessionId: descriptor.terminalSessionId,
+          ownerUserId: params.ownerUserId,
+          sessionKey: params.sessionKey,
+          title: descriptor.title,
+          createdAt: now,
+          lastSeenAt: now,
+          tmuxSessionName: descriptor.terminalSessionId,
+        });
+        filtered.push(attachment);
+        continue;
+      }
+      filtered.push(attachment);
+    }
+    return filtered;
+  }
 
   function runPerUserTask<T>(userId: string, task: () => Promise<T>): Promise<T> {
     const previous = perUserQueue.get(userId) ?? Promise.resolve();
@@ -2902,6 +3035,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     attachments?: NormalizedAttachment[],
   ): Promise<ServerMessage> {
     const timestamp = nowMs();
+    const filteredAttachments = attachments
+      ? filterOutboundAttachmentsForTerminalPolicy({
+          attachments,
+          ownerUserId: targetUserId,
+          sessionKey,
+        })
+      : undefined;
     const event: ServerMessage = {
       type: "message",
       id: generateServerMessageId(),
@@ -2911,7 +3051,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       timestamp,
       streaming: false,
       sessionKey,
-      attachments: attachments && attachments.length > 0 ? attachments : undefined,
+      attachments:
+        filteredAttachments && filteredAttachments.length > 0 ? filteredAttachments : undefined,
     };
     await appendEvent(event, targetUserId);
     return event;
@@ -3011,6 +3152,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         uploaderDeviceId: target.kind === "device" ? target.deviceId : "server",
       });
     }
+
+    outboundAttachments.attachments = filterOutboundAttachmentsForTerminalPolicy({
+      attachments: outboundAttachments.attachments,
+      ownerUserId: target.userId,
+      sessionKey: resolvedSessionKey,
+    });
 
     const event: ServerMessage = {
       type: "message",
@@ -3651,6 +3798,318 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     ws.on("error", () => handleSocketClose(ws));
   });
 
+  terminalWss.on("connection", (ws, req) => {
+    logger.info?.("[clawline:http] terminal_ws_connection_open", {
+      origin: req?.headers?.origin ?? "null",
+      remoteAddress: req?.socket?.remoteAddress,
+    });
+    terminalConnectionState.set(ws, { authenticated: false });
+
+    ws.on("message", (raw, isBinary) => {
+      void handleTerminalMessage(ws, raw, isBinary);
+    });
+
+    ws.on("close", () => teardownTerminalSocket(ws));
+    ws.on("error", () => teardownTerminalSocket(ws));
+  });
+
+  function teardownTerminalSocket(ws: WebSocket) {
+    const state = terminalConnectionState.get(ws);
+    if (state && state.authenticated) {
+      try {
+        state.pty?.kill?.();
+      } catch {
+        // ignore
+      }
+    }
+    terminalConnectionState.delete(ws);
+  }
+
+  async function handleTerminalMessage(ws: WebSocket, raw: WebSocket.RawData, isBinary: boolean) {
+    const state = terminalConnectionState.get(ws);
+    if (!state) {
+      return;
+    }
+    if (!state.authenticated) {
+      if (isBinary) {
+        void sendJson(ws, { type: "terminal_error", message: "Expected terminal_auth" });
+        ws.close();
+        return;
+      }
+      const rawString = rawDataToString(raw);
+      let payload: any;
+      try {
+        payload = JSON.parse(rawString);
+      } catch {
+        void sendJson(ws, { type: "terminal_error", message: "Malformed JSON" });
+        ws.close();
+        return;
+      }
+      if (!payload || payload.type !== "terminal_auth") {
+        void sendJson(ws, { type: "terminal_error", message: "Expected terminal_auth" });
+        ws.close();
+        return;
+      }
+      await handleTerminalAuth(ws, payload);
+      return;
+    }
+
+    if (isBinary) {
+      const buf = Buffer.isBuffer(raw) ? raw : Buffer.from(raw as any);
+      state.pty.write(buf.toString("utf8"));
+      return;
+    }
+
+    const rawString = rawDataToString(raw);
+    let payload: any;
+    try {
+      payload = JSON.parse(rawString);
+    } catch {
+      return;
+    }
+    if (!payload || typeof payload.type !== "string") {
+      return;
+    }
+    switch (payload.type) {
+      case "terminal_resize": {
+        const cols = typeof payload.cols === "number" ? Math.floor(payload.cols) : 0;
+        const rows = typeof payload.rows === "number" ? Math.floor(payload.rows) : 0;
+        if (cols > 0 && rows > 0) {
+          try {
+            state.pty.resize(cols, rows);
+          } catch {
+            // ignore
+          }
+          void resizeTmuxPane(state.paneId, cols, rows);
+        }
+        break;
+      }
+      case "terminal_detach": {
+        try {
+          state.pty.kill();
+        } catch {
+          // ignore
+        }
+        void sendJson(ws, { type: "terminal_closed" });
+        ws.close();
+        break;
+      }
+      case "terminal_close": {
+        void killTmuxSession(state.tmuxSessionName);
+        try {
+          state.pty.kill();
+        } catch {
+          // ignore
+        }
+        void sendJson(ws, { type: "terminal_closed" });
+        ws.close();
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  async function handleTerminalAuth(ws: WebSocket, payload: any) {
+    if (payload.protocolVersion !== PROTOCOL_VERSION) {
+      await sendJson(ws, { type: "terminal_error", message: "Unsupported protocol" });
+      ws.close();
+      return;
+    }
+    const terminalSessionId =
+      typeof payload.terminalSessionId === "string" ? payload.terminalSessionId.trim() : "";
+    if (!terminalSessionId) {
+      await sendJson(ws, { type: "terminal_error", message: "Missing terminalSessionId" });
+      ws.close();
+      return;
+    }
+    const deviceId = typeof payload.deviceId === "string" ? payload.deviceId : "";
+    const authToken = typeof payload.authToken === "string" ? payload.authToken : "";
+    if (!validateDeviceId(deviceId) || !authToken) {
+      await sendJson(ws, { type: "terminal_error", message: "Invalid auth" });
+      ws.close();
+      return;
+    }
+    if (!authRateLimiter.attempt(deviceId)) {
+      await sendJson(ws, { type: "terminal_error", message: "Rate limited" });
+      ws.close(1008);
+      return;
+    }
+    let decoded: jwt.JwtPayload;
+    try {
+      decoded = jwt.verify(authToken, jwtKey, { algorithms: ["HS256"] }) as jwt.JwtPayload;
+    } catch {
+      await sendJson(ws, { type: "terminal_error", message: "Auth failed" });
+      ws.close();
+      return;
+    }
+    if (
+      typeof decoded.deviceId !== "string" ||
+      !timingSafeStringEqual(decoded.deviceId, deviceId) ||
+      typeof decoded.sub !== "string"
+    ) {
+      await sendJson(ws, { type: "terminal_error", message: "Auth failed" });
+      ws.close();
+      return;
+    }
+    const entry = findAllowlistEntry(deviceId);
+    if (
+      !entry ||
+      !timingSafeStringEqual(decoded.sub, entry.userId) ||
+      isDenylisted(entry.deviceId)
+    ) {
+      await sendJson(ws, { type: "terminal_error", message: "Auth failed" });
+      ws.close();
+      return;
+    }
+
+    const record = terminalSessions.get(terminalSessionId);
+    if (!record) {
+      await sendJson(ws, { type: "terminal_error", message: "Unknown terminal session" });
+      ws.close();
+      return;
+    }
+    if (record.ownerUserId !== entry.userId) {
+      await sendJson(ws, { type: "terminal_error", message: "Forbidden" });
+      ws.close();
+      return;
+    }
+
+    const cols = typeof payload.cols === "number" ? Math.max(1, Math.floor(payload.cols)) : 80;
+    const rows = typeof payload.rows === "number" ? Math.max(1, Math.floor(payload.rows)) : 24;
+    const backfillLines =
+      typeof payload.backfillLines === "number"
+        ? Math.max(0, Math.floor(payload.backfillLines))
+        : 0;
+
+    const paneId = await resolveTmuxPaneId(record.tmuxSessionName);
+    if (!paneId) {
+      await sendJson(ws, { type: "terminal_error", message: "Terminal session is not running" });
+      ws.close();
+      return;
+    }
+
+    record.lastSeenAt = nowMs();
+    await sendJson(ws, {
+      type: "terminal_ready",
+      terminalSessionId,
+      cols,
+      rows,
+      readOnly: false,
+      maxBackfillLines: 5000,
+      backfillLinesActual: Math.min(backfillLines, 5000),
+    });
+
+    if (backfillLines > 0) {
+      const backfill = await captureTmuxBackfill(paneId, Math.min(backfillLines, 5000));
+      if (backfill.length > 0 && ws.readyState === WebSocket.OPEN) {
+        // Chunk to avoid giant frames.
+        const chunkSize = 32 * 1024;
+        for (let offset = 0; offset < backfill.length; offset += chunkSize) {
+          ws.send(backfill.subarray(offset, offset + chunkSize));
+        }
+      }
+      await sendJson(ws, { type: "terminal_backfill_end" });
+    }
+
+    const ptyModule = (await import("@lydell/node-pty")) as unknown as {
+      spawn: (file: string, args: string[], options: any) => any;
+    };
+    const pty = ptyModule.spawn("tmux", ["attach-session", "-t", record.tmuxSessionName], {
+      name: "xterm-256color",
+      cols,
+      rows,
+    });
+
+    terminalConnectionState.set(ws, {
+      authenticated: true,
+      deviceId,
+      userId: entry.userId,
+      terminalSessionId,
+      tmuxSessionName: record.tmuxSessionName,
+      paneId,
+      pty,
+    });
+
+    pty.onData((data: string) => {
+      if (ws.readyState !== WebSocket.OPEN) {
+        return;
+      }
+      ws.send(Buffer.from(data, "utf8"));
+    });
+
+    pty.onExit((ev: { exitCode?: number }) => {
+      void sendJson(ws, {
+        type: "terminal_exit",
+        code: typeof ev.exitCode === "number" ? ev.exitCode : null,
+      });
+      try {
+        ws.close();
+      } catch {
+        // ignore
+      }
+    });
+  }
+
+  async function resolveTmuxPaneId(tmuxSessionName: string): Promise<string | null> {
+    try {
+      const { stdout } = await execFile(
+        "tmux",
+        ["list-panes", "-t", tmuxSessionName, "-F", "#{pane_id}"],
+        {
+          timeout: 2_000,
+          maxBuffer: 1024 * 1024,
+        },
+      );
+      const paneId = String(stdout).trim().split(/\s+/)[0];
+      return paneId ? paneId : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function captureTmuxBackfill(paneId: string, backfillLines: number): Promise<Buffer> {
+    if (backfillLines <= 0) {
+      return Buffer.alloc(0);
+    }
+    try {
+      const { stdout } = await execFile(
+        "tmux",
+        ["capture-pane", "-p", "-e", "-t", paneId, "-S", `-${backfillLines}`],
+        { timeout: 3_000, maxBuffer: 10 * 1024 * 1024 },
+      );
+      return Buffer.from(String(stdout), "utf8");
+    } catch {
+      return Buffer.alloc(0);
+    }
+  }
+
+  async function resizeTmuxPane(paneId: string, cols: number, rows: number) {
+    try {
+      await execFile(
+        "tmux",
+        ["resize-pane", "-t", paneId, "-x", String(cols), "-y", String(rows)],
+        {
+          timeout: 2_000,
+          maxBuffer: 1024 * 1024,
+        },
+      );
+    } catch {
+      // ignore
+    }
+  }
+
+  async function killTmuxSession(tmuxSessionName: string) {
+    try {
+      await execFile("tmux", ["kill-session", "-t", tmuxSessionName], {
+        timeout: 2_000,
+        maxBuffer: 1024 * 1024,
+      });
+    } catch {
+      // ignore
+    }
+  }
+
   async function handlePairRequest(ws: WebSocket, payload: any) {
     logger.info?.("[clawline:http] pair_request_start", {
       deviceId: payload?.deviceId,
@@ -4040,6 +4499,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           // ignore
         }
       }
+      for (const client of terminalWss.clients) {
+        try {
+          client.terminate();
+        } catch {
+          // ignore
+        }
+      }
       for (const socket of sockets) {
         try {
           socket.destroy();
@@ -4068,6 +4534,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           });
         });
       await closeWithTimeout((cb) => wss.close(cb), "wss");
+      await closeWithTimeout((cb) => terminalWss.close(cb), "terminalWss");
       await closeWithTimeout((cb) => httpServer.close(cb), "httpServer");
       disposeDatabaseResources();
       started = false;

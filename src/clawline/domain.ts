@@ -1,5 +1,5 @@
-import type { OpenClawConfig } from "../config/config.js";
 import type { getReplyFromConfig } from "../auto-reply/reply.js";
+import type { OpenClawConfig } from "../config/config.js";
 
 export type DeviceInfo = {
   platform: string;
@@ -24,7 +24,8 @@ export type AllowlistFile = { version: 1; entries: AllowlistEntry[] };
 
 export type NormalizedAttachment =
   | { type: "image"; mimeType: string; data: string; assetId?: string }
-  | { type: "asset"; assetId: string };
+  | { type: "asset"; assetId: string }
+  | { type: "document"; mimeType: string; data: string };
 export type ClawlineOutboundAttachmentInput = {
   data: string;
   mimeType?: string;
