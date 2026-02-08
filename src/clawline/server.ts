@@ -1,40 +1,19 @@
+import type { Database as SqliteDatabase, Statement as SqliteStatement } from "better-sqlite3";
+import type { Stats } from "node:fs";
+import BetterSqlite3 from "better-sqlite3";
+import jwt from "jsonwebtoken";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { watch, type FSWatcher, createReadStream } from "node:fs";
+import fs from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import fs from "node:fs/promises";
-import { watch, type FSWatcher, createReadStream } from "node:fs";
-import type { Stats } from "node:fs";
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-
-import WebSocket, { WebSocketServer } from "ws";
-import jwt from "jsonwebtoken";
-import BetterSqlite3 from "better-sqlite3";
-import type { Database as SqliteDatabase, Statement as SqliteStatement } from "better-sqlite3";
 import { type Dispatcher } from "undici";
-import { finalizeInboundContext } from "../auto-reply/reply/inbound-context.js";
-import { dispatchReplyFromConfig } from "../auto-reply/reply/dispatch-from-config.js";
-import { createReplyDispatcherWithTyping } from "../auto-reply/reply/reply-dispatcher.js";
-import { getFollowupQueueDepth, resolveQueueSettings } from "../auto-reply/reply/queue.js";
-import { extractShortModelName } from "../auto-reply/reply/response-prefix-template.js";
+import WebSocket, { WebSocketServer } from "ws";
 import type { ResponsePrefixContext } from "../auto-reply/reply/response-prefix-template.js";
 import type { ReplyPayload } from "../auto-reply/types.js";
-import { DEFAULT_ACCOUNT_ID, resolveAgentRoute } from "../routing/resolve-route.js";
-import {
-  resolveEffectiveMessagesConfig,
-  resolveHumanDelayConfig,
-  resolveIdentityName,
-} from "../agents/identity.js";
-import { resolveAgentIdFromSessionKey } from "../config/sessions.js";
-import { rawDataToString } from "../infra/ws.js";
-import { peekSystemEvents } from "../infra/system-events.js";
-import { recordInboundSession } from "../channels/session.js";
-import { ClawlineDeliveryTarget } from "./routing.js";
-import { recordClawlineSessionActivity } from "./session-store.js";
-import { DEFAULT_AGENT_WORKSPACE_DIR } from "../agents/workspace.js";
 import type { ClawlineAdapterOverrides } from "./config.js";
-import { clawlineSessionFileName } from "./session-key.js";
-import { deepMerge } from "./utils/deep-merge.js";
 import type {
   AllowlistEntry,
   AllowlistFile,
@@ -50,23 +29,43 @@ import type {
   ClawlineOutboundSendParams,
   ClawlineOutboundSendResult,
 } from "./domain.js";
-import { ClientMessageError, HttpError } from "./errors.js";
-import { SlidingWindowRateLimiter } from "./rate-limiter.js";
-import { createAssetHandlers } from "./http-assets.js";
+import {
+  resolveEffectiveMessagesConfig,
+  resolveHumanDelayConfig,
+  resolveIdentityName,
+} from "../agents/identity.js";
+import { type AnnounceQueueItem, enqueueAnnounce } from "../agents/subagent-announce-queue.js";
+import { DEFAULT_AGENT_WORKSPACE_DIR } from "../agents/workspace.js";
+import { dispatchReplyFromConfig } from "../auto-reply/reply/dispatch-from-config.js";
+import { finalizeInboundContext } from "../auto-reply/reply/inbound-context.js";
+import { getFollowupQueueDepth, resolveQueueSettings } from "../auto-reply/reply/queue.js";
+import { createReplyDispatcherWithTyping } from "../auto-reply/reply/reply-dispatcher.js";
+import { extractShortModelName } from "../auto-reply/reply/response-prefix-template.js";
+import { recordInboundSession } from "../channels/session.js";
+import { resolveAgentIdFromSessionKey } from "../config/sessions.js";
 import { callGateway } from "../gateway/call.js";
 import { GATEWAY_CLIENT_MODES, GATEWAY_CLIENT_NAMES } from "../gateway/protocol/client-info.js";
-import { detectMime } from "../media/mime.js";
-import { mediaKindFromMime, maxBytesForKind } from "../media/constants.js";
-import { hasAlphaChannel, optimizeImageToPng } from "../media/image-ops.js";
-import { optimizeImageToJpeg } from "../web/media.js";
 import {
   createPinnedDispatcher,
   resolvePinnedHostname,
   closeDispatcher,
   type PinnedHostname,
 } from "../infra/net/ssrf.js";
+import { peekSystemEvents } from "../infra/system-events.js";
+import { rawDataToString } from "../infra/ws.js";
+import { mediaKindFromMime, maxBytesForKind } from "../media/constants.js";
+import { hasAlphaChannel, optimizeImageToPng } from "../media/image-ops.js";
+import { detectMime } from "../media/mime.js";
+import { DEFAULT_ACCOUNT_ID, resolveAgentRoute } from "../routing/resolve-route.js";
+import { optimizeImageToJpeg } from "../web/media.js";
 import { clawlineAttachmentsToImages } from "./attachments.js";
-import { type AnnounceQueueItem, enqueueAnnounce } from "../agents/subagent-announce-queue.js";
+import { ClientMessageError, HttpError } from "./errors.js";
+import { createAssetHandlers } from "./http-assets.js";
+import { SlidingWindowRateLimiter } from "./rate-limiter.js";
+import { ClawlineDeliveryTarget } from "./routing.js";
+import { clawlineSessionFileName } from "./session-key.js";
+import { recordClawlineSessionActivity } from "./session-store.js";
+import { deepMerge } from "./utils/deep-merge.js";
 
 export const PROTOCOL_VERSION = 1;
 
@@ -1563,6 +1562,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   async function handleAlertHttpRequest(req: http.IncomingMessage, res: http.ServerResponse) {
     logHttpRequest("alert_request_start");
     try {
+      // Require a valid token for alert delivery (prevents unauthenticated alert injection).
+      authenticateHttpRequest(req);
       const payload = await parseAlertPayload(req);
       logger.info?.("[clawline] alert_received", {
         source: payload.source,
