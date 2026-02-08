@@ -3,10 +3,12 @@ import { jsonResult } from "openclaw/plugin-sdk";
 import type {
   ChannelMessageActionAdapter,
   ChannelMessageActionName,
-} from "../../../src/channels/plugins/types.js";
+  OpenClawConfig,
+} from "openclaw/plugin-sdk";
 import BetterSqlite3 from "better-sqlite3";
-import path from "node:path";
 import os from "node:os";
+import path from "node:path";
+import { jsonResult, sendClawlineOutboundMessage } from "openclaw/plugin-sdk";
 
 type EventRow = {
   id: string;
@@ -186,12 +188,40 @@ export const clawlineMessageActions: ChannelMessageActionAdapter = {
     if (!cfg.channels?.clawline?.enabled) {
       return [];
     }
-    const actions: ChannelMessageActionName[] = ["send", "read", "list-users"];
+    const actions: ChannelMessageActionName[] = ["send", "sendAttachment", "read", "list-users"];
     return actions;
   },
-  supportsAction: ({ action }) => action === "read" || action === "list-users",
+  supportsAction: ({ action }) =>
+    action === "sendAttachment" || action === "read" || action === "list-users",
 
   handleAction: async ({ action, params, cfg }): Promise<AgentToolResult<unknown>> => {
+    if (action === "sendAttachment") {
+      const to =
+        (typeof params.target === "string" ? params.target : undefined) ??
+        (typeof params.to === "string" ? params.to : undefined);
+      if (!to?.trim()) {
+        throw new Error("Clawline sendAttachment requires target/to");
+      }
+      const buffer = typeof params.buffer === "string" ? params.buffer.trim() : "";
+      if (!buffer) {
+        throw new Error("Clawline sendAttachment requires buffer (base64 or data: URL)");
+      }
+      const mimeType =
+        (typeof params.contentType === "string" ? params.contentType : undefined) ??
+        (typeof params.mimeType === "string" ? params.mimeType : undefined) ??
+        "application/octet-stream";
+      const caption =
+        (typeof params.caption === "string" ? params.caption : undefined) ??
+        (typeof params.message === "string" ? params.message : undefined) ??
+        "";
+      const result = await sendClawlineOutboundMessage({
+        target: to.trim(),
+        text: caption,
+        attachments: [{ data: buffer, mimeType }],
+      });
+      return jsonResult(result);
+    }
+
     if (action === "read") {
       // Accept both userId param and to param (standard message tool target)
       const userId =
