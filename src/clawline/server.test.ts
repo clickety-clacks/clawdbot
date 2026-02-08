@@ -1,18 +1,16 @@
+import jwt from "jsonwebtoken";
 import { Blob } from "node:buffer";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
-
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { FormData, fetch, getGlobalDispatcher } from "undici";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
-import { FormData, fetch } from "undici";
-import jwt from "jsonwebtoken";
-
 import type { getReplyFromConfig } from "../auto-reply/reply.js";
 import type { OpenClawConfig } from "../config/config.js";
-import { enqueueSystemEvent, resetSystemEventsForTest } from "../infra/system-events.js";
 import type { AllowlistEntry, Logger, ProviderServer } from "./domain.js";
+import { enqueueSystemEvent, resetSystemEventsForTest } from "../infra/system-events.js";
 
 const gatewayCallMock = vi.fn();
 vi.mock("../gateway/call.js", () => ({
@@ -64,6 +62,36 @@ const decodeRawData = (data: WebSocket.RawData): string => {
   return Buffer.from(data).toString("utf8");
 };
 
+function createMessageQueue(ws: WebSocket) {
+  const queued: any[] = [];
+  const waiters: Array<(value: any) => void> = [];
+
+  const onMessage = (data: WebSocket.RawData) => {
+    let parsed: any;
+    try {
+      parsed = JSON.parse(decodeRawData(data));
+    } catch {
+      parsed = decodeRawData(data);
+    }
+    const waiter = waiters.shift();
+    if (waiter) {
+      waiter(parsed);
+      return;
+    }
+    queued.push(parsed);
+  };
+
+  ws.on("message", onMessage);
+
+  return {
+    next: () =>
+      queued.length > 0
+        ? Promise.resolve(queued.shift())
+        : new Promise<any>((resolve) => waiters.push(resolve)),
+    dispose: () => ws.off("message", onMessage),
+  };
+}
+
 beforeEach(() => {
   gatewayCallMock.mockReset();
   gatewayCallMock.mockResolvedValue({ ok: true });
@@ -77,6 +105,14 @@ beforeEach(() => {
     mediaUrl: null,
   });
   resetSystemEventsForTest();
+});
+
+afterAll(async () => {
+  // Undici keeps connections alive by default; close the global dispatcher so Vitest can exit.
+  const dispatcher = getGlobalDispatcher() as unknown as { close?: () => unknown };
+  if (typeof dispatcher.close === "function") {
+    await dispatcher.close();
+  }
 });
 
 type TestServerContext = {
@@ -274,9 +310,11 @@ async function performPairRequest(
 ) {
   const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
   await waitForOpen(ws);
+  // Avoid a race where the server replies before we attach a message listener.
+  const responsePromise = waitForMessage(ws);
   ws.send(JSON.stringify(createPairRequestPayload(deviceId, overrides)));
   try {
-    return await waitForMessage(ws);
+    return await responsePromise;
   } finally {
     ws.terminate();
   }
@@ -301,6 +339,8 @@ async function uploadAsset(port: number, token: string, data: Buffer, mimeType: 
 async function authenticateDevice(port: number, deviceId: string, token: string) {
   const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
   await waitForOpen(ws);
+  // Buffer messages to avoid races (auth_result and session_info can arrive back-to-back).
+  const queue = createMessageQueue(ws);
   ws.send(
     JSON.stringify({
       type: "auth",
@@ -309,8 +349,9 @@ async function authenticateDevice(port: number, deviceId: string, token: string)
       token,
     }),
   );
-  const auth = await waitForMessage(ws);
+  const auth = await queue.next();
   if (!auth?.success) {
+    queue.dispose();
     ws.terminate();
     throw new Error(
       `Auth failed for ${deviceId}: ${typeof auth === "object" ? JSON.stringify(auth) : auth}`,
@@ -318,13 +359,15 @@ async function authenticateDevice(port: number, deviceId: string, token: string)
   }
   let sessionInfo: any | null = null;
   if (Array.isArray(auth.features) && auth.features.includes("session_info")) {
-    const next = await waitForMessage(ws);
+    const next = await queue.next();
     if (next?.type !== "session_info") {
+      queue.dispose();
       ws.terminate();
       throw new Error(`Expected session_info after auth_result, got ${JSON.stringify(next)}`);
     }
     sessionInfo = next;
   }
+  queue.dispose();
   return { ws, auth, sessionInfo };
 }
 
@@ -349,9 +392,7 @@ describe.sequential("clawline provider server", () => {
     };
     const ctx = await setupTestServer([entry]);
     try {
-      console.log("allowlist before pair", await fs.readFile(ctx.allowlistPath, "utf8"));
       const response = await performPairRequest(ctx.port, deviceId);
-      console.log("pair response", response);
       expect(response).toMatchObject({
         type: "pair_result",
         success: true,
@@ -632,6 +673,7 @@ describe.sequential("clawline provider server", () => {
       const pair = await performPairRequest(ctx.port, deviceId);
       const { ws } = await authenticateDevice(ctx.port, deviceId, pair.token as string);
       const messageId = `c_${randomUUID()}`;
+      const firstPromise = waitForMessage(ws);
       ws.send(
         JSON.stringify({
           type: "message",
@@ -639,7 +681,7 @@ describe.sequential("clawline provider server", () => {
           content: "hello",
         }),
       );
-      const first = await waitForMessage(ws);
+      const first = await firstPromise;
       const ack = first?.type === "ack" ? first : await waitForMessage(ws);
       expect(ack).toMatchObject({ type: "ack", id: messageId });
       ws.terminate();
