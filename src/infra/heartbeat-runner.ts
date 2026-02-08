@@ -31,6 +31,7 @@ import {
   resolveAgentIdFromSessionKey,
   resolveAgentMainSessionKey,
   resolveStorePath,
+  saveSessionStore,
   updateSessionStore,
 } from "../config/sessions.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
@@ -732,18 +733,17 @@ export async function runHeartbeatOnce(opts: {
     });
 
     // Record last delivered heartbeat payload for dedupe.
-    // Use updateSessionStore for atomic read-modify-write to avoid clobbering concurrent updates.
     if (!shouldSkipMain && normalized.text.trim()) {
-      await updateSessionStore(storePath, (store) => {
-        const current = store[sessionKey];
-        if (current) {
-          store[sessionKey] = {
-            ...current,
-            lastHeartbeatText: normalized.text,
-            lastHeartbeatSentAt: startedAt,
-          };
-        }
-      });
+      const store = loadSessionStore(storePath);
+      const current = store[sessionKey];
+      if (current) {
+        store[sessionKey] = {
+          ...current,
+          lastHeartbeatText: normalized.text,
+          lastHeartbeatSentAt: startedAt,
+        };
+        await saveSessionStore(storePath, store);
+      }
     }
 
     emitHeartbeatEvent({
