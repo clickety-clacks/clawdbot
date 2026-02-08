@@ -1,40 +1,19 @@
+import type { Database as SqliteDatabase, Statement as SqliteStatement } from "better-sqlite3";
+import type { Stats } from "node:fs";
+import BetterSqlite3 from "better-sqlite3";
+import jwt from "jsonwebtoken";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { watch, type FSWatcher, createReadStream } from "node:fs";
+import fs from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import fs from "node:fs/promises";
-import { watch, type FSWatcher, createReadStream } from "node:fs";
-import type { Stats } from "node:fs";
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-
-import WebSocket, { WebSocketServer } from "ws";
-import jwt from "jsonwebtoken";
-import BetterSqlite3 from "better-sqlite3";
-import type { Database as SqliteDatabase, Statement as SqliteStatement } from "better-sqlite3";
 import { type Dispatcher } from "undici";
-import { finalizeInboundContext } from "../auto-reply/reply/inbound-context.js";
-import { dispatchReplyFromConfig } from "../auto-reply/reply/dispatch-from-config.js";
-import { createReplyDispatcherWithTyping } from "../auto-reply/reply/reply-dispatcher.js";
-import { getFollowupQueueDepth, resolveQueueSettings } from "../auto-reply/reply/queue.js";
-import { extractShortModelName } from "../auto-reply/reply/response-prefix-template.js";
+import WebSocket, { WebSocketServer } from "ws";
 import type { ResponsePrefixContext } from "../auto-reply/reply/response-prefix-template.js";
 import type { ReplyPayload } from "../auto-reply/types.js";
-import { DEFAULT_ACCOUNT_ID, resolveAgentRoute } from "../routing/resolve-route.js";
-import {
-  resolveEffectiveMessagesConfig,
-  resolveHumanDelayConfig,
-  resolveIdentityName,
-} from "../agents/identity.js";
-import { resolveAgentIdFromSessionKey } from "../config/sessions.js";
-import { rawDataToString } from "../infra/ws.js";
-import { peekSystemEvents } from "../infra/system-events.js";
-import { recordInboundSession } from "../channels/session.js";
-import { ClawlineDeliveryTarget } from "./routing.js";
-import { recordClawlineSessionActivity } from "./session-store.js";
-import { DEFAULT_AGENT_WORKSPACE_DIR } from "../agents/workspace.js";
 import type { ClawlineAdapterOverrides } from "./config.js";
-import { clawlineSessionFileName } from "./session-key.js";
-import { deepMerge } from "./utils/deep-merge.js";
 import type {
   AllowlistEntry,
   AllowlistFile,
@@ -50,23 +29,43 @@ import type {
   ClawlineOutboundSendParams,
   ClawlineOutboundSendResult,
 } from "./domain.js";
-import { ClientMessageError, HttpError } from "./errors.js";
-import { SlidingWindowRateLimiter } from "./rate-limiter.js";
-import { createAssetHandlers } from "./http-assets.js";
+import {
+  resolveEffectiveMessagesConfig,
+  resolveHumanDelayConfig,
+  resolveIdentityName,
+} from "../agents/identity.js";
+import { type AnnounceQueueItem, enqueueAnnounce } from "../agents/subagent-announce-queue.js";
+import { DEFAULT_AGENT_WORKSPACE_DIR } from "../agents/workspace.js";
+import { dispatchReplyFromConfig } from "../auto-reply/reply/dispatch-from-config.js";
+import { finalizeInboundContext } from "../auto-reply/reply/inbound-context.js";
+import { getFollowupQueueDepth, resolveQueueSettings } from "../auto-reply/reply/queue.js";
+import { createReplyDispatcherWithTyping } from "../auto-reply/reply/reply-dispatcher.js";
+import { extractShortModelName } from "../auto-reply/reply/response-prefix-template.js";
+import { recordInboundSession } from "../channels/session.js";
+import { resolveAgentIdFromSessionKey } from "../config/sessions.js";
 import { callGateway } from "../gateway/call.js";
 import { GATEWAY_CLIENT_MODES, GATEWAY_CLIENT_NAMES } from "../gateway/protocol/client-info.js";
-import { detectMime } from "../media/mime.js";
-import { mediaKindFromMime, maxBytesForKind } from "../media/constants.js";
-import { hasAlphaChannel, optimizeImageToPng } from "../media/image-ops.js";
-import { optimizeImageToJpeg } from "../web/media.js";
 import {
   createPinnedDispatcher,
   resolvePinnedHostname,
   closeDispatcher,
   type PinnedHostname,
 } from "../infra/net/ssrf.js";
+import { peekSystemEvents } from "../infra/system-events.js";
+import { rawDataToString } from "../infra/ws.js";
+import { mediaKindFromMime, maxBytesForKind } from "../media/constants.js";
+import { hasAlphaChannel, optimizeImageToPng } from "../media/image-ops.js";
+import { detectMime } from "../media/mime.js";
+import { DEFAULT_ACCOUNT_ID, resolveAgentRoute } from "../routing/resolve-route.js";
+import { optimizeImageToJpeg } from "../web/media.js";
 import { clawlineAttachmentsToImages } from "./attachments.js";
-import { type AnnounceQueueItem, enqueueAnnounce } from "../agents/subagent-announce-queue.js";
+import { ClientMessageError, HttpError } from "./errors.js";
+import { createAssetHandlers } from "./http-assets.js";
+import { SlidingWindowRateLimiter } from "./rate-limiter.js";
+import { ClawlineDeliveryTarget } from "./routing.js";
+import { clawlineSessionFileName } from "./session-key.js";
+import { recordClawlineSessionActivity } from "./session-store.js";
+import { deepMerge } from "./utils/deep-merge.js";
 
 export const PROTOCOL_VERSION = 1;
 
@@ -111,6 +110,21 @@ function truncateUtf8(value: string, maxBytes: number): string {
     bytes += charBytes;
   }
   return result;
+}
+
+function formatError(err: unknown): string {
+  if (err instanceof Error) {
+    return err.stack ?? `${err.name}: ${err.message}`;
+  }
+  if (typeof err === "string") {
+    return err;
+  }
+  try {
+    const serialized = JSON.stringify(err);
+    return serialized ?? String(err);
+  } catch {
+    return String(err);
+  }
 }
 
 function sanitizeLabel(label?: string): string | undefined {
@@ -724,8 +738,13 @@ function generateUserId(): string {
   return `user_${randomUUID()}`;
 }
 
-function parseServerMessage(json: string): ServerMessage {
-  return JSON.parse(json) as ServerMessage;
+function parseServerMessage(json: string, logger: Logger): ServerMessage | null {
+  try {
+    return JSON.parse(json) as ServerMessage;
+  } catch (err) {
+    logger.warn?.(`replay_parse_failed: ${formatError(err)}`);
+    return null;
+  }
 }
 
 export async function createProviderServer(options: ProviderOptions): Promise<ProviderServer> {
@@ -1302,7 +1321,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       try {
         buffer = Buffer.from(attachment.data, "base64");
       } catch (err) {
-        logger.warn?.("[clawline] inline_attachment_decode_failed", err);
+        logger.warn?.(`[clawline] inline_attachment_decode_failed: ${formatError(err)}`);
         updated.push(attachment);
         continue;
       }
@@ -1327,7 +1346,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         inlineAssetIds.push(assetId);
         updated.push({ ...attachment, assetId });
       } catch (err) {
-        logger.warn?.("[clawline] inline_attachment_persist_failed", err);
+        logger.warn?.(`[clawline] inline_attachment_persist_failed: ${formatError(err)}`);
         updated.push(attachment);
       }
     }
@@ -1448,7 +1467,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       });
       res.writeHead(404).end();
     } catch (err) {
-      logger.error("http_request_failed", err);
+      logger.error?.(`http_request_failed: ${formatError(err)}`);
       if (!res.headersSent) {
         sendHttpError(res, 500, "server_error", "Internal error");
       } else {
@@ -1495,7 +1514,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         sendHttpError(res, 404, "not_found", "File not found");
         return;
       }
-      logger.error?.("[clawline] webroot_stat_failed", err);
+      logger.error?.(`[clawline] webroot_stat_failed: ${formatError(err)}`);
       sendHttpError(res, 500, "server_error", "Failed to read static file");
       return;
     }
@@ -1515,7 +1534,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           sendHttpError(res, 404, "not_found", "File not found");
           return;
         }
-        logger.error?.("[clawline] webroot_index_failed", err);
+        logger.error?.(`[clawline] webroot_index_failed: ${formatError(err)}`);
         sendHttpError(res, 500, "server_error", "Failed to read static file");
         return;
       }
@@ -1527,7 +1546,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     try {
       finalRealPath = await fs.realpath(finalPath);
     } catch (err) {
-      logger.error?.("[clawline] webroot_realpath_failed", err);
+      logger.error?.(`[clawline] webroot_realpath_failed: ${formatError(err)}`);
       sendHttpError(res, 500, "server_error", "Failed to read static file");
       return;
     }
@@ -1550,7 +1569,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
     const stream = createReadStream(finalPath);
     stream.on("error", (err) => {
-      logger.error?.("[clawline] webroot_stream_failed", err);
+      logger.error?.(`[clawline] webroot_stream_failed: ${formatError(err)}`);
       if (!res.headersSent) {
         sendHttpError(res, 500, "server_error", "Failed to stream file");
       } else {
@@ -1591,7 +1610,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         logHttpRequest("alert_request_error", { status: err.status, code: err.code });
         sendHttpError(res, err.status, err.code, err.message);
       } else {
-        logger.error("alert_request_failed", err);
+        logger.error?.(`alert_request_failed: ${formatError(err)}`);
         sendHttpError(res, 500, "server_error", "Internal error");
       }
     }
@@ -1964,7 +1983,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       return trimmed.length > 0 ? trimmed : null;
     } catch (err: any) {
       if (err && err.code !== "ENOENT") {
-        logger.warn?.("alert_instructions_read_failed", err);
+        logger.warn?.(`alert_instructions_read_failed: ${formatError(err)}`);
       }
       return null;
     }
@@ -1978,7 +1997,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       await fs.access(alertInstructionsPath);
     } catch (err: any) {
       if (err && err.code !== "ENOENT") {
-        logger.warn?.("alert_instructions_access_failed", err);
+        logger.warn?.(`alert_instructions_access_failed: ${formatError(err)}`);
         return;
       }
       try {
@@ -1990,7 +2009,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         );
         logger.info?.("alert_instructions_initialized", { alertInstructionsPath });
       } catch (writeErr) {
-        logger.warn?.("alert_instructions_write_failed", writeErr);
+        logger.warn?.(`alert_instructions_write_failed: ${formatError(writeErr)}`);
       }
     }
   }
@@ -2128,7 +2147,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
       alertLog("alert_wake_result", { outcome: "queued" });
     } catch (err) {
-      logger.error("alert_gateway_wake_failed", err);
+      logger.error?.(`alert_gateway_wake_failed: ${formatError(err)}`);
       throw err instanceof HttpError
         ? err
         : new HttpError(502, "wake_failed", "Failed to wake CLU");
@@ -2206,7 +2225,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const assetCleanupInterval =
     config.media.unreferencedUploadTtlSeconds > 0
       ? setInterval(() => {
-          cleanupUnreferencedAssets().catch((err) => logger.warn("asset_cleanup_failed", err));
+          cleanupUnreferencedAssets().catch((err) =>
+            logger.warn?.(`asset_cleanup_failed: ${formatError(err)}`),
+          );
         }, maintenanceIntervalMs)
       : null;
   if (assetCleanupInterval && typeof assetCleanupInterval.unref === "function") {
@@ -2220,21 +2241,25 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
     void refreshAllowlistFromDisk();
   });
-  allowlistWatcher.on("error", (err) => logger.warn?.("allowlist_watch_failed", err));
+  allowlistWatcher.on("error", (err) =>
+    logger.warn?.(`allowlist_watch_failed: ${formatError(err)}`),
+  );
   const pendingFileWatcher: FSWatcher = watch(pendingPath, { persistent: false }, () => {
     void refreshPendingFile();
   });
-  pendingFileWatcher.on("error", (err) => logger.warn?.("pending_watch_failed", err));
+  pendingFileWatcher.on("error", (err) =>
+    logger.warn?.(`pending_watch_failed: ${formatError(err)}`),
+  );
   const denylistWatcher: FSWatcher = watch(denylistPath, { persistent: false }, () => {
     void refreshDenylist();
   });
-  denylistWatcher.on("error", (err) => logger.warn?.("denylist_watch_failed", err));
+  denylistWatcher.on("error", (err) => logger.warn?.(`denylist_watch_failed: ${formatError(err)}`));
 
   function runPerUserTask<T>(userId: string, task: () => Promise<T>): Promise<T> {
     const previous = perUserQueue.get(userId) ?? Promise.resolve();
     const next = previous
       .catch((err) => {
-        logger.warn?.("per_user_task_failed", err);
+        logger.warn?.(`per_user_task_failed: ${formatError(err)}`);
       })
       .then(task)
       .finally(() => {
@@ -2252,7 +2277,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     writeQueue = result.then(
       () => undefined,
       (err) => {
-        logger.warn?.("write_queue_failed", err);
+        logger.warn?.(`write_queue_failed: ${formatError(err)}`);
         return undefined;
       },
     );
@@ -2275,7 +2300,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       allowlist.entries.forEach(normalizeAllowlistEntry);
       handleAllowlistChanged();
     } catch (err) {
-      logger.warn?.("allowlist_reload_failed", err);
+      logger.warn?.(`allowlist_reload_failed: ${formatError(err)}`);
     }
   }
 
@@ -2284,7 +2309,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       pendingFile = await loadPending(pendingPath);
       reconcilePendingSocketsWithFile();
     } catch (err) {
-      logger.warn?.("pending_reload_failed", err);
+      logger.warn?.(`pending_reload_failed: ${formatError(err)}`);
     }
   }
 
@@ -2321,7 +2346,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         }
       }
     } catch (err) {
-      logger.warn("denylist_reload_failed", err);
+      logger.warn?.(`denylist_reload_failed: ${formatError(err)}`);
     }
   }
 
@@ -2460,7 +2485,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       }
       ws.send(JSON.stringify(payload), (err) => {
         if (err) {
-          logger.warn?.("[clawline:http] send_json_failed", err);
+          logger.warn?.(`[clawline:http] send_json_failed: ${formatError(err)}`);
+          resolve(false);
+          return;
         }
         resolve();
       });
@@ -2519,7 +2546,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       if (!err || err.code === "ENOENT") {
         return;
       }
-      logger.warn("file_unlink_failed", err);
+      logger.warn?.(`file_unlink_failed: ${formatError(err)}`);
     }
   }
 
@@ -3237,7 +3264,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           ctx: ctxPayload,
           updateLastRoute,
           onRecordError: (err) => {
-            logger.warn?.("[clawline] failed recording inbound session", err);
+            logger.warn?.(`[clawline] failed recording inbound session: ${formatError(err)}`);
           },
         });
 
@@ -3291,7 +3318,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
                 });
                 attachments = materialized.attachments;
               } catch (err) {
-                logger.warn?.("[clawline] reply_media_attachment_failed", err);
+                logger.warn?.(`[clawline] reply_media_attachment_failed: ${formatError(err)}`);
               }
             }
             const assistantText =
@@ -3358,7 +3385,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           // Count all delivered content (streaming blocks, tool results, and final replies)
           deliveredCount = result.counts.block + result.counts.tool + result.counts.final;
         } catch (err) {
-          logger.error?.("[clawline] dispatch_failed", err);
+          logger.error?.(`[clawline] dispatch_failed: ${formatError(err)}`);
           queuedFinal = false;
         }
         markDispatchIdle();
