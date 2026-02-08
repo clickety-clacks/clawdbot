@@ -455,6 +455,43 @@ describe("runMessageAction sendAttachment hydration", () => {
     );
   });
 
+  it("accepts buffer objects for sendAttachment", async () => {
+    const cfg = {
+      channels: {
+        bluebubbles: {
+          enabled: true,
+          serverUrl: "http://localhost:1234",
+          password: "test-password",
+        },
+      },
+    } as OpenClawConfig;
+
+    vi.mocked(loadWebMedia).mockClear();
+
+    const result = await runMessageAction({
+      cfg,
+      action: "sendAttachment",
+      params: {
+        channel: "bluebubbles",
+        target: "+15551234567",
+        buffer: Buffer.from("ok"),
+        contentType: "text/plain",
+        filename: "note.txt",
+      },
+    });
+
+    expect(result.kind).toBe("action");
+    expect(result.payload).toMatchObject({
+      ok: true,
+      filename: "note.txt",
+      contentType: "text/plain",
+    });
+    expect((result.payload as { buffer?: string }).buffer).toBe(
+      Buffer.from("ok").toString("base64"),
+    );
+    expect(vi.mocked(loadWebMedia)).not.toHaveBeenCalled();
+  });
+
   it("rewrites sandboxed media paths for sendAttachment", async () => {
     const cfg = {
       channels: {
@@ -484,6 +521,33 @@ describe("runMessageAction sendAttachment hydration", () => {
     } finally {
       await fs.rm(sandboxDir, { recursive: true, force: true });
     }
+  });
+
+  it("allows localhost media fetches for sendAttachment", async () => {
+    const cfg = {
+      channels: {
+        bluebubbles: {
+          enabled: true,
+          serverUrl: "http://localhost:1234",
+          password: "test-password",
+        },
+      },
+    } as OpenClawConfig;
+
+    await runMessageAction({
+      cfg,
+      action: "sendAttachment",
+      params: {
+        channel: "bluebubbles",
+        target: "+15551234567",
+        media: "http://127.0.0.1:18999/terminal.json",
+        message: "caption",
+      },
+    });
+
+    const call = vi.mocked(loadWebMedia).mock.calls[0];
+    expect(call?.[0]).toBe("http://127.0.0.1:18999/terminal.json");
+    expect(call?.[2]).toEqual({ ssrfPolicy: { allowedHostnames: ["127.0.0.1"] } });
   });
 });
 
