@@ -4027,16 +4027,22 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         return;
       }
       const now = nowMs();
-      record = {
+      const hydrated: TerminalSessionRecord = {
         terminalSessionId,
         ownerUserId: entry.userId,
         sessionKey: dbRecord.sessionKey,
-        title: dbRecord.title ?? null,
+        title: dbRecord.title,
         createdAt: now,
         lastSeenAt: now,
         tmuxSessionName: terminalSessionId,
       };
-      terminalSessions.set(terminalSessionId, record);
+      terminalSessions.set(terminalSessionId, hydrated);
+      record = hydrated;
+    }
+    if (!record) {
+      await sendJson(ws, { type: "terminal_error", message: "Unknown terminal session" });
+      ws.close();
+      return;
     }
     if (record.ownerUserId !== entry.userId) {
       await sendJson(ws, { type: "terminal_error", message: "Forbidden" });
