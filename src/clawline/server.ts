@@ -2297,6 +2297,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       };
   const terminalConnectionState = new WeakMap<WebSocket, TerminalConnectionState>();
   const terminalSessions = new Map<string, TerminalSessionRecord>();
+  const TERMINAL_DB_LOOKUP_LIMIT = 300;
   const pendingSockets = new Map<string, PendingConnection>();
   const faceSpeakPending = new Map<string, string>();
   const faceSpeakDedupe = new Map<string, number>();
@@ -2386,6 +2387,54 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       filtered.push(attachment);
     }
     return filtered;
+  }
+
+  function lookupTerminalSessionRecordFromDb(params: {
+    userId: string;
+    terminalSessionId: string;
+  }): { sessionKey: string; title?: string } | null {
+    if (!selectEventsTailStmt) {
+      return null;
+    }
+    const limit = TERMINAL_DB_LOOKUP_LIMIT;
+    let rows: Array<{ id: string; payloadJson: string }> = [];
+    try {
+      rows = selectEventsTailStmt.all(params.userId, limit) as Array<{
+        id: string;
+        payloadJson: string;
+      }>;
+    } catch {
+      return null;
+    }
+    for (const row of rows) {
+      const msg = parseServerMessage(row.payloadJson, logger);
+      if (!msg || msg.type !== "message" || !Array.isArray(msg.attachments)) {
+        continue;
+      }
+      const sessionKey = typeof msg.sessionKey === "string" ? msg.sessionKey : "";
+      if (!sessionKey || !isClawlinePersonalDMSessionKey(sessionKey)) {
+        continue;
+      }
+      for (const attachment of msg.attachments) {
+        if (!attachment || typeof attachment !== "object") {
+          continue;
+        }
+        const a = attachment as { type?: unknown; mimeType?: unknown; data?: unknown };
+        if (
+          a.type !== "document" ||
+          a.mimeType !== TERMINAL_SESSION_MIME ||
+          typeof a.data !== "string"
+        ) {
+          continue;
+        }
+        const descriptor = decodeTerminalSessionDescriptorFromBase64(a.data);
+        if (!descriptor || descriptor.terminalSessionId !== params.terminalSessionId) {
+          continue;
+        }
+        return { sessionKey, title: descriptor.title || undefined };
+      }
+    }
+    return null;
   }
 
   function runPerUserTask<T>(userId: string, task: () => Promise<T>): Promise<T> {
@@ -3963,11 +4012,31 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       return;
     }
 
-    const record = terminalSessions.get(terminalSessionId);
+    let record = terminalSessions.get(terminalSessionId);
     if (!record) {
-      await sendJson(ws, { type: "terminal_error", message: "Unknown terminal session" });
-      ws.close();
-      return;
+      // Terminal sessions should survive provider restarts and be reconnectable without
+      // requiring an in-memory registration step. If we can prove the sessionId was
+      // referenced by a terminal bubble message for this user, allow + cache it.
+      const dbRecord = lookupTerminalSessionRecordFromDb({
+        userId: entry.userId,
+        terminalSessionId,
+      });
+      if (!dbRecord) {
+        await sendJson(ws, { type: "terminal_error", message: "Unknown terminal session" });
+        ws.close();
+        return;
+      }
+      const now = nowMs();
+      record = {
+        terminalSessionId,
+        ownerUserId: entry.userId,
+        sessionKey: dbRecord.sessionKey,
+        title: dbRecord.title ?? null,
+        createdAt: now,
+        lastSeenAt: now,
+        tmuxSessionName: terminalSessionId,
+      };
+      terminalSessions.set(terminalSessionId, record);
     }
     if (record.ownerUserId !== entry.userId) {
       await sendJson(ws, { type: "terminal_error", message: "Forbidden" });
