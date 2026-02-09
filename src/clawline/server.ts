@@ -58,7 +58,7 @@ import { rawDataToString } from "../infra/ws.js";
 import { mediaKindFromMime, maxBytesForKind } from "../media/constants.js";
 import { hasAlphaChannel, optimizeImageToPng } from "../media/image-ops.js";
 import { detectMime } from "../media/mime.js";
-import { DEFAULT_ACCOUNT_ID, resolveAgentRoute } from "../routing/resolve-route.js";
+import { DEFAULT_ACCOUNT_ID } from "../routing/resolve-route.js";
 import { optimizeImageToJpeg } from "../web/media.js";
 import { clawlineAttachmentsToImages } from "./attachments.js";
 import { ClientMessageError, HttpError } from "./errors.js";
@@ -397,14 +397,24 @@ function normalizeOutboundAttachmentData(input: ClawlineOutboundAttachmentInput)
 }
 
 function buildClawlinePersonalSessionKey(agentId: string, userId: string): string {
-  const normalizedAgentId = (agentId ?? "").trim().toLowerCase() || "main";
-  const normalizedUserId = sanitizeUserId(userId).toLowerCase();
-  return `agent:${normalizedAgentId}:clawline:${normalizedUserId}:main`;
+  return buildClawlineUserStreamSessionKey(agentId, userId, "main");
 }
 
-function isClawlinePersonalDMSessionKey(sessionKey: string): boolean {
-  // MVP policy: terminal bubbles are DM-only.
-  // Required pattern: `agent:<agentId>:clawline:<userId>:main`
+function buildClawlineUserStreamSessionKey(
+  agentId: string,
+  userId: string,
+  streamSuffix: "main" | "dm",
+): string {
+  const normalizedAgentId = (agentId ?? "").trim().toLowerCase() || "main";
+  const normalizedUserId = sanitizeUserId(userId).toLowerCase();
+  return `agent:${normalizedAgentId}:clawline:${normalizedUserId}:${streamSuffix}`;
+}
+
+function isClawlinePersonalUserStreamSessionKey(sessionKey: string, userId?: string): boolean {
+  // MVP policy: terminal bubbles are per-user only (never global).
+  // Allowed patterns:
+  // - agent:<agentId>:clawline:<userId>:main
+  // - agent:<agentId>:clawline:<userId>:dm
   const parts = sessionKey.split(":");
   if (parts.length !== 5) {
     return false;
@@ -418,10 +428,12 @@ function isClawlinePersonalDMSessionKey(sessionKey: string): boolean {
   if (parts[2] !== "clawline") {
     return false;
   }
-  if (!parts[3]) {
+  const expectedUserId = userId ? sanitizeUserId(userId).toLowerCase() : null;
+  if (!parts[3] || (expectedUserId && parts[3].toLowerCase() !== expectedUserId)) {
     return false;
   }
-  return parts[4] === "main";
+  const suffix = parts[4]?.toLowerCase();
+  return suffix === "main" || suffix === "dm";
 }
 
 function decodeTerminalSessionDescriptorFromBase64(data: string): {
@@ -958,13 +970,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     const globalSessionKey = mainSessionKey;
     const dmSessionKey =
       dmScope === "main"
-        ? mainSessionKey
-        : resolveAgentRoute({
-            cfg: openClawCfg,
-            channel: "clawline",
-            accountId: DEFAULT_ACCOUNT_ID,
-            peer: { kind: "dm", id: userId },
-          }).sessionKey;
+        ? mainStreamSessionKey
+        : buildClawlineUserStreamSessionKey(mainSessionAgentId, userId, "dm");
 
     const provisioned = [mainStreamSessionKey, dmSessionKey, globalSessionKey];
     const provisionedSessionKeys = Array.from(
@@ -973,7 +980,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
     // Only subscribe sockets to sessions they are allowed to receive.
     // - Main stream is always visible.
-    // - DM stream is visible only when dmScope != main (otherwise it aliases the global session).
+    // - DM stream is visible only when dmScope != main (otherwise it aliases the main stream).
     // - Global stream is admin-only.
     const subscribed: string[] = [mainStreamSessionKey];
     if (dmScope !== "main") {
@@ -2473,15 +2480,28 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     if (params.attachments.length === 0) {
       return params.attachments;
     }
-    const terminalAllowed = isClawlinePersonalDMSessionKey(params.sessionKey);
+    const terminalAllowed = isClawlinePersonalUserStreamSessionKey(
+      params.sessionKey,
+      params.ownerUserId,
+    );
     const filtered: NormalizedAttachment[] = [];
     for (const attachment of params.attachments) {
       if (attachment.type === "document" && attachment.mimeType === TERMINAL_SESSION_MIME) {
         if (!terminalAllowed) {
-          continue;
+          logger.warn?.("[clawline] terminal_attachment_blocked", {
+            sessionKey: params.sessionKey,
+            ownerUserId: params.ownerUserId,
+          });
+          throw new Error(
+            "Terminal attachments are only allowed in per-user Clawline sessions (agent:<agentId>:clawline:<userId>:main|dm).",
+          );
         }
         const descriptor = decodeTerminalSessionDescriptorFromBase64(attachment.data);
         if (!descriptor) {
+          logger.warn?.("[clawline] terminal_attachment_invalid_descriptor", {
+            sessionKey: params.sessionKey,
+            ownerUserId: params.ownerUserId,
+          });
           continue;
         }
         const now = nowMs();
@@ -2525,7 +2545,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         continue;
       }
       const sessionKey = typeof msg.sessionKey === "string" ? msg.sessionKey : "";
-      if (!sessionKey || !isClawlinePersonalDMSessionKey(sessionKey)) {
+      if (!sessionKey || !isClawlinePersonalUserStreamSessionKey(sessionKey, params.userId)) {
         continue;
       }
       for (const attachment of msg.attachments) {
@@ -3277,13 +3297,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       } else {
         sessionKeyHint =
           dmScope === "main"
-            ? mainSessionKey
-            : resolveAgentRoute({
-                cfg: openClawCfg,
-                channel: "clawline",
-                accountId: DEFAULT_ACCOUNT_ID,
-                peer: { kind: "dm", id: userId },
-              }).sessionKey;
+            ? buildClawlinePersonalSessionKey(mainSessionAgentId, userId)
+            : buildClawlineUserStreamSessionKey(mainSessionAgentId, userId, "dm");
       }
     } else {
       target = resolveSendTarget(normalizedTargetInput);
