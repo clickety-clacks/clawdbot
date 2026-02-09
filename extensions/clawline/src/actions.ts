@@ -75,6 +75,62 @@ function parseEventPayload(row: EventRow): ParsedMessage {
   }
 }
 
+function normalizeMimeType(value: string): string {
+  // Drop any parameters ("; charset=utf-8") so provider-side exact matches work reliably.
+  const head = value.split(";")[0] ?? "";
+  return head.trim().toLowerCase();
+}
+
+function promiseWithTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`${label} timed out after ${timeoutMs}ms`)),
+      timeoutMs,
+    );
+  });
+  return Promise.race([
+    promise.finally(() => {
+      if (timer) {
+        clearTimeout(timer);
+      }
+    }),
+    timeout,
+  ]);
+}
+
+function summarizeOutboundResult(result: Awaited<ReturnType<typeof sendClawlineOutboundMessage>>) {
+  // Never echo base64 attachment payloads back to the agent/tool output. They can be large and
+  // can cause tool delivery to stall.
+  const attachments = Array.isArray(result.attachments)
+    ? result.attachments.map((a: any) => {
+        if (!a || typeof a !== "object") {
+          return { type: "unknown" };
+        }
+        if (a.type === "asset") {
+          return { type: "asset", assetId: a.assetId };
+        }
+        if (a.type === "image") {
+          return { type: "image", mimeType: a.mimeType, assetId: a.assetId };
+        }
+        if (a.type === "document") {
+          return { type: "document", mimeType: a.mimeType };
+        }
+        return { type: String(a.type ?? "unknown") };
+      })
+    : undefined;
+
+  return {
+    ok: true,
+    messageId: result.messageId,
+    userId: result.userId,
+    deviceId: result.deviceId,
+    assetIds: result.assetIds,
+    attachmentCount: Array.isArray(result.attachments) ? result.attachments.length : 0,
+    attachments,
+  };
+}
+
 async function readClawlineMessages(params: {
   cfg: OpenClawConfig;
   userId?: string;
@@ -206,20 +262,25 @@ export const clawlineMessageActions: ChannelMessageActionAdapter = {
       if (!buffer) {
         throw new Error("Clawline sendAttachment requires buffer (base64 or data: URL)");
       }
-      const mimeType =
+      const rawMimeType =
         (typeof params.contentType === "string" ? params.contentType : undefined) ??
         (typeof params.mimeType === "string" ? params.mimeType : undefined) ??
         "application/octet-stream";
+      const mimeType = normalizeMimeType(rawMimeType);
       const caption =
         (typeof params.caption === "string" ? params.caption : undefined) ??
         (typeof params.message === "string" ? params.message : undefined) ??
         "";
-      const result = await sendClawlineOutboundMessage({
-        target: to.trim(),
-        text: caption,
-        attachments: [{ data: buffer, mimeType }],
-      });
-      return jsonResult(result);
+      const result = await promiseWithTimeout(
+        sendClawlineOutboundMessage({
+          target: to.trim(),
+          text: caption,
+          attachments: [{ data: buffer, mimeType }],
+        }),
+        15_000,
+        "Clawline sendAttachment",
+      );
+      return jsonResult(summarizeOutboundResult(result));
     }
 
     if (action === "read") {
