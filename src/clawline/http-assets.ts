@@ -1,14 +1,12 @@
+import type { Statement } from "better-sqlite3";
+import type http from "node:http";
+import Busboy from "busboy";
+import { randomUUID } from "node:crypto";
+import { createWriteStream } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { createWriteStream } from "node:fs";
-import { randomUUID } from "node:crypto";
-
-import Busboy from "busboy";
-import type http from "node:http";
-import type { Statement } from "better-sqlite3";
-
-import { ClientMessageError, HttpError } from "./errors.js";
 import type { Logger, ProviderConfig } from "./domain.js";
+import { ClientMessageError, HttpError } from "./errors.js";
 
 export type AuthDetails = { deviceId: string; userId: string; isAdmin: boolean };
 
@@ -167,8 +165,9 @@ export function createAssetHandlers(deps: AssetHandlerDeps) {
       let fileHandle: fs.FileHandle;
       try {
         fileHandle = await fs.open(filePath, "r");
-      } catch (err: any) {
-        if (err && err.code === "ENOENT") {
+      } catch (err) {
+        const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+        if (code === "ENOENT") {
           await enqueueWriteTask(() => deleteAssetStmt.run(assetId));
           sendHttpError(res, 404, "asset_not_found", "Asset not found");
           return;

@@ -58,7 +58,7 @@ import { rawDataToString } from "../infra/ws.js";
 import { mediaKindFromMime, maxBytesForKind } from "../media/constants.js";
 import { hasAlphaChannel, optimizeImageToPng } from "../media/image-ops.js";
 import { detectMime } from "../media/mime.js";
-import { DEFAULT_ACCOUNT_ID } from "../routing/resolve-route.js";
+import { DEFAULT_ACCOUNT_ID, resolveAgentRoute } from "../routing/resolve-route.js";
 import { optimizeImageToJpeg } from "../web/media.js";
 import { clawlineAttachmentsToImages } from "./attachments.js";
 import { ClientMessageError, HttpError } from "./errors.js";
@@ -77,12 +77,14 @@ type TerminalTmuxBackend = {
   execTmux(
     args: string[],
     options: { timeout: number; maxBuffer: number },
-  ): Promise<{ stdout: any }>;
-  spawnAttachPty(params: {
-    sessionName: string;
-    cols: number;
-    rows: number;
-  }): Promise<{ pty: any }>;
+  ): Promise<{
+    // oxlint-disable-next-line typescript/no-explicit-any
+    stdout: any;
+  }>;
+  spawnAttachPty(params: { sessionName: string; cols: number; rows: number }): Promise<{
+    // oxlint-disable-next-line typescript/no-explicit-any
+    pty: any;
+  }>;
 };
 
 function buildSshBaseArgs(cfg: ProviderConfig["terminal"]["tmux"]["ssh"]): string[] {
@@ -142,6 +144,7 @@ function createTerminalTmuxBackend(config: ProviderConfig, logger: Logger): Term
     },
     async spawnAttachPty(params: { sessionName: string; cols: number; rows: number }) {
       const ptyModule = (await import("@lydell/node-pty")) as unknown as {
+        // oxlint-disable-next-line typescript/no-explicit-any
         spawn: (file: string, args: string[], options: any) => any;
       };
       if (!useRemote) {
@@ -199,6 +202,8 @@ const EXEC_COMPLETION_ALERT_PROMPT =
 const USER_ID_MAX_LENGTH = 48;
 const COMBINING_MARKS_REGEX = /[\u0300-\u036f]/g;
 const WEBROOT_PREFIX = "/www";
+const FORM_INJECT_PATH = "/inject";
+const FORM_INJECT_TOKEN_ENV = "CLAWLINE_FORM_POST_TOKEN";
 
 function truncateUtf8(value: string, maxBytes: number): string {
   if (Buffer.byteLength(value, "utf8") <= maxBytes) {
@@ -541,23 +546,22 @@ function timingSafeStringEqual(a: string, b: string): boolean {
   return timingSafeEqual(bufA, bufB);
 }
 
-function validateDeviceInfo(value: any): value is DeviceInfo {
+function validateDeviceInfo(value: unknown): value is DeviceInfo {
   if (!value || typeof value !== "object") {
     return false;
   }
+  const obj = value as Record<string, unknown>;
   const requiredString = (input: unknown) =>
     typeof input === "string" && input.length > 0 && Buffer.byteLength(input, "utf8") <= 64;
-  if (!requiredString(value.platform) || !requiredString(value.model)) {
+  if (!requiredString(obj.platform) || !requiredString(obj.model)) {
     return false;
   }
-  if (value.osVersion !== undefined && !requiredString(value.osVersion) && value.osVersion !== "") {
+  const osVersion = obj.osVersion;
+  if (osVersion !== undefined && !requiredString(osVersion) && osVersion !== "") {
     return false;
   }
-  if (
-    value.appVersion !== undefined &&
-    !requiredString(value.appVersion) &&
-    value.appVersion !== ""
-  ) {
+  const appVersion = obj.appVersion;
+  if (appVersion !== undefined && !requiredString(appVersion) && appVersion !== "") {
     return false;
   }
   return true;
@@ -834,8 +838,9 @@ async function loadJsonFile<T>(filePath: string, fallback: T): Promise<T> {
   try {
     const data = await fs.readFile(filePath, "utf8");
     return JSON.parse(data) as T;
-  } catch (err: any) {
-    if (err && (err.code === "ENOENT" || err.code === "ENOTDIR")) {
+  } catch (err) {
+    const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+    if (code === "ENOENT" || code === "ENOTDIR") {
       await fs.writeFile(filePath, JSON.stringify(fallback, null, 2));
       return fallback;
     }
@@ -873,8 +878,9 @@ async function ensureJwtKey(filePath: string, provided?: string | null): Promise
   try {
     const data = await fs.readFile(filePath, "utf8");
     return validateKey(data);
-  } catch (err: any) {
-    if (err && err.code !== "ENOENT") {
+  } catch (err) {
+    const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+    if (code && code !== "ENOENT") {
       throw err;
     }
     const key = randomBytes(32).toString("hex");
@@ -1654,6 +1660,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         await handleAlertHttpRequest(req, res);
         return;
       }
+      if (req.method === "POST" && parsedUrl.pathname === FORM_INJECT_PATH) {
+        await handleFormInjectHttpRequest(req, res);
+        return;
+      }
       logHttpRequest("request_not_found", {
         method: req.method ?? "UNKNOWN",
         path: parsedUrl.pathname,
@@ -1702,8 +1712,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     let fileStat: Stats;
     try {
       fileStat = await fs.stat(targetPath);
-    } catch (err: any) {
-      if (err && (err.code === "ENOENT" || err.code === "ENOTDIR")) {
+    } catch (err) {
+      const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+      if (code === "ENOENT" || code === "ENOTDIR") {
         sendHttpError(res, 404, "not_found", "File not found");
         return;
       }
@@ -1722,8 +1733,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         }
         fileStat = indexStat;
         finalPath = indexPath;
-      } catch (err: any) {
-        if (err && (err.code === "ENOENT" || err.code === "ENOTDIR")) {
+      } catch (err) {
+        const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+        if (code === "ENOENT" || code === "ENOTDIR") {
           sendHttpError(res, 404, "not_found", "File not found");
           return;
         }
@@ -1809,6 +1821,499 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
   }
 
+  function resolveFormInjectToken(): string | null {
+    const token =
+      typeof process.env[FORM_INJECT_TOKEN_ENV] === "string"
+        ? process.env[FORM_INJECT_TOKEN_ENV].trim()
+        : "";
+    return token.length > 0 ? token : null;
+  }
+
+  function resolveFormInjectAuthToken(req: http.IncomingMessage): string | null {
+    const fromHeader = (value: string | string[] | undefined): string | null => {
+      if (typeof value === "string") {
+        const trimmed = value.trim();
+        return trimmed.length > 0 ? trimmed : null;
+      }
+      if (Array.isArray(value)) {
+        for (const entry of value) {
+          const trimmed = entry.trim();
+          if (trimmed.length > 0) {
+            return trimmed;
+          }
+        }
+      }
+      return null;
+    };
+
+    const explicit =
+      fromHeader(req.headers["x-clawline-form-token"]) ??
+      fromHeader(req.headers["x-clawline-token"]) ??
+      fromHeader(req.headers["x-openclaw-token"]);
+    if (explicit) {
+      return explicit;
+    }
+
+    const authHeader =
+      typeof req.headers.authorization === "string" ? req.headers.authorization : "";
+    if (authHeader.startsWith("Bearer ")) {
+      const token = authHeader.slice(7).trim();
+      return token.length > 0 ? token : null;
+    }
+    return null;
+  }
+
+  function authenticateFormInjectRequest(req: http.IncomingMessage) {
+    const expected = resolveFormInjectToken();
+    if (!expected) {
+      // If no token is configured, treat the endpoint as disabled.
+      throw new HttpError(404, "not_found", "Not found");
+    }
+    const provided = resolveFormInjectAuthToken(req);
+    if (!provided) {
+      throw new HttpError(401, "auth_failed", "Missing token");
+    }
+    if (!timingSafeStringEqual(provided, expected)) {
+      throw new HttpError(401, "auth_failed", "Invalid token");
+    }
+  }
+
+  async function readRequestBodyWithLimit(
+    req: http.IncomingMessage,
+    limit: number,
+    tooLargeMessage: string,
+  ): Promise<Buffer> {
+    return await new Promise<Buffer>((resolve, reject) => {
+      const chunks: Buffer[] = [];
+      let size = 0;
+      const cleanup = () => {
+        req.off("data", handleData);
+        req.off("end", handleEnd);
+        req.off("error", handleError);
+      };
+      const handleError = (err: Error) => {
+        cleanup();
+        reject(err);
+      };
+      const handleEnd = () => {
+        cleanup();
+        resolve(Buffer.concat(chunks));
+      };
+      const handleData = (chunk: Buffer) => {
+        size += chunk.length;
+        if (size > limit) {
+          cleanup();
+          chunks.length = 0;
+          req.destroy();
+          reject(new HttpError(413, "payload_too_large", tooLargeMessage));
+          return;
+        }
+        chunks.push(chunk);
+      };
+      req.on("data", handleData);
+      req.on("end", handleEnd);
+      req.on("error", handleError);
+    });
+  }
+
+  async function parseFormInjectPayload(req: http.IncomingMessage): Promise<{
+    message: string;
+    sessionKey: string;
+  }> {
+    const raw = await readRequestBodyWithLimit(
+      req,
+      Math.max(config.sessions.maxMessageBytes + 4096, 64 * 1024),
+      "Inject payload too large",
+    );
+    if (raw.length === 0) {
+      throw new HttpError(400, "invalid_request", "Empty payload");
+    }
+
+    const contentType =
+      typeof req.headers["content-type"] === "string" ? req.headers["content-type"] : "";
+    const lowerContentType = contentType.toLowerCase();
+    const rawText = raw.toString("utf8");
+
+    const coerce = (value: unknown): string =>
+      typeof value === "string" ? value : typeof value === "number" ? String(value) : "";
+
+    if (lowerContentType.includes("application/x-www-form-urlencoded")) {
+      const params = new URLSearchParams(rawText);
+      const message = params.get("message") ?? params.get("content") ?? "";
+      const sessionKey = params.get("sessionKey") ?? params.get("session_key") ?? "";
+      return { message, sessionKey };
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(rawText);
+    } catch {
+      throw new HttpError(
+        400,
+        "invalid_request",
+        "Inject payload must be JSON or application/x-www-form-urlencoded",
+      );
+    }
+    if (!parsed || typeof parsed !== "object") {
+      throw new HttpError(400, "invalid_request", "Inject payload must be an object");
+    }
+    const obj = parsed as Record<string, unknown>;
+    const message = coerce(obj.message) || coerce(obj.content);
+    const sessionKey = coerce(obj.sessionKey) || coerce(obj.session_key);
+    return { message, sessionKey };
+  }
+
+  function findAllowlistEntryByUserId(rawUserId: string): AllowlistEntry | null {
+    const needle = sanitizeUserId(rawUserId).toLowerCase();
+    if (!needle) {
+      return null;
+    }
+    return (
+      allowlist.entries.find((entry) => sanitizeUserId(entry.userId).toLowerCase() === needle) ??
+      null
+    );
+  }
+
+  function resolveInjectTarget(rawSessionKey: string): {
+    sessionKey: string;
+    userId: string;
+    streamSuffix: "main" | "dm" | "global";
+    deliveryTarget: ClawlineDeliveryTarget;
+    peerId: string;
+    claimedName?: string;
+  } {
+    const trimmed = rawSessionKey.trim();
+    if (!trimmed) {
+      throw new HttpError(400, "invalid_request", "sessionKey is required");
+    }
+
+    if (sessionKeyEq(trimmed, mainSessionKey)) {
+      const adminEntry = allowlist.entries.find((entry) => entry.isAdmin);
+      if (!adminEntry) {
+        throw new HttpError(400, "invalid_session", "No admin allowlist entry found");
+      }
+      return {
+        sessionKey: mainSessionKey,
+        userId: adminEntry.userId,
+        streamSuffix: "global",
+        deliveryTarget: ClawlineDeliveryTarget.fromParts(adminEntry.userId, "global"),
+        peerId: derivePeerId(adminEntry),
+        claimedName: adminEntry.claimedName,
+      };
+    }
+
+    const parts = trimmed.split(":");
+    if (parts.length !== 5) {
+      throw new HttpError(400, "invalid_session", "Invalid Clawline sessionKey");
+    }
+    if (parts[0]?.toLowerCase() !== "agent") {
+      throw new HttpError(400, "invalid_session", "Invalid Clawline sessionKey");
+    }
+    const agentId = (parts[1] ?? "").trim().toLowerCase();
+    if (!agentId || agentId !== mainSessionAgentId.toLowerCase()) {
+      throw new HttpError(400, "invalid_session", "Invalid agentId");
+    }
+    if (parts[2]?.toLowerCase() !== "clawline") {
+      throw new HttpError(400, "invalid_session", "Invalid Clawline sessionKey");
+    }
+
+    if (parts[3]?.toLowerCase() === "dm") {
+      const dmScope = openClawCfg.session?.dmScope ?? "main";
+      if (dmScope === "main") {
+        throw new HttpError(400, "invalid_session", "DM stream is disabled (dmScope=main)");
+      }
+      const entry = findAllowlistEntryByUserId(parts[4] ?? "");
+      if (!entry) {
+        throw new HttpError(404, "not_found", "Unknown user");
+      }
+      const dmSessionKey = resolveAgentRoute({
+        cfg: openClawCfg,
+        channel: "clawline",
+        accountId: DEFAULT_ACCOUNT_ID,
+        peer: { kind: "dm", id: entry.userId },
+      }).sessionKey;
+      if (!sessionKeyEq(dmSessionKey, trimmed)) {
+        throw new HttpError(400, "invalid_session", "Invalid DM sessionKey");
+      }
+      return {
+        sessionKey: dmSessionKey,
+        userId: entry.userId,
+        streamSuffix: "dm",
+        deliveryTarget: ClawlineDeliveryTarget.fromParts(entry.userId, "dm"),
+        peerId: derivePeerId(entry),
+        claimedName: entry.claimedName,
+      };
+    }
+
+    if (parts[4]?.toLowerCase() !== "main") {
+      throw new HttpError(400, "invalid_session", "Invalid Clawline sessionKey");
+    }
+    const entry = findAllowlistEntryByUserId(parts[3] ?? "");
+    if (!entry) {
+      throw new HttpError(404, "not_found", "Unknown user");
+    }
+    const personalSessionKey = buildClawlinePersonalSessionKey(mainSessionAgentId, entry.userId);
+    if (!sessionKeyEq(personalSessionKey, trimmed)) {
+      throw new HttpError(400, "invalid_session", "Invalid personal sessionKey");
+    }
+    return {
+      sessionKey: personalSessionKey,
+      userId: entry.userId,
+      streamSuffix: "main",
+      deliveryTarget: ClawlineDeliveryTarget.fromParts(entry.userId, "main"),
+      peerId: derivePeerId(entry),
+      claimedName: entry.claimedName,
+    };
+  }
+
+  async function persistAssistantEvent(params: {
+    targetUserId: string;
+    content: string;
+    sessionKey: string;
+    attachments?: NormalizedAttachment[];
+  }): Promise<ServerMessage> {
+    const filteredAttachments = params.attachments
+      ? filterOutboundAttachmentsForTerminalPolicy({
+          attachments: params.attachments,
+          ownerUserId: params.targetUserId,
+          sessionKey: params.sessionKey,
+        })
+      : undefined;
+    const event: ServerMessage = {
+      type: "message",
+      id: generateServerMessageId(),
+      role: "assistant",
+      sender: resolveAssistantSenderName(params.sessionKey),
+      content: params.content,
+      timestamp: nowMs(),
+      streaming: false,
+      sessionKey: params.sessionKey,
+      attachments:
+        filteredAttachments && filteredAttachments.length > 0 ? filteredAttachments : undefined,
+    };
+    await appendEvent(event, params.targetUserId);
+    return event;
+  }
+
+  async function handleFormInjectHttpRequest(req: http.IncomingMessage, res: http.ServerResponse) {
+    logHttpRequest("form_inject_request_start");
+    try {
+      authenticateFormInjectRequest(req);
+      const payload = await parseFormInjectPayload(req);
+      const message = typeof payload.message === "string" ? payload.message : "";
+      const sessionKey = typeof payload.sessionKey === "string" ? payload.sessionKey : "";
+
+      const trimmedMessage = message.trim();
+      if (!trimmedMessage) {
+        throw new HttpError(400, "invalid_message", "Message is required");
+      }
+      if (Buffer.byteLength(message, "utf8") > config.sessions.maxMessageBytes) {
+        throw new HttpError(400, "message_too_large", "Message exceeds max size");
+      }
+
+      const target = resolveInjectTarget(sessionKey);
+      if (!formInjectRateLimiter.attempt(target.sessionKey)) {
+        throw new HttpError(429, "rate_limited", "Too many messages");
+      }
+
+      const inboundEvent: ServerMessage = {
+        type: "message",
+        id: generateServerMessageId(),
+        role: "user",
+        content: message,
+        timestamp: nowMs(),
+        streaming: false,
+        sessionKey: target.sessionKey,
+      };
+
+      const result = await runPerUserTask(target.userId, async () => {
+        await appendEvent(inboundEvent, target.userId, "form");
+        broadcastToSessionKey(target.sessionKey, inboundEvent);
+
+        const inboundBody = message;
+        const channelLabel = "clawline";
+        const route = {
+          agentId: mainSessionAgentId,
+          channel: "clawline",
+          accountId: DEFAULT_ACCOUNT_ID,
+          sessionKey: target.sessionKey,
+          mainSessionKey,
+        };
+
+        const ctxPayload = finalizeInboundContext({
+          Body: inboundBody,
+          RawBody: message,
+          CommandBody: message,
+          From: `${channelLabel}:${target.peerId}`,
+          To: "form:inject",
+          SessionKey: route.sessionKey,
+          AccountId: route.accountId,
+          MessageSid: inboundEvent.id,
+          ChatType: "direct",
+          SenderName: target.claimedName ?? target.peerId,
+          SenderId: target.userId,
+          Provider: "clawline",
+          Surface: channelLabel,
+          OriginatingChannel: channelLabel,
+          OriginatingTo: target.deliveryTarget.toString(),
+          CommandAuthorized: true,
+        });
+
+        const updateLastRoute =
+          target.streamSuffix === "dm" && (openClawCfg.session?.dmScope ?? "main") !== "main"
+            ? {
+                // DM cross-session "follow me" write: tell agent:main:main where this user is currently talking.
+                sessionKey: route.mainSessionKey,
+                channel: "clawline",
+                to: target.deliveryTarget.toString(),
+                accountId: route.accountId,
+              }
+            : undefined;
+        await recordInboundSession({
+          storePath: sessionStorePath,
+          sessionKey: route.sessionKey,
+          ctx: ctxPayload,
+          updateLastRoute,
+          onRecordError: (err) => {
+            logger.warn?.(
+              `[clawline] failed recording injected inbound session: ${formatError(err)}`,
+            );
+          },
+        });
+
+        const fallbackText = adapterOverrides.responseFallback?.trim() ?? "";
+        const prefixContext: ResponsePrefixContext = {
+          identityName: resolveIdentityName(openClawCfg, route.agentId),
+        };
+
+        const { dispatcher, replyOptions, markDispatchIdle } = createReplyDispatcherWithTyping({
+          responsePrefix: resolveEffectiveMessagesConfig(openClawCfg, route.agentId).responsePrefix,
+          responsePrefixContextProvider: () => prefixContext,
+          humanDelay: resolveHumanDelayConfig(openClawCfg, route.agentId),
+          deliver: async (replyPayload) => {
+            const mediaUrls = replyPayload.mediaUrls?.length
+              ? replyPayload.mediaUrls
+              : replyPayload.mediaUrl
+                ? [replyPayload.mediaUrl]
+                : [];
+            let attachments: NormalizedAttachment[] = [];
+            const trimmedText = replyPayload.text?.trim();
+            if (mediaUrls.length > 0) {
+              try {
+                const materialized = await materializeOutboundMediaUrls({
+                  mediaUrls,
+                  ownerUserId: target.userId,
+                  uploaderDeviceId: "form",
+                });
+                attachments = materialized.attachments;
+              } catch (err) {
+                logger.warn?.(
+                  `[clawline] injected_reply_media_attachment_failed: ${formatError(err)}`,
+                );
+              }
+            }
+            const assistantText =
+              trimmedText && trimmedText.length > 0
+                ? trimmedText
+                : attachments.length > 0
+                  ? ""
+                  : buildAssistantTextFromPayload(replyPayload, fallbackText);
+            if (assistantText === null) {
+              return;
+            }
+            const assistantEvent = await persistAssistantEvent({
+              targetUserId: target.userId,
+              content: assistantText,
+              sessionKey: route.sessionKey,
+              attachments,
+            });
+            broadcastToSessionKey(target.sessionKey, assistantEvent);
+          },
+          onError: (err, info) => {
+            logger.error?.("[clawline] injected_reply_delivery_failed", {
+              kind: info.kind,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          },
+        });
+
+        logger.info?.("[clawline] injected_run_start", {
+          messageId: inboundEvent.id,
+          sessionKey: target.sessionKey,
+          userId: target.userId,
+        });
+
+        let queuedFinal = false;
+        let deliveredCount = 0;
+        try {
+          const dispatchResult = await dispatchReplyFromConfig({
+            ctx: ctxPayload,
+            cfg: openClawCfg,
+            dispatcher,
+            replyOptions: {
+              ...replyOptions,
+              onModelSelected: (ctx) => {
+                prefixContext.provider = ctx.provider;
+                prefixContext.model = extractShortModelName(ctx.model);
+                prefixContext.modelFull = `${ctx.provider}/${ctx.model}`;
+                prefixContext.thinkingLevel = ctx.thinkLevel ?? "off";
+              },
+            },
+            replyResolver: options.replyResolver,
+          });
+          queuedFinal = dispatchResult.queuedFinal;
+          deliveredCount =
+            dispatchResult.counts.block + dispatchResult.counts.tool + dispatchResult.counts.final;
+        } catch (err) {
+          logger.error?.(`[clawline] injected_dispatch_failed: ${formatError(err)}`);
+          queuedFinal = false;
+        }
+        markDispatchIdle();
+        await dispatcher.waitForIdle();
+
+        const queueDepth = getFollowupQueueDepth(route.sessionKey);
+        const wasDelivered = queuedFinal || deliveredCount > 0;
+        const wasQueued = !wasDelivered && queueDepth > 0;
+
+        logger.info?.("[clawline] injected_run_end", {
+          messageId: inboundEvent.id,
+          sessionKey: target.sessionKey,
+          userId: target.userId,
+          deliveredCount,
+          queuedFinal,
+          queueDepth,
+          wasDelivered,
+          wasQueued,
+        });
+
+        return { queuedFinal, deliveredCount, queueDepth, wasDelivered, wasQueued };
+      });
+
+      res.setHeader("Content-Type", "application/json");
+      res.writeHead(200);
+      res.end(
+        JSON.stringify({
+          ok: true,
+          messageId: inboundEvent.id,
+          sessionKey: target.sessionKey,
+          ...result,
+        }),
+      );
+      logHttpRequest("form_inject_request_complete", {
+        sessionKey: target.sessionKey,
+        userId: target.userId,
+      });
+    } catch (err) {
+      if (err instanceof HttpError) {
+        logHttpRequest("form_inject_request_error", { status: err.status, code: err.code });
+        sendHttpError(res, err.status, err.code, err.message);
+      } else {
+        logger.error?.(`form_inject_request_failed: ${formatError(err)}`);
+        sendHttpError(res, 500, "server_error", "Internal error");
+      }
+    }
+  }
+
   async function parseAlertPayload(
     req: http.IncomingMessage,
   ): Promise<{ raw: string; message: string; source?: string; sessionKey?: string }> {
@@ -1826,10 +2331,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     if (!parsed || typeof parsed !== "object") {
       throw new HttpError(400, "invalid_request", "Alert payload must be an object");
     }
-    const message = typeof (parsed as any).message === "string" ? (parsed as any).message : "";
-    const source = typeof (parsed as any).source === "string" ? (parsed as any).source : undefined;
-    const sessionKey =
-      typeof (parsed as any).sessionKey === "string" ? (parsed as any).sessionKey : undefined;
+    const obj = parsed as Record<string, unknown>;
+    const message = typeof obj.message === "string" ? obj.message : "";
+    const source = typeof obj.source === "string" ? obj.source : undefined;
+    const sessionKey = typeof obj.sessionKey === "string" ? obj.sessionKey : undefined;
     if (!message.trim()) {
       throw new HttpError(400, "invalid_message", "Alert message is required");
     }
@@ -2174,8 +2679,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       const raw = await fs.readFile(alertInstructionsPath, "utf8");
       const trimmed = raw.trim();
       return trimmed.length > 0 ? trimmed : null;
-    } catch (err: any) {
-      if (err && err.code !== "ENOENT") {
+    } catch (err) {
+      const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+      if (code && code !== "ENOENT") {
         logger.warn?.(`alert_instructions_read_failed: ${formatError(err)}`);
       }
       return null;
@@ -2188,18 +2694,15 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
     try {
       await fs.access(alertInstructionsPath);
-    } catch (err: any) {
-      if (err && err.code !== "ENOENT") {
+    } catch (err) {
+      const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+      if (code && code !== "ENOENT") {
         logger.warn?.(`alert_instructions_access_failed: ${formatError(err)}`);
         return;
       }
       try {
         await ensureDir(path.dirname(alertInstructionsPath));
-        await fs.writeFile(
-          `${alertInstructionsPath}`,
-          `${DEFAULT_ALERT_INSTRUCTIONS_TEXT}\n`,
-          "utf8",
-        );
+        await fs.writeFile(alertInstructionsPath, `${DEFAULT_ALERT_INSTRUCTIONS_TEXT}\n`, "utf8");
         logger.info?.("alert_instructions_initialized", { alertInstructionsPath });
       } catch (writeErr) {
         logger.warn?.(`alert_instructions_write_failed: ${formatError(writeErr)}`);
@@ -2257,18 +2760,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       decisionReason,
       decisionAction,
     };
-  }
-
-  function isAlertSessionKeyAllowedForUser(
-    sessionKey: string,
-    userId: string,
-    agentId: string,
-  ): boolean {
-    const normalizedUserId = sanitizeUserId(userId).toLowerCase();
-    const normalizedSessionKey = sessionKey.trim().toLowerCase();
-    const personalKey = buildClawlinePersonalSessionKey(agentId, userId).toLowerCase();
-    const dmKey = `agent:${agentId}:clawline:dm:${normalizedUserId}`.toLowerCase();
-    return normalizedSessionKey === personalKey || normalizedSessionKey === dmKey;
   }
 
   async function wakeGatewayForAlert(text: string, sessionKey?: string) {
@@ -2413,6 +2904,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         terminalSessionId: string;
         tmuxSessionName: string;
         paneId: string;
+        // node-pty has no great runtime type here; treat as opaque.
+        // oxlint-disable-next-line typescript/no-explicit-any
         pty: any;
       };
   const terminalConnectionState = new WeakMap<WebSocket, TerminalConnectionState>();
@@ -2428,6 +2921,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const authRateLimiter = new SlidingWindowRateLimiter(config.auth.maxAttemptsPerMinute, 60_000);
   const messageRateLimiter = new SlidingWindowRateLimiter(
     config.sessions.maxMessagesPerSecond,
+    1_000,
+  );
+  const formInjectRateLimiter = new SlidingWindowRateLimiter(
+    Math.max(1, config.sessions.maxMessagesPerSecond),
     1_000,
   );
   let writeQueue: Promise<void> = Promise.resolve();
@@ -2857,8 +3354,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   async function safeUnlink(filePath: string) {
     try {
       await fs.unlink(filePath);
-    } catch (err: any) {
-      if (!err || err.code === "ENOENT") {
+    } catch (err) {
+      const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+      if (!err || code === "ENOENT") {
         return;
       }
       logger.warn?.(`file_unlink_failed: ${formatError(err)}`);
@@ -3129,34 +3627,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     });
   }
 
-  function broadcastToUser(userId: string, payload: ServerMessage) {
-    const sessions = userSessions.get(userId);
-    if (!sessions) {
-      return;
-    }
-    for (const session of sessions) {
-      sendPayloadToSession(session, payload);
-    }
-  }
-
-  function broadcastToAdmins(payload: ServerMessage) {
-    for (const session of sessionsByDevice.values()) {
-      if (!session.isAdmin) {
-        continue;
-      }
-      sendPayloadToSession(session, payload);
-    }
-  }
-
-  function deliverToDevice(deviceId: string, payload: ServerMessage): boolean {
-    const session = sessionsByDevice.get(deviceId);
-    if (!session) {
-      return false;
-    }
-    sendPayloadToSession(session, payload);
-    return true;
-  }
-
   function broadcastToSessionKey(sessionKey: string, payload: ServerMessage) {
     if (!payload.sessionKey) {
       payload.sessionKey = sessionKey;
@@ -3201,8 +3671,14 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             sessionKey,
           ) as { event: ServerMessage; sequence: number },
       );
-    } catch (err: any) {
-      if (err && typeof err.message === "string" && err.message.includes("FOREIGN KEY")) {
+    } catch (err) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : err && typeof err === "object"
+            ? (err as { message?: unknown }).message
+            : undefined;
+      if (typeof message === "string" && message.includes("FOREIGN KEY")) {
         throw new ClientMessageError("asset_not_found", "Asset not found");
       }
       throw err;
@@ -3405,6 +3881,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     });
   }
 
+  // Clawline WS payloads are runtime-validated; keep `any` here to avoid a huge type layer.
+  // oxlint-disable-next-line typescript/no-explicit-any
   async function processClientMessage(session: Session, payload: any) {
     try {
       if (payload.type !== "message") {
@@ -3801,7 +4279,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     const socketTtlMs =
       Math.max(1, config.pairing.pendingSocketTimeoutSeconds ?? config.pairing.pendingTtlSeconds) *
       1000;
-    const entryTtlMs = Math.max(1, config.pairing.pendingTtlSeconds) * 1000;
     for (const [deviceId, pending] of pendingSockets) {
       if (now - pending.createdAt >= socketTtlMs) {
         pendingSockets.delete(deviceId);
@@ -3835,10 +4312,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       }
     }
     connectionState.delete(socket);
-  }
-
-  function hasAdmin(): boolean {
-    return allowlist.entries.some((entry) => entry.isAdmin);
   }
 
   function validateDeviceId(value: unknown): value is string {
@@ -3940,6 +4413,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       logger.info?.("[clawline:http] ws_message_received", {
         bytes: Buffer.byteLength(rawString, "utf8"),
       });
+      // oxlint-disable-next-line typescript/no-explicit-any
       let payload: any;
       try {
         payload = JSON.parse(rawString);
@@ -4014,6 +4488,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         return;
       }
       const rawString = rawDataToString(raw);
+      // oxlint-disable-next-line typescript/no-explicit-any
       let payload: any;
       try {
         payload = JSON.parse(rawString);
@@ -4032,12 +4507,19 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
 
     if (isBinary) {
-      const buf = Buffer.isBuffer(raw) ? raw : Buffer.from(raw as any);
+      const buf = Buffer.isBuffer(raw)
+        ? raw
+        : raw instanceof ArrayBuffer
+          ? Buffer.from(raw)
+          : Array.isArray(raw)
+            ? Buffer.concat(raw)
+            : Buffer.from(String(raw));
       state.pty.write(buf.toString("utf8"));
       return;
     }
 
     const rawString = rawDataToString(raw);
+    // oxlint-disable-next-line typescript/no-explicit-any
     let payload: any;
     try {
       payload = JSON.parse(rawString);
@@ -4087,6 +4569,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
   }
 
+  // oxlint-disable-next-line typescript/no-explicit-any
   async function handleTerminalAuth(ws: WebSocket, payload: any) {
     if (payload.protocolVersion !== PROTOCOL_VERSION) {
       await sendJson(ws, { type: "terminal_error", message: "Unsupported protocol" });
@@ -4301,6 +4784,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
   }
 
+  // oxlint-disable-next-line typescript/no-explicit-any
   async function handlePairRequest(ws: WebSocket, payload: any) {
     logger.info?.("[clawline:http] pair_request_start", {
       deviceId: payload?.deviceId,
@@ -4504,6 +4988,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     );
   }
 
+  // oxlint-disable-next-line typescript/no-explicit-any
   async function handleAuth(ws: WebSocket, payload: any) {
     if (payload.protocolVersion !== PROTOCOL_VERSION) {
       await sendJson(ws, {
@@ -4621,6 +5106,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
   }
 
+  // oxlint-disable-next-line typescript/no-explicit-any
   async function handleAuthedMessage(ws: WebSocket, payload: any) {
     const state = connectionState.get(ws);
     if (!state || !state.authenticated || !state.deviceId || !state.userId) {

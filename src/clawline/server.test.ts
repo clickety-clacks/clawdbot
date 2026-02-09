@@ -63,10 +63,13 @@ const decodeRawData = (data: WebSocket.RawData): string => {
 };
 
 function createMessageQueue(ws: WebSocket) {
+  // oxlint-disable-next-line typescript/no-explicit-any
   const queued: any[] = [];
+  // oxlint-disable-next-line typescript/no-explicit-any
   const waiters: Array<(value: any) => void> = [];
 
   const onMessage = (data: WebSocket.RawData) => {
+    // oxlint-disable-next-line typescript/no-explicit-any
     let parsed: any;
     try {
       parsed = JSON.parse(decodeRawData(data));
@@ -87,7 +90,7 @@ function createMessageQueue(ws: WebSocket) {
     next: () =>
       queued.length > 0
         ? Promise.resolve(queued.shift())
-        : new Promise<any>((resolve) => waiters.push(resolve)),
+        : new Promise((resolve) => waiters.push(resolve)),
     dispose: () => ws.off("message", onMessage),
   };
 }
@@ -261,6 +264,7 @@ function waitForOpen(ws: WebSocket): Promise<void> {
   });
 }
 
+// oxlint-disable-next-line typescript/no-explicit-any
 function waitForMessage(ws: WebSocket): Promise<any> {
   return new Promise((resolve, reject) => {
     let resolved = false;
@@ -357,7 +361,7 @@ async function authenticateDevice(port: number, deviceId: string, token: string)
       `Auth failed for ${deviceId}: ${typeof auth === "object" ? JSON.stringify(auth) : auth}`,
     );
   }
-  let sessionInfo: any | null = null;
+  let sessionInfo: unknown = null;
   if (Array.isArray(auth.features) && auth.features.includes("session_info")) {
     const next = await queue.next();
     if (next?.type !== "session_info") {
@@ -544,6 +548,7 @@ describe.sequential("clawline provider server", () => {
         userPair.token as string,
       );
 
+      // oxlint-disable-next-line typescript/no-explicit-any
       const received: any[] = [];
       const listener = (data: WebSocket.RawData) => {
         received.push(JSON.parse(decodeRawData(data)));
@@ -624,6 +629,7 @@ describe.sequential("clawline provider server", () => {
         userPair.token as string,
       );
 
+      // oxlint-disable-next-line typescript/no-explicit-any
       const received: any[] = [];
       const listener = (data: WebSocket.RawData) => {
         received.push(JSON.parse(decodeRawData(data)));
@@ -771,6 +777,131 @@ describe.sequential("clawline provider server", () => {
       expect(call?.item?.prompt).toBe("System Alert: [codex] Check on Flynn");
       expect(call?.item?.origin).toEqual({ channel: "clawline", to: "agent:main:main" });
     } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("returns 404 when form inject endpoint is not configured", async () => {
+    const prevToken = process.env.CLAWLINE_FORM_POST_TOKEN;
+    delete process.env.CLAWLINE_FORM_POST_TOKEN;
+    const entry = createAllowlistEntry();
+    const ctx = await setupTestServer([entry]);
+    try {
+      const response = await fetch(`http://127.0.0.1:${ctx.port}/inject`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer test" },
+        body: JSON.stringify({ message: "hi", sessionKey: "agent:main:clawline:flynn:main" }),
+      });
+      expect(response.status).toBe(404);
+    } finally {
+      if (prevToken !== undefined) {
+        process.env.CLAWLINE_FORM_POST_TOKEN = prevToken;
+      } else {
+        delete process.env.CLAWLINE_FORM_POST_TOKEN;
+      }
+      await ctx.cleanup();
+    }
+  });
+
+  it("injects form POST messages into an existing session (json)", async () => {
+    const prevToken = process.env.CLAWLINE_FORM_POST_TOKEN;
+    process.env.CLAWLINE_FORM_POST_TOKEN = "test-form-token";
+    const entry = createAllowlistEntry({ isAdmin: false });
+    const ctx = await setupTestServer([entry]);
+    try {
+      const pair = await performPairRequest(ctx.port, entry.deviceId);
+      const { ws } = await authenticateDevice(ctx.port, entry.deviceId, pair.token as string);
+      const queue = createMessageQueue(ws);
+      const response = await fetch(`http://127.0.0.1:${ctx.port}/inject`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer test-form-token",
+        },
+        body: JSON.stringify({
+          message: "hello from form",
+          sessionKey: "agent:main:clawline:flynn:main",
+        }),
+      });
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        ok?: boolean;
+        sessionKey?: string;
+        messageId?: string;
+      };
+      expect(body.ok).toBe(true);
+      expect(body.sessionKey).toBe("agent:main:clawline:flynn:main");
+      expect(typeof body.messageId).toBe("string");
+
+      const injected = await queue.next();
+      expect(injected).toMatchObject({
+        type: "message",
+        role: "user",
+        content: "hello from form",
+        sessionKey: "agent:main:clawline:flynn:main",
+      });
+      const assistant = await queue.next();
+      expect(assistant).toMatchObject({
+        type: "message",
+        role: "assistant",
+        content: "ok",
+        sessionKey: "agent:main:clawline:flynn:main",
+      });
+      queue.dispose();
+      ws.terminate();
+    } finally {
+      if (prevToken !== undefined) {
+        process.env.CLAWLINE_FORM_POST_TOKEN = prevToken;
+      } else {
+        delete process.env.CLAWLINE_FORM_POST_TOKEN;
+      }
+      await ctx.cleanup();
+    }
+  });
+
+  it("injects form POST messages into an existing session (urlencoded)", async () => {
+    const prevToken = process.env.CLAWLINE_FORM_POST_TOKEN;
+    process.env.CLAWLINE_FORM_POST_TOKEN = "test-form-token";
+    const entry = createAllowlistEntry({ isAdmin: false });
+    const ctx = await setupTestServer([entry]);
+    try {
+      const pair = await performPairRequest(ctx.port, entry.deviceId);
+      const { ws } = await authenticateDevice(ctx.port, entry.deviceId, pair.token as string);
+      const queue = createMessageQueue(ws);
+      const response = await fetch(`http://127.0.0.1:${ctx.port}/inject`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          Authorization: "Bearer test-form-token",
+        },
+        body: new URLSearchParams({
+          message: "hello from urlencoded",
+          sessionKey: "agent:main:clawline:flynn:main",
+        }).toString(),
+      });
+      expect(response.status).toBe(200);
+      const injected = await queue.next();
+      expect(injected).toMatchObject({
+        type: "message",
+        role: "user",
+        content: "hello from urlencoded",
+        sessionKey: "agent:main:clawline:flynn:main",
+      });
+      const assistant = await queue.next();
+      expect(assistant).toMatchObject({
+        type: "message",
+        role: "assistant",
+        content: "ok",
+        sessionKey: "agent:main:clawline:flynn:main",
+      });
+      queue.dispose();
+      ws.terminate();
+    } finally {
+      if (prevToken !== undefined) {
+        process.env.CLAWLINE_FORM_POST_TOKEN = prevToken;
+      } else {
+        delete process.env.CLAWLINE_FORM_POST_TOKEN;
+      }
       await ctx.cleanup();
     }
   });
