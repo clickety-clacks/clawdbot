@@ -74,6 +74,13 @@ const StreamsSchema = z
   .strict()
   .optional();
 
+const WebRootSchema = z
+  .object({
+    followSymlinks: z.boolean().optional(),
+  })
+  .strict()
+  .optional();
+
 export const ClawlineConfigSchema = z
   .object({
     enabled: z.boolean().optional(),
@@ -81,6 +88,7 @@ export const ClawlineConfigSchema = z
     statePath: z.string().optional(),
     alertInstructionsPath: z.string().nullable().optional(),
     webRootPath: z.string().optional(),
+    webRoot: WebRootSchema,
     network: NetworkSchema,
     adapter: AdapterSchema,
     auth: AuthSchema,

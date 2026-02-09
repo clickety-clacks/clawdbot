@@ -101,6 +101,13 @@ export interface ProviderConfig {
     unreferencedUploadTtlSeconds: number;
   };
   webRootPath: string;
+  webRoot: {
+    /**
+     * When enabled, allow webroot paths that resolve (via symlinks) outside the webroot.
+     * Dotfiles and traversal remain blocked at the request level.
+     */
+    followSymlinks: boolean;
+  };
   sessions: {
     maxMessageBytes: number;
     maxReplayMessages: number;
