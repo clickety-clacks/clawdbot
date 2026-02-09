@@ -19,12 +19,15 @@ export type ResolvedClawlineConfig = ProviderConfig & {
   adapterOverrides: ClawlineAdapterOverrides;
 };
 
-type ProviderConfigBase = Omit<ProviderConfig, "adapter">;
+type ProviderConfigBase = Omit<ProviderConfig, "adapter" | "webRoot">;
 
 export type ClawlineConfigInput = {
   enabled?: boolean;
   adapter?: ClawlineAdapterOverrides;
   webRootPath?: string;
+  webRoot?: {
+    followSymlinks?: boolean;
+  };
 } & Partial<ProviderConfigBase>;
 
 const defaultStatePath = path.join(os.homedir(), ".openclaw", "clawline");
@@ -97,6 +100,9 @@ const DEFAULTS: ResolvedClawlineConfig = {
     unreferencedUploadTtlSeconds: 3600,
   },
   webRootPath: path.join(DEFAULT_AGENT_WORKSPACE_DIR, "www"),
+  webRoot: {
+    followSymlinks: false,
+  },
   sessions: {
     maxMessageBytes: 65_536,
     maxReplayMessages: 500,

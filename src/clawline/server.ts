@@ -685,6 +685,9 @@ const DEFAULT_CONFIG: ProviderConfig = {
     unreferencedUploadTtlSeconds: 3600,
   },
   webRootPath: path.join(DEFAULT_AGENT_WORKSPACE_DIR, "www"),
+  webRoot: {
+    followSymlinks: false,
+  },
   sessions: {
     maxMessageBytes: 65_536,
     maxReplayMessages: 500,
@@ -1749,7 +1752,17 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       sendHttpError(res, 500, "server_error", "Failed to read static file");
       return;
     }
-    if (finalRealPath !== webRootRealPath && !finalRealPath.startsWith(webRootRealPrefix)) {
+    if (config.webRoot.followSymlinks) {
+      // Keep "no dotfiles" invariant even if the webroot path is a symlink to hidden paths.
+      const hasDotSegment = finalRealPath
+        .split(path.sep)
+        .some((segment) => segment.length > 0 && segment.startsWith("."));
+      if (hasDotSegment) {
+        sendHttpError(res, 404, "not_found", "File not found");
+        return;
+      }
+    } else if (finalRealPath !== webRootRealPath && !finalRealPath.startsWith(webRootRealPrefix)) {
+      // Default behavior: block symlink escapes (realpath follows symlinks).
       sendHttpError(res, 404, "not_found", "File not found");
       return;
     }

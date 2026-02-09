@@ -161,7 +161,7 @@ const createAuthHeader = async (ctx: TestServerContext, entry: AllowlistEntry): 
 
 async function setupTestServer(
   initialAllowlist: AllowlistEntry[] = [],
-  options: { alertInstructionsText?: string | null } = {},
+  options: { alertInstructionsText?: string | null; webRootFollowSymlinks?: boolean } = {},
 ): Promise<TestServerContext> {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "clawline-server-test-"));
   const statePath = path.join(root, "state");
@@ -198,6 +198,7 @@ async function setupTestServer(
       media: { storagePath: mediaPath },
       alertInstructionsPath,
       webRootPath,
+      webRoot: { followSymlinks: options.webRootFollowSymlinks === true },
     },
     openClawConfig: testOpenClawConfig,
     replyResolver: testReplyResolver,
@@ -976,6 +977,31 @@ describe.sequential("clawline provider server", () => {
         const symlinkResponse = await fetch(`http://127.0.0.1:${ctx.port}/www/leak`);
         expect(symlinkResponse.status).toBe(404);
       }
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("/www follows symlinks outside webroot when enabled (still blocks dotfiles)", async () => {
+    if (process.platform === "win32") {
+      return;
+    }
+    const ctx = await setupTestServer([], { webRootFollowSymlinks: true });
+    try {
+      const outsideFile = path.join(path.dirname(ctx.webRootPath), "outside.txt");
+      await fs.writeFile(outsideFile, "leak");
+      const linkPath = path.join(ctx.webRootPath, "leak");
+      await fs.symlink(outsideFile, linkPath);
+      const response = await fetch(`http://127.0.0.1:${ctx.port}/www/leak`);
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe("leak");
+
+      const outsideDotfile = path.join(path.dirname(ctx.webRootPath), ".dotsecret");
+      await fs.writeFile(outsideDotfile, "hidden");
+      const dotLinkPath = path.join(ctx.webRootPath, "dotsecret");
+      await fs.symlink(outsideDotfile, dotLinkPath);
+      const dotResponse = await fetch(`http://127.0.0.1:${ctx.port}/www/dotsecret`);
+      expect(dotResponse.status).toBe(404);
     } finally {
       await ctx.cleanup();
     }
