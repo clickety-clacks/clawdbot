@@ -7,6 +7,7 @@ import type {
   ChannelThreadingToolContext,
 } from "../../channels/plugins/types.js";
 import type { OpenClawConfig } from "../../config/config.js";
+import type { SsrFPolicy } from "../net/ssrf.js";
 import type { OutboundSendDeps } from "./deliver.js";
 import type { MessagePollResult, MessageSendResult } from "./message.js";
 import { resolveSessionAgentId } from "../../agents/agent-scope.js";
@@ -355,6 +356,51 @@ function normalizeBase64Payload(params: { base64?: string; contentType?: string 
   };
 }
 
+function readBase64BufferParam(
+  args: Record<string, unknown>,
+  key: string,
+): { raw?: string; normalized?: string } {
+  const value = args[key];
+  if (typeof value === "string") {
+    return { raw: value };
+  }
+  if (value instanceof ArrayBuffer) {
+    return { normalized: Buffer.from(value).toString("base64") };
+  }
+  if (ArrayBuffer.isView(value)) {
+    return {
+      normalized: Buffer.from(value.buffer, value.byteOffset, value.byteLength).toString("base64"),
+    };
+  }
+  if (value && typeof value === "object") {
+    const rec = value as { type?: unknown; data?: unknown };
+    if (rec.type === "Buffer" && Array.isArray(rec.data)) {
+      return { normalized: Buffer.from(rec.data).toString("base64") };
+    }
+  }
+  return {};
+}
+
+function resolveLocalMediaSsrPolicy(mediaSource?: string | null): SsrFPolicy | undefined {
+  if (!mediaSource) {
+    return undefined;
+  }
+  const trimmed = mediaSource.trim();
+  if (!trimmed || !/^https?:\/\//i.test(trimmed)) {
+    return undefined;
+  }
+  try {
+    const url = new URL(trimmed);
+    const hostname = url.hostname.toLowerCase();
+    if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1") {
+      return { allowedHostnames: [hostname] };
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
 async function normalizeSandboxMediaParams(params: {
   args: Record<string, unknown>;
   sandboxRoot?: string;
@@ -421,12 +467,19 @@ async function hydrateSetGroupIconParams(params: {
   const contentTypeParam =
     readStringParam(params.args, "contentType") ?? readStringParam(params.args, "mimeType");
 
-  const rawBuffer = readStringParam(params.args, "buffer", { trim: false });
+  const { raw: rawBuffer, normalized: normalizedBuffer } = readBase64BufferParam(
+    params.args,
+    "buffer",
+  );
+  const rawBufferValue = rawBuffer ?? normalizedBuffer;
+  if (!rawBuffer && normalizedBuffer) {
+    params.args.buffer = normalizedBuffer;
+  }
   const normalized = normalizeBase64Payload({
-    base64: rawBuffer,
+    base64: rawBufferValue,
     contentType: contentTypeParam ?? undefined,
   });
-  if (normalized.base64 !== rawBuffer && normalized.base64) {
+  if (normalized.base64 !== rawBufferValue && normalized.base64) {
     params.args.buffer = normalized.base64;
     if (normalized.contentType && !contentTypeParam) {
       params.args.contentType = normalized.contentType;
@@ -436,13 +489,15 @@ async function hydrateSetGroupIconParams(params: {
   const filename = readStringParam(params.args, "filename");
   const mediaSource = mediaHint ?? fileHint;
 
-  if (!params.dryRun && !readStringParam(params.args, "buffer", { trim: false }) && mediaSource) {
+  if (!params.dryRun && !rawBufferValue && mediaSource) {
     const maxBytes = resolveAttachmentMaxBytes({
       cfg: params.cfg,
       channel: params.channel,
       accountId: params.accountId,
     });
-    const media = await loadWebMedia(mediaSource, maxBytes);
+    const media = await loadWebMedia(mediaSource, maxBytes, {
+      ssrfPolicy: resolveLocalMediaSsrPolicy(mediaSource),
+    });
     params.args.buffer = media.buffer.toString("base64");
     if (!contentTypeParam && media.contentType) {
       params.args.contentType = media.contentType;
@@ -485,12 +540,19 @@ async function hydrateSendAttachmentParams(params: {
     params.args.caption = message;
   }
 
-  const rawBuffer = readStringParam(params.args, "buffer", { trim: false });
+  const { raw: rawBuffer, normalized: normalizedBuffer } = readBase64BufferParam(
+    params.args,
+    "buffer",
+  );
+  const rawBufferValue = rawBuffer ?? normalizedBuffer;
+  if (!rawBuffer && normalizedBuffer) {
+    params.args.buffer = normalizedBuffer;
+  }
   const normalized = normalizeBase64Payload({
-    base64: rawBuffer,
+    base64: rawBufferValue,
     contentType: contentTypeParam ?? undefined,
   });
-  if (normalized.base64 !== rawBuffer && normalized.base64) {
+  if (normalized.base64 !== rawBufferValue && normalized.base64) {
     params.args.buffer = normalized.base64;
     if (normalized.contentType && !contentTypeParam) {
       params.args.contentType = normalized.contentType;
@@ -500,13 +562,15 @@ async function hydrateSendAttachmentParams(params: {
   const filename = readStringParam(params.args, "filename");
   const mediaSource = mediaHint ?? fileHint;
 
-  if (!params.dryRun && !readStringParam(params.args, "buffer", { trim: false }) && mediaSource) {
+  if (!params.dryRun && !rawBufferValue && mediaSource) {
     const maxBytes = resolveAttachmentMaxBytes({
       cfg: params.cfg,
       channel: params.channel,
       accountId: params.accountId,
     });
-    const media = await loadWebMedia(mediaSource, maxBytes);
+    const media = await loadWebMedia(mediaSource, maxBytes, {
+      ssrfPolicy: resolveLocalMediaSsrPolicy(mediaSource),
+    });
     params.args.buffer = media.buffer.toString("base64");
     if (!contentTypeParam && media.contentType) {
       params.args.contentType = media.contentType;
