@@ -126,12 +126,6 @@ public actor GatewayChannelActor {
     private var password: String?
     private let session: WebSocketSessioning
     private var backoffMs: Double = 500
-    // When the gateway rejects auth/pairing during the connect handshake (e.g. close code 1008),
-    // callers can end up spamming connect() in tight loops (health checks, status polling, etc.).
-    // Apply a separate exponential backoff specifically for auth-rejection failures so we back off
-    // instead of hammering the gateway with doomed connection attempts.
-    private var authRejectBackoffMs: Double = 5_000
-    private var authRejectNextConnectAt: Date?
     private var shouldReconnect = true
     private var lastSeq: Int?
     private var lastTick: Date?
@@ -233,8 +227,6 @@ public actor GatewayChannelActor {
         self.isConnecting = true
         defer { self.isConnecting = false }
 
-        await self.waitForAuthRejectBackoffIfNeeded()
-
         self.task?.cancel(with: .goingAway, reason: nil)
         self.task = self.session.makeWebSocketTask(url: self.url)
         self.task?.resume()
@@ -252,9 +244,6 @@ public actor GatewayChannelActor {
             let wrapped = self.wrap(error, context: "connect to gateway @ \(self.url.absoluteString)")
             self.connected = false
             self.task?.cancel(with: .goingAway, reason: nil)
-            if self.isAuthRejectionError(wrapped) {
-                await self.bumpAuthRejectBackoff(reason: wrapped.localizedDescription)
-            }
             await self.disconnectHandler?("connect failed: \(wrapped.localizedDescription)")
             let waiters = self.connectWaiters
             self.connectWaiters.removeAll()
@@ -267,8 +256,6 @@ public actor GatewayChannelActor {
         self.listen()
         self.connected = true
         self.backoffMs = 500
-        self.authRejectBackoffMs = 5_000
-        self.authRejectNextConnectAt = nil
         self.lastSeq = nil
 
         let waiters = self.connectWaiters
@@ -603,50 +590,6 @@ public actor GatewayChannelActor {
             self.logger.error("gateway reconnect failed \(wrapped.localizedDescription, privacy: .public)")
             await self.scheduleReconnect()
         }
-    }
-
-    private func waitForAuthRejectBackoffIfNeeded() async {
-        guard let next = self.authRejectNextConnectAt else { return }
-        let now = Date()
-        guard now < next else {
-            self.authRejectNextConnectAt = nil
-            return
-        }
-        let remaining = next.timeIntervalSince(now)
-        guard remaining > 0 else {
-            self.authRejectNextConnectAt = nil
-            return
-        }
-        // Best-effort: if cancelled, just fall through to connect attempt.
-        try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
-    }
-
-    private func bumpAuthRejectBackoff(reason: String) async {
-        let delaySeconds = self.authRejectBackoffMs / 1000
-        let maxMs: Double = 5 * 60 * 1000 // 5 minutes
-        self.authRejectNextConnectAt = Date().addingTimeInterval(delaySeconds)
-        self.authRejectBackoffMs = min(self.authRejectBackoffMs * 2, maxMs)
-        self.logger.warning(
-            "gateway connect rejected (auth/pairing); backing off \(delaySeconds, privacy: .public)s reason=\(reason, privacy: .public)")
-    }
-
-    private func isAuthRejectionError(_ error: Error) -> Bool {
-        if let urlError = error as? URLError, urlError.code == .dataNotAllowed {
-            return true
-        }
-        let ns = error as NSError
-        if ns.domain == URLError.errorDomain,
-           URLError.Code(rawValue: ns.code) == .dataNotAllowed
-        {
-            return true
-        }
-        if ns.domain == "Gateway", ns.code == 1008 { return true }
-
-        let msg = ns.localizedDescription.lowercased()
-        if msg.contains("pairing required") { return true }
-        if msg.contains("invalid connect params") { return true }
-        if msg.contains("unauthorized") { return true }
-        return false
     }
 
     public func request(
