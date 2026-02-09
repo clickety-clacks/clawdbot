@@ -2073,7 +2073,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     attachments?: NormalizedAttachment[];
   }): Promise<ServerMessage> {
     const filteredAttachments = params.attachments
-      ? filterOutboundAttachmentsForTerminalPolicy({
+      ? await filterOutboundAttachmentsForTerminalPolicy({
           attachments: params.attachments,
           ownerUserId: params.targetUserId,
           sessionKey: params.sessionKey,
@@ -2969,11 +2969,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   });
   denylistWatcher.on("error", (err) => logger.warn?.(`denylist_watch_failed: ${formatError(err)}`));
 
-  function filterOutboundAttachmentsForTerminalPolicy(params: {
+  async function filterOutboundAttachmentsForTerminalPolicy(params: {
     attachments: NormalizedAttachment[];
     ownerUserId: string;
     sessionKey: string;
-  }): NormalizedAttachment[] {
+  }): Promise<NormalizedAttachment[]> {
     if (params.attachments.length === 0) {
       return params.attachments;
     }
@@ -3011,6 +3011,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           lastSeenAt: now,
           tmuxSessionName: descriptor.terminalSessionId,
         });
+        const ensured = await ensureTmuxSessionExists(descriptor.terminalSessionId);
+        if (!ensured) {
+          throw new Error(
+            "Failed to start terminal session (tmux). Check provider terminal.tmux configuration.",
+          );
+        }
         filtered.push(attachment);
         continue;
       }
@@ -3694,7 +3700,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   ): Promise<ServerMessage> {
     const timestamp = nowMs();
     const filteredAttachments = attachments
-      ? filterOutboundAttachmentsForTerminalPolicy({
+      ? await filterOutboundAttachmentsForTerminalPolicy({
           attachments,
           ownerUserId: targetUserId,
           sessionKey,
@@ -3806,7 +3812,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       });
     }
 
-    outboundAttachments.attachments = filterOutboundAttachmentsForTerminalPolicy({
+    outboundAttachments.attachments = await filterOutboundAttachmentsForTerminalPolicy({
       attachments: outboundAttachments.attachments,
       ownerUserId: target.userId,
       sessionKey: resolvedSessionKey,
@@ -4668,7 +4674,15 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         ? Math.max(0, Math.floor(payload.backfillLines))
         : 0;
 
-    const paneId = await resolveTmuxPaneId(record.tmuxSessionName);
+    let paneId = await resolveTmuxPaneId(record.tmuxSessionName);
+    if (!paneId) {
+      // If the session was referenced by a bubble but the tmux session hasn't been created yet,
+      // create it on-demand so auth succeeds.
+      const ensured = await ensureTmuxSessionExists(record.tmuxSessionName);
+      if (ensured) {
+        paneId = await resolveTmuxPaneId(record.tmuxSessionName);
+      }
+    }
     if (!paneId) {
       await sendJson(ws, { type: "terminal_error", message: "Terminal session is not running" });
       ws.close();
@@ -4759,6 +4773,37 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       return Buffer.from(String(stdout), "utf8");
     } catch {
       return Buffer.alloc(0);
+    }
+  }
+
+  async function ensureTmuxSessionExists(tmuxSessionName: string): Promise<boolean> {
+    const name = typeof tmuxSessionName === "string" ? tmuxSessionName.trim() : "";
+    if (!name) {
+      return false;
+    }
+
+    try {
+      await tmuxBackend.execTmux(["has-session", "-t", name], {
+        timeout: 2_000,
+        maxBuffer: 1024 * 1024,
+      });
+      return true;
+    } catch {
+      // fall through
+    }
+
+    try {
+      await tmuxBackend.execTmux(["new-session", "-d", "-s", name], {
+        timeout: 5_000,
+        maxBuffer: 1024 * 1024,
+      });
+      return true;
+    } catch (err) {
+      logger.warn?.("[clawline:terminal] tmux_new_session_failed", {
+        sessionName: name,
+        error: formatError(err),
+      });
+      return false;
     }
   }
 
