@@ -1,5 +1,4 @@
 import type { ImageContent } from "@mariozechner/pi-ai";
-
 import type { NormalizedAttachment } from "./domain.js";
 
 export function clawlineAttachmentsToImages(attachments: NormalizedAttachment[]): ImageContent[] {

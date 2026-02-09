@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-
 import { clawlinePlugin } from "./channel.js";
 
 describe("clawline plugin", () => {

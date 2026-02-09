@@ -1,5 +1,6 @@
 export function deepMerge<T>(target: T, source: Partial<T>): T {
-  for (const [rawKey, value] of Object.entries(source ?? {}) as [keyof T, any][]) {
+  const targetObj = target as unknown as Record<string, unknown>;
+  for (const [rawKey, value] of Object.entries(source ?? {})) {
     if (rawKey === "__proto__" || rawKey === "constructor" || rawKey === "prototype") {
       continue;
     }
@@ -7,16 +8,13 @@ export function deepMerge<T>(target: T, source: Partial<T>): T {
       value &&
       typeof value === "object" &&
       !Array.isArray(value) &&
-      typeof (target as any)[rawKey] === "object" &&
-      (target as any)[rawKey] !== null &&
-      !Array.isArray((target as any)[rawKey])
+      typeof targetObj[rawKey] === "object" &&
+      targetObj[rawKey] !== null &&
+      !Array.isArray(targetObj[rawKey])
     ) {
-      (target as any)[rawKey] = deepMerge(
-        { ...(target as any)[rawKey] } as Record<string, unknown>,
-        value,
-      );
+      targetObj[rawKey] = deepMerge({ ...(targetObj[rawKey] as Record<string, unknown>) }, value);
     } else if (value !== undefined) {
-      (target as any)[rawKey] = value;
+      targetObj[rawKey] = value as unknown;
     }
   }
   return target;
