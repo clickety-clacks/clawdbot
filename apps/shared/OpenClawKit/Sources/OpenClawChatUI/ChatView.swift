@@ -246,8 +246,12 @@ public struct OpenClawChatView: View {
     }
 
 #if canImport(UIKit)
-    private var resignActivePublisher: NotificationCenter.Publisher {
-        NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)
+    private var resignActivePublisher: AnyPublisher<Notification, Never> {
+        Publishers.Merge(
+            NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification),
+            NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)
+        )
+        .eraseToAnyPublisher()
     }
 #elseif canImport(AppKit)
     private var resignActivePublisher: NotificationCenter.Publisher {
