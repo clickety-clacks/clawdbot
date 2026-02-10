@@ -1753,11 +1753,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       return;
     }
     if (config.webRoot.followSymlinks) {
-      // Keep "no dotfiles" invariant even if the webroot path is a symlink to hidden paths.
-      const hasDotSegment = finalRealPath
-        .split(path.sep)
-        .some((segment) => segment.length > 0 && segment.startsWith("."));
-      if (hasDotSegment) {
+      // Keep "no dotfiles" invariant even if a symlink points at a dotfile. Do not reject
+      // dot-directories in the real path because webRootPath is configurable and may live under
+      // paths like ~/.openclaw/...
+      if (path.basename(finalRealPath).startsWith(".")) {
         sendHttpError(res, 404, "not_found", "File not found");
         return;
       }
