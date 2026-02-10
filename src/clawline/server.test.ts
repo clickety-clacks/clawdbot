@@ -161,14 +161,22 @@ const createAuthHeader = async (ctx: TestServerContext, entry: AllowlistEntry): 
 
 async function setupTestServer(
   initialAllowlist: AllowlistEntry[] = [],
-  options: { alertInstructionsText?: string | null; webRootFollowSymlinks?: boolean } = {},
+  options: {
+    alertInstructionsText?: string | null;
+    webRootFollowSymlinks?: boolean;
+    webRootPathRelative?: string;
+  } = {},
 ): Promise<TestServerContext> {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "clawline-server-test-"));
   const statePath = path.join(root, "state");
   const mediaPath = path.join(root, "media");
   await fs.mkdir(statePath, { recursive: true });
   await fs.mkdir(mediaPath, { recursive: true });
-  const webRootPath = path.join(root, "www");
+  const webRootPathRelative = options.webRootPathRelative ?? "www";
+  if (path.isAbsolute(webRootPathRelative)) {
+    throw new Error("setupTestServer: webRootPathRelative must be relative");
+  }
+  const webRootPath = path.join(root, webRootPathRelative);
   await fs.mkdir(webRootPath, { recursive: true });
   await fs.mkdir(path.join(webRootPath, "media"), { recursive: true });
   await fs.writeFile(path.join(webRootPath, "index.html"), "<html><body>root index</body></html>");
@@ -1002,6 +1010,31 @@ describe.sequential("clawline provider server", () => {
       await fs.symlink(outsideDotfile, dotLinkPath);
       const dotResponse = await fetch(`http://127.0.0.1:${ctx.port}/www/dotsecret`);
       expect(dotResponse.status).toBe(404);
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("/www serves from a dot-directory webRootPath (followSymlinks=false)", async () => {
+    const ctx = await setupTestServer([], { webRootPathRelative: ".openclaw/workspace/www" });
+    try {
+      const response = await fetch(`http://127.0.0.1:${ctx.port}/www/index.html`);
+      expect(response.status).toBe(200);
+      expect(await response.text()).toContain("root index");
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("/www serves from a dot-directory webRootPath (followSymlinks=true)", async () => {
+    const ctx = await setupTestServer([], {
+      webRootFollowSymlinks: true,
+      webRootPathRelative: ".openclaw/workspace/www",
+    });
+    try {
+      const response = await fetch(`http://127.0.0.1:${ctx.port}/www/index.html`);
+      expect(response.status).toBe(200);
+      expect(await response.text()).toContain("root index");
     } finally {
       await ctx.cleanup();
     }
