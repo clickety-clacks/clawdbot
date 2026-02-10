@@ -1,5 +1,12 @@
 import SwiftUI
 
+import Combine
+#if canImport(AppKit)
+import AppKit
+#elseif canImport(UIKit)
+import UIKit
+#endif
+
 @MainActor
 public struct OpenClawChatView: View {
     public enum Style {
@@ -14,6 +21,7 @@ public struct OpenClawChatView: View {
     @State private var hasPerformedInitialScroll = false
     @State private var isPinnedToBottom = true
     @State private var lastUserMessageID: UUID?
+    @State private var scrollStateSaveTask: Task<Void, Never>?
     private let showsSessionSwitcher: Bool
     private let style: Style
     private let markdownVariant: ChatMarkdownVariant
@@ -109,7 +117,19 @@ public struct OpenClawChatView: View {
             .scrollPosition(id: self.$scrollPosition, anchor: .bottom)
             .onChange(of: self.scrollPosition) { _, position in
                 guard let position else { return }
-                self.isPinnedToBottom = position == self.scrollerBottomID
+                let oldPinned = self.isPinnedToBottom
+                let newPinned = position == self.scrollerBottomID
+                self.isPinnedToBottom = newPinned
+
+                guard self.style == .standard,
+                      self.hasPerformedInitialScroll,
+                      !self.viewModel.isLoading
+                else { return }
+
+                // Avoid spamming writes while pinned; save when the user scrolls up or transitions back to bottom.
+                if !newPinned || (oldPinned != newPinned) {
+                    self.persistScrollStateDebounced()
+                }
             }
 
             if self.viewModel.isLoading {
@@ -123,15 +143,21 @@ public struct OpenClawChatView: View {
         // Ensure the message list claims vertical space on the first layout pass.
         .frame(maxHeight: .infinity, alignment: .top)
         .layoutPriority(1)
+        #if canImport(UIKit) || canImport(AppKit)
+        .onReceive(self.resignActivePublisher) { _ in
+            self.persistScrollStateNow()
+        }
+        #endif
         .onChange(of: self.viewModel.isLoading) { _, isLoading in
             guard !isLoading, !self.hasPerformedInitialScroll else { return }
-            self.scrollPosition = self.scrollerBottomID
-            self.hasPerformedInitialScroll = true
-            self.isPinnedToBottom = true
+            self.restoreOrScrollToBottom()
         }
         .onChange(of: self.viewModel.sessionKey) { _, _ in
             self.hasPerformedInitialScroll = false
             self.isPinnedToBottom = true
+            self.scrollPosition = nil
+            self.scrollStateSaveTask?.cancel()
+            self.scrollStateSaveTask = nil
         }
         .onChange(of: self.viewModel.isSending) { _, isSending in
             // Scroll to bottom when user sends a message, even if scrolled up.
@@ -172,6 +198,62 @@ public struct OpenClawChatView: View {
             }
         }
     }
+
+    private func restoreOrScrollToBottom() {
+        defer { self.hasPerformedInitialScroll = true }
+
+        guard self.style == .standard else {
+            self.scrollPosition = self.scrollerBottomID
+            self.isPinnedToBottom = true
+            return
+        }
+
+        if let saved = ChatScrollStateStore.load(sessionKey: self.viewModel.sessionKey),
+           !saved.isPinnedToBottom,
+           let anchor = saved.anchorMessageID,
+           let anchorID = UUID(uuidString: anchor),
+           self.visibleMessages.contains(where: { $0.id == anchorID })
+        {
+            self.scrollPosition = anchorID
+            self.isPinnedToBottom = false
+            return
+        }
+
+        self.scrollPosition = self.scrollerBottomID
+        self.isPinnedToBottom = true
+    }
+
+    private func persistScrollStateDebounced() {
+        self.scrollStateSaveTask?.cancel()
+        self.scrollStateSaveTask = Task {
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            await MainActor.run {
+                self.persistScrollStateNow()
+            }
+        }
+    }
+
+    private func persistScrollStateNow() {
+        guard self.style == .standard,
+              self.hasPerformedInitialScroll,
+              !self.viewModel.isLoading
+        else { return }
+
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        let anchor = self.isPinnedToBottom ? nil : self.scrollPosition?.uuidString
+        let state = ChatScrollState(isPinnedToBottom: self.isPinnedToBottom, anchorMessageID: anchor, updatedAtMs: nowMs)
+        ChatScrollStateStore.save(state, sessionKey: self.viewModel.sessionKey)
+    }
+
+#if canImport(UIKit)
+    private var resignActivePublisher: NotificationCenter.Publisher {
+        NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)
+    }
+#elseif canImport(AppKit)
+    private var resignActivePublisher: NotificationCenter.Publisher {
+        NotificationCenter.default.publisher(for: NSApplication.willResignActiveNotification)
+    }
+#endif
 
     @ViewBuilder
     private var messageListRows: some View {
