@@ -192,6 +192,9 @@ const INLINE_IMAGE_MIME_TYPES = new Set([
   "image/heic",
 ]);
 const TERMINAL_SESSION_MIME = "application/vnd.clawline.terminal-session+json";
+const INTERACTIVE_CALLBACK_MIME = "application/vnd.clawline.interactive-callback+json";
+const MAX_INTERACTIVE_ACTION_CHARS = 128;
+const MAX_INTERACTIVE_DATA_BYTES = 64 * 1024;
 const MAX_ALERT_BODY_BYTES = 4 * 1024;
 const MAX_MEDIA_REDIRECTS = 5;
 const REDIRECT_STATUS_CODES = new Set([301, 302, 303, 307, 308]);
@@ -218,6 +221,18 @@ function truncateUtf8(value: string, maxBytes: number): string {
     bytes += charBytes;
   }
   return result;
+}
+
+function safeJsonStringify(value: unknown): { json: string; bytes: number } {
+  // JSON.stringify(undefined) returns undefined; normalize to "null" so we always have JSON.
+  let json: string | undefined;
+  try {
+    json = JSON.stringify(value === undefined ? null : value) ?? "null";
+  } catch {
+    throw new ClientMessageError("invalid_message", "Invalid JSON payload");
+  }
+  const bytes = Buffer.byteLength(json, "utf8");
+  return { json, bytes };
 }
 
 function formatError(err: unknown): string {
@@ -1097,6 +1112,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   let selectEventsAfterStmt!: SqliteStatement;
   let selectEventsTailStmt!: SqliteStatement;
   let selectEventByIdStmt!: SqliteStatement;
+  let selectEventPayloadForUserStmt!: SqliteStatement;
   let selectEventsAfterTimestampStmt!: SqliteStatement;
   let insertUserMessageTx!: ReturnType<SqliteDatabase["transaction"]>;
   let insertEventTx!: ReturnType<SqliteDatabase["transaction"]>;
@@ -1362,6 +1378,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     );
     selectEventByIdStmt = newDb.prepare(
       `SELECT id, userId, sequence, timestamp FROM events WHERE id = ?`,
+    );
+    selectEventPayloadForUserStmt = newDb.prepare(
+      `SELECT payloadJson FROM events WHERE userId = ? AND id = ?`,
     );
     selectEventsAfterTimestampStmt = newDb.prepare(
       `SELECT id, payloadJson FROM events WHERE userId = ? AND timestamp > ? ORDER BY sequence ASC`,
@@ -3786,6 +3805,377 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
   }
 
+  // oxlint-disable-next-line typescript/no-explicit-any
+  async function processInteractiveCallback(session: Session, payload: any) {
+    try {
+      const sourceMessageId = typeof payload.messageId === "string" ? payload.messageId.trim() : "";
+      if (!sourceMessageId) {
+        throw new ClientMessageError("invalid_message", "Missing messageId");
+      }
+
+      const callbackPayload =
+        payload.payload && typeof payload.payload === "object"
+          ? (payload.payload as Record<string, unknown>)
+          : null;
+      const action =
+        callbackPayload && typeof callbackPayload.action === "string"
+          ? callbackPayload.action.trim()
+          : "";
+      if (!action) {
+        throw new ClientMessageError("invalid_message", "Missing action");
+      }
+      if (action.length > MAX_INTERACTIVE_ACTION_CHARS) {
+        throw new ClientMessageError("invalid_message", "action too long");
+      }
+
+      const dataValue = callbackPayload ? callbackPayload.data : null;
+      const { json: dataJson, bytes: dataBytes } = safeJsonStringify(dataValue);
+      if (dataBytes > MAX_INTERACTIVE_DATA_BYTES) {
+        throw new ClientMessageError("payload_too_large", "data payload too large");
+      }
+
+      // Best-effort: route the callback to the same sessionKey the source message was delivered on.
+      // Guard with userId to prevent cross-user routing.
+      let resolvedSessionKey = session.sessionKey;
+      const sourceRow = selectEventPayloadForUserStmt.get(session.userId, sourceMessageId) as
+        | { payloadJson: string }
+        | undefined;
+      if (sourceRow && typeof sourceRow.payloadJson === "string") {
+        const parsed = parseServerMessage(sourceRow.payloadJson, logger);
+        const hinted = typeof parsed?.sessionKey === "string" ? parsed.sessionKey.trim() : "";
+        if (hinted) {
+          resolvedSessionKey = hinted;
+        }
+      }
+
+      const allowedSessionKeys = session.provisionedSessionKeys?.length
+        ? session.provisionedSessionKeys
+        : [session.sessionKey];
+      if (
+        !allowedSessionKeys.some(
+          (sessionKey) => sessionKey.toLowerCase() === resolvedSessionKey.toLowerCase(),
+        )
+      ) {
+        resolvedSessionKey = session.sessionKey;
+      }
+
+      let streamSuffix: "main" | "dm" | "global" = "main";
+      if (sessionKeyEq(resolvedSessionKey, session.personalSessionKey)) {
+        streamSuffix = "main";
+      } else if (
+        session.dmScope !== "main" &&
+        sessionKeyEq(resolvedSessionKey, session.dmSessionKey)
+      ) {
+        streamSuffix = "dm";
+      } else if (sessionKeyEq(resolvedSessionKey, session.globalSessionKey)) {
+        streamSuffix = "global";
+      }
+      if (streamSuffix === "global" && !session.isAdmin) {
+        throw new ClientMessageError("forbidden", "Admin channel requires admin access");
+      }
+
+      const callbackEnvelope = {
+        messageId: sourceMessageId,
+        payload: { action, data: dataValue === undefined ? null : dataValue },
+      };
+      const { json: callbackJson } = safeJsonStringify(callbackEnvelope);
+      const docAttachment: NormalizedAttachment = {
+        type: "document",
+        mimeType: INTERACTIVE_CALLBACK_MIME,
+        data: Buffer.from(callbackJson, "utf8").toString("base64"),
+      };
+
+      const prefix = `[Interactive] action=${action} -- `;
+      const maxBytes = config.sessions.maxMessageBytes;
+      const prefixBytes = Buffer.byteLength(prefix, "utf8");
+      // Ensure the text fallback stays within maxMessageBytes even when data is near the 64KB cap.
+      const dataBudget = Math.max(0, maxBytes - prefixBytes);
+      const dataForText =
+        Buffer.byteLength(dataJson, "utf8") <= dataBudget
+          ? dataJson
+          : `${truncateUtf8(dataJson, Math.max(0, dataBudget - 3))}...`;
+      const rawContent = `${prefix}${dataForText}`;
+
+      const targetUserId = session.userId;
+      const attachments: NormalizedAttachment[] = [docAttachment];
+      const attachmentsHash = hashAttachments(attachments);
+      const assetIds: string[] = [];
+
+      await runPerUserTask(session.userId, async () => {
+        if (!messageRateLimiter.attempt(session.deviceId)) {
+          throw new ClientMessageError("rate_limited", "Too many messages");
+        }
+
+        const clientId = `c_${randomUUID()}`;
+
+        const { event } = await persistUserMessage(
+          session,
+          targetUserId,
+          clientId,
+          rawContent,
+          attachments,
+          attachmentsHash,
+          assetIds,
+          resolvedSessionKey,
+        );
+        broadcastToSessionKey(resolvedSessionKey, event);
+
+        const attachmentSummary = describeClawlineAttachments(attachments);
+        const inboundBody = attachmentSummary
+          ? `${rawContent}\n\n${attachmentSummary}`
+          : rawContent;
+        const inboundImages = clawlineAttachmentsToImages(attachments);
+
+        const channelLabel = "clawline";
+        const routeSessionKey = resolvedSessionKey;
+        const route = {
+          agentId: mainSessionAgentId,
+          channel: "clawline",
+          accountId: DEFAULT_ACCOUNT_ID,
+          sessionKey: routeSessionKey,
+          mainSessionKey,
+        };
+        const peerId = session.peerId;
+
+        const deliveryTarget = ClawlineDeliveryTarget.fromParts(session.userId, streamSuffix);
+        const ctxPayload = finalizeInboundContext({
+          Body: inboundBody,
+          RawBody: rawContent,
+          CommandBody: rawContent,
+          From: `${channelLabel}:${peerId}`,
+          To: `device:${session.deviceId}`,
+          SessionKey: route.sessionKey,
+          AccountId: route.accountId,
+          MessageSid: clientId,
+          ChatType: "direct",
+          SenderName: session.claimedName ?? session.deviceInfo?.model ?? peerId,
+          SenderId: session.userId,
+          Provider: "clawline",
+          Surface: channelLabel,
+          OriginatingChannel: channelLabel,
+          OriginatingTo: deliveryTarget.toString(),
+          CommandAuthorized: true,
+        });
+        const updateLastRoute =
+          streamSuffix === "dm" && session.dmScope !== "main"
+            ? {
+                // DM cross-session "follow me" write: tell agent:main:main where this user is currently talking.
+                sessionKey: route.mainSessionKey,
+                channel: "clawline",
+                to: deliveryTarget.toString(),
+                accountId: route.accountId,
+              }
+            : undefined;
+        await recordInboundSession({
+          storePath: sessionStorePath,
+          sessionKey: route.sessionKey,
+          ctx: ctxPayload,
+          updateLastRoute,
+          onRecordError: (err) => {
+            logger.warn?.(`[clawline] failed recording inbound session: ${formatError(err)}`);
+          },
+        });
+
+        const fallbackText = adapterOverrides.responseFallback?.trim() ?? "";
+        const prefixContext: ResponsePrefixContext = {
+          identityName: resolveIdentityName(openClawCfg, route.agentId),
+        };
+
+        // Track activity state for typing indicator
+        let activitySignaled = false;
+        const sendActivitySignal = async (isActive: boolean) => {
+          logger.info?.("[clawline] activity_signal", {
+            isActive,
+            messageId: clientId,
+            sessionKey: route.sessionKey,
+          });
+          await sendJson(session.socket, {
+            type: "event",
+            event: "activity",
+            payload: {
+              isActive,
+              messageId: clientId,
+              sessionKey: route.sessionKey,
+            },
+          }).catch(() => {});
+        };
+
+        const { dispatcher, replyOptions, markDispatchIdle } = createReplyDispatcherWithTyping({
+          responsePrefix: resolveEffectiveMessagesConfig(openClawCfg, route.agentId).responsePrefix,
+          responsePrefixContextProvider: () => prefixContext,
+          humanDelay: resolveHumanDelayConfig(openClawCfg, route.agentId),
+          deliver: async (replyPayload) => {
+            // Stop activity signal when first content arrives (streaming begins)
+            if (activitySignaled) {
+              activitySignaled = false;
+              void sendActivitySignal(false);
+            }
+            const mediaUrls = replyPayload.mediaUrls?.length
+              ? replyPayload.mediaUrls
+              : replyPayload.mediaUrl
+                ? [replyPayload.mediaUrl]
+                : [];
+            let replyAttachments: NormalizedAttachment[] = [];
+            const trimmedText = replyPayload.text?.trim();
+            if (mediaUrls.length > 0) {
+              try {
+                const materialized = await materializeOutboundMediaUrls({
+                  mediaUrls,
+                  ownerUserId: targetUserId,
+                  uploaderDeviceId: session.deviceId,
+                });
+                replyAttachments = materialized.attachments;
+              } catch (err) {
+                logger.warn?.(`[clawline] reply_media_attachment_failed: ${formatError(err)}`);
+              }
+            }
+            const assistantText =
+              trimmedText && trimmedText.length > 0
+                ? trimmedText
+                : replyAttachments.length > 0
+                  ? ""
+                  : buildAssistantTextFromPayload(replyPayload, fallbackText);
+            if (assistantText === null) {
+              return;
+            }
+            const assistantEvent = await persistAssistantMessage(
+              session,
+              targetUserId,
+              assistantText,
+              route.sessionKey,
+              replyAttachments,
+            );
+            broadcastToSessionKey(resolvedSessionKey, assistantEvent);
+          },
+          onError: (err, info) => {
+            logger.error?.("[clawline] reply_delivery_failed", {
+              kind: info.kind,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          },
+          onReplyStart: async () => {
+            // Signal that processing has started (for typing indicator)
+            if (!activitySignaled) {
+              activitySignaled = true;
+              await sendActivitySignal(true);
+            }
+          },
+        });
+
+        logger.info?.("[clawline] agent_run_start", {
+          messageId: clientId,
+          sessionId: session.sessionId,
+          sessionKey: resolvedSessionKey,
+          userId: session.userId,
+          deviceId: session.deviceId,
+          sourceMessageId,
+          interactiveAction: action,
+        });
+
+        let queuedFinal = false;
+        let deliveredCount = 0;
+        try {
+          const result = await dispatchReplyFromConfig({
+            ctx: ctxPayload,
+            cfg: openClawCfg,
+            dispatcher,
+            replyOptions: {
+              ...replyOptions,
+              images: inboundImages.length > 0 ? inboundImages : undefined,
+              onModelSelected: (ctx) => {
+                prefixContext.provider = ctx.provider;
+                prefixContext.model = extractShortModelName(ctx.model);
+                prefixContext.modelFull = `${ctx.provider}/${ctx.model}`;
+                prefixContext.thinkingLevel = ctx.thinkLevel ?? "off";
+              },
+            },
+            replyResolver: options.replyResolver,
+          });
+          queuedFinal = result.queuedFinal;
+          // Count all delivered content (streaming blocks, tool results, and final replies)
+          deliveredCount = result.counts.block + result.counts.tool + result.counts.final;
+        } catch (err) {
+          logger.error?.(`[clawline] dispatch_failed: ${formatError(err)}`);
+          queuedFinal = false;
+        }
+        markDispatchIdle();
+        await dispatcher.waitForIdle();
+
+        // Always send activity=false when done
+        if (activitySignaled) {
+          activitySignaled = false;
+          void sendActivitySignal(false);
+        }
+
+        const queueKey = route.sessionKey;
+        const queueDepth = getFollowupQueueDepth(queueKey);
+        const wasDelivered = queuedFinal || deliveredCount > 0;
+        const wasQueued = !wasDelivered && queueDepth > 0;
+
+        logger.info?.("[clawline] agent_run_end", {
+          messageId: clientId,
+          sessionId: session.sessionId,
+          sessionKey: resolvedSessionKey,
+          userId: session.userId,
+          deviceId: session.deviceId,
+          deliveredCount,
+          queuedFinal,
+          queueDepth,
+          wasDelivered,
+          wasQueued,
+          sourceMessageId,
+          interactiveAction: action,
+        });
+
+        if (!wasDelivered && !wasQueued) {
+          updateMessageStreamingStmt.run(MessageStreamingState.Failed, session.deviceId, clientId);
+          await sendJson(session.socket, {
+            type: "error",
+            code: "server_error",
+            message: "Unable to deliver reply",
+            messageId: clientId,
+          }).catch(() => {});
+          return;
+        }
+
+        updateMessageStreamingStmt.run(
+          wasQueued ? MessageStreamingState.Queued : MessageStreamingState.Finalized,
+          session.deviceId,
+          clientId,
+        );
+      });
+    } catch (err) {
+      if (err instanceof ClientMessageError) {
+        await sendJson(session.socket, {
+          type: "error",
+          code: err.code,
+          message: err.message,
+        }).catch(() => {});
+        return;
+      }
+      if (err instanceof HttpError) {
+        await sendJson(session.socket, {
+          type: "error",
+          code: err.code,
+          message: err.message,
+        }).catch(() => {});
+        return;
+      }
+      logger.error?.("[clawline] processInteractiveCallback_unexpected_error", {
+        error: err instanceof Error ? err.message : String(err),
+        messageId: payload?.messageId,
+        userId: session.userId,
+        deviceId: session.deviceId,
+      });
+      await sendJson(session.socket, {
+        type: "error",
+        code: "server_error",
+        message: "Message processing failed",
+        messageId: payload?.messageId,
+      }).catch(() => {});
+    }
+  }
+
   function expirePendingPairs() {
     if (config.pairing.pendingTtlSeconds <= 0 && config.pairing.pendingSocketTimeoutSeconds <= 0) {
       return;
@@ -3954,6 +4344,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           break;
         case "message":
           await handleAuthedMessage(ws, payload);
+          break;
+        case "interactive-callback":
+          await handleAuthedInteractiveCallback(ws, payload);
           break;
         default:
           await sendJson(ws, { type: "error", code: "invalid_message", message: "Unknown type" });
@@ -4674,6 +5067,22 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       return;
     }
     await processClientMessage(session, payload);
+  }
+
+  // oxlint-disable-next-line typescript/no-explicit-any
+  async function handleAuthedInteractiveCallback(ws: WebSocket, payload: any) {
+    const state = connectionState.get(ws);
+    if (!state || !state.authenticated || !state.deviceId || !state.userId) {
+      await sendJson(ws, { type: "error", code: "auth_failed", message: "Not authenticated" });
+      ws.close();
+      return;
+    }
+    const session = sessionsByDevice.get(state.deviceId);
+    if (!session) {
+      await sendJson(ws, { type: "error", code: "auth_failed", message: "Session missing" });
+      return;
+    }
+    await processInteractiveCallback(session, payload);
   }
 
   let started = false;
