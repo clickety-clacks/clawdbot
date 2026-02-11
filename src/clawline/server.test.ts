@@ -445,6 +445,32 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("queues a session alert when a pairing request becomes pending", async () => {
+    const deviceId = randomUUID();
+    const ctx = await setupTestServer();
+    try {
+      const response = await performPairRequest(ctx.port, deviceId, { claimedName: "QA Sim" });
+      expect(response).toMatchObject({
+        type: "pair_result",
+        success: false,
+        reason: "pair_pending",
+      });
+      await vi.waitFor(() => {
+        expect(enqueueAnnounceMock).toHaveBeenCalledTimes(1);
+      });
+      const call = enqueueAnnounceMock.mock.calls[0]?.[0] as {
+        key?: string;
+        item?: { prompt?: string; origin?: { channel?: string; to?: string } };
+      };
+      expect(call?.key).toBe("agent:main:main");
+      expect(call?.item?.prompt).toBe("System Alert: New device pending approval: qa sim (iOS)");
+      expect(call?.item?.origin).toEqual({ channel: "clawline", to: "agent:main:main" });
+      expect(gatewayCallMock).not.toHaveBeenCalled();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("does not bootstrap admin when no admin exists", async () => {
     const ctx = await setupTestServer();
     const deviceId = randomUUID();
