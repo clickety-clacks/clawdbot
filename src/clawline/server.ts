@@ -46,7 +46,6 @@ import { extractShortModelName } from "../auto-reply/reply/response-prefix-templ
 import { recordInboundSession } from "../channels/session.js";
 import { resolveAgentIdFromSessionKey } from "../config/sessions.js";
 import { callGateway } from "../gateway/call.js";
-import { GATEWAY_CLIENT_MODES, GATEWAY_CLIENT_NAMES } from "../gateway/protocol/client-info.js";
 import {
   createPinnedDispatcher,
   resolvePinnedHostname,
@@ -323,24 +322,6 @@ function normalizeAllowlistEntry(entry: AllowlistEntry) {
   entry.userId = nextUserId;
   if (typeof entry.isAdmin !== "boolean") {
     entry.isAdmin = false;
-  }
-}
-
-async function notifyGatewayOfPending(entry: PendingEntry) {
-  const name = entry.claimedName ?? "New device";
-  const platform = entry.deviceInfo.platform || "Unknown platform";
-  const text = `New device pending approval: ${name} (${platform})`;
-  try {
-    await callGateway({
-      method: "wake",
-      params: { text, mode: "now" },
-      clientName: GATEWAY_CLIENT_NAMES.CLI,
-      mode: GATEWAY_CLIENT_MODES.BACKEND,
-      clientDisplayName: "clawline",
-      clientVersion: "clawline",
-    });
-  } catch (error) {
-    throw error instanceof Error ? error : new Error(String(error));
   }
 }
 
@@ -1049,6 +1030,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     };
     await sendJson(session.socket, payload).catch(() => {});
   };
+  async function notifyGatewayOfPending(entry: PendingEntry) {
+    const name = entry.claimedName ?? "New device";
+    const platform = entry.deviceInfo.platform || "Unknown platform";
+    const text = `New device pending approval: ${name} (${platform})`;
+    await wakeGatewayForAlert(text, mainSessionKey);
+  }
   const alertInstructionsPath =
     typeof config.alertInstructionsPath === "string" &&
     config.alertInstructionsPath.trim().length > 0
