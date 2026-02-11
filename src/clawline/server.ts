@@ -64,7 +64,6 @@ import { ClientMessageError, HttpError } from "./errors.js";
 import { createAssetHandlers } from "./http-assets.js";
 import { SlidingWindowRateLimiter } from "./rate-limiter.js";
 import { ClawlineDeliveryTarget } from "./routing.js";
-import { extractAssistantSalience, type ServerSalience } from "./salience.js";
 import { clawlineSessionFileName } from "./session-key.js";
 import { recordClawlineSessionActivity } from "./session-store.js";
 import { deepMerge } from "./utils/deep-merge.js";
@@ -615,7 +614,6 @@ type ServerMessage = {
   content: string;
   timestamp: number;
   streaming: boolean;
-  salience?: ServerSalience;
   sessionKey?: string;
   attachments?: unknown[];
   deviceId?: string;
@@ -3231,7 +3229,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       content,
       timestamp,
       streaming: false,
-      salience: extractAssistantSalience(content, timestamp),
       sessionKey,
       attachments:
         filteredAttachments && filteredAttachments.length > 0 ? filteredAttachments : undefined,
@@ -3344,7 +3341,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       content: text,
       timestamp: nowMs(),
       streaming: false,
-      salience: extractAssistantSalience(text),
       sessionKey: resolvedSessionKey,
       attachments:
         outboundAttachments.attachments.length > 0 ? outboundAttachments.attachments : undefined,
