@@ -450,7 +450,7 @@ function normalizeOutboundAttachmentData(input: ClawlineOutboundAttachmentInput)
   }
   let mimeType = typeof input.mimeType === "string" ? input.mimeType.trim() : "";
   let data = rawData;
-  const match = /^data:([^;]+);base64,([\s\S]*)$/i.exec(rawData);
+  const match = /^data:([^;,]+)(?:;[^,]*)*;base64,([\s\S]*)$/i.exec(rawData);
   if (match) {
     mimeType = mimeType || match[1].trim();
     data = match[2].replace(/\s+/g, "");

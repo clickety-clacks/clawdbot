@@ -693,6 +693,51 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("accepts data URI terminal descriptors with extra mime parameters", async () => {
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry], {
+      terminalTmux: {
+        mode: "ssh",
+        sshTarget: "nonexistent-host.invalid",
+      },
+    });
+    try {
+      const descriptor = {
+        terminalSessionId: `term_${randomUUID()}`,
+        title: "Term",
+      };
+      const base64 = Buffer.from(JSON.stringify(descriptor), "utf8").toString("base64");
+      const dataUri =
+        "data:application/vnd.clawline.terminal-session+json;charset=utf-8;base64," + base64;
+
+      const result = await ctx.server.sendMessage({
+        target: entry.userId,
+        text: "terminal",
+        attachments: [
+          {
+            data: dataUri,
+            mimeType: "application/vnd.clawline.terminal-session+json",
+          },
+        ],
+      });
+
+      expect(result.attachments).toEqual([
+        {
+          type: "document",
+          mimeType: "application/vnd.clawline.terminal-session+json",
+          data: base64,
+        },
+      ]);
+      expect(result.assetIds).toEqual([]);
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("does not deliver admin channel messages to non-admin sessions", async () => {
     const adminDeviceId = randomUUID();
     const userDeviceId = randomUUID();
