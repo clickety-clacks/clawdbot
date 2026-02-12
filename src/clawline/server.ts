@@ -3557,6 +3557,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         const peerId = session.peerId;
 
         const deliveryTarget = ClawlineDeliveryTarget.fromParts(session.userId, streamSuffix);
+        const systemPromptParts = [adapterOverrides.systemPrompt?.trim() || null].filter(
+          (entry): entry is string => Boolean(entry),
+        );
+        const groupSystemPrompt =
+          systemPromptParts.length > 0 ? systemPromptParts.join("\n\n") : undefined;
         const ctxPayload = finalizeInboundContext({
           Body: inboundBody,
           RawBody: rawContent,
@@ -3573,6 +3578,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           Surface: channelLabel,
           OriginatingChannel: channelLabel,
           OriginatingTo: deliveryTarget.toString(),
+          GroupSystemPrompt: groupSystemPrompt,
           CommandAuthorized: true,
         });
         const updateLastRoute =
@@ -3933,6 +3939,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         const peerId = session.peerId;
 
         const deliveryTarget = ClawlineDeliveryTarget.fromParts(session.userId, streamSuffix);
+        const systemPromptParts = [adapterOverrides.systemPrompt?.trim() || null].filter(
+          (entry): entry is string => Boolean(entry),
+        );
+        const groupSystemPrompt =
+          systemPromptParts.length > 0 ? systemPromptParts.join("\n\n") : undefined;
         const ctxPayload = finalizeInboundContext({
           Body: inboundBody,
           RawBody: rawContent,
@@ -3949,6 +3960,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           Surface: channelLabel,
           OriginatingChannel: channelLabel,
           OriginatingTo: deliveryTarget.toString(),
+          GroupSystemPrompt: groupSystemPrompt,
           CommandAuthorized: true,
         });
         const updateLastRoute =
