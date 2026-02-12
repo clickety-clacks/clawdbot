@@ -5,9 +5,14 @@ import type {
   OpenClawConfig,
 } from "openclaw/plugin-sdk";
 import BetterSqlite3 from "better-sqlite3";
+import { randomBytes } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { jsonResult, sendClawlineOutboundMessage } from "openclaw/plugin-sdk";
+
+const DEFAULT_CLAWLINE_PORT = 18800;
+const STREAM_API_TIMEOUT_MS = 15_000;
+const STREAM_DELETE_USER_ACTION = "delete_stream";
 
 type EventRow = {
   id: string;
@@ -30,7 +35,24 @@ type ParsedMessage = {
   content?: string;
   fromServer?: boolean;
   channelType?: string;
+  sessionKey?: string;
 };
+
+type StreamApiCallResult =
+  | {
+      ok: true;
+      status: number;
+      body: Record<string, unknown>;
+    }
+  | {
+      ok: false;
+      status: number;
+      error: {
+        code: string;
+        message: string;
+      };
+      body?: Record<string, unknown>;
+    };
 
 function resolveClawlineDbPath(cfg: OpenClawConfig): string {
   const clawlineStatePath = cfg.channels?.clawline?.statePath;
@@ -65,6 +87,7 @@ function parseEventPayload(row: EventRow): ParsedMessage {
         content: payload.content ?? "",
         fromServer: !isFromUser,
         channelType: payload.channelType,
+        sessionKey: typeof payload.sessionKey === "string" ? payload.sessionKey : undefined,
         deviceId: payload.deviceId ?? row.originatingDeviceId,
       };
     }
@@ -96,6 +119,144 @@ function promiseWithTimeout<T>(promise: Promise<T>, timeoutMs: number, label: st
     }),
     timeout,
   ]);
+}
+
+function readStringParam(params: Record<string, unknown>, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = params[key];
+    if (typeof value === "string" && value.trim().length > 0) {
+      return value.trim();
+    }
+  }
+  return undefined;
+}
+
+function normalizeHttpHost(raw: string | undefined): string {
+  const trimmed = (raw ?? "").trim();
+  if (!trimmed || trimmed === "0.0.0.0" || trimmed === "::" || trimmed === "[::]") {
+    return "127.0.0.1";
+  }
+  return trimmed.replace(/^\[|\]$/g, "");
+}
+
+function hostToUrlHost(host: string): string {
+  return host.includes(":") ? `[${host}]` : host;
+}
+
+function resolveClawlineApiBaseUrl(cfg: OpenClawConfig, params: Record<string, unknown>): string {
+  const explicitBaseUrl = readStringParam(params, ["baseUrl", "apiBaseUrl", "gatewayUrl"]);
+  if (explicitBaseUrl) {
+    try {
+      return new URL(explicitBaseUrl).origin;
+    } catch {
+      throw new Error("Clawline stream actions require an absolute baseUrl when provided");
+    }
+  }
+  const bindAddress = normalizeHttpHost(cfg.channels?.clawline?.network?.bindAddress);
+  const port = cfg.channels?.clawline?.port ?? DEFAULT_CLAWLINE_PORT;
+  return `http://${hostToUrlHost(bindAddress)}:${port}`;
+}
+
+function toObject(value: unknown): Record<string, unknown> {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  return {};
+}
+
+async function parseJsonObject(response: Response): Promise<Record<string, unknown>> {
+  const text = await response.text();
+  if (!text.trim()) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(text);
+    return toObject(parsed);
+  } catch {
+    return {};
+  }
+}
+
+function parseStreamApiError(
+  body: Record<string, unknown>,
+  status: number,
+): {
+  code: string;
+  message: string;
+} {
+  const rawError = body.error;
+  if (rawError && typeof rawError === "object" && !Array.isArray(rawError)) {
+    const parsed = rawError as Record<string, unknown>;
+    const code = typeof parsed.code === "string" ? parsed.code : "stream_api_error";
+    const message =
+      typeof parsed.message === "string"
+        ? parsed.message
+        : `Clawline stream API request failed (${status})`;
+    return { code, message };
+  }
+  return {
+    code: "stream_api_error",
+    message: `Clawline stream API request failed (${status})`,
+  };
+}
+
+async function callStreamApi(params: {
+  cfg: OpenClawConfig;
+  actionParams: Record<string, unknown>;
+  path: string;
+  method: "GET" | "POST" | "PATCH" | "DELETE";
+  body?: Record<string, unknown>;
+  extraHeaders?: Record<string, string>;
+}): Promise<StreamApiCallResult> {
+  const token = readStringParam(params.actionParams, ["token", "bearerToken", "authToken"]);
+  if (!token) {
+    throw new Error("Clawline stream actions require token (bearerToken/authToken also accepted)");
+  }
+  const baseUrl = resolveClawlineApiBaseUrl(params.cfg, params.actionParams);
+  const requestUrl = new URL(params.path, `${baseUrl}/`);
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${token}`,
+    ...params.extraHeaders,
+  };
+  if (params.body) {
+    headers["Content-Type"] = "application/json";
+  }
+  try {
+    const response = await promiseWithTimeout(
+      fetch(requestUrl, {
+        method: params.method,
+        headers,
+        body: params.body ? JSON.stringify(params.body) : undefined,
+      }),
+      STREAM_API_TIMEOUT_MS,
+      `Clawline ${params.method} ${params.path}`,
+    );
+    const body = await parseJsonObject(response);
+    if (response.ok) {
+      return { ok: true, status: response.status, body };
+    }
+    return {
+      ok: false,
+      status: response.status,
+      error: parseStreamApiError(body, response.status),
+      body,
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      status: 0,
+      error: { code: "stream_api_unreachable", message },
+    };
+  }
+}
+
+function buildIdempotencyKey(actionParams: Record<string, unknown>): string {
+  const existing = readStringParam(actionParams, ["idempotencyKey", "requestId"]);
+  if (existing) {
+    return existing;
+  }
+  return `req_${randomBytes(4).toString("hex")}`;
 }
 
 function summarizeOutboundResult(result: Awaited<ReturnType<typeof sendClawlineOutboundMessage>>) {
@@ -135,9 +296,11 @@ async function readClawlineMessages(params: {
   userId?: string;
   limit?: number;
   channelType?: string;
+  sessionKey?: string;
 }): Promise<{ ok: boolean; messages: ParsedMessage[]; error?: string }> {
   const { cfg, limit = 20 } = params;
   const dbPath = resolveClawlineDbPath(cfg);
+  const normalizedSessionKey = params.sessionKey?.trim().toLowerCase();
 
   let db: BetterSqlite3.Database | null = null;
   try {
@@ -174,6 +337,9 @@ async function readClawlineMessages(params: {
       for (const row of rows) {
         const parsed = parseEventPayload(row);
         if (params.channelType && parsed.channelType !== params.channelType) {
+          continue;
+        }
+        if (normalizedSessionKey && parsed.sessionKey?.toLowerCase() !== normalizedSessionKey) {
           continue;
         }
         if (parsed.type !== "user_message" && parsed.type !== "server_message") {
@@ -238,11 +404,26 @@ export const clawlineMessageActions: ChannelMessageActionAdapter = {
     if (!cfg.channels?.clawline?.enabled) {
       return [];
     }
-    const actions: ChannelMessageActionName[] = ["send", "sendAttachment", "read", "list-users"];
+    const actions: ChannelMessageActionName[] = [
+      "send",
+      "sendAttachment",
+      "read",
+      "list-users",
+      "channel-list",
+      "channel-create",
+      "channel-edit",
+      "channel-delete",
+    ];
     return actions;
   },
   supportsAction: ({ action }) =>
-    action === "sendAttachment" || action === "read" || action === "list-users",
+    action === "sendAttachment" ||
+    action === "read" ||
+    action === "list-users" ||
+    action === "channel-list" ||
+    action === "channel-create" ||
+    action === "channel-edit" ||
+    action === "channel-delete",
 
   handleAction: async ({ action, params, cfg }): Promise<AgentToolResult<unknown>> => {
     if (action === "sendAttachment") {
@@ -283,18 +464,91 @@ export const clawlineMessageActions: ChannelMessageActionAdapter = {
         (typeof params.userId === "string" ? params.userId : undefined) ??
         (typeof params.to === "string" ? params.to : undefined);
       const channelType = typeof params.channelType === "string" ? params.channelType : undefined;
+      const sessionKey = readStringParam(params, ["sessionKey", "channelId"]);
       const limit =
         typeof params.limit === "number" && Number.isFinite(params.limit)
           ? Math.floor(params.limit)
           : 20;
 
-      const result = await readClawlineMessages({ cfg, userId, limit, channelType });
+      const result = await readClawlineMessages({ cfg, userId, limit, channelType, sessionKey });
       return jsonResult(result);
     }
 
     if (action === "list-users") {
       const result = await listClawlineUsers({ cfg });
       return jsonResult(result);
+    }
+
+    if (action === "channel-list") {
+      const result = await callStreamApi({
+        cfg,
+        actionParams: params,
+        method: "GET",
+        path: "/api/streams",
+      });
+      return jsonResult(result.ok ? { ok: true, status: result.status, ...result.body } : result);
+    }
+
+    if (action === "channel-create") {
+      const displayName = readStringParam(params, ["displayName", "name", "title"]);
+      if (!displayName) {
+        throw new Error("Clawline channel-create requires displayName (or name/title)");
+      }
+      const idempotencyKey = buildIdempotencyKey(params);
+      const result = await callStreamApi({
+        cfg,
+        actionParams: params,
+        method: "POST",
+        path: "/api/streams",
+        body: { displayName, idempotencyKey },
+      });
+      return jsonResult(
+        result.ok
+          ? { ok: true, status: result.status, idempotencyKey, ...result.body }
+          : { ...result, idempotencyKey },
+      );
+    }
+
+    if (action === "channel-edit") {
+      const sessionKey = readStringParam(params, ["channelId", "sessionKey", "to"]);
+      if (!sessionKey) {
+        throw new Error("Clawline channel-edit requires channelId/sessionKey");
+      }
+      const displayName = readStringParam(params, ["displayName", "name", "title"]);
+      if (!displayName) {
+        throw new Error("Clawline channel-edit requires displayName (or name/title)");
+      }
+      const result = await callStreamApi({
+        cfg,
+        actionParams: params,
+        method: "PATCH",
+        path: `/api/streams/${encodeURIComponent(sessionKey)}`,
+        body: { displayName },
+      });
+      return jsonResult(result.ok ? { ok: true, status: result.status, ...result.body } : result);
+    }
+
+    if (action === "channel-delete") {
+      const sessionKey = readStringParam(params, ["channelId", "sessionKey", "to"]);
+      if (!sessionKey) {
+        throw new Error("Clawline channel-delete requires channelId/sessionKey");
+      }
+      const idempotencyKey = buildIdempotencyKey(params);
+      const result = await callStreamApi({
+        cfg,
+        actionParams: params,
+        method: "DELETE",
+        path: `/api/streams/${encodeURIComponent(sessionKey)}`,
+        body: { idempotencyKey },
+        extraHeaders: {
+          "x-clawline-user-action": STREAM_DELETE_USER_ACTION,
+        },
+      });
+      return jsonResult(
+        result.ok
+          ? { ok: true, status: result.status, idempotencyKey, ...result.body }
+          : { ...result, idempotencyKey },
+      );
     }
 
     throw new Error(`Action ${action} is not supported for Clawline.`);
