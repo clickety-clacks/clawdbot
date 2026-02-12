@@ -17,6 +17,12 @@ describe("clawlineMessageActions", () => {
     vi.clearAllMocks();
   });
 
+  it("lists sendAttachment when clawline is enabled", () => {
+    const cfg: OpenClawConfig = { channels: { clawline: { enabled: true } } };
+    expect(clawlineMessageActions.listActions({ cfg })).toContain("sendAttachment");
+    expect(clawlineMessageActions.supportsAction?.({ action: "sendAttachment" })).toBe(true);
+  });
+
   it("sendAttachment returns a small summary (no base64 attachment data)", async () => {
     const cfg: OpenClawConfig = { channels: { clawline: { enabled: true } } };
     vi.mocked(sendClawlineOutboundMessage).mockResolvedValueOnce({
@@ -26,7 +32,7 @@ describe("clawlineMessageActions", () => {
       attachments: [
         {
           type: "document",
-          mimeType: "application/vnd.clawline.terminal-session+json",
+          mimeType: "application/vnd.clawline.interactive-html+json",
           data: "AAAABASE64PAYLOAD",
         },
       ],
@@ -38,7 +44,7 @@ describe("clawlineMessageActions", () => {
       params: {
         target: "flynn:main",
         buffer: "AAAABASE64PAYLOAD",
-        mimeType: "application/vnd.clawline.terminal-session+json; charset=utf-8",
+        mimeType: "application/vnd.clawline.interactive-html+json; charset=utf-8",
       },
       cfg,
       accountId: null,
@@ -54,7 +60,7 @@ describe("clawlineMessageActions", () => {
       attachments: [
         {
           type: "document",
-          mimeType: "application/vnd.clawline.terminal-session+json",
+          mimeType: "application/vnd.clawline.interactive-html+json",
         },
       ],
     });
@@ -64,7 +70,7 @@ describe("clawlineMessageActions", () => {
       target: "flynn:main",
       text: "",
       attachments: [
-        { data: "AAAABASE64PAYLOAD", mimeType: "application/vnd.clawline.terminal-session+json" },
+        { data: "AAAABASE64PAYLOAD", mimeType: "application/vnd.clawline.interactive-html+json" },
       ],
     });
   });

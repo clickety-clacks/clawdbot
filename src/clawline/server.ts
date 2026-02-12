@@ -2,6 +2,7 @@ import type { Database as SqliteDatabase, Statement as SqliteStatement } from "b
 import type { Stats } from "node:fs";
 import BetterSqlite3 from "better-sqlite3";
 import jwt from "jsonwebtoken";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { execFile as execFileCb } from "node:child_process";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { watch, type FSWatcher, createReadStream } from "node:fs";
@@ -191,7 +192,9 @@ const INLINE_IMAGE_MIME_TYPES = new Set([
   "image/heic",
 ]);
 const TERMINAL_SESSION_MIME = "application/vnd.clawline.terminal-session+json";
+const INTERACTIVE_HTML_MIME = "application/vnd.clawline.interactive-html+json";
 const INTERACTIVE_CALLBACK_MIME = "application/vnd.clawline.interactive-callback+json";
+const INLINE_DOCUMENT_MIME_TYPES = new Set([TERMINAL_SESSION_MIME, INTERACTIVE_HTML_MIME]);
 const MAX_INTERACTIVE_ACTION_CHARS = 128;
 const MAX_INTERACTIVE_DATA_BYTES = 64 * 1024;
 const MAX_ALERT_BODY_BYTES = 4 * 1024;
@@ -1433,11 +1436,17 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         resolved.push({ type: "image", mimeType, data });
         continue;
       }
-      if (mimeType === TERMINAL_SESSION_MIME) {
-        // Terminal sessions must be delivered inline so the client can decode the descriptor without
-        // fetching an asset. Keep this small (descriptor JSON only).
+      if (INLINE_DOCUMENT_MIME_TYPES.has(mimeType)) {
+        // Certain document descriptors must stay inline so clients can render immediately without
+        // downloading an asset first.
         if (buffer.length > config.media.maxInlineBytes) {
-          throw new Error("Clawline terminal session descriptor exceeds maxInlineBytes");
+          if (mimeType === TERMINAL_SESSION_MIME) {
+            throw new Error("Clawline terminal session descriptor exceeds maxInlineBytes");
+          }
+          if (mimeType === INTERACTIVE_HTML_MIME) {
+            throw new Error("Clawline interactive HTML descriptor exceeds maxInlineBytes");
+          }
+          throw new Error("Clawline inline document descriptor exceeds maxInlineBytes");
         }
         resolved.push({ type: "document", mimeType, data });
         continue;
@@ -2436,6 +2445,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const sessionsByDevice = new Map<string, Session>();
   const userSessions = new Map<string, Set<Session>>();
   const perUserQueue = new Map<string, Promise<unknown>>();
+  const perUserTaskContext = new AsyncLocalStorage<string>();
   const pairRateLimiter = new SlidingWindowRateLimiter(config.pairing.maxRequestsPerMinute, 60_000);
   const authRateLimiter = new SlidingWindowRateLimiter(config.auth.maxAttemptsPerMinute, 60_000);
   const messageRateLimiter = new SlidingWindowRateLimiter(
@@ -2589,12 +2599,15 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   }
 
   function runPerUserTask<T>(userId: string, task: () => Promise<T>): Promise<T> {
+    if (perUserTaskContext.getStore() === userId) {
+      return task();
+    }
     const previous = perUserQueue.get(userId) ?? Promise.resolve();
     const next = previous
       .catch((err) => {
         logger.warn?.(`per_user_task_failed: ${formatError(err)}`);
       })
-      .then(task)
+      .then(() => perUserTaskContext.run(userId, task))
       .finally(() => {
         if (perUserQueue.get(userId) === next) {
           perUserQueue.delete(userId);
