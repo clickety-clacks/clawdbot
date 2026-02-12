@@ -529,6 +529,45 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("keeps outbound interactive HTML attachments inline as documents", async () => {
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry]);
+    try {
+      const descriptor = {
+        version: 1,
+        html: "<div>Hello</div>",
+        metadata: { title: "Card", height: 80 },
+      };
+      const base64 = Buffer.from(JSON.stringify(descriptor), "utf8").toString("base64");
+
+      const result = await ctx.server.sendMessage({
+        target: entry.userId,
+        text: "",
+        attachments: [
+          {
+            data: base64,
+            mimeType: "application/vnd.clawline.interactive-html+json",
+          },
+        ],
+      });
+
+      expect(result.attachments).toEqual([
+        {
+          type: "document",
+          mimeType: "application/vnd.clawline.interactive-html+json",
+          data: base64,
+        },
+      ]);
+      expect(result.assetIds).toEqual([]);
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("does not deliver admin channel messages to non-admin sessions", async () => {
     const adminDeviceId = randomUUID();
     const userDeviceId = randomUUID();
