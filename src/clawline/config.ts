@@ -118,6 +118,8 @@ const DEFAULTS: ResolvedClawlineConfig = {
   streams: {
     chunkPersistIntervalMs: 100,
     chunkBufferBytes: 1_048_576,
+    maxStreamsPerUser: 32,
+    maxDisplayNameBytes: 120,
   },
 };
 

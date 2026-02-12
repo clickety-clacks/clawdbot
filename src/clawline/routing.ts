@@ -25,7 +25,7 @@
  *
  * CURRENTLY SUPPORTED:
  * - User streams: {userId}:{streamSuffix} (e.g., flynn:main)
- * - streamSuffix values are limited to: main, dm, global
+ * - streamSuffix values: main, dm, global, s_<8-lowercase-hex>
  *
  * NOT YET IMPLEMENTED (future):
  * - Additional user session labels (e.g., flynn:secondary, flynn:hobby) beyond the stream suffixes
@@ -54,6 +54,9 @@ export class ClawlineDeliveryTarget {
     if (!userId || !sessionLabel) {
       throw new Error("Invalid Clawline delivery target: missing userId or sessionLabel");
     }
+    if (!isSupportedSessionLabel(sessionLabel)) {
+      throw new Error("Invalid Clawline delivery target: unsupported sessionLabel");
+    }
     return new ClawlineDeliveryTarget(userId, sessionLabel);
   }
 
@@ -62,6 +65,9 @@ export class ClawlineDeliveryTarget {
     const trimmedSessionLabel = sessionLabel.trim();
     if (!trimmedUserId || !trimmedSessionLabel) {
       throw new Error("Invalid Clawline delivery target: missing userId or sessionLabel");
+    }
+    if (!isSupportedSessionLabel(trimmedSessionLabel)) {
+      throw new Error("Invalid Clawline delivery target: unsupported sessionLabel");
     }
     return new ClawlineDeliveryTarget(trimmedUserId, trimmedSessionLabel);
   }
@@ -78,6 +84,9 @@ export class ClawlineDeliveryTarget {
     const sessionLabel = parts[4]?.trim() ?? "";
     if (!userId || !sessionLabel) {
       throw new Error("Invalid Clawline session key: missing userId or sessionLabel");
+    }
+    if (!isSupportedSessionLabel(sessionLabel)) {
+      throw new Error("Invalid Clawline session key: unsupported sessionLabel");
     }
     return new ClawlineDeliveryTarget(userId, sessionLabel);
   }
@@ -98,4 +107,14 @@ export class ClawlineDeliveryTarget {
   toString(): string {
     return `${this.rawUserId}:${this.rawSessionLabel}`;
   }
+}
+
+const CUSTOM_SESSION_LABEL_REGEX = /^s_[0-9a-f]{8}$/;
+
+function isSupportedSessionLabel(label: string): boolean {
+  const normalized = label.trim().toLowerCase();
+  if (normalized === "main" || normalized === "dm" || normalized === "global") {
+    return true;
+  }
+  return CUSTOM_SESSION_LABEL_REGEX.test(normalized);
 }

@@ -50,5 +50,7 @@ export type ClawlineConfig = {
   streams?: {
     chunkPersistIntervalMs?: number;
     chunkBufferBytes?: number;
+    maxStreamsPerUser?: number;
+    maxDisplayNameBytes?: number;
   };
 };
