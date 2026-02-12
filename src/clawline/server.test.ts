@@ -1,3 +1,4 @@
+import BetterSqlite3 from "better-sqlite3";
 import jwt from "jsonwebtoken";
 import { Blob } from "node:buffer";
 import { randomUUID } from "node:crypto";
@@ -165,6 +166,7 @@ async function setupTestServer(
     alertInstructionsText?: string | null;
     webRootFollowSymlinks?: boolean;
     webRootPathRelative?: string;
+    seedLegacyDatabase?: (dbPath: string) => Promise<void>;
     terminalTmux?: {
       mode?: "local" | "ssh";
       sshTarget?: string;
@@ -197,6 +199,10 @@ async function setupTestServer(
   const pendingPath = path.join(statePath, "pending.json");
   await fs.writeFile(pendingPath, JSON.stringify({ version: 1, entries: [] }, null, 2));
   await fs.writeFile(path.join(statePath, "denylist.json"), "[]");
+  const dbPath = path.join(statePath, "clawline.sqlite");
+  if (typeof options.seedLegacyDatabase === "function") {
+    await options.seedLegacyDatabase(dbPath);
+  }
   const alertInstructionsPath = path.join(root, "alert-instructions.md");
   if (options.alertInstructionsText !== null) {
     const contents = options.alertInstructionsText ?? "";
@@ -232,6 +238,18 @@ async function setupTestServer(
   await server.start();
   const cleanup = async () => {
     await server.stop();
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        await fs.rm(root, { recursive: true, force: true });
+        return;
+      } catch (err) {
+        const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+        if (code !== "ENOTEMPTY" && code !== "EBUSY") {
+          throw err;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
+      }
+    }
     await fs.rm(root, { recursive: true, force: true });
   };
   return {
@@ -368,7 +386,7 @@ async function uploadAsset(port: number, token: string, data: Buffer, mimeType: 
 async function authenticateDevice(port: number, deviceId: string, token: string) {
   const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
   await waitForOpen(ws);
-  // Buffer messages to avoid races (auth_result and session_info can arrive back-to-back).
+  // Buffer messages to avoid races (auth_result, stream_snapshot, and session_info can arrive fast).
   const queue = createMessageQueue(ws);
   ws.send(
     JSON.stringify({
@@ -386,18 +404,26 @@ async function authenticateDevice(port: number, deviceId: string, token: string)
       `Auth failed for ${deviceId}: ${typeof auth === "object" ? JSON.stringify(auth) : auth}`,
     );
   }
+  const streamSnapshot = await queue.next();
+  if (streamSnapshot?.type !== "stream_snapshot") {
+    queue.dispose();
+    ws.terminate();
+    throw new Error(
+      `Expected stream_snapshot after auth_result, got ${JSON.stringify(streamSnapshot)}`,
+    );
+  }
   let sessionInfo: unknown = null;
   if (Array.isArray(auth.features) && auth.features.includes("session_info")) {
     const next = await queue.next();
     if (next?.type !== "session_info") {
       queue.dispose();
       ws.terminate();
-      throw new Error(`Expected session_info after auth_result, got ${JSON.stringify(next)}`);
+      throw new Error(`Expected session_info after stream_snapshot, got ${JSON.stringify(next)}`);
     }
     sessionInfo = next;
   }
   queue.dispose();
-  return { ws, auth, sessionInfo };
+  return { ws, auth, streamSnapshot, sessionInfo };
 }
 
 describe.sequential("clawline provider server", () => {
@@ -1099,6 +1125,460 @@ describe.sequential("clawline provider server", () => {
       expect(sendDirectAgentMessageMock).not.toHaveBeenCalled();
       expect(gatewayCallMock).not.toHaveBeenCalled();
       expect(sendMessageMock).not.toHaveBeenCalled();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("sends stream_snapshot after auth_result and before replay", async () => {
+    const deviceId = randomUUID();
+    const entry = createAllowlistEntry({
+      deviceId,
+      userId: "flynn",
+      isAdmin: false,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry]);
+    try {
+      const pair = await performPairRequest(ctx.port, deviceId);
+      const { ws, auth, streamSnapshot } = await authenticateDevice(
+        ctx.port,
+        deviceId,
+        pair.token as string,
+      );
+      expect(auth.type).toBe("auth_result");
+      expect(streamSnapshot.type).toBe("stream_snapshot");
+      expect(Array.isArray(streamSnapshot.streams)).toBe(true);
+      expect(streamSnapshot.streams[0]?.kind).toBe("main");
+      expect(streamSnapshot.streams[0]?.sessionKey).toBe("agent:main:clawline:flynn:main");
+      ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("supports stream CRUD over REST and broadcasts stream events to all user sockets", async () => {
+    const userId = "flynn";
+    const firstDeviceId = randomUUID();
+    const secondDeviceId = randomUUID();
+    const now = Date.now();
+    const baseEntry = {
+      claimedName: "Flynn",
+      deviceInfo: { platform: "iOS", model: "iPhone" },
+      userId,
+      isAdmin: false,
+      tokenDelivered: true,
+      createdAt: now - 5_000,
+      lastSeenAt: now - 2_000,
+    };
+    const ctx = await setupTestServer([
+      { ...baseEntry, deviceId: firstDeviceId },
+      { ...baseEntry, deviceId: secondDeviceId },
+    ]);
+    try {
+      const firstPair = await performPairRequest(ctx.port, firstDeviceId);
+      const secondPair = await performPairRequest(ctx.port, secondDeviceId);
+      const firstToken = firstPair.token as string;
+      const secondToken = secondPair.token as string;
+      const { ws: firstWs } = await authenticateDevice(ctx.port, firstDeviceId, firstToken);
+      const { ws: secondWs } = await authenticateDevice(ctx.port, secondDeviceId, secondToken);
+      const firstQueue = createMessageQueue(firstWs);
+      const secondQueue = createMessageQueue(secondWs);
+
+      const listResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
+        headers: { Authorization: `Bearer ${firstToken}` },
+      });
+      expect(listResponse.status).toBe(200);
+      const listPayload = (await listResponse.json()) as {
+        streams: Array<{ sessionKey: string; orderIndex: number }>;
+      };
+      expect(listPayload.streams.length).toBeGreaterThanOrEqual(1);
+      expect(listPayload.streams[0]?.sessionKey).toBe("agent:main:clawline:flynn:main");
+
+      const createResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${firstToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          idempotencyKey: "req_create_stream_1",
+          displayName: "Research",
+        }),
+      });
+      expect(createResponse.status).toBe(201);
+      const createdPayload = (await createResponse.json()) as {
+        stream: { sessionKey: string; kind: string };
+      };
+      expect(createdPayload.stream.kind).toBe("custom");
+      expect(createdPayload.stream.sessionKey).toMatch(/:s_[0-9a-f]{8}$/);
+      expect(await firstQueue.next()).toMatchObject({
+        type: "stream_created",
+        stream: { sessionKey: createdPayload.stream.sessionKey },
+      });
+      expect(await secondQueue.next()).toMatchObject({
+        type: "stream_created",
+        stream: { sessionKey: createdPayload.stream.sessionKey },
+      });
+
+      const encodedKey = encodeURIComponent(createdPayload.stream.sessionKey);
+      const renameResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams/${encodedKey}`, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${firstToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ displayName: "Research v2" }),
+      });
+      expect(renameResponse.status).toBe(200);
+      expect(await firstQueue.next()).toMatchObject({
+        type: "stream_updated",
+        stream: { sessionKey: createdPayload.stream.sessionKey, displayName: "Research v2" },
+      });
+      expect(await secondQueue.next()).toMatchObject({
+        type: "stream_updated",
+        stream: { sessionKey: createdPayload.stream.sessionKey, displayName: "Research v2" },
+      });
+
+      const deleteResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams/${encodedKey}`, {
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${firstToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ idempotencyKey: "req_delete_stream_1" }),
+      });
+      expect(deleteResponse.status).toBe(200);
+      expect(await firstQueue.next()).toMatchObject({
+        type: "stream_deleted",
+        sessionKey: createdPayload.stream.sessionKey,
+      });
+      expect(await secondQueue.next()).toMatchObject({
+        type: "stream_deleted",
+        sessionKey: createdPayload.stream.sessionKey,
+      });
+
+      const listAfterDelete = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
+        headers: { Authorization: `Bearer ${firstToken}` },
+      });
+      const listAfterDeletePayload = (await listAfterDelete.json()) as {
+        streams: Array<{ sessionKey: string }>;
+      };
+      expect(
+        listAfterDeletePayload.streams.some(
+          (stream) => stream.sessionKey === createdPayload.stream.sessionKey,
+        ),
+      ).toBe(false);
+
+      firstQueue.dispose();
+      secondQueue.dispose();
+      firstWs.terminate();
+      secondWs.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("enforces stream API edge cases for built-ins, idempotency reuse, and deleted stream sends", async () => {
+    const deviceId = randomUUID();
+    const entry = createAllowlistEntry({
+      deviceId,
+      userId: "flynn",
+      isAdmin: false,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry]);
+    try {
+      const pair = await performPairRequest(ctx.port, deviceId);
+      const token = pair.token as string;
+      const listResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const listPayload = (await listResponse.json()) as {
+        streams: Array<{ sessionKey: string }>;
+      };
+      const mainKey = listPayload.streams[0]?.sessionKey;
+      expect(mainKey).toBe("agent:main:clawline:flynn:main");
+
+      const renameBuiltIn = await fetch(
+        `http://127.0.0.1:${ctx.port}/api/streams/${encodeURIComponent(mainKey)}`,
+        {
+          method: "PATCH",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ displayName: "Nope" }),
+        },
+      );
+      expect(renameBuiltIn.status).toBe(409);
+      expect(await renameBuiltIn.json()).toEqual({
+        error: {
+          code: "built_in_stream_rename_forbidden",
+          message: "Built-in streams cannot be renamed",
+        },
+      });
+
+      const deleteBuiltIn = await fetch(
+        `http://127.0.0.1:${ctx.port}/api/streams/${encodeURIComponent(mainKey)}`,
+        {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${token}` },
+        },
+      );
+      expect(deleteBuiltIn.status).toBe(409);
+      expect(await deleteBuiltIn.json()).toEqual({
+        error: {
+          code: "built_in_stream_delete_forbidden",
+          message: "Built-in streams cannot be deleted",
+        },
+      });
+
+      const createOnce = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          idempotencyKey: "req_create_once",
+          displayName: "Scratch",
+        }),
+      });
+      expect(createOnce.status).toBe(201);
+      const created = (await createOnce.json()) as { stream: { sessionKey: string } };
+
+      const createRetry = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          idempotencyKey: "req_create_once",
+          displayName: "Scratch",
+        }),
+      });
+      expect(createRetry.status).toBe(201);
+      expect(await createRetry.json()).toEqual(created);
+
+      const createConflict = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          idempotencyKey: "req_create_once",
+          displayName: "Different",
+        }),
+      });
+      expect(createConflict.status).toBe(409);
+      expect(await createConflict.json()).toEqual({
+        error: {
+          code: "idempotency_key_reused",
+          message: "Idempotency key was already used",
+        },
+      });
+
+      const deleteOnce = await fetch(
+        `http://127.0.0.1:${ctx.port}/api/streams/${encodeURIComponent(created.stream.sessionKey)}`,
+        {
+          method: "DELETE",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ idempotencyKey: "req_delete_once" }),
+        },
+      );
+      expect(deleteOnce.status).toBe(200);
+
+      const deleteRetry = await fetch(
+        `http://127.0.0.1:${ctx.port}/api/streams/${encodeURIComponent(created.stream.sessionKey)}`,
+        {
+          method: "DELETE",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ idempotencyKey: "req_delete_once" }),
+        },
+      );
+      expect(deleteRetry.status).toBe(200);
+      expect(await deleteRetry.json()).toEqual({
+        deletedSessionKey: created.stream.sessionKey,
+      });
+
+      const crossOperationConflict = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          idempotencyKey: "req_delete_once",
+          displayName: "Other",
+        }),
+      });
+      expect(crossOperationConflict.status).toBe(409);
+      expect(await crossOperationConflict.json()).toEqual({
+        error: {
+          code: "idempotency_key_reused",
+          message: "Idempotency key was already used",
+        },
+      });
+
+      const { ws } = await authenticateDevice(ctx.port, deviceId, token);
+      ws.send(
+        JSON.stringify({
+          type: "message",
+          id: `c_${randomUUID()}`,
+          content: "to deleted stream",
+          sessionKey: created.stream.sessionKey,
+        }),
+      );
+      const wsResponse = await waitForMessage(ws);
+      expect(wsResponse).toMatchObject({
+        type: "error",
+        code: "stream_not_found",
+      });
+      ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("migrates legacy events into stream metadata and backfills events.sessionKey", async () => {
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      userId: "flynn",
+      isAdmin: false,
+      tokenDelivered: true,
+    });
+    const customSessionKey = "agent:main:clawline:flynn:s_deadbeef";
+    const ctx = await setupTestServer([entry], {
+      seedLegacyDatabase: async (dbPath) => {
+        const db = new BetterSqlite3(dbPath);
+        try {
+          db.exec(`
+            CREATE TABLE user_sequences (
+              userId TEXT PRIMARY KEY,
+              nextSequence INTEGER NOT NULL
+            );
+            CREATE TABLE events (
+              id TEXT PRIMARY KEY,
+              userId TEXT NOT NULL,
+              sequence INTEGER NOT NULL,
+              originatingDeviceId TEXT,
+              payloadJson TEXT NOT NULL,
+              payloadBytes INTEGER NOT NULL,
+              timestamp INTEGER NOT NULL
+            );
+            CREATE UNIQUE INDEX idx_events_userId_sequence ON events(userId, sequence);
+            CREATE INDEX idx_events_userId ON events(userId);
+            CREATE TABLE messages (
+              deviceId TEXT NOT NULL,
+              userId TEXT NOT NULL,
+              clientId TEXT NOT NULL,
+              serverEventId TEXT NOT NULL,
+              serverSequence INTEGER NOT NULL,
+              content TEXT NOT NULL,
+              contentHash TEXT NOT NULL,
+              attachmentsHash TEXT NOT NULL,
+              timestamp INTEGER NOT NULL,
+              streaming INTEGER NOT NULL,
+              ackSent INTEGER NOT NULL DEFAULT 0,
+              PRIMARY KEY (deviceId, clientId)
+            );
+            CREATE INDEX idx_messages_userId ON messages(userId);
+            CREATE INDEX idx_messages_serverEventId ON messages(serverEventId);
+            CREATE TABLE assets (
+              assetId TEXT PRIMARY KEY,
+              userId TEXT NOT NULL,
+              mimeType TEXT NOT NULL,
+              size INTEGER NOT NULL,
+              createdAt INTEGER NOT NULL,
+              uploaderDeviceId TEXT NOT NULL
+            );
+            CREATE INDEX idx_assets_userId ON assets(userId);
+            CREATE INDEX idx_assets_createdAt ON assets(createdAt);
+            CREATE TABLE message_assets (
+              deviceId TEXT NOT NULL,
+              clientId TEXT NOT NULL,
+              assetId TEXT NOT NULL,
+              PRIMARY KEY (deviceId, clientId, assetId),
+              FOREIGN KEY (deviceId, clientId) REFERENCES messages(deviceId, clientId) ON DELETE CASCADE,
+              FOREIGN KEY (assetId) REFERENCES assets(assetId) ON DELETE RESTRICT
+            );
+            CREATE INDEX idx_message_assets_assetId ON message_assets(assetId);
+          `);
+          const payload = JSON.stringify({
+            type: "message",
+            id: "s_00000000-0000-0000-0000-000000000001",
+            role: "assistant",
+            content: "legacy",
+            timestamp: 1,
+            streaming: false,
+            sessionKey: customSessionKey,
+          });
+          db.prepare(
+            `INSERT INTO events
+              (id, userId, sequence, originatingDeviceId, payloadJson, payloadBytes, timestamp)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          ).run(
+            "s_00000000-0000-0000-0000-000000000001",
+            "flynn",
+            1,
+            null,
+            payload,
+            Buffer.byteLength(payload, "utf8"),
+            1,
+          );
+        } finally {
+          db.close();
+        }
+      },
+    });
+    try {
+      const pair = await performPairRequest(ctx.port, entry.deviceId);
+      const token = pair.token as string;
+      const streamsResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      expect(streamsResponse.status).toBe(200);
+      const streamsPayload = (await streamsResponse.json()) as {
+        streams: Array<{ sessionKey: string; kind: string }>;
+      };
+      expect(streamsPayload.streams.some((stream) => stream.sessionKey === customSessionKey)).toBe(
+        true,
+      );
+      expect(
+        streamsPayload.streams.some(
+          (stream) => stream.sessionKey === customSessionKey && stream.kind === "custom",
+        ),
+      ).toBe(true);
+
+      const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
+      const db = new BetterSqlite3(dbPath, { readonly: true });
+      try {
+        const userVersion = db.pragma("user_version", { simple: true }) as number;
+        expect(userVersion).toBe(2);
+        const eventsColumns = db.prepare(`PRAGMA table_info(events)`).all() as Array<{
+          name: string;
+        }>;
+        expect(eventsColumns.some((col) => col.name === "eventType")).toBe(true);
+        expect(eventsColumns.some((col) => col.name === "sessionKey")).toBe(true);
+        const row = db
+          .prepare(`SELECT sessionKey, eventType FROM events WHERE id = ?`)
+          .get("s_00000000-0000-0000-0000-000000000001") as
+          | { sessionKey: string; eventType: string }
+          | undefined;
+        expect(row?.sessionKey).toBe(customSessionKey);
+        expect(row?.eventType).toBe("message");
+      } finally {
+        db.close();
+      }
     } finally {
       await ctx.cleanup();
     }

@@ -31,6 +31,12 @@ import type {
   ClawlineOutboundAttachmentInput,
   ClawlineOutboundSendParams,
   ClawlineOutboundSendResult,
+  StreamSession,
+  StreamSessionKind,
+  StreamSnapshotServerMessage,
+  StreamCreatedServerMessage,
+  StreamUpdatedServerMessage,
+  StreamDeletedServerMessage,
 } from "./domain.js";
 import {
   resolveEffectiveMessagesConfig,
@@ -207,6 +213,14 @@ const EXEC_COMPLETION_ALERT_PROMPT =
 const USER_ID_MAX_LENGTH = 48;
 const COMBINING_MARKS_REGEX = /[\u0300-\u036f]/g;
 const WEBROOT_PREFIX = "/www";
+const STREAM_DB_VERSION = 2;
+const STREAM_SUFFIX_REGEX = /^s_[0-9a-f]{8}$/;
+const STREAM_DISPLAY_NAME_FALLBACK = "Stream";
+const STREAM_IDEMPOTENCY_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+const STREAM_IDEMPOTENCY_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
+const STREAM_OPERATION_CREATE = "create_stream";
+const STREAM_OPERATION_DELETE = "delete_stream";
+const MAX_STREAMS_BODY_BYTES = 16 * 1024;
 
 function truncateUtf8(value: string, maxBytes: number): string {
   if (Buffer.byteLength(value, "utf8") <= maxBytes) {
@@ -261,6 +275,20 @@ function sanitizeLabel(label?: string): string | undefined {
     return undefined;
   }
   return truncateUtf8(stripped, 64);
+}
+
+function sanitizeStreamDisplayName(value: unknown, maxBytes: number): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const stripped = value.replace(CONTROL_CHARS_REGEX, "").trim();
+  if (!stripped) {
+    return null;
+  }
+  if (Buffer.byteLength(stripped, "utf8") > maxBytes) {
+    return null;
+  }
+  return stripped;
 }
 
 function sanitizeDeviceInfo(info: DeviceInfo): DeviceInfo {
@@ -444,11 +472,54 @@ function buildClawlinePersonalSessionKey(agentId: string, userId: string): strin
 function buildClawlineUserStreamSessionKey(
   agentId: string,
   userId: string,
-  streamSuffix: "main" | "dm",
+  streamSuffix: string,
 ): string {
   const normalizedAgentId = (agentId ?? "").trim().toLowerCase() || "main";
   const normalizedUserId = sanitizeUserId(userId).toLowerCase();
-  return `agent:${normalizedAgentId}:clawline:${normalizedUserId}:${streamSuffix}`;
+  const normalizedSuffix = sanitizeUserId(streamSuffix).toLowerCase();
+  return `agent:${normalizedAgentId}:clawline:${normalizedUserId}:${normalizedSuffix}`;
+}
+
+function isCustomStreamSuffix(value: string): boolean {
+  return STREAM_SUFFIX_REGEX.test(value.trim().toLowerCase());
+}
+
+function generateCustomStreamSuffix(): string {
+  return `s_${randomBytes(4).toString("hex")}`;
+}
+
+function parseClawlineUserSessionKey(sessionKey: string): {
+  agentId: string;
+  userId: string;
+  streamSuffix: string;
+} | null {
+  const parts = sessionKey.split(":");
+  if (parts.length !== 5) {
+    return null;
+  }
+  if (parts[0]?.toLowerCase() !== "agent" || parts[2]?.toLowerCase() !== "clawline") {
+    return null;
+  }
+  const agentId = (parts[1] ?? "").trim().toLowerCase();
+  const userId = sanitizeUserId(parts[3]).toLowerCase();
+  const streamSuffix = sanitizeUserId(parts[4]).toLowerCase();
+  if (!agentId || !userId || !streamSuffix) {
+    return null;
+  }
+  return { agentId, userId, streamSuffix };
+}
+
+function streamKindToDisplayName(kind: StreamSessionKind): string {
+  if (kind === "main") {
+    return "Personal";
+  }
+  if (kind === "dm") {
+    return "DM";
+  }
+  if (kind === "global_dm") {
+    return "Admin";
+  }
+  return STREAM_DISPLAY_NAME_FALLBACK;
 }
 
 function isClawlinePersonalUserStreamSessionKey(sessionKey: string, userId?: string): boolean {
@@ -474,7 +545,7 @@ function isClawlinePersonalUserStreamSessionKey(sessionKey: string, userId?: str
     return false;
   }
   const suffix = parts[4]?.toLowerCase();
-  return suffix === "main" || suffix === "dm";
+  return suffix === "main" || suffix === "dm" || isCustomStreamSuffix(suffix ?? "");
 }
 
 function decodeTerminalSessionDescriptorFromBase64(data: string): {
@@ -661,6 +732,29 @@ type ServerMessage = {
   deviceId?: string;
 };
 
+type StreamServerMessage =
+  | StreamSnapshotServerMessage
+  | StreamCreatedServerMessage
+  | StreamUpdatedServerMessage
+  | StreamDeletedServerMessage;
+
+type StreamSessionRow = {
+  userId: string;
+  sessionKey: string;
+  displayName: string;
+  kind: StreamSessionKind;
+  orderIndex: number;
+  isBuiltIn: number;
+  createdAt: number;
+  updatedAt: number;
+};
+
+type StreamMutationIdempotencyRecord = {
+  status: number;
+  requestKey: string;
+  response: Record<string, unknown>;
+};
+
 enum MessageStreamingState {
   Finalized = 0,
   Active = 1,
@@ -741,6 +835,8 @@ const DEFAULT_CONFIG: ProviderConfig = {
   streams: {
     chunkPersistIntervalMs: 100,
     chunkBufferBytes: 1_048_576,
+    maxStreamsPerUser: 32,
+    maxDisplayNameBytes: 120,
   },
 };
 
@@ -1017,26 +1113,23 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       dmScope === "main"
         ? mainStreamSessionKey
         : buildClawlineUserStreamSessionKey(mainSessionAgentId, userId, "dm");
-
-    const provisioned = [mainStreamSessionKey, dmSessionKey, globalSessionKey];
-    const provisionedSessionKeys = Array.from(
-      new Map(provisioned.map((key) => [normalizeSessionKey(key), key])).values(),
+    const seededStreams = ensureStreamSessionsForUser({ userId, isAdmin });
+    const visibleStreamKeys = filterStreamAccess(seededStreams, isAdmin).map(
+      (stream) => stream.sessionKey,
     );
-
-    // Only subscribe sockets to sessions they are allowed to receive.
-    // - Main stream is always visible.
-    // - DM stream is visible only when dmScope != main (otherwise it aliases the main stream).
-    // - Global stream is admin-only.
-    const subscribed: string[] = [mainStreamSessionKey];
+    const fallbackKeys = [mainStreamSessionKey];
     if (dmScope !== "main") {
-      subscribed.push(dmSessionKey);
+      fallbackKeys.push(dmSessionKey);
     }
     if (isAdmin) {
-      subscribed.push(globalSessionKey);
+      fallbackKeys.push(globalSessionKey);
     }
-    const subscribedSessionKeys = Array.from(
-      new Map(subscribed.map((key) => [normalizeSessionKey(key), key])).values(),
+    const dedupeKeys = (keys: string[]) =>
+      Array.from(new Map(keys.map((key) => [normalizeSessionKey(key), key])).values());
+    const provisionedSessionKeys = dedupeKeys(
+      visibleStreamKeys.length > 0 ? visibleStreamKeys : fallbackKeys,
     );
+    const subscribedSessionKeys = provisionedSessionKeys;
 
     return {
       dmScope,
@@ -1143,63 +1236,524 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   let selectEventByIdStmt!: SqliteStatement;
   let selectEventPayloadForUserStmt!: SqliteStatement;
   let selectEventsAfterTimestampStmt!: SqliteStatement;
+  let selectStreamSessionsByUserStmt!: SqliteStatement;
+  let selectStreamSessionByKeyStmt!: SqliteStatement;
+  let selectStreamCountByUserStmt!: SqliteStatement;
+  let selectStreamMaxOrderStmt!: SqliteStatement;
+  let insertStreamSessionStmt!: SqliteStatement;
+  let updateStreamSessionDisplayNameStmt!: SqliteStatement;
+  let deleteStreamSessionStmt!: SqliteStatement;
+  let selectStreamIdempotencyStmt!: SqliteStatement;
+  let insertStreamIdempotencyStmt!: SqliteStatement;
+  let deleteExpiredStreamIdempotencyStmt!: SqliteStatement;
+  let deleteMessageAssetsBySessionStmt!: SqliteStatement;
+  let deleteMessagesBySessionStmt!: SqliteStatement;
+  let deleteEventsBySessionStmt!: SqliteStatement;
+  let selectOrphanedAssetsForUserStmt!: SqliteStatement;
+  let deleteOrphanedAssetByIdStmt!: SqliteStatement;
   let insertUserMessageTx!: ReturnType<SqliteDatabase["transaction"]>;
   let insertEventTx!: ReturnType<SqliteDatabase["transaction"]>;
+  let deleteStreamDataTx!: ReturnType<SqliteDatabase["transaction"]>;
   let handleUpload!: AssetHandlers["handleUpload"];
   let handleDownload!: AssetHandlers["handleDownload"];
   let cleanupTmpDirectory!: AssetHandlers["cleanupTmpDirectory"];
   let cleanupOrphanedAssetFiles!: AssetHandlers["cleanupOrphanedAssetFiles"];
   let cleanupUnreferencedAssets!: AssetHandlers["cleanupUnreferencedAssets"];
+  let streamIdempotencyCleanupInterval: ReturnType<typeof setInterval> | null = null;
 
-  function migrateLegacyClawlineSessionKeys(database: SqliteDatabase) {
-    const selectLegacy = database.prepare(
-      `SELECT id, payloadJson FROM events WHERE payloadJson LIKE '%"sessionKey"%' AND payloadJson LIKE '%clawline:dm:%'`,
+  const normalizeStoredSessionKey = (rawSessionKey: string, fallbackUserId?: string): string => {
+    const trimmed = rawSessionKey.trim();
+    if (!trimmed) {
+      if (fallbackUserId) {
+        return buildClawlinePersonalSessionKey(mainSessionAgentId, fallbackUserId);
+      }
+      return "";
+    }
+    if (sessionKeyEq(trimmed, mainSessionKey)) {
+      return mainSessionKey;
+    }
+    const parsed = parseClawlineUserSessionKey(trimmed);
+    if (parsed) {
+      if (parsed.streamSuffix === "main" || parsed.streamSuffix === "dm") {
+        return buildClawlineUserStreamSessionKey(
+          parsed.agentId,
+          parsed.userId,
+          parsed.streamSuffix,
+        );
+      }
+      if (isCustomStreamSuffix(parsed.streamSuffix)) {
+        return buildClawlineUserStreamSessionKey(
+          parsed.agentId,
+          parsed.userId,
+          parsed.streamSuffix,
+        );
+      }
+    }
+    const legacyParts = trimmed.split(":");
+    if (
+      legacyParts.length === 5 &&
+      legacyParts[0]?.toLowerCase() === "agent" &&
+      legacyParts[2]?.toLowerCase() === "clawline" &&
+      legacyParts[3]?.toLowerCase() === "dm"
+    ) {
+      const agentId = (legacyParts[1] ?? "").trim().toLowerCase() || "main";
+      const legacyUserId = sanitizeUserId(legacyParts[4]).toLowerCase();
+      if (!legacyUserId) {
+        return "";
+      }
+      return buildClawlinePersonalSessionKey(agentId, legacyUserId);
+    }
+    if (fallbackUserId) {
+      return buildClawlinePersonalSessionKey(mainSessionAgentId, fallbackUserId);
+    }
+    return "";
+  };
+
+  const streamSessionFromRow = (row: StreamSessionRow): StreamSession => ({
+    sessionKey: row.sessionKey,
+    displayName: row.displayName,
+    kind: row.kind,
+    orderIndex: row.orderIndex,
+    isBuiltIn: row.isBuiltIn === 1,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  });
+
+  const streamResponseSort = (a: StreamSession, b: StreamSession) => {
+    if (a.orderIndex !== b.orderIndex) {
+      return a.orderIndex - b.orderIndex;
+    }
+    return a.sessionKey.localeCompare(b.sessionKey);
+  };
+
+  const readStreamSessionsForUser = (userId: string): StreamSession[] => {
+    if (!selectStreamSessionsByUserStmt) {
+      return [];
+    }
+    const rows = selectStreamSessionsByUserStmt.all(userId) as StreamSessionRow[];
+    return rows.map(streamSessionFromRow).sort(streamResponseSort);
+  };
+
+  const filterStreamAccess = (streams: StreamSession[], isAdmin: boolean): StreamSession[] => {
+    if (isAdmin) {
+      return streams;
+    }
+    return streams.filter((stream) => !sessionKeyEq(stream.sessionKey, mainSessionKey));
+  };
+
+  const applyStreamSubscriptionsToSession = (session: Session, streams: StreamSession[]) => {
+    const visible = filterStreamAccess(streams, session.isAdmin);
+    const keys = Array.from(
+      new Map(
+        visible.map((stream) => [normalizeSessionKey(stream.sessionKey), stream.sessionKey]),
+      ).values(),
     );
-    const updateEvent = database.prepare(
-      `UPDATE events SET payloadJson = ?, payloadBytes = ? WHERE id = ?`,
+    session.provisionedSessionKeys = keys;
+    session.sessionKeys = keys;
+    if (!keys.some((key) => sessionKeyEq(key, session.sessionKey))) {
+      const preferred = keys.find((key) => sessionKeyEq(key, session.personalSessionKey));
+      session.sessionKey = preferred ?? keys[0] ?? session.personalSessionKey;
+    }
+  };
+
+  const syncUserSessionSubscriptions = (userId: string, streams?: StreamSession[]) => {
+    const resolved = streams ?? readStreamSessionsForUser(userId);
+    const sessions = userSessions.get(userId);
+    if (!sessions) {
+      return;
+    }
+    for (const session of sessions) {
+      applyStreamSubscriptionsToSession(session, resolved);
+    }
+  };
+
+  const seedDefaultStreamsForUser = (params: {
+    userId: string;
+    isAdmin: boolean;
+    hasSeparateDm: boolean;
+    now: number;
+  }): StreamSession[] => {
+    const entries: Array<{
+      sessionKey: string;
+      kind: StreamSessionKind;
+      displayName: string;
+      orderIndex: number;
+      isBuiltIn: number;
+    }> = [];
+    const mainKey = buildClawlinePersonalSessionKey(mainSessionAgentId, params.userId);
+    entries.push({
+      sessionKey: mainKey,
+      kind: "main",
+      displayName: streamKindToDisplayName("main"),
+      orderIndex: entries.length,
+      isBuiltIn: 1,
+    });
+    if (params.hasSeparateDm) {
+      entries.push({
+        sessionKey: buildClawlineUserStreamSessionKey(mainSessionAgentId, params.userId, "dm"),
+        kind: "dm",
+        displayName: streamKindToDisplayName("dm"),
+        orderIndex: entries.length,
+        isBuiltIn: 1,
+      });
+    }
+    if (params.isAdmin) {
+      entries.push({
+        sessionKey: mainSessionKey,
+        kind: "global_dm",
+        displayName: streamKindToDisplayName("global_dm"),
+        orderIndex: entries.length,
+        isBuiltIn: 1,
+      });
+    }
+    for (const entry of entries) {
+      insertStreamSessionStmt.run(
+        params.userId,
+        entry.sessionKey,
+        entry.displayName,
+        entry.kind,
+        entry.orderIndex,
+        entry.isBuiltIn,
+        params.now,
+        params.now,
+      );
+    }
+    return readStreamSessionsForUser(params.userId);
+  };
+
+  const ensureStreamSessionsForUser = (params: {
+    userId: string;
+    isAdmin: boolean;
+  }): StreamSession[] => {
+    if (!selectStreamSessionsByUserStmt || !insertStreamSessionStmt || !selectStreamMaxOrderStmt) {
+      const fallback: StreamSession[] = [
+        {
+          sessionKey: buildClawlinePersonalSessionKey(mainSessionAgentId, params.userId),
+          displayName: streamKindToDisplayName("main"),
+          kind: "main",
+          orderIndex: 0,
+          isBuiltIn: true,
+          createdAt: 0,
+          updatedAt: 0,
+        },
+      ];
+      if ((openClawCfg.session?.dmScope ?? "main") !== "main") {
+        fallback.push({
+          sessionKey: buildClawlineUserStreamSessionKey(mainSessionAgentId, params.userId, "dm"),
+          displayName: streamKindToDisplayName("dm"),
+          kind: "dm",
+          orderIndex: fallback.length,
+          isBuiltIn: true,
+          createdAt: 0,
+          updatedAt: 0,
+        });
+      }
+      if (params.isAdmin) {
+        fallback.push({
+          sessionKey: mainSessionKey,
+          displayName: streamKindToDisplayName("global_dm"),
+          kind: "global_dm",
+          orderIndex: fallback.length,
+          isBuiltIn: true,
+          createdAt: 0,
+          updatedAt: 0,
+        });
+      }
+      return fallback;
+    }
+    const now = nowMs();
+    const hasSeparateDm = (openClawCfg.session?.dmScope ?? "main") !== "main";
+    let streams = readStreamSessionsForUser(params.userId);
+    if (streams.length === 0) {
+      streams = seedDefaultStreamsForUser({
+        userId: params.userId,
+        isAdmin: params.isAdmin,
+        hasSeparateDm,
+        now,
+      });
+      return streams;
+    }
+    if (
+      params.isAdmin &&
+      !streams.some((stream) => sessionKeyEq(stream.sessionKey, mainSessionKey))
+    ) {
+      const maxOrderRow = selectStreamMaxOrderStmt.get(params.userId) as {
+        maxOrder: number | null;
+      };
+      const nextOrder = (maxOrderRow?.maxOrder ?? -1) + 1;
+      insertStreamSessionStmt.run(
+        params.userId,
+        mainSessionKey,
+        streamKindToDisplayName("global_dm"),
+        "global_dm",
+        nextOrder,
+        1,
+        now,
+        now,
+      );
+      streams = readStreamSessionsForUser(params.userId);
+    }
+    return streams;
+  };
+
+  function migrateDatabaseToV2(database: SqliteDatabase) {
+    const tableHasColumn = (tableName: string, columnName: string): boolean => {
+      const rows = database.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{
+        name: string;
+      }>;
+      return rows.some((row) => row.name === columnName);
+    };
+
+    const currentVersion = Number(database.pragma("user_version", { simple: true }) ?? 0);
+
+    if (!tableHasColumn("events", "eventType")) {
+      database.exec(`ALTER TABLE events ADD COLUMN eventType TEXT NOT NULL DEFAULT 'message'`);
+    }
+    if (!tableHasColumn("events", "sessionKey")) {
+      database.exec(`ALTER TABLE events ADD COLUMN sessionKey TEXT`);
+    }
+
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS stream_sessions (
+        userId TEXT NOT NULL,
+        sessionKey TEXT NOT NULL,
+        displayName TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        orderIndex INTEGER NOT NULL,
+        isBuiltIn INTEGER NOT NULL,
+        createdAt INTEGER NOT NULL,
+        updatedAt INTEGER NOT NULL,
+        PRIMARY KEY (userId, sessionKey),
+        UNIQUE (userId, orderIndex)
+      );
+      CREATE INDEX IF NOT EXISTS idx_stream_sessions_user_order
+        ON stream_sessions(userId, orderIndex);
+      CREATE TABLE IF NOT EXISTS stream_idempotency (
+        userId TEXT NOT NULL,
+        idempotencyKey TEXT NOT NULL,
+        operation TEXT NOT NULL,
+        responseJson TEXT NOT NULL,
+        createdAt INTEGER NOT NULL,
+        PRIMARY KEY (userId, idempotencyKey)
+      );
+      CREATE INDEX IF NOT EXISTS idx_stream_idempotency_created
+        ON stream_idempotency(createdAt);
+      CREATE INDEX IF NOT EXISTS idx_events_user_type_sequence
+        ON events(userId, eventType, sequence);
+      CREATE INDEX IF NOT EXISTS idx_events_user_session_sequence
+        ON events(userId, sessionKey, sequence);
+    `);
+
+    if (currentVersion >= STREAM_DB_VERSION) {
+      return;
+    }
+
+    const knownUsers = new Set<string>();
+    for (const entry of allowlist.entries) {
+      const userId = sanitizeUserId(entry.userId);
+      if (userId) {
+        knownUsers.add(userId);
+      }
+    }
+    const userRows = database.prepare(`SELECT DISTINCT userId FROM events`).all() as Array<{
+      userId: string;
+    }>;
+    for (const row of userRows) {
+      const userId = sanitizeUserId(row.userId);
+      if (userId) {
+        knownUsers.add(userId);
+      }
+    }
+
+    const historicalByUser = new Map<string, Set<string>>();
+    const collectKey = (userId: string, rawSessionKey: string) => {
+      const normalizedUserId = sanitizeUserId(userId);
+      if (!normalizedUserId) {
+        return;
+      }
+      const normalizedSessionKey = normalizeStoredSessionKey(rawSessionKey, normalizedUserId);
+      if (!normalizedSessionKey) {
+        return;
+      }
+      const set = historicalByUser.get(normalizedUserId) ?? new Set<string>();
+      set.add(normalizedSessionKey);
+      historicalByUser.set(normalizedUserId, set);
+      knownUsers.add(normalizedUserId);
+    };
+
+    const eventSessionRows = database
+      .prepare(`SELECT DISTINCT userId, sessionKey FROM events WHERE sessionKey IS NOT NULL`)
+      .all() as Array<{ userId: string; sessionKey: string }>;
+    for (const row of eventSessionRows) {
+      collectKey(row.userId, row.sessionKey);
+    }
+
+    if (tableHasColumn("messages", "sessionKey")) {
+      const messageSessionRows = database
+        .prepare(`SELECT DISTINCT userId, sessionKey FROM messages WHERE sessionKey IS NOT NULL`)
+        .all() as Array<{ userId: string; sessionKey: string }>;
+      for (const row of messageSessionRows) {
+        collectKey(row.userId, row.sessionKey);
+      }
+    }
+
+    const isAdminUserId = new Set(
+      allowlist.entries
+        .filter((entry) => entry.isAdmin)
+        .map((entry) => sanitizeUserId(entry.userId))
+        .filter((value) => value.length > 0),
     );
-    let updated = 0;
-    const runMigration = database.transaction(() => {
-      for (const row of selectLegacy.iterate() as IterableIterator<{
-        id: string;
-        payloadJson: string;
-      }>) {
-        let payload: ServerMessage;
-        try {
-          payload = JSON.parse(row.payloadJson) as ServerMessage;
-        } catch {
+    const hasSeparateDm = (openClawCfg.session?.dmScope ?? "main") !== "main";
+    const now = nowMs();
+    const selectExistingStreamsCount = database.prepare(
+      `SELECT COUNT(*) as count FROM stream_sessions WHERE userId = ?`,
+    );
+    const selectMaxOrderForUser = database.prepare(
+      `SELECT MAX(orderIndex) as maxOrder FROM stream_sessions WHERE userId = ?`,
+    );
+    const insertStreamSession = database.prepare(
+      `INSERT OR IGNORE INTO stream_sessions
+         (userId, sessionKey, displayName, kind, orderIndex, isBuiltIn, createdAt, updatedAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+
+    const insertCustomStreamsForUser = (userId: string, discovered: Set<string>) => {
+      const existing = database
+        .prepare(`SELECT sessionKey FROM stream_sessions WHERE userId = ?`)
+        .all(userId) as Array<{ sessionKey: string }>;
+      const existingKeys = new Set(existing.map((row) => normalizeSessionKey(row.sessionKey)));
+      let maxOrder = (selectMaxOrderForUser.get(userId) as { maxOrder: number | null } | undefined)
+        ?.maxOrder;
+      if (maxOrder == null) {
+        maxOrder = -1;
+      }
+      for (const key of Array.from(discovered).sort()) {
+        if (sessionKeyEq(key, mainSessionKey)) {
           continue;
         }
-        const sessionKey = typeof payload.sessionKey === "string" ? payload.sessionKey.trim() : "";
-        if (!sessionKey) {
+        const parsed = parseClawlineUserSessionKey(key);
+        if (!parsed || parsed.userId !== sanitizeUserId(userId).toLowerCase()) {
           continue;
         }
-        const parts = sessionKey.split(":");
-        if (parts.length < 5) {
+        if (parsed.streamSuffix === "main" || parsed.streamSuffix === "dm") {
           continue;
         }
-        if (parts[0] !== "agent" || parts[2] !== "clawline" || parts[3] !== "dm") {
+        if (!isCustomStreamSuffix(parsed.streamSuffix)) {
           continue;
         }
-        const normalizedUserId = sanitizeUserId(parts[4]).toLowerCase();
+        if (existingKeys.has(normalizeSessionKey(key))) {
+          continue;
+        }
+        maxOrder += 1;
+        insertStreamSession.run(
+          userId,
+          key,
+          STREAM_DISPLAY_NAME_FALLBACK,
+          "custom",
+          maxOrder,
+          0,
+          now,
+          now,
+        );
+        existingKeys.add(normalizeSessionKey(key));
+      }
+    };
+
+    for (const userId of Array.from(knownUsers).sort()) {
+      const countRow = selectExistingStreamsCount.get(userId) as { count: number };
+      if (countRow.count === 0) {
+        const discovered = historicalByUser.get(userId) ?? new Set<string>();
+        const builtIns: Array<{ sessionKey: string; kind: StreamSessionKind }> = [];
+        builtIns.push({
+          sessionKey: buildClawlinePersonalSessionKey(mainSessionAgentId, userId),
+          kind: "main",
+        });
+        const hasDiscoveredDm = Array.from(discovered).some((sessionKey) => {
+          const parsed = parseClawlineUserSessionKey(sessionKey);
+          return (
+            parsed?.userId === sanitizeUserId(userId).toLowerCase() && parsed.streamSuffix === "dm"
+          );
+        });
+        if (hasSeparateDm || hasDiscoveredDm) {
+          builtIns.push({
+            sessionKey: buildClawlineUserStreamSessionKey(mainSessionAgentId, userId, "dm"),
+            kind: "dm",
+          });
+        }
+        if (
+          isAdminUserId.has(userId) ||
+          Array.from(discovered).some((sessionKey) => sessionKeyEq(sessionKey, mainSessionKey))
+        ) {
+          builtIns.push({ sessionKey: mainSessionKey, kind: "global_dm" });
+        }
+        for (const [orderIndex, builtIn] of builtIns.entries()) {
+          insertStreamSession.run(
+            userId,
+            builtIn.sessionKey,
+            streamKindToDisplayName(builtIn.kind),
+            builtIn.kind,
+            orderIndex,
+            1,
+            now,
+            now,
+          );
+        }
+      }
+      const discovered = historicalByUser.get(userId) ?? new Set<string>();
+      insertCustomStreamsForUser(userId, discovered);
+    }
+
+    const selectEventsForBackfill = database.prepare(
+      `SELECT id, userId, payloadJson, sessionKey
+       FROM events
+       WHERE eventType = 'message'`,
+    );
+    const updateEventSessionKey = database.prepare(`UPDATE events SET sessionKey = ? WHERE id = ?`);
+    const backfillRows = selectEventsForBackfill.all() as Array<{
+      id: string;
+      userId: string;
+      payloadJson: string;
+      sessionKey: string | null;
+    }>;
+    const runBackfill = database.transaction(() => {
+      for (const row of backfillRows) {
+        const normalizedUserId = sanitizeUserId(row.userId);
         if (!normalizedUserId) {
           continue;
         }
-        const agentId = parts[1] || "main";
-        const nextSessionKey = buildClawlinePersonalSessionKey(agentId, normalizedUserId);
-        if (nextSessionKey === sessionKey) {
-          continue;
+        let resolvedSessionKey = normalizeStoredSessionKey(row.sessionKey ?? "");
+        if (!resolvedSessionKey) {
+          try {
+            const payload = JSON.parse(row.payloadJson) as {
+              type?: unknown;
+              sessionKey?: unknown;
+            };
+            if (payload.type === "message" && typeof payload.sessionKey === "string") {
+              resolvedSessionKey = normalizeStoredSessionKey(payload.sessionKey, normalizedUserId);
+            }
+          } catch {
+            resolvedSessionKey = "";
+          }
         }
-        payload.sessionKey = nextSessionKey;
-        const payloadJson = JSON.stringify(payload);
-        updateEvent.run(payloadJson, Buffer.byteLength(payloadJson, "utf8"), row.id);
-        updated += 1;
+        if (!resolvedSessionKey) {
+          resolvedSessionKey = buildClawlinePersonalSessionKey(
+            mainSessionAgentId,
+            normalizedUserId,
+          );
+        }
+        if (!row.sessionKey || !sessionKeyEq(row.sessionKey, resolvedSessionKey)) {
+          updateEventSessionKey.run(resolvedSessionKey, row.id);
+        }
+        collectKey(normalizedUserId, resolvedSessionKey);
       }
     });
-    runMigration();
-    if (updated > 0) {
-      logger.info?.("[clawline] migrated_legacy_session_keys", { updated });
+    runBackfill();
+
+    for (const [userId, discovered] of historicalByUser) {
+      insertCustomStreamsForUser(userId, discovered);
     }
+
+    database.pragma(`user_version = ${STREAM_DB_VERSION}`);
   }
 
   function initializeDatabaseResources(): boolean {
@@ -1221,7 +1775,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         originatingDeviceId TEXT,
         payloadJson TEXT NOT NULL,
         payloadBytes INTEGER NOT NULL,
-        timestamp INTEGER NOT NULL
+        timestamp INTEGER NOT NULL,
+        eventType TEXT NOT NULL DEFAULT 'message',
+        sessionKey TEXT
       );
       CREATE UNIQUE INDEX IF NOT EXISTS idx_events_userId_sequence ON events(userId, sequence);
       CREATE INDEX IF NOT EXISTS idx_events_userId ON events(userId);
@@ -1262,12 +1818,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       CREATE INDEX IF NOT EXISTS idx_message_assets_assetId ON message_assets(assetId);
     `);
 
-    migrateLegacyClawlineSessionKeys(newDb);
+    migrateDatabaseToV2(newDb);
 
     sequenceStatement = userSequenceStmt(newDb);
     insertEventStmt = newDb.prepare(
-      `INSERT INTO events (id, userId, sequence, originatingDeviceId, payloadJson, payloadBytes, timestamp)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO events
+         (id, userId, sequence, originatingDeviceId, payloadJson, payloadBytes, timestamp, eventType, sessionKey)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     updateMessageAckStmt = newDb.prepare(
       `UPDATE messages SET ackSent = 1 WHERE deviceId = ? AND clientId = ?`,
@@ -1300,6 +1857,84 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
          )`,
     );
     deleteAssetStmt = newDb.prepare(
+      `DELETE FROM assets
+       WHERE assetId = ?
+         AND NOT EXISTS (
+           SELECT 1 FROM message_assets WHERE message_assets.assetId = assets.assetId
+         )`,
+    );
+    selectStreamSessionsByUserStmt = newDb.prepare(
+      `SELECT userId, sessionKey, displayName, kind, orderIndex, isBuiltIn, createdAt, updatedAt
+       FROM stream_sessions
+       WHERE userId = ?
+       ORDER BY orderIndex ASC`,
+    );
+    selectStreamSessionByKeyStmt = newDb.prepare(
+      `SELECT userId, sessionKey, displayName, kind, orderIndex, isBuiltIn, createdAt, updatedAt
+       FROM stream_sessions
+       WHERE userId = ? AND sessionKey = ?`,
+    );
+    selectStreamCountByUserStmt = newDb.prepare(
+      `SELECT COUNT(*) as count FROM stream_sessions WHERE userId = ?`,
+    );
+    selectStreamMaxOrderStmt = newDb.prepare(
+      `SELECT MAX(orderIndex) as maxOrder FROM stream_sessions WHERE userId = ?`,
+    );
+    insertStreamSessionStmt = newDb.prepare(
+      `INSERT INTO stream_sessions
+         (userId, sessionKey, displayName, kind, orderIndex, isBuiltIn, createdAt, updatedAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    updateStreamSessionDisplayNameStmt = newDb.prepare(
+      `UPDATE stream_sessions
+       SET displayName = ?, updatedAt = ?
+       WHERE userId = ? AND sessionKey = ?`,
+    );
+    deleteStreamSessionStmt = newDb.prepare(
+      `DELETE FROM stream_sessions WHERE userId = ? AND sessionKey = ?`,
+    );
+    selectStreamIdempotencyStmt = newDb.prepare(
+      `SELECT operation, responseJson FROM stream_idempotency WHERE userId = ? AND idempotencyKey = ?`,
+    );
+    insertStreamIdempotencyStmt = newDb.prepare(
+      `INSERT INTO stream_idempotency (userId, idempotencyKey, operation, responseJson, createdAt)
+       VALUES (?, ?, ?, ?, ?)`,
+    );
+    deleteExpiredStreamIdempotencyStmt = newDb.prepare(
+      `DELETE FROM stream_idempotency WHERE createdAt < ?`,
+    );
+    deleteMessageAssetsBySessionStmt = newDb.prepare(
+      `DELETE FROM message_assets
+       WHERE EXISTS (
+         SELECT 1
+         FROM messages
+         JOIN events ON events.id = messages.serverEventId
+         WHERE messages.deviceId = message_assets.deviceId
+           AND messages.clientId = message_assets.clientId
+           AND messages.userId = ?
+           AND events.userId = ?
+           AND events.sessionKey = ?
+       )`,
+    );
+    deleteMessagesBySessionStmt = newDb.prepare(
+      `DELETE FROM messages
+       WHERE userId = ?
+         AND serverEventId IN (
+           SELECT id FROM events WHERE userId = ? AND sessionKey = ?
+         )`,
+    );
+    deleteEventsBySessionStmt = newDb.prepare(
+      `DELETE FROM events WHERE userId = ? AND sessionKey = ?`,
+    );
+    selectOrphanedAssetsForUserStmt = newDb.prepare(
+      `SELECT assetId
+       FROM assets
+       WHERE userId = ?
+         AND NOT EXISTS (
+           SELECT 1 FROM message_assets WHERE message_assets.assetId = assets.assetId
+         )`,
+    );
+    deleteOrphanedAssetByIdStmt = newDb.prepare(
       `DELETE FROM assets
        WHERE assetId = ?
          AND NOT EXISTS (
@@ -1380,6 +2015,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           payloadJson,
           payloadBytes,
           timestamp,
+          "message",
+          sessionKey,
         );
         insertMessageStmt.run(
           session.deviceId,
@@ -1400,25 +2037,38 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     );
 
     selectEventsAfterStmt = newDb.prepare(
-      `SELECT id, payloadJson FROM events WHERE userId = ? AND sequence > ? ORDER BY sequence ASC`,
+      `SELECT id, payloadJson
+       FROM events
+       WHERE userId = ? AND eventType = 'message' AND sequence > ?
+       ORDER BY sequence ASC`,
     );
     selectEventsTailStmt = newDb.prepare(
-      `SELECT id, payloadJson FROM events WHERE userId = ? ORDER BY sequence DESC LIMIT ?`,
+      `SELECT id, payloadJson
+       FROM events
+       WHERE userId = ? AND eventType = 'message'
+       ORDER BY sequence DESC LIMIT ?`,
     );
     selectEventByIdStmt = newDb.prepare(
-      `SELECT id, userId, sequence, timestamp FROM events WHERE id = ?`,
+      `SELECT id, userId, sequence, timestamp FROM events WHERE id = ? AND eventType = 'message'`,
     );
     selectEventPayloadForUserStmt = newDb.prepare(
-      `SELECT payloadJson FROM events WHERE userId = ? AND id = ?`,
+      `SELECT payloadJson FROM events WHERE userId = ? AND id = ? AND eventType = 'message'`,
     );
     selectEventsAfterTimestampStmt = newDb.prepare(
-      `SELECT id, payloadJson FROM events WHERE userId = ? AND timestamp > ? ORDER BY sequence ASC`,
+      `SELECT id, payloadJson
+       FROM events
+       WHERE userId = ? AND eventType = 'message' AND timestamp > ?
+       ORDER BY sequence ASC`,
     );
     insertEventTx = newDb.transaction(
       (event: ServerMessage, userId: string, originatingDeviceId?: string) => {
         const payloadJson = JSON.stringify(event);
         const payloadBytes = Buffer.byteLength(payloadJson, "utf8");
         const sequenceRow = sequenceStatement.get(userId) as { sequence: number };
+        const normalizedSessionKey =
+          typeof event.sessionKey === "string"
+            ? normalizeStoredSessionKey(event.sessionKey, userId)
+            : "";
         insertEventStmt.run(
           event.id,
           userId,
@@ -1427,10 +2077,32 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           payloadJson,
           payloadBytes,
           event.timestamp,
+          "message",
+          normalizedSessionKey || null,
         );
         return sequenceRow.sequence;
       },
     );
+
+    deleteStreamDataTx = newDb.transaction((params: { userId: string; sessionKey: string }) => {
+      const orphanCandidates = selectOrphanedAssetsForUserStmt.all(params.userId) as Array<{
+        assetId: string;
+      }>;
+      deleteMessageAssetsBySessionStmt.run(params.userId, params.userId, params.sessionKey);
+      deleteMessagesBySessionStmt.run(params.userId, params.userId, params.sessionKey);
+      deleteEventsBySessionStmt.run(params.userId, params.sessionKey);
+      deleteStreamSessionStmt.run(params.userId, params.sessionKey);
+      const deletedAssetIds: string[] = [];
+      for (const row of orphanCandidates) {
+        const result = deleteOrphanedAssetByIdStmt.run(row.assetId);
+        if (result.changes > 0) {
+          deletedAssetIds.push(row.assetId);
+        }
+      }
+      return deletedAssetIds;
+    });
+
+    deleteExpiredStreamIdempotencyStmt.run(nowMs() - STREAM_IDEMPOTENCY_RETENTION_MS);
 
     db = newDb;
     return true;
@@ -1704,6 +2376,26 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         logHttpRequest("download_complete", { assetId });
         return;
       }
+      if (parsedUrl.pathname === "/api/streams") {
+        if (req.method === "GET") {
+          await handleListStreamsRequest(req, res);
+          return;
+        }
+        if (req.method === "POST") {
+          await handleCreateStreamRequest(req, res);
+          return;
+        }
+      }
+      if (parsedUrl.pathname.startsWith("/api/streams/")) {
+        if (req.method === "PATCH") {
+          await handleRenameStreamRequest(req, res);
+          return;
+        }
+        if (req.method === "DELETE") {
+          await handleDeleteStreamRequest(req, res);
+          return;
+        }
+      }
       if (
         parsedUrl.pathname === WEBROOT_PREFIX ||
         parsedUrl.pathname.startsWith(`${WEBROOT_PREFIX}/`)
@@ -1721,6 +2413,17 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       });
       res.writeHead(404).end();
     } catch (err) {
+      const pathName = req.url ? new URL(req.url, "http://localhost").pathname : "";
+      const isStreamApi = pathName === "/api/streams" || pathName.startsWith("/api/streams/");
+      if (isStreamApi) {
+        if (err instanceof HttpError) {
+          sendStreamApiError(res, err.status, err.code, err.message);
+        } else {
+          logger.error?.(`http_request_failed: ${formatError(err)}`);
+          sendStreamApiError(res, 500, "server_error", "Internal error");
+        }
+        return;
+      }
       logger.error?.(`http_request_failed: ${formatError(err)}`);
       if (!res.headersSent) {
         sendHttpError(res, 500, "server_error", "Internal error");
@@ -1908,7 +2611,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     return { raw: rawText, message, source, sessionKey };
   }
 
-  async function readRequestBody(req: http.IncomingMessage, limit: number): Promise<Buffer> {
+  async function readRequestBody(
+    req: http.IncomingMessage,
+    limit: number,
+    tooLargeMessage = "Alert payload too large",
+  ): Promise<Buffer> {
     return await new Promise<Buffer>((resolve, reject) => {
       const chunks: Buffer[] = [];
       let size = 0;
@@ -1930,7 +2637,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         if (size > limit) {
           cleanup();
           req.destroy();
-          reject(new HttpError(413, "payload_too_large", "Alert payload too large"));
+          reject(new HttpError(413, "payload_too_large", tooLargeMessage));
           return;
         }
         chunks.push(chunk);
@@ -2775,6 +3482,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         if (state && state.authenticated) {
           state.isAdmin = entry.isAdmin;
         }
+        const streams = filterStreamAccess(
+          ensureStreamSessionsForUser({ userId: session.userId, isAdmin: entry.isAdmin }),
+          entry.isAdmin,
+        );
+        syncUserSessionSubscriptions(session.userId, streams);
+        void sendJson(session.socket, { type: "stream_snapshot", streams }).catch(() => {});
         void sendSessionInfo(session, info);
       }
     }
@@ -2883,6 +3596,46 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     res.end(JSON.stringify({ type: "error", code, message }));
   }
 
+  function sendStreamApiError(
+    res: http.ServerResponse,
+    status: number,
+    code: string,
+    message: string,
+  ) {
+    res.setHeader("Content-Type", "application/json");
+    res.writeHead(status);
+    res.end(JSON.stringify({ error: { code, message } }));
+  }
+
+  function normalizeStreamMutationSessionKeyForUser(userId: string, sessionKey: string): string {
+    const normalized = normalizeStoredSessionKey(sessionKey, userId);
+    if (!normalized) {
+      return "";
+    }
+    if (sessionKeyEq(normalized, mainSessionKey)) {
+      return mainSessionKey;
+    }
+    const parsed = parseClawlineUserSessionKey(normalized);
+    if (!parsed) {
+      return "";
+    }
+    if (parsed.userId !== sanitizeUserId(userId).toLowerCase()) {
+      return "";
+    }
+    if (
+      parsed.streamSuffix !== "main" &&
+      parsed.streamSuffix !== "dm" &&
+      !isCustomStreamSuffix(parsed.streamSuffix)
+    ) {
+      return "";
+    }
+    return normalized;
+  }
+
+  function streamMutationRequestKey(operation: string, payload: Record<string, unknown>): string {
+    return JSON.stringify({ operation, payload });
+  }
+
   function authenticateHttpRequest(req: http.IncomingMessage) {
     const header = req.headers.authorization;
     if (!header || !header.startsWith("Bearer ")) {
@@ -2918,6 +3671,401 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     return { deviceId, userId: entry.userId, isAdmin: entry.isAdmin };
   }
 
+  async function ensureStreamsForAuthedUser(auth: {
+    userId: string;
+    isAdmin: boolean;
+  }): Promise<StreamSession[]> {
+    return runPerUserTask(auth.userId, async () =>
+      enqueueWriteTask(() => {
+        const streams = ensureStreamSessionsForUser({ userId: auth.userId, isAdmin: auth.isAdmin });
+        syncUserSessionSubscriptions(auth.userId, streams);
+        return filterStreamAccess(streams, auth.isAdmin);
+      }),
+    );
+  }
+
+  function loadStreamRowForUser(userId: string, sessionKey: string): StreamSessionRow | null {
+    const row = selectStreamSessionByKeyStmt.get(userId, sessionKey) as
+      | StreamSessionRow
+      | undefined;
+    return row ?? null;
+  }
+
+  function cleanupExpiredStreamIdempotencyRows() {
+    deleteExpiredStreamIdempotencyStmt.run(nowMs() - STREAM_IDEMPOTENCY_RETENTION_MS);
+  }
+
+  function readIdempotencyRecord(params: {
+    userId: string;
+    idempotencyKey: string;
+    operation: string;
+    requestKey: string;
+  }): { status: number; response: Record<string, unknown> } | null {
+    const row = selectStreamIdempotencyStmt.get(params.userId, params.idempotencyKey) as
+      | { operation: string; responseJson: string }
+      | undefined;
+    if (!row) {
+      return null;
+    }
+    let parsed: StreamMutationIdempotencyRecord | null = null;
+    try {
+      parsed = JSON.parse(row.responseJson) as StreamMutationIdempotencyRecord;
+    } catch {
+      parsed = null;
+    }
+    if (!parsed) {
+      throw new HttpError(409, "idempotency_key_reused", "Idempotency key was already used");
+    }
+    if (row.operation !== params.operation || parsed.requestKey !== params.requestKey) {
+      throw new HttpError(409, "idempotency_key_reused", "Idempotency key was already used");
+    }
+    return { status: parsed.status, response: parsed.response };
+  }
+
+  function storeIdempotencyRecord(params: {
+    userId: string;
+    idempotencyKey: string;
+    operation: string;
+    requestKey: string;
+    status: number;
+    response: Record<string, unknown>;
+  }) {
+    const payload: StreamMutationIdempotencyRecord = {
+      status: params.status,
+      requestKey: params.requestKey,
+      response: params.response,
+    };
+    insertStreamIdempotencyStmt.run(
+      params.userId,
+      params.idempotencyKey,
+      params.operation,
+      JSON.stringify(payload),
+      nowMs(),
+    );
+  }
+
+  async function broadcastStreamEvent(userId: string, payload: StreamServerMessage) {
+    const sessions = userSessions.get(userId);
+    if (!sessions || sessions.size === 0) {
+      return;
+    }
+    const sends: Promise<boolean>[] = [];
+    for (const session of sessions) {
+      sends.push(sendJson(session.socket, payload));
+    }
+    await Promise.allSettled(sends);
+  }
+
+  async function handleListStreamsRequest(req: http.IncomingMessage, res: http.ServerResponse) {
+    const auth = authenticateHttpRequest(req);
+    const streams = await ensureStreamsForAuthedUser(auth);
+    res.setHeader("Content-Type", "application/json");
+    res.writeHead(200);
+    res.end(JSON.stringify({ streams }));
+  }
+
+  async function parseStreamsRequestBody(
+    req: http.IncomingMessage,
+  ): Promise<Record<string, unknown>> {
+    const raw = await readRequestBody(req, MAX_STREAMS_BODY_BYTES, "Stream payload too large");
+    if (raw.length === 0) {
+      return {};
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw.toString("utf8"));
+    } catch {
+      throw new HttpError(400, "invalid_json", "Stream payload must be valid JSON");
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new HttpError(400, "invalid_request", "Stream payload must be an object");
+    }
+    return parsed as Record<string, unknown>;
+  }
+
+  function parseSessionKeyPath(pathname: string): string {
+    const prefix = "/api/streams/";
+    if (!pathname.startsWith(prefix)) {
+      throw new HttpError(404, "stream_not_found", "Stream not found");
+    }
+    const raw = pathname.slice(prefix.length);
+    if (!raw || raw.includes("/")) {
+      throw new HttpError(404, "stream_not_found", "Stream not found");
+    }
+    try {
+      const decoded = decodeURIComponent(raw);
+      if (!decoded.trim()) {
+        throw new HttpError(400, "invalid_session_key", "Invalid session key");
+      }
+      return decoded;
+    } catch (err) {
+      if (err instanceof HttpError) {
+        throw err;
+      }
+      throw new HttpError(400, "invalid_session_key", "Invalid session key");
+    }
+  }
+
+  async function handleCreateStreamRequest(req: http.IncomingMessage, res: http.ServerResponse) {
+    const auth = authenticateHttpRequest(req);
+    const body = await parseStreamsRequestBody(req);
+    const idempotencyKey =
+      typeof body.idempotencyKey === "string" ? body.idempotencyKey.trim() : "";
+    const displayName = sanitizeStreamDisplayName(
+      body.displayName,
+      config.streams.maxDisplayNameBytes,
+    );
+    if (!displayName) {
+      throw new HttpError(400, "invalid_display_name", "Display name is required");
+    }
+    if (!idempotencyKey) {
+      throw new HttpError(400, "invalid_request", "idempotencyKey is required");
+    }
+    const requestKey = streamMutationRequestKey(STREAM_OPERATION_CREATE, { displayName });
+    const existingIdempotent = readIdempotencyRecord({
+      userId: auth.userId,
+      idempotencyKey,
+      operation: STREAM_OPERATION_CREATE,
+      requestKey,
+    });
+    if (existingIdempotent) {
+      res.setHeader("Content-Type", "application/json");
+      res.writeHead(existingIdempotent.status);
+      res.end(JSON.stringify(existingIdempotent.response));
+      return;
+    }
+    const { stream, responseBody } = await runPerUserTask(auth.userId, async () =>
+      enqueueWriteTask(() => {
+        const availableStreams = ensureStreamSessionsForUser({
+          userId: auth.userId,
+          isAdmin: auth.isAdmin,
+        });
+        const visibleStreams = filterStreamAccess(availableStreams, auth.isAdmin);
+        if (visibleStreams.length >= config.streams.maxStreamsPerUser) {
+          throw new HttpError(409, "stream_limit_reached", "Stream limit reached");
+        }
+        const now = nowMs();
+        const maxOrderRow = selectStreamMaxOrderStmt.get(auth.userId) as {
+          maxOrder: number | null;
+        };
+        let nextOrder = (maxOrderRow?.maxOrder ?? -1) + 1;
+        let nextSessionKey = "";
+        for (let attempts = 0; attempts < 8; attempts += 1) {
+          const suffix = generateCustomStreamSuffix();
+          const candidate = buildClawlineUserStreamSessionKey(
+            mainSessionAgentId,
+            auth.userId,
+            suffix,
+          );
+          const existing = loadStreamRowForUser(auth.userId, candidate);
+          if (!existing) {
+            nextSessionKey = candidate;
+            break;
+          }
+        }
+        if (!nextSessionKey) {
+          throw new HttpError(500, "server_error", "Unable to allocate stream key");
+        }
+        let inserted = false;
+        let lastOrderConflict = false;
+        for (let attempts = 0; attempts < 2; attempts += 1) {
+          lastOrderConflict = false;
+          try {
+            insertStreamSessionStmt.run(
+              auth.userId,
+              nextSessionKey,
+              displayName,
+              "custom",
+              nextOrder,
+              0,
+              now,
+              now,
+            );
+            inserted = true;
+            break;
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            if (message.includes("stream_sessions.userId, stream_sessions.orderIndex")) {
+              lastOrderConflict = true;
+              const recomputed = selectStreamMaxOrderStmt.get(auth.userId) as {
+                maxOrder: number | null;
+              };
+              nextOrder = (recomputed?.maxOrder ?? -1) + 1;
+              continue;
+            }
+            throw err;
+          }
+        }
+        if (!inserted) {
+          if (lastOrderConflict) {
+            throw new HttpError(409, "stream_limit_reached", "Unable to allocate stream order");
+          }
+          throw new HttpError(500, "server_error", "Unable to create stream");
+        }
+        const row = loadStreamRowForUser(auth.userId, nextSessionKey);
+        if (!row) {
+          throw new HttpError(500, "server_error", "Created stream is missing");
+        }
+        const created = streamSessionFromRow(row);
+        const synced = ensureStreamSessionsForUser({ userId: auth.userId, isAdmin: auth.isAdmin });
+        syncUserSessionSubscriptions(auth.userId, synced);
+        const response = { stream: created };
+        storeIdempotencyRecord({
+          userId: auth.userId,
+          idempotencyKey,
+          operation: STREAM_OPERATION_CREATE,
+          requestKey,
+          status: 201,
+          response,
+        });
+        return { stream: created, responseBody: response };
+      }),
+    );
+    await broadcastStreamEvent(auth.userId, { type: "stream_created", stream });
+    res.setHeader("Content-Type", "application/json");
+    res.writeHead(201);
+    res.end(JSON.stringify(responseBody));
+  }
+
+  async function handleRenameStreamRequest(req: http.IncomingMessage, res: http.ServerResponse) {
+    const auth = authenticateHttpRequest(req);
+    const sessionKeyInput = parseSessionKeyPath(
+      new URL(req.url ?? "", "http://localhost").pathname,
+    );
+    const sessionKey = normalizeStreamMutationSessionKeyForUser(auth.userId, sessionKeyInput);
+    if (!sessionKey) {
+      throw new HttpError(404, "stream_not_found", "Stream not found");
+    }
+    const body = await parseStreamsRequestBody(req);
+    const displayName = sanitizeStreamDisplayName(
+      body.displayName,
+      config.streams.maxDisplayNameBytes,
+    );
+    if (!displayName) {
+      throw new HttpError(400, "invalid_display_name", "Display name is required");
+    }
+    const stream = await runPerUserTask(auth.userId, async () =>
+      enqueueWriteTask(() => {
+        const streams = ensureStreamSessionsForUser({ userId: auth.userId, isAdmin: auth.isAdmin });
+        syncUserSessionSubscriptions(auth.userId, streams);
+        const existing = loadStreamRowForUser(auth.userId, sessionKey);
+        if (!existing) {
+          throw new HttpError(404, "stream_not_found", "Stream not found");
+        }
+        if (existing.isBuiltIn === 1) {
+          throw new HttpError(
+            409,
+            "built_in_stream_rename_forbidden",
+            "Built-in streams cannot be renamed",
+          );
+        }
+        const now = nowMs();
+        updateStreamSessionDisplayNameStmt.run(displayName, now, auth.userId, sessionKey);
+        const updated = loadStreamRowForUser(auth.userId, sessionKey);
+        if (!updated) {
+          throw new HttpError(404, "stream_not_found", "Stream not found");
+        }
+        const mapped = streamSessionFromRow(updated);
+        const synced = ensureStreamSessionsForUser({ userId: auth.userId, isAdmin: auth.isAdmin });
+        syncUserSessionSubscriptions(auth.userId, synced);
+        return mapped;
+      }),
+    );
+    await broadcastStreamEvent(auth.userId, { type: "stream_updated", stream });
+    res.setHeader("Content-Type", "application/json");
+    res.writeHead(200);
+    res.end(JSON.stringify({ stream }));
+  }
+
+  async function handleDeleteStreamRequest(req: http.IncomingMessage, res: http.ServerResponse) {
+    const auth = authenticateHttpRequest(req);
+    const userActionHeaderRaw = req.headers["x-clawline-user-action"];
+    const userActionHeader = Array.isArray(userActionHeaderRaw)
+      ? userActionHeaderRaw[0]
+      : userActionHeaderRaw;
+    if (
+      typeof userActionHeader === "string" &&
+      userActionHeader.trim().length > 0 &&
+      userActionHeader.trim().toLowerCase() !== "delete_stream"
+    ) {
+      throw new HttpError(
+        409,
+        "stream_delete_requires_user_action",
+        "Stream delete requires explicit user action",
+      );
+    }
+    const sessionKeyInput = parseSessionKeyPath(
+      new URL(req.url ?? "", "http://localhost").pathname,
+    );
+    const sessionKey = normalizeStreamMutationSessionKeyForUser(auth.userId, sessionKeyInput);
+    if (!sessionKey) {
+      throw new HttpError(404, "stream_not_found", "Stream not found");
+    }
+    const body = await parseStreamsRequestBody(req);
+    const idempotencyKey =
+      typeof body.idempotencyKey === "string" ? body.idempotencyKey.trim() : "";
+    const requestKey = streamMutationRequestKey(STREAM_OPERATION_DELETE, { sessionKey });
+    if (idempotencyKey) {
+      const existingIdempotent = readIdempotencyRecord({
+        userId: auth.userId,
+        idempotencyKey,
+        operation: STREAM_OPERATION_DELETE,
+        requestKey,
+      });
+      if (existingIdempotent) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(existingIdempotent.status);
+        res.end(JSON.stringify(existingIdempotent.response));
+        return;
+      }
+    }
+    const responseBody = await runPerUserTask(auth.userId, async () =>
+      enqueueWriteTask(async () => {
+        const streams = ensureStreamSessionsForUser({ userId: auth.userId, isAdmin: auth.isAdmin });
+        const visibleStreams = filterStreamAccess(streams, auth.isAdmin);
+        const existing = loadStreamRowForUser(auth.userId, sessionKey);
+        if (!existing) {
+          throw new HttpError(404, "stream_not_found", "Stream not found");
+        }
+        if (existing.isBuiltIn === 1) {
+          throw new HttpError(
+            409,
+            "built_in_stream_delete_forbidden",
+            "Built-in streams cannot be deleted",
+          );
+        }
+        if (visibleStreams.length <= 1) {
+          throw new HttpError(409, "last_stream_delete_forbidden", "Cannot delete the last stream");
+        }
+        const deletedAssetIds = deleteStreamDataTx({
+          userId: auth.userId,
+          sessionKey,
+        }) as string[];
+        for (const assetId of deletedAssetIds) {
+          await safeUnlink(path.join(assetsDir, assetId));
+        }
+        const synced = ensureStreamSessionsForUser({ userId: auth.userId, isAdmin: auth.isAdmin });
+        syncUserSessionSubscriptions(auth.userId, synced);
+        const response = { deletedSessionKey: sessionKey };
+        if (idempotencyKey) {
+          storeIdempotencyRecord({
+            userId: auth.userId,
+            idempotencyKey,
+            operation: STREAM_OPERATION_DELETE,
+            requestKey,
+            status: 200,
+            response,
+          });
+        }
+        return response;
+      }),
+    );
+    await broadcastStreamEvent(auth.userId, { type: "stream_deleted", sessionKey });
+    res.setHeader("Content-Type", "application/json");
+    res.writeHead(200);
+    res.end(JSON.stringify(responseBody));
+  }
+
   async function safeUnlink(filePath: string) {
     try {
       await fs.unlink(filePath);
@@ -2934,38 +4082,24 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     // All messages are stored under the real userId; sessionKey determines routing.
     // Query once to get all messages for this user.
     const transcriptTargets: Array<{ userId: string }> = [{ userId: session.userId }];
-    const expectedMainStreamSessionKey =
-      session.personalSessionKey ??
-      buildClawlinePersonalSessionKey(mainSessionAgentId, session.userId);
-    const expectedDmSessionKey = session.dmSessionKey;
-    const expectedGlobalSessionKey = session.globalSessionKey ?? mainSessionKey;
+    const expectedMainStreamSessionKey = buildClawlinePersonalSessionKey(
+      mainSessionAgentId,
+      session.userId,
+    );
+    const expectedGlobalSessionKey = mainSessionKey;
     const normalizedMainKey = mainSessionKey.toLowerCase();
-    const normalizedMainStreamKey = expectedMainStreamSessionKey.toLowerCase();
-    const normalizedDmKey = expectedDmSessionKey ? expectedDmSessionKey.toLowerCase() : null;
     const normalizeEventRouting = (event: ServerMessage): void => {
       const rawSessionKey = typeof event.sessionKey === "string" ? event.sessionKey.trim() : "";
-      if (!rawSessionKey) {
+      const normalized = normalizeStoredSessionKey(rawSessionKey, session.userId);
+      if (!normalized) {
         event.sessionKey = expectedMainStreamSessionKey;
         return;
       }
-      const normalizedSessionKey = rawSessionKey.toLowerCase();
-      if (normalizedSessionKey === normalizedMainKey) {
+      if (sessionKeyEq(normalized, expectedGlobalSessionKey)) {
         event.sessionKey = expectedGlobalSessionKey;
         return;
       }
-      if (normalizedSessionKey === normalizedMainStreamKey) {
-        event.sessionKey = expectedMainStreamSessionKey;
-        return;
-      }
-      if (normalizedDmKey && normalizedSessionKey === normalizedDmKey) {
-        event.sessionKey = expectedDmSessionKey;
-        return;
-      }
-      logger.warn?.("[clawline] replay_session_key_unrecognized", {
-        messageId: event.id,
-        sessionKey: rawSessionKey,
-      });
-      event.sessionKey = rawSessionKey;
+      event.sessionKey = normalized;
     };
     let anchor: { userId: string; sequence: number; timestamp: number } | null = null;
     if (lastMessageId) {
@@ -3028,6 +4162,16 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       dmScope: sessionInfo.dmScope,
       sessionKeys: sessionInfo.subscribedSessionKeys,
     };
+    const streams = await runPerUserTask(session.userId, async () =>
+      enqueueWriteTask(() => {
+        const seeded = ensureStreamSessionsForUser({
+          userId: session.userId,
+          isAdmin: session.isAdmin,
+        });
+        syncUserSessionSubscriptions(session.userId, seeded);
+        return filterStreamAccess(seeded, session.isAdmin);
+      }),
+    );
     // Debug logging for duplicate investigation
     logger.info("replay_complete", {
       deviceId: session.deviceId,
@@ -3037,6 +4181,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       lastEventId: limited[limited.length - 1]?.id,
     });
     await sendJson(session.socket, payload).catch(() => {});
+    await sendJson(session.socket, { type: "stream_snapshot", streams }).catch(() => {});
     await sendSessionInfo(session, sessionInfo);
     for (const event of limited) {
       if (
@@ -3316,10 +4461,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     ) {
       try {
         const parsed = ClawlineDeliveryTarget.fromString(normalizedTargetInput);
-        const suffix = parsed.sessionLabel();
-        if (suffix === "main" || suffix === "dm" || suffix === "global") {
-          deliveryTarget = parsed;
-        }
+        deliveryTarget = parsed;
       } catch {
         // Not a delivery target.
       }
@@ -3337,11 +4479,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         sessionKeyHint = buildClawlinePersonalSessionKey(mainSessionAgentId, userId);
       } else if (suffix === "global") {
         sessionKeyHint = mainSessionKey;
-      } else {
+      } else if (suffix === "dm") {
         sessionKeyHint =
           dmScope === "main"
             ? buildClawlinePersonalSessionKey(mainSessionAgentId, userId)
             : buildClawlineUserStreamSessionKey(mainSessionAgentId, userId, "dm");
+      } else if (isCustomStreamSuffix(suffix)) {
+        sessionKeyHint = buildClawlineUserStreamSessionKey(mainSessionAgentId, userId, suffix);
       }
     } else {
       target = resolveSendTarget(normalizedTargetInput);
@@ -3354,6 +4498,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       // Boundary normalization: accept user/device targets, but use fully-qualified session keys
       // internally so all Clawline routing stays session-key-based.
       buildClawlinePersonalSessionKey(mainSessionAgentId, target.userId);
+    const normalizedResolvedSessionKey = normalizeStreamMutationSessionKeyForUser(
+      target.userId,
+      resolvedSessionKey,
+    );
+    if (!normalizedResolvedSessionKey) {
+      throw new Error("stream_not_found");
+    }
 
     let outboundAttachments = {
       attachments: [] as NormalizedAttachment[],
@@ -3383,18 +4534,33 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       type: "message",
       id: generateServerMessageId(),
       role: "assistant",
-      sender: resolveAssistantSenderName(resolvedSessionKey),
+      sender: resolveAssistantSenderName(normalizedResolvedSessionKey),
       content: text,
       timestamp: nowMs(),
       streaming: false,
-      sessionKey: resolvedSessionKey,
+      sessionKey: normalizedResolvedSessionKey,
       attachments:
         outboundAttachments.attachments.length > 0 ? outboundAttachments.attachments : undefined,
     };
     await runPerUserTask(target.userId, async () => {
+      const targetIsAdmin = allowlist.entries.some(
+        (entry) =>
+          entry.isAdmin &&
+          entry.userId.toLowerCase() === sanitizeUserId(target.userId).toLowerCase(),
+      );
+      const streams = ensureStreamSessionsForUser({
+        userId: target.userId,
+        isAdmin: targetIsAdmin,
+      });
+      if (
+        !streams.some((stream) => sessionKeyEq(stream.sessionKey, normalizedResolvedSessionKey))
+      ) {
+        throw new Error("stream_not_found");
+      }
+      syncUserSessionSubscriptions(target.userId, streams);
       await appendEvent(event, target.userId);
     });
-    broadcastToSessionKey(resolvedSessionKey, event);
+    broadcastToSessionKey(normalizedResolvedSessionKey, event);
     return {
       messageId: event.id,
       userId: target.userId,
@@ -3471,20 +4637,26 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       const attachmentsHash = hashAttachments(attachmentsInfo.attachments);
       const payloadSessionKey =
         typeof payload.sessionKey === "string" ? payload.sessionKey.trim() : "";
+      const normalizedPayloadSessionKey = payloadSessionKey
+        ? normalizeStreamMutationSessionKeyForUser(session.userId, payloadSessionKey)
+        : "";
+      if (payloadSessionKey && !normalizedPayloadSessionKey) {
+        throw new ClientMessageError("stream_not_found", "Stream not found");
+      }
       const allowedSessionKeys = session.provisionedSessionKeys?.length
         ? session.provisionedSessionKeys
         : [session.sessionKey];
       // Legacy clients may omit sessionKey; default to the Main stream session key.
-      const resolvedSessionKey = payloadSessionKey || session.sessionKey;
+      const resolvedSessionKey = normalizedPayloadSessionKey || session.sessionKey;
       if (
-        payloadSessionKey &&
         !allowedSessionKeys.some(
-          (sessionKey) => sessionKey.toLowerCase() === payloadSessionKey.toLowerCase(),
+          (sessionKey) =>
+            normalizeSessionKey(sessionKey) === normalizeSessionKey(resolvedSessionKey),
         )
       ) {
-        throw new ClientMessageError("invalid_message", "Invalid sessionKey");
+        throw new ClientMessageError("stream_not_found", "Stream not found");
       }
-      let streamSuffix: "main" | "dm" | "global" = "main";
+      let streamSuffix = "main";
       if (sessionKeyEq(resolvedSessionKey, session.personalSessionKey)) {
         streamSuffix = "main";
       } else if (
@@ -3494,8 +4666,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         streamSuffix = "dm";
       } else if (sessionKeyEq(resolvedSessionKey, session.globalSessionKey)) {
         streamSuffix = "global";
-      } else if (payloadSessionKey) {
-        throw new ClientMessageError("invalid_message", "Invalid sessionKey");
+      } else {
+        const parsed = parseClawlineUserSessionKey(resolvedSessionKey);
+        const normalizedUserId = sanitizeUserId(session.userId).toLowerCase();
+        if (!parsed || parsed.userId !== normalizedUserId) {
+          throw new ClientMessageError("stream_not_found", "Stream not found");
+        }
+        streamSuffix = parsed.streamSuffix;
       }
       logger.info?.("[clawline] inbound message routing", {
         messageId: payload.id,
@@ -5147,6 +6324,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         await cleanupTmpDirectory();
         await cleanupOrphanedAssetFiles();
       }
+      cleanupExpiredStreamIdempotencyRows();
+      if (!streamIdempotencyCleanupInterval) {
+        streamIdempotencyCleanupInterval = setInterval(() => {
+          cleanupExpiredStreamIdempotencyRows();
+        }, STREAM_IDEMPOTENCY_CLEANUP_INTERVAL_MS);
+      }
       if (started) {
         return;
       }
@@ -5175,6 +6358,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       clearInterval(pendingCleanupInterval);
       if (assetCleanupInterval) {
         clearInterval(assetCleanupInterval);
+      }
+      if (streamIdempotencyCleanupInterval) {
+        clearInterval(streamIdempotencyCleanupInterval);
+        streamIdempotencyCleanupInterval = null;
       }
       // Force-close any active clients so shutdown doesn't hang.
       for (const client of wss.clients) {
@@ -5221,6 +6408,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       await closeWithTimeout((cb) => wss.close(cb), "wss");
       await closeWithTimeout((cb) => terminalWss.close(cb), "terminalWss");
       await closeWithTimeout((cb) => httpServer.close(cb), "httpServer");
+      await Promise.allSettled(Array.from(perUserQueue.values()));
+      await writeQueue.catch(() => {});
       disposeDatabaseResources();
       started = false;
     },
