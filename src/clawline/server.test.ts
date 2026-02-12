@@ -165,6 +165,10 @@ async function setupTestServer(
     alertInstructionsText?: string | null;
     webRootFollowSymlinks?: boolean;
     webRootPathRelative?: string;
+    terminalTmux?: {
+      mode?: "local" | "ssh";
+      sshTarget?: string;
+    };
   } = {},
 ): Promise<TestServerContext> {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "clawline-server-test-"));
@@ -207,6 +211,18 @@ async function setupTestServer(
       alertInstructionsPath,
       webRootPath,
       webRoot: { followSymlinks: options.webRootFollowSymlinks === true },
+      ...(options.terminalTmux
+        ? {
+            terminal: {
+              tmux: {
+                mode: options.terminalTmux.mode ?? "local",
+                ssh: {
+                  target: options.terminalTmux.sshTarget ?? "",
+                },
+              },
+            },
+          }
+        : {}),
     },
     openClawConfig: testOpenClawConfig,
     replyResolver: testReplyResolver,
@@ -559,6 +575,89 @@ describe.sequential("clawline provider server", () => {
         {
           type: "document",
           mimeType: "application/vnd.clawline.interactive-html+json",
+          data: base64,
+        },
+      ]);
+      expect(result.assetIds).toEqual([]);
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("accepts raw JSON terminal descriptors in outbound attachments", async () => {
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry]);
+    try {
+      const descriptor = {
+        terminalSessionId: `term_${randomUUID()}`,
+        title: "Term",
+      };
+      const jsonPayload = JSON.stringify(descriptor);
+      const expectedBase64 = Buffer.from(jsonPayload, "utf8").toString("base64");
+
+      const result = await ctx.server.sendMessage({
+        target: entry.userId,
+        text: "",
+        attachments: [
+          {
+            data: jsonPayload,
+            mimeType: "application/vnd.clawline.terminal-session+json",
+          },
+        ],
+      });
+
+      expect(result.attachments).toEqual([
+        {
+          type: "document",
+          mimeType: "application/vnd.clawline.terminal-session+json",
+          data: expectedBase64,
+        },
+      ]);
+      expect(result.assetIds).toEqual([]);
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("accepts data URI terminal descriptors without blocking on tmux startup", async () => {
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry], {
+      terminalTmux: {
+        mode: "ssh",
+        sshTarget: "nonexistent-host.invalid",
+      },
+    });
+    try {
+      const descriptor = {
+        terminalSessionId: `term_${randomUUID()}`,
+        title: "Term",
+      };
+      const base64 = Buffer.from(JSON.stringify(descriptor), "utf8").toString("base64");
+      const dataUri = `data:application/vnd.clawline.terminal-session+json;base64,${base64}`;
+
+      const result = await ctx.server.sendMessage({
+        target: entry.userId,
+        text: "terminal",
+        attachments: [
+          {
+            data: dataUri,
+            mimeType: "application/vnd.clawline.terminal-session+json",
+          },
+        ],
+      });
+
+      expect(result.attachments).toEqual([
+        {
+          type: "document",
+          mimeType: "application/vnd.clawline.terminal-session+json",
           data: base64,
         },
       ]);

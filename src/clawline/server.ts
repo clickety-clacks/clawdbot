@@ -377,6 +377,41 @@ function normalizeAttachmentsInput(
   return { attachments, inlineBytes, assetIds };
 }
 
+function isStrictBase64(input: string): boolean {
+  const compact = input.replace(/\s+/g, "");
+  if (!compact || compact.length % 4 !== 0) {
+    return false;
+  }
+  if (!/^[a-zA-Z0-9+/]*={0,2}$/.test(compact)) {
+    return false;
+  }
+  try {
+    const roundTrip = Buffer.from(compact, "base64").toString("base64");
+    const stripPadding = (value: string) => value.replace(/=+$/g, "");
+    return stripPadding(roundTrip) === stripPadding(compact);
+  } catch {
+    return false;
+  }
+}
+
+function maybeEncodeJsonDocumentPayload(data: string, mimeType: string): string {
+  if (mimeType !== TERMINAL_SESSION_MIME && mimeType !== INTERACTIVE_HTML_MIME) {
+    return data;
+  }
+  if (isStrictBase64(data)) {
+    return data.replace(/\s+/g, "");
+  }
+  const trimmed = data.trim();
+  if (!trimmed) {
+    return data;
+  }
+  const looksLikeJson = trimmed.startsWith("{") || trimmed.startsWith("[");
+  if (!looksLikeJson) {
+    return data;
+  }
+  return Buffer.from(trimmed, "utf8").toString("base64");
+}
+
 function normalizeOutboundAttachmentData(input: ClawlineOutboundAttachmentInput): {
   data: string;
   mimeType: string;
@@ -387,15 +422,19 @@ function normalizeOutboundAttachmentData(input: ClawlineOutboundAttachmentInput)
   }
   let mimeType = typeof input.mimeType === "string" ? input.mimeType.trim() : "";
   let data = rawData;
-  const match = /^data:([^;]+);base64,(.*)$/i.exec(rawData);
+  const match = /^data:([^;]+);base64,([\s\S]*)$/i.exec(rawData);
   if (match) {
     mimeType = mimeType || match[1].trim();
-    data = match[2].trim();
+    data = match[2].replace(/\s+/g, "");
   }
   if (!mimeType) {
     mimeType = "application/octet-stream";
   }
-  return { data, mimeType: mimeType.toLowerCase() };
+  const normalizedMime = mimeType.toLowerCase();
+  return {
+    data: maybeEncodeJsonDocumentPayload(data, normalizedMime),
+    mimeType: normalizedMime,
+  };
 }
 
 function buildClawlinePersonalSessionKey(agentId: string, userId: string): string {
@@ -2536,12 +2575,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           lastSeenAt: now,
           tmuxSessionName: descriptor.terminalSessionId,
         });
-        const ensured = await ensureTmuxSessionExists(descriptor.terminalSessionId);
-        if (!ensured) {
-          throw new Error(
-            "Failed to start terminal session (tmux). Check provider terminal.tmux configuration.",
-          );
-        }
         filtered.push(attachment);
         continue;
       }
