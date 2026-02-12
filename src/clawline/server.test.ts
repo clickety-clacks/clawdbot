@@ -167,6 +167,7 @@ async function setupTestServer(
     webRootFollowSymlinks?: boolean;
     webRootPathRelative?: string;
     seedLegacyDatabase?: (dbPath: string) => Promise<void>;
+    replyResolver?: typeof getReplyFromConfig;
     terminalTmux?: {
       mode?: "local" | "ssh";
       sshTarget?: string;
@@ -231,7 +232,7 @@ async function setupTestServer(
         : {}),
     },
     openClawConfig: testOpenClawConfig,
-    replyResolver: testReplyResolver,
+    replyResolver: options.replyResolver ?? testReplyResolver,
     logger: silentLogger,
     sessionStorePath,
   });
@@ -734,6 +735,75 @@ describe.sequential("clawline provider server", () => {
       ]);
       expect(result.assetIds).toEqual([]);
     } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("sends outbound document attachments even when inbound processing is still running", async () => {
+    const deviceId = randomUUID();
+    const entry = createAllowlistEntry({
+      deviceId,
+      isAdmin: true,
+      tokenDelivered: false,
+      lastSeenAt: null,
+    });
+    const ctx = await setupTestServer([entry], {
+      replyResolver: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 1_500));
+        return { text: "slow" };
+      },
+    });
+
+    let ws: WebSocket | null = null;
+    try {
+      const pair = await performPairRequest(ctx.port, deviceId, { claimedName: "Flynn" });
+      expect(pair.success).toBe(true);
+      const authed = await authenticateDevice(ctx.port, deviceId, pair.token as string);
+      ws = authed.ws;
+
+      const inboundId = `c_${randomUUID()}`;
+      ws.send(
+        JSON.stringify({
+          type: "message",
+          id: inboundId,
+          content: "trigger slow reply",
+        }),
+      );
+      const ack = await waitForMessage(ws);
+      expect(ack).toMatchObject({ type: "ack", id: inboundId });
+
+      const descriptor = {
+        version: 1,
+        html: "<button>Hi</button>",
+        metadata: { title: "Test" },
+      };
+      const base64 = Buffer.from(JSON.stringify(descriptor), "utf8").toString("base64");
+
+      const outbound = await Promise.race([
+        ctx.server.sendMessage({
+          target: entry.userId,
+          text: "",
+          attachments: [
+            {
+              data: base64,
+              mimeType: "application/vnd.clawline.interactive-html+json",
+            },
+          ],
+        }),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("outbound_send_timeout")), 800),
+        ),
+      ]);
+
+      expect(outbound.attachments).toEqual([
+        {
+          type: "document",
+          mimeType: "application/vnd.clawline.interactive-html+json",
+          data: base64,
+        },
+      ]);
+    } finally {
+      ws?.terminate();
       await ctx.cleanup();
     }
   });

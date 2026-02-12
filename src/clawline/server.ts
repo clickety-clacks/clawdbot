@@ -4546,7 +4546,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       attachments:
         outboundAttachments.attachments.length > 0 ? outboundAttachments.attachments : undefined,
     };
-    await runPerUserTask(target.userId, async () => {
+    // Do not route outbound sends through runPerUserTask: inbound processing holds that queue for
+    // the entire agent turn, which can stall sendAttachment rich-bubble delivery until timeout.
+    await enqueueWriteTask(() => {
       const targetIsAdmin = allowlist.entries.some(
         (entry) =>
           entry.isAdmin &&
@@ -4562,7 +4564,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         throw new Error("stream_not_found");
       }
       syncUserSessionSubscriptions(target.userId, streams);
-      await appendEvent(event, target.userId);
+      insertEventTx(event, target.userId);
     });
     broadcastToSessionKey(normalizedResolvedSessionKey, event);
     return {
