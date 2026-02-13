@@ -1045,11 +1045,13 @@ describe.sequential("clawline provider server", () => {
       const {
         ws: adminWs,
         auth: adminAuth,
+        streamSnapshot: adminStreamSnapshot,
         sessionInfo: adminSessionInfo,
       } = await authenticateDevice(ctx.port, adminDeviceId, adminPair.token as string);
       const {
         ws: userWs,
         auth: userAuth,
+        streamSnapshot: userStreamSnapshot,
         sessionInfo: userSessionInfo,
       } = await authenticateDevice(ctx.port, userDeviceId, userPair.token as string);
       expect(adminAuth.isAdmin).toBe(true);
@@ -1058,9 +1060,46 @@ describe.sequential("clawline provider server", () => {
       expect(userAuth.features).toContain("session_info");
       expect(adminSessionInfo?.sessionKeys).toEqual([
         "agent:main:clawline:flynn:main",
+        "agent:main:clawline:flynn:dm",
         "agent:main:main",
       ]);
-      expect(userSessionInfo?.sessionKeys).toEqual(["agent:main:clawline:qa_sim:main"]);
+      expect(userSessionInfo?.sessionKeys).toEqual([
+        "agent:main:clawline:qa_sim:main",
+        "agent:main:clawline:qa_sim:dm",
+      ]);
+      expect(adminStreamSnapshot.streams).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            sessionKey: "agent:main:clawline:flynn:main",
+            displayName: "Personal",
+            kind: "main",
+          }),
+          expect.objectContaining({
+            sessionKey: "agent:main:clawline:flynn:dm",
+            displayName: "DM",
+            kind: "dm",
+          }),
+          expect.objectContaining({
+            sessionKey: "agent:main:main",
+            displayName: "Admin",
+            kind: "global_dm",
+          }),
+        ]),
+      );
+      expect(userStreamSnapshot.streams).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            sessionKey: "agent:main:clawline:qa_sim:main",
+            displayName: "Personal",
+            kind: "main",
+          }),
+          expect.objectContaining({
+            sessionKey: "agent:main:clawline:qa_sim:dm",
+            displayName: "DM",
+            kind: "dm",
+          }),
+        ]),
+      );
       adminWs.terminate();
       userWs.terminate();
     } finally {
@@ -1264,8 +1303,20 @@ describe.sequential("clawline provider server", () => {
       expect(auth.type).toBe("auth_result");
       expect(streamSnapshot.type).toBe("stream_snapshot");
       expect(Array.isArray(streamSnapshot.streams)).toBe(true);
-      expect(streamSnapshot.streams[0]?.kind).toBe("main");
-      expect(streamSnapshot.streams[0]?.sessionKey).toBe("agent:main:clawline:flynn:main");
+      expect(streamSnapshot.streams).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            sessionKey: "agent:main:clawline:flynn:main",
+            kind: "main",
+            displayName: "Personal",
+          }),
+          expect.objectContaining({
+            sessionKey: "agent:main:clawline:flynn:dm",
+            kind: "dm",
+            displayName: "DM",
+          }),
+        ]),
+      );
       ws.terminate();
     } finally {
       await ctx.cleanup();
@@ -1305,10 +1356,27 @@ describe.sequential("clawline provider server", () => {
       });
       expect(listResponse.status).toBe(200);
       const listPayload = (await listResponse.json()) as {
-        streams: Array<{ sessionKey: string; orderIndex: number }>;
+        streams: Array<{
+          sessionKey: string;
+          orderIndex: number;
+          displayName: string;
+          kind: string;
+        }>;
       };
-      expect(listPayload.streams.length).toBeGreaterThanOrEqual(1);
-      expect(listPayload.streams[0]?.sessionKey).toBe("agent:main:clawline:flynn:main");
+      expect(listPayload.streams).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            sessionKey: "agent:main:clawline:flynn:main",
+            kind: "main",
+            displayName: "Personal",
+          }),
+          expect.objectContaining({
+            sessionKey: "agent:main:clawline:flynn:dm",
+            kind: "dm",
+            displayName: "DM",
+          }),
+        ]),
+      );
 
       const createResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
         method: "POST",
@@ -1663,8 +1731,22 @@ describe.sequential("clawline provider server", () => {
       });
       expect(streamsResponse.status).toBe(200);
       const streamsPayload = (await streamsResponse.json()) as {
-        streams: Array<{ sessionKey: string; kind: string }>;
+        streams: Array<{ sessionKey: string; kind: string; displayName: string }>;
       };
+      expect(streamsPayload.streams).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            sessionKey: "agent:main:clawline:flynn:main",
+            kind: "main",
+            displayName: "Personal",
+          }),
+          expect.objectContaining({
+            sessionKey: "agent:main:clawline:flynn:dm",
+            kind: "dm",
+            displayName: "DM",
+          }),
+        ]),
+      );
       expect(streamsPayload.streams.some((stream) => stream.sessionKey === customSessionKey)).toBe(
         true,
       );

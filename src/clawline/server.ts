@@ -698,7 +698,7 @@ type Session = {
   personalSessionKey: string;
   /** dmScope in effect when session was provisioned (debug/UX only). */
   dmScope: string;
-  /** DM session key (resolved via core; may alias to agent:main:main when dmScope=main). */
+  /** DM stream session key (agent:<id>:clawline:<userId>:dm). */
   dmSessionKey: string;
   /** Global DM session key (shared operator session; admin-only). */
   globalSessionKey: string;
@@ -1109,18 +1109,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     const dmScope = openClawCfg.session?.dmScope ?? "main";
     const mainStreamSessionKey = buildClawlinePersonalSessionKey(mainSessionAgentId, userId);
     const globalSessionKey = mainSessionKey;
-    const dmSessionKey =
-      dmScope === "main"
-        ? mainStreamSessionKey
-        : buildClawlineUserStreamSessionKey(mainSessionAgentId, userId, "dm");
+    const dmSessionKey = buildClawlineUserStreamSessionKey(mainSessionAgentId, userId, "dm");
     const seededStreams = ensureStreamSessionsForUser({ userId, isAdmin });
     const visibleStreamKeys = filterStreamAccess(seededStreams, isAdmin).map(
       (stream) => stream.sessionKey,
     );
     const fallbackKeys = [mainStreamSessionKey];
-    if (dmScope !== "main") {
-      fallbackKeys.push(dmSessionKey);
-    }
+    fallbackKeys.push(dmSessionKey);
     if (isAdmin) {
       fallbackKeys.push(globalSessionKey);
     }
@@ -1238,10 +1233,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   let selectEventsAfterTimestampStmt!: SqliteStatement;
   let selectStreamSessionsByUserStmt!: SqliteStatement;
   let selectStreamSessionByKeyStmt!: SqliteStatement;
-  let selectStreamCountByUserStmt!: SqliteStatement;
   let selectStreamMaxOrderStmt!: SqliteStatement;
   let insertStreamSessionStmt!: SqliteStatement;
   let updateStreamSessionDisplayNameStmt!: SqliteStatement;
+  let updateStreamSessionBuiltInMetadataStmt!: SqliteStatement;
   let deleteStreamSessionStmt!: SqliteStatement;
   let selectStreamIdempotencyStmt!: SqliteStatement;
   let insertStreamIdempotencyStmt!: SqliteStatement;
@@ -1370,7 +1365,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const seedDefaultStreamsForUser = (params: {
     userId: string;
     isAdmin: boolean;
-    hasSeparateDm: boolean;
     now: number;
   }): StreamSession[] => {
     const entries: Array<{
@@ -1388,15 +1382,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       orderIndex: entries.length,
       isBuiltIn: 1,
     });
-    if (params.hasSeparateDm) {
-      entries.push({
-        sessionKey: buildClawlineUserStreamSessionKey(mainSessionAgentId, params.userId, "dm"),
-        kind: "dm",
-        displayName: streamKindToDisplayName("dm"),
-        orderIndex: entries.length,
-        isBuiltIn: 1,
-      });
-    }
+    entries.push({
+      sessionKey: buildClawlineUserStreamSessionKey(mainSessionAgentId, params.userId, "dm"),
+      kind: "dm",
+      displayName: streamKindToDisplayName("dm"),
+      orderIndex: entries.length,
+      isBuiltIn: 1,
+    });
     if (params.isAdmin) {
       entries.push({
         sessionKey: mainSessionKey,
@@ -1437,17 +1429,15 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           updatedAt: 0,
         },
       ];
-      if ((openClawCfg.session?.dmScope ?? "main") !== "main") {
-        fallback.push({
-          sessionKey: buildClawlineUserStreamSessionKey(mainSessionAgentId, params.userId, "dm"),
-          displayName: streamKindToDisplayName("dm"),
-          kind: "dm",
-          orderIndex: fallback.length,
-          isBuiltIn: true,
-          createdAt: 0,
-          updatedAt: 0,
-        });
-      }
+      fallback.push({
+        sessionKey: buildClawlineUserStreamSessionKey(mainSessionAgentId, params.userId, "dm"),
+        displayName: streamKindToDisplayName("dm"),
+        kind: "dm",
+        orderIndex: fallback.length,
+        isBuiltIn: true,
+        createdAt: 0,
+        updatedAt: 0,
+      });
       if (params.isAdmin) {
         fallback.push({
           sessionKey: mainSessionKey,
@@ -1462,35 +1452,76 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       return fallback;
     }
     const now = nowMs();
-    const hasSeparateDm = (openClawCfg.session?.dmScope ?? "main") !== "main";
     let streams = readStreamSessionsForUser(params.userId);
     if (streams.length === 0) {
       streams = seedDefaultStreamsForUser({
         userId: params.userId,
         isAdmin: params.isAdmin,
-        hasSeparateDm,
         now,
       });
-      return streams;
     }
-    if (
-      params.isAdmin &&
-      !streams.some((stream) => sessionKeyEq(stream.sessionKey, mainSessionKey))
-    ) {
-      const maxOrderRow = selectStreamMaxOrderStmt.get(params.userId) as {
-        maxOrder: number | null;
-      };
-      const nextOrder = (maxOrderRow?.maxOrder ?? -1) + 1;
-      insertStreamSessionStmt.run(
-        params.userId,
-        mainSessionKey,
-        streamKindToDisplayName("global_dm"),
-        "global_dm",
-        nextOrder,
-        1,
-        now,
-        now,
-      );
+    const builtIns: Array<{
+      sessionKey: string;
+      kind: StreamSessionKind;
+      displayName: string;
+    }> = [
+      {
+        sessionKey: buildClawlinePersonalSessionKey(mainSessionAgentId, params.userId),
+        kind: "main",
+        displayName: streamKindToDisplayName("main"),
+      },
+      {
+        sessionKey: buildClawlineUserStreamSessionKey(mainSessionAgentId, params.userId, "dm"),
+        kind: "dm",
+        displayName: streamKindToDisplayName("dm"),
+      },
+    ];
+    if (params.isAdmin) {
+      builtIns.push({
+        sessionKey: mainSessionKey,
+        kind: "global_dm",
+        displayName: streamKindToDisplayName("global_dm"),
+      });
+    }
+    let maxOrderRow = selectStreamMaxOrderStmt.get(params.userId) as { maxOrder: number | null };
+    let nextOrder = (maxOrderRow?.maxOrder ?? -1) + 1;
+    const streamByKey = new Map(
+      streams.map((stream) => [normalizeSessionKey(stream.sessionKey), stream] as const),
+    );
+    let changed = false;
+    for (const builtIn of builtIns) {
+      const existing = streamByKey.get(normalizeSessionKey(builtIn.sessionKey));
+      if (!existing) {
+        insertStreamSessionStmt.run(
+          params.userId,
+          builtIn.sessionKey,
+          builtIn.displayName,
+          builtIn.kind,
+          nextOrder,
+          1,
+          now,
+          now,
+        );
+        nextOrder += 1;
+        changed = true;
+        continue;
+      }
+      if (
+        existing.kind !== builtIn.kind ||
+        existing.displayName !== builtIn.displayName ||
+        !existing.isBuiltIn
+      ) {
+        updateStreamSessionBuiltInMetadataStmt.run(
+          builtIn.displayName,
+          builtIn.kind,
+          now,
+          params.userId,
+          builtIn.sessionKey,
+        );
+        changed = true;
+      }
+    }
+    if (changed) {
       streams = readStreamSessionsForUser(params.userId);
     }
     return streams;
@@ -1544,10 +1575,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         ON events(userId, sessionKey, sequence);
     `);
 
-    if (currentVersion >= STREAM_DB_VERSION) {
-      return;
-    }
-
     const knownUsers = new Set<string>();
     for (const entry of allowlist.entries) {
       const userId = sanitizeUserId(entry.userId);
@@ -1559,6 +1586,15 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       userId: string;
     }>;
     for (const row of userRows) {
+      const userId = sanitizeUserId(row.userId);
+      if (userId) {
+        knownUsers.add(userId);
+      }
+    }
+    const streamUsers = database
+      .prepare(`SELECT DISTINCT userId FROM stream_sessions`)
+      .all() as Array<{ userId: string }>;
+    for (const row of streamUsers) {
       const userId = sanitizeUserId(row.userId);
       if (userId) {
         knownUsers.add(userId);
@@ -1603,11 +1639,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         .map((entry) => sanitizeUserId(entry.userId))
         .filter((value) => value.length > 0),
     );
-    const hasSeparateDm = (openClawCfg.session?.dmScope ?? "main") !== "main";
     const now = nowMs();
-    const selectExistingStreamsCount = database.prepare(
-      `SELECT COUNT(*) as count FROM stream_sessions WHERE userId = ?`,
-    );
     const selectMaxOrderForUser = database.prepare(
       `SELECT MAX(orderIndex) as maxOrder FROM stream_sessions WHERE userId = ?`,
     );
@@ -1615,6 +1647,14 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       `INSERT OR IGNORE INTO stream_sessions
          (userId, sessionKey, displayName, kind, orderIndex, isBuiltIn, createdAt, updatedAt)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    const selectExistingStreamsForUser = database.prepare(
+      `SELECT sessionKey, kind, displayName, isBuiltIn FROM stream_sessions WHERE userId = ?`,
+    );
+    const updateBuiltInStreamMetadata = database.prepare(
+      `UPDATE stream_sessions
+       SET displayName = ?, kind = ?, isBuiltIn = 1, updatedAt = ?
+       WHERE userId = ? AND sessionKey = ?`,
     );
 
     const insertCustomStreamsForUser = (userId: string, discovered: Set<string>) => {
@@ -1659,48 +1699,85 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       }
     };
 
-    for (const userId of Array.from(knownUsers).sort()) {
-      const countRow = selectExistingStreamsCount.get(userId) as { count: number };
-      if (countRow.count === 0) {
-        const discovered = historicalByUser.get(userId) ?? new Set<string>();
-        const builtIns: Array<{ sessionKey: string; kind: StreamSessionKind }> = [];
-        builtIns.push({
-          sessionKey: buildClawlinePersonalSessionKey(mainSessionAgentId, userId),
-          kind: "main",
-        });
-        const hasDiscoveredDm = Array.from(discovered).some((sessionKey) => {
-          const parsed = parseClawlineUserSessionKey(sessionKey);
-          return (
-            parsed?.userId === sanitizeUserId(userId).toLowerCase() && parsed.streamSuffix === "dm"
-          );
-        });
-        if (hasSeparateDm || hasDiscoveredDm) {
-          builtIns.push({
+    const ensureBuiltInsForUser = (userId: string) => {
+      const discovered = historicalByUser.get(userId) ?? new Set<string>();
+      const builtIns: Array<{ sessionKey: string; kind: StreamSessionKind; displayName: string }> =
+        [
+          {
+            sessionKey: buildClawlinePersonalSessionKey(mainSessionAgentId, userId),
+            kind: "main",
+            displayName: streamKindToDisplayName("main"),
+          },
+          {
             sessionKey: buildClawlineUserStreamSessionKey(mainSessionAgentId, userId, "dm"),
             kind: "dm",
-          });
-        }
-        if (
-          isAdminUserId.has(userId) ||
-          Array.from(discovered).some((sessionKey) => sessionKeyEq(sessionKey, mainSessionKey))
-        ) {
-          builtIns.push({ sessionKey: mainSessionKey, kind: "global_dm" });
-        }
-        for (const [orderIndex, builtIn] of builtIns.entries()) {
+            displayName: streamKindToDisplayName("dm"),
+          },
+        ];
+      if (
+        isAdminUserId.has(userId) ||
+        Array.from(discovered).some((sessionKey) => sessionKeyEq(sessionKey, mainSessionKey))
+      ) {
+        builtIns.push({
+          sessionKey: mainSessionKey,
+          kind: "global_dm",
+          displayName: streamKindToDisplayName("global_dm"),
+        });
+      }
+      const existingRows = selectExistingStreamsForUser.all(userId) as Array<{
+        sessionKey: string;
+        kind: StreamSessionKind;
+        displayName: string;
+        isBuiltIn: number;
+      }>;
+      const byKey = new Map(existingRows.map((row) => [normalizeSessionKey(row.sessionKey), row]));
+      let maxOrder = (selectMaxOrderForUser.get(userId) as { maxOrder: number | null } | undefined)
+        ?.maxOrder;
+      if (maxOrder == null) {
+        maxOrder = -1;
+      }
+      for (const builtIn of builtIns) {
+        const existing = byKey.get(normalizeSessionKey(builtIn.sessionKey));
+        if (!existing) {
+          maxOrder += 1;
           insertStreamSession.run(
             userId,
             builtIn.sessionKey,
-            streamKindToDisplayName(builtIn.kind),
+            builtIn.displayName,
             builtIn.kind,
-            orderIndex,
+            maxOrder,
             1,
             now,
             now,
           );
+          continue;
+        }
+        if (
+          existing.kind !== builtIn.kind ||
+          existing.displayName !== builtIn.displayName ||
+          existing.isBuiltIn !== 1
+        ) {
+          updateBuiltInStreamMetadata.run(
+            builtIn.displayName,
+            builtIn.kind,
+            now,
+            userId,
+            builtIn.sessionKey,
+          );
         }
       }
-      const discovered = historicalByUser.get(userId) ?? new Set<string>();
-      insertCustomStreamsForUser(userId, discovered);
+    };
+
+    for (const userId of Array.from(knownUsers).sort()) {
+      ensureBuiltInsForUser(userId);
+      if (currentVersion < STREAM_DB_VERSION) {
+        const discovered = historicalByUser.get(userId) ?? new Set<string>();
+        insertCustomStreamsForUser(userId, discovered);
+      }
+    }
+
+    if (currentVersion >= STREAM_DB_VERSION) {
+      return;
     }
 
     const selectEventsForBackfill = database.prepare(
@@ -1874,9 +1951,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
        FROM stream_sessions
        WHERE userId = ? AND sessionKey = ?`,
     );
-    selectStreamCountByUserStmt = newDb.prepare(
-      `SELECT COUNT(*) as count FROM stream_sessions WHERE userId = ?`,
-    );
     selectStreamMaxOrderStmt = newDb.prepare(
       `SELECT MAX(orderIndex) as maxOrder FROM stream_sessions WHERE userId = ?`,
     );
@@ -1888,6 +1962,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     updateStreamSessionDisplayNameStmt = newDb.prepare(
       `UPDATE stream_sessions
        SET displayName = ?, updatedAt = ?
+       WHERE userId = ? AND sessionKey = ?`,
+    );
+    updateStreamSessionBuiltInMetadataStmt = newDb.prepare(
+      `UPDATE stream_sessions
+       SET displayName = ?, kind = ?, isBuiltIn = 1, updatedAt = ?
        WHERE userId = ? AND sessionKey = ?`,
     );
     deleteStreamSessionStmt = newDb.prepare(
@@ -4474,16 +4553,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       const suffix = deliveryTarget.sessionLabel();
       const userId = deliveryTarget.userId();
       target = resolveSendTarget(userId);
-      const dmScope = openClawCfg.session?.dmScope ?? "main";
       if (suffix === "main") {
         sessionKeyHint = buildClawlinePersonalSessionKey(mainSessionAgentId, userId);
       } else if (suffix === "global") {
         sessionKeyHint = mainSessionKey;
       } else if (suffix === "dm") {
-        sessionKeyHint =
-          dmScope === "main"
-            ? buildClawlinePersonalSessionKey(mainSessionAgentId, userId)
-            : buildClawlineUserStreamSessionKey(mainSessionAgentId, userId, "dm");
+        sessionKeyHint = buildClawlineUserStreamSessionKey(mainSessionAgentId, userId, "dm");
       } else if (isCustomStreamSuffix(suffix)) {
         sessionKeyHint = buildClawlineUserStreamSessionKey(mainSessionAgentId, userId, suffix);
       }
