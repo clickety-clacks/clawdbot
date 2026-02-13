@@ -221,6 +221,7 @@ const STREAM_IDEMPOTENCY_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 const STREAM_OPERATION_CREATE = "create_stream";
 const STREAM_OPERATION_DELETE = "delete_stream";
 const MAX_STREAMS_BODY_BYTES = 16 * 1024;
+const STREAM_SESSION_KEY_PATH_DECODE_PASSES = 2;
 
 function truncateUtf8(value: string, maxBytes: number): string {
   if (Buffer.byteLength(value, "utf8") <= maxBytes) {
@@ -3872,11 +3873,21 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       throw new HttpError(404, "stream_not_found", "Stream not found");
     }
     try {
-      const decoded = decodeURIComponent(raw);
-      if (!decoded.trim()) {
+      // Some clients can double-encode path components (e.g. %3A -> %253A).
+      // Decode a bounded number of passes so stream mutations remain compatible.
+      let decoded = raw;
+      for (let pass = 0; pass < STREAM_SESSION_KEY_PATH_DECODE_PASSES; pass += 1) {
+        const next = decodeURIComponent(decoded);
+        if (next === decoded) {
+          break;
+        }
+        decoded = next;
+      }
+      const trimmed = decoded.trim();
+      if (!trimmed || trimmed.includes("/")) {
         throw new HttpError(400, "invalid_session_key", "Invalid session key");
       }
-      return decoded;
+      return trimmed;
     } catch (err) {
       if (err instanceof HttpError) {
         throw err;

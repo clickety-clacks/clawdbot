@@ -1462,6 +1462,90 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("accepts double-encoded stream session keys for rename and delete", async () => {
+    const deviceId = randomUUID();
+    const entry = createAllowlistEntry({
+      deviceId,
+      userId: "flynn",
+      isAdmin: false,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry]);
+    try {
+      const pair = await performPairRequest(ctx.port, deviceId);
+      const token = pair.token as string;
+      const { ws } = await authenticateDevice(ctx.port, deviceId, token);
+      const queue = createMessageQueue(ws);
+
+      const createResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          idempotencyKey: "req_create_double_encode",
+          displayName: "Double Encode",
+        }),
+      });
+      expect(createResponse.status).toBe(201);
+      const createdPayload = (await createResponse.json()) as {
+        stream: { sessionKey: string };
+      };
+      const createdSessionKey = createdPayload.stream.sessionKey;
+      await queue.next();
+
+      const encodedKey = encodeURIComponent(createdSessionKey);
+      const doubleEncodedKey = encodeURIComponent(encodedKey);
+
+      const renameResponse = await fetch(
+        `http://127.0.0.1:${ctx.port}/api/streams/${doubleEncodedKey}`,
+        {
+          method: "PATCH",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ displayName: "Renamed via double encode" }),
+        },
+      );
+      expect(renameResponse.status).toBe(200);
+      const renamedPayload = (await renameResponse.json()) as {
+        stream: { sessionKey: string; displayName: string };
+      };
+      expect(renamedPayload.stream.sessionKey).toBe(createdSessionKey);
+      expect(renamedPayload.stream.displayName).toBe("Renamed via double encode");
+      expect(await queue.next()).toMatchObject({
+        type: "stream_updated",
+        stream: { sessionKey: createdSessionKey, displayName: "Renamed via double encode" },
+      });
+
+      const deleteResponse = await fetch(
+        `http://127.0.0.1:${ctx.port}/api/streams/${doubleEncodedKey}`,
+        {
+          method: "DELETE",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ idempotencyKey: "req_delete_double_encode" }),
+        },
+      );
+      expect(deleteResponse.status).toBe(200);
+      const deletePayload = (await deleteResponse.json()) as { deletedSessionKey: string };
+      expect(deletePayload.deletedSessionKey).toBe(createdSessionKey);
+      expect(await queue.next()).toMatchObject({
+        type: "stream_deleted",
+        sessionKey: createdSessionKey,
+      });
+
+      queue.dispose();
+      ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("enforces stream API edge cases for built-ins, idempotency reuse, and deleted stream sends", async () => {
     const deviceId = randomUUID();
     const entry = createAllowlistEntry({
