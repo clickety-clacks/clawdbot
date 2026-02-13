@@ -99,19 +99,11 @@ export async function modelsListCommand(
         continue;
       }
       let model = modelByKey.get(entry.key);
-      if (!model && modelRegistry) {
-        const forwardCompat = resolveForwardCompatModel(
-          entry.ref.provider,
-          entry.ref.model,
-          modelRegistry,
-        );
-        if (forwardCompat) {
-          model = forwardCompat;
-          modelByKey.set(entry.key, forwardCompat);
-        }
-      }
       if (!model) {
-        model = resolveModel(entry.ref.provider, entry.ref.model, undefined, cfg).model;
+        const resolved = resolveModel(entry.ref.provider, entry.ref.model, undefined, cfg);
+        if (resolved.model && !resolved.error) {
+          model = resolved.model;
+        }
       }
       if (opts.local && model && !isLocalBaseUrl(model.baseUrl)) {
         continue;
