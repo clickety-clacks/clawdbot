@@ -2140,6 +2140,175 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("T073: create then immediately delete child stream succeeds deterministically", async () => {
+    const deviceId = randomUUID();
+    const entry = createAllowlistEntry({
+      deviceId,
+      userId: "flynn",
+      isAdmin: false,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry]);
+    try {
+      const pair = await performPairRequest(ctx.port, deviceId);
+      const token = pair.token as string;
+
+      // Rapid create+delete cycles to expose timing/normalization issues
+      for (let i = 0; i < 5; i++) {
+        const createResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            idempotencyKey: `req_create_t073_${i}`,
+            displayName: `Test Stream ${i}`,
+          }),
+        });
+        expect(createResponse.status).toBe(201);
+        const created = (await createResponse.json()) as { stream: { sessionKey: string } };
+        const sessionKey = created.stream.sessionKey;
+
+        // Delete immediately (no delay) — this is the T073 repro condition
+        const encodedKey = encodeURIComponent(sessionKey);
+        const deleteResponse = await fetch(
+          `http://127.0.0.1:${ctx.port}/api/streams/${encodedKey}`,
+          {
+            method: "DELETE",
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ idempotencyKey: `req_delete_t073_${i}` }),
+          },
+        );
+        expect(deleteResponse.status).toBe(200);
+        const deleted = (await deleteResponse.json()) as { deletedSessionKey: string };
+        expect(deleted.deletedSessionKey).toBe(sessionKey);
+
+        // Verify stream is gone
+        const listResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const list = (await listResponse.json()) as { streams: Array<{ sessionKey: string }> };
+        expect(list.streams.find((s) => s.sessionKey === sessionKey)).toBeUndefined();
+      }
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("T073: concurrent create+delete from two sockets is serialized correctly", async () => {
+    const deviceId1 = randomUUID();
+    const deviceId2 = randomUUID();
+    const entry1 = createAllowlistEntry({
+      deviceId: deviceId1,
+      userId: "flynn",
+      isAdmin: false,
+      tokenDelivered: true,
+    });
+    const entry2 = createAllowlistEntry({
+      deviceId: deviceId2,
+      userId: "flynn",
+      isAdmin: false,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry1, entry2]);
+    try {
+      const pair1 = await performPairRequest(ctx.port, deviceId1);
+      const pair2 = await performPairRequest(ctx.port, deviceId2);
+      const token1 = pair1.token as string;
+      const token2 = pair2.token as string;
+
+      // Create from device 1
+      const createResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token1}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          idempotencyKey: "req_create_concurrent",
+          displayName: "Concurrent Test",
+        }),
+      });
+      expect(createResponse.status).toBe(201);
+      const created = (await createResponse.json()) as { stream: { sessionKey: string } };
+
+      // Delete from device 2 immediately
+      const encodedKey = encodeURIComponent(created.stream.sessionKey);
+      const deleteResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams/${encodedKey}`, {
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${token2}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ idempotencyKey: "req_delete_concurrent" }),
+      });
+      expect(deleteResponse.status).toBe(200);
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("T073: delete of already-deleted stream returns 404 without idempotency", async () => {
+    const deviceId = randomUUID();
+    const entry = createAllowlistEntry({
+      deviceId,
+      userId: "flynn",
+      isAdmin: false,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry]);
+    try {
+      const pair = await performPairRequest(ctx.port, deviceId);
+      const token = pair.token as string;
+
+      // Create
+      const createResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          idempotencyKey: "req_create_double_del",
+          displayName: "Double Delete Test",
+        }),
+      });
+      expect(createResponse.status).toBe(201);
+      const created = (await createResponse.json()) as { stream: { sessionKey: string } };
+      const encodedKey = encodeURIComponent(created.stream.sessionKey);
+
+      // First delete
+      const del1 = await fetch(`http://127.0.0.1:${ctx.port}/api/streams/${encodedKey}`, {
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ idempotencyKey: "req_del_1" }),
+      });
+      expect(del1.status).toBe(200);
+
+      // Second delete with different idempotency key → should be 404
+      const del2 = await fetch(`http://127.0.0.1:${ctx.port}/api/streams/${encodedKey}`, {
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ idempotencyKey: "req_del_2" }),
+      });
+      expect(del2.status).toBe(404);
+      const payload = (await del2.json()) as { error: { code: string } };
+      expect(payload.error.code).toBe("stream_not_found");
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("/www serves from a dot-directory webRootPath (followSymlinks=true)", async () => {
     const ctx = await setupTestServer([], {
       webRootFollowSymlinks: true,
