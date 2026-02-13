@@ -221,7 +221,7 @@ const STREAM_IDEMPOTENCY_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 const STREAM_OPERATION_CREATE = "create_stream";
 const STREAM_OPERATION_DELETE = "delete_stream";
 const MAX_STREAMS_BODY_BYTES = 16 * 1024;
-const STREAM_SESSION_KEY_PATH_DECODE_PASSES = 2;
+const STREAM_SESSION_KEY_PATH_DECODE_PASSES = 4;
 
 function truncateUtf8(value: string, maxBytes: number): string {
   if (Buffer.byteLength(value, "utf8") <= maxBytes) {
@@ -3688,7 +3688,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   }
 
   function normalizeStreamMutationSessionKeyForUser(userId: string, sessionKey: string): string {
-    const normalized = normalizeStoredSessionKey(sessionKey, userId);
+    // Mutation paths must never fall back to a default stream key.
+    // If the path key is malformed, return not-found semantics.
+    const normalized = normalizeStoredSessionKey(sessionKey);
     if (!normalized) {
       return "";
     }

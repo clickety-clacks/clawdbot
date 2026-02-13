@@ -1462,7 +1462,7 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
-  it("accepts double-encoded stream session keys for rename and delete", async () => {
+  it("accepts multiply-encoded stream session keys for rename and delete", async () => {
     const deviceId = randomUUID();
     const entry = createAllowlistEntry({
       deviceId,
@@ -1497,6 +1497,7 @@ describe.sequential("clawline provider server", () => {
 
       const encodedKey = encodeURIComponent(createdSessionKey);
       const doubleEncodedKey = encodeURIComponent(encodedKey);
+      const tripleEncodedKey = encodeURIComponent(doubleEncodedKey);
 
       const renameResponse = await fetch(
         `http://127.0.0.1:${ctx.port}/api/streams/${doubleEncodedKey}`,
@@ -1521,7 +1522,7 @@ describe.sequential("clawline provider server", () => {
       });
 
       const deleteResponse = await fetch(
-        `http://127.0.0.1:${ctx.port}/api/streams/${doubleEncodedKey}`,
+        `http://127.0.0.1:${ctx.port}/api/streams/${tripleEncodedKey}`,
         {
           method: "DELETE",
           headers: {
@@ -1541,6 +1542,57 @@ describe.sequential("clawline provider server", () => {
 
       queue.dispose();
       ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("returns stream_not_found for malformed mutation keys instead of mutating built-ins", async () => {
+    const deviceId = randomUUID();
+    const entry = createAllowlistEntry({
+      deviceId,
+      userId: "flynn",
+      isAdmin: false,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry]);
+    try {
+      const pair = await performPairRequest(ctx.port, deviceId);
+      const token = pair.token as string;
+
+      const renameResponse = await fetch(
+        `http://127.0.0.1:${ctx.port}/api/streams/${encodeURIComponent("%%%")}`,
+        {
+          method: "PATCH",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ displayName: "Should not apply" }),
+        },
+      );
+      expect(renameResponse.status).toBe(400);
+      const renamePayload = (await renameResponse.json()) as {
+        error: { code: string; message: string };
+      };
+      expect(renamePayload.error.code).toBe("invalid_session_key");
+
+      const deleteResponse = await fetch(
+        `http://127.0.0.1:${ctx.port}/api/streams/${encodeURIComponent("agent:bad:key")}`,
+        {
+          method: "DELETE",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ idempotencyKey: "req_bad_key_delete" }),
+        },
+      );
+      expect(deleteResponse.status).toBe(404);
+      const deletePayload = (await deleteResponse.json()) as {
+        error: { code: string; message: string };
+      };
+      expect(deletePayload.error.code).toBe("stream_not_found");
     } finally {
       await ctx.cleanup();
     }
