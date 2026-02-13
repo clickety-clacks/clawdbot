@@ -604,7 +604,7 @@ function streamKindToDisplayName(kind: StreamSessionKind): string {
     return "DM";
   }
   if (kind === "global_dm") {
-    return "Admin";
+    return "Global DM";
   }
   return STREAM_DISPLAY_NAME_FALLBACK;
 }
@@ -1170,6 +1170,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     (options.config as { adapterOverrides?: ClawlineAdapterOverrides } | undefined)
       ?.adapterOverrides ?? {};
   const openClawCfg = options.openClawConfig;
+  const dmScope = openClawCfg.session?.dmScope ?? "main";
   const logger: Logger = options.logger ?? console;
   const tmuxBackend = createTerminalTmuxBackend(config, logger);
   const sessionStorePath = options.sessionStorePath;
@@ -1195,7 +1196,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const sessionKeyEq = (a: string, b: string) => normalizeSessionKey(a) === normalizeSessionKey(b);
 
   const buildSessionInfo = (userId: string, isAdmin: boolean) => {
-    const dmScope = openClawCfg.session?.dmScope ?? "main";
     const mainStreamSessionKey = buildClawlinePersonalSessionKey(mainSessionAgentId, userId);
     const globalSessionKey = mainSessionKey;
     const dmSessionKey = buildClawlineUserStreamSessionKey(mainSessionAgentId, userId, "dm");
@@ -1204,7 +1204,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       (stream) => stream.sessionKey,
     );
     const fallbackKeys = [mainStreamSessionKey];
-    fallbackKeys.push(dmSessionKey);
+    if (dmScope !== "main") {
+      fallbackKeys.push(dmSessionKey);
+    }
     if (isAdmin) {
       fallbackKeys.push(globalSessionKey);
     }
@@ -1471,18 +1473,20 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       orderIndex: entries.length,
       isBuiltIn: 1,
     });
-    entries.push({
-      sessionKey: buildClawlineUserStreamSessionKey(mainSessionAgentId, params.userId, "dm"),
-      kind: "dm",
-      displayName: streamKindToDisplayName("dm"),
-      orderIndex: entries.length,
-      isBuiltIn: 1,
-    });
+    if (dmScope !== "main") {
+      entries.push({
+        sessionKey: buildClawlineUserStreamSessionKey(mainSessionAgentId, params.userId, "dm"),
+        kind: "dm",
+        displayName: `${params.userId} DM`,
+        orderIndex: entries.length,
+        isBuiltIn: 1,
+      });
+    }
     if (params.isAdmin) {
       entries.push({
         sessionKey: mainSessionKey,
         kind: "global_dm",
-        displayName: streamKindToDisplayName("global_dm"),
+        displayName: "Global DM",
         orderIndex: entries.length,
         isBuiltIn: 1,
       });
@@ -1518,19 +1522,21 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           updatedAt: 0,
         },
       ];
-      fallback.push({
-        sessionKey: buildClawlineUserStreamSessionKey(mainSessionAgentId, params.userId, "dm"),
-        displayName: streamKindToDisplayName("dm"),
-        kind: "dm",
-        orderIndex: fallback.length,
-        isBuiltIn: true,
-        createdAt: 0,
-        updatedAt: 0,
-      });
+      if (dmScope !== "main") {
+        fallback.push({
+          sessionKey: buildClawlineUserStreamSessionKey(mainSessionAgentId, params.userId, "dm"),
+          displayName: `${params.userId} DM`,
+          kind: "dm",
+          orderIndex: fallback.length,
+          isBuiltIn: true,
+          createdAt: 0,
+          updatedAt: 0,
+        });
+      }
       if (params.isAdmin) {
         fallback.push({
           sessionKey: mainSessionKey,
-          displayName: streamKindToDisplayName("global_dm"),
+          displayName: "Global DM",
           kind: "global_dm",
           orderIndex: fallback.length,
           isBuiltIn: true,
@@ -1559,17 +1565,19 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         kind: "main",
         displayName: streamKindToDisplayName("main"),
       },
-      {
+    ];
+    if (dmScope !== "main") {
+      builtIns.push({
         sessionKey: buildClawlineUserStreamSessionKey(mainSessionAgentId, params.userId, "dm"),
         kind: "dm",
-        displayName: streamKindToDisplayName("dm"),
-      },
-    ];
+        displayName: `${params.userId} DM`,
+      });
+    }
     if (params.isAdmin) {
       builtIns.push({
         sessionKey: mainSessionKey,
         kind: "global_dm",
-        displayName: streamKindToDisplayName("global_dm"),
+        displayName: "Global DM",
       });
     }
     let maxOrderRow = selectStreamMaxOrderStmt.get(params.userId) as { maxOrder: number | null };
@@ -1797,12 +1805,14 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             kind: "main",
             displayName: streamKindToDisplayName("main"),
           },
-          {
-            sessionKey: buildClawlineUserStreamSessionKey(mainSessionAgentId, userId, "dm"),
-            kind: "dm",
-            displayName: streamKindToDisplayName("dm"),
-          },
         ];
+      if (dmScope !== "main") {
+        builtIns.push({
+          sessionKey: buildClawlineUserStreamSessionKey(mainSessionAgentId, userId, "dm"),
+          kind: "dm",
+          displayName: `${userId} DM`,
+        });
+      }
       if (
         isAdminUserId.has(userId) ||
         Array.from(discovered).some((sessionKey) => sessionKeyEq(sessionKey, mainSessionKey))
@@ -1810,7 +1820,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         builtIns.push({
           sessionKey: mainSessionKey,
           kind: "global_dm",
-          displayName: streamKindToDisplayName("global_dm"),
+          displayName: "Global DM",
         });
       }
       const existingRows = selectExistingStreamsForUser.all(userId) as Array<{
