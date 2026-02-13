@@ -2,7 +2,6 @@ import type { Database as SqliteDatabase, Statement as SqliteStatement } from "b
 import type { Stats } from "node:fs";
 import BetterSqlite3 from "better-sqlite3";
 import jwt from "jsonwebtoken";
-import { AsyncLocalStorage } from "node:async_hooks";
 import { execFile as execFileCb } from "node:child_process";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { watch, type FSWatcher, createReadStream } from "node:fs";
@@ -69,6 +68,7 @@ import { optimizeImageToJpeg } from "../web/media.js";
 import { clawlineAttachmentsToImages } from "./attachments.js";
 import { ClientMessageError, HttpError } from "./errors.js";
 import { createAssetHandlers } from "./http-assets.js";
+import { createPerUserTaskQueue } from "./per-user-task-queue.js";
 import { SlidingWindowRateLimiter } from "./rate-limiter.js";
 import { ClawlineDeliveryTarget } from "./routing.js";
 import { clawlineSessionFileName } from "./session-key.js";
@@ -3367,8 +3367,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const faceSpeakDedupe = new Map<string, number>();
   const sessionsByDevice = new Map<string, Session>();
   const userSessions = new Map<string, Set<Session>>();
-  const perUserQueue = new Map<string, Promise<unknown>>();
-  const perUserTaskContext = new AsyncLocalStorage<string>();
+  const perUserTaskQueue = createPerUserTaskQueue({
+    onTaskError: (err) => {
+      logger.warn?.(`per_user_task_failed: ${formatError(err)}`);
+    },
+  });
   const pairRateLimiter = new SlidingWindowRateLimiter(config.pairing.maxRequestsPerMinute, 60_000);
   const authRateLimiter = new SlidingWindowRateLimiter(config.auth.maxAttemptsPerMinute, 60_000);
   const messageRateLimiter = new SlidingWindowRateLimiter(
@@ -3515,23 +3518,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     return null;
   }
 
-  function runPerUserTask<T>(userId: string, task: () => Promise<T>): Promise<T> {
-    if (perUserTaskContext.getStore() === userId) {
-      return task();
-    }
-    const previous = perUserQueue.get(userId) ?? Promise.resolve();
-    const next = previous
-      .catch((err) => {
-        logger.warn?.(`per_user_task_failed: ${formatError(err)}`);
-      })
-      .then(() => perUserTaskContext.run(userId, task))
-      .finally(() => {
-        if (perUserQueue.get(userId) === next) {
-          perUserQueue.delete(userId);
-        }
-      });
-    perUserQueue.set(userId, next);
-    return next;
+  function runPerUserTask<T>(
+    userId: string,
+    task: () => Promise<T>,
+    opts?: { streamKey?: string },
+  ): Promise<T> {
+    return perUserTaskQueue.run({ userId, streamKey: opts?.streamKey }, task);
   }
 
   function enqueueWriteTask<T>(task: () => T | Promise<T>): Promise<T> {
@@ -4866,310 +4858,315 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       }
       const targetUserId = session.userId;
 
-      await runPerUserTask(session.userId, async () => {
-        const existing = selectMessageStmt.get(session.deviceId, payload.id) as
-          | {
-              deviceId: string;
-              contentHash: string;
-              attachmentsHash: string;
-              streaming: number;
-              ackSent: number;
+      await runPerUserTask(
+        session.userId,
+        async () => {
+          const existing = selectMessageStmt.get(session.deviceId, payload.id) as
+            | {
+                deviceId: string;
+                contentHash: string;
+                attachmentsHash: string;
+                streaming: number;
+                ackSent: number;
+              }
+            | undefined;
+          const incomingHash = sha256(rawContent);
+          if (existing) {
+            if (
+              existing.contentHash !== incomingHash ||
+              existing.attachmentsHash !== attachmentsHash
+            ) {
+              throw new ClientMessageError("invalid_message", "Duplicate mismatch");
             }
-          | undefined;
-        const incomingHash = sha256(rawContent);
-        if (existing) {
-          if (
-            existing.contentHash !== incomingHash ||
-            existing.attachmentsHash !== attachmentsHash
-          ) {
-            throw new ClientMessageError("invalid_message", "Duplicate mismatch");
+            if (existing.streaming === (MessageStreamingState.Failed as number)) {
+              throw new ClientMessageError("invalid_message", "Message failed");
+            }
+            if (existing.ackSent === 0) {
+              session.socket.send(JSON.stringify({ type: "ack", id: payload.id }), (err) => {
+                if (!err) {
+                  markAckSent(session.deviceId, payload.id);
+                }
+              });
+            } else {
+              session.socket.send(JSON.stringify({ type: "ack", id: payload.id }), () => {});
+            }
+            return;
           }
-          if (existing.streaming === (MessageStreamingState.Failed as number)) {
-            throw new ClientMessageError("invalid_message", "Message failed");
+
+          if (!messageRateLimiter.attempt(session.deviceId)) {
+            throw new ClientMessageError("rate_limited", "Too many messages");
           }
-          if (existing.ackSent === 0) {
+
+          const materialized = await materializeInlineAttachments({
+            attachments: attachmentsInfo.attachments,
+            ownerUserId: targetUserId,
+            deviceId: session.deviceId,
+          });
+          const assetIds = attachmentsInfo.assetIds.concat(materialized.inlineAssetIds);
+          const ownership = await ensureChannelAttachmentOwnership({
+            attachments: materialized.attachments,
+            assetIds,
+            session,
+          });
+
+          const { event } = await persistUserMessage(
+            session,
+            targetUserId,
+            payload.id,
+            rawContent,
+            ownership.attachments,
+            attachmentsHash,
+            ownership.assetIds,
+            resolvedSessionKey,
+          );
+          await new Promise<void>((resolve) => {
             session.socket.send(JSON.stringify({ type: "ack", id: payload.id }), (err) => {
               if (!err) {
                 markAckSent(session.deviceId, payload.id);
               }
+              resolve();
             });
-          } else {
-            session.socket.send(JSON.stringify({ type: "ack", id: payload.id }), () => {});
-          }
-          return;
-        }
-
-        if (!messageRateLimiter.attempt(session.deviceId)) {
-          throw new ClientMessageError("rate_limited", "Too many messages");
-        }
-
-        const materialized = await materializeInlineAttachments({
-          attachments: attachmentsInfo.attachments,
-          ownerUserId: targetUserId,
-          deviceId: session.deviceId,
-        });
-        const assetIds = attachmentsInfo.assetIds.concat(materialized.inlineAssetIds);
-        const ownership = await ensureChannelAttachmentOwnership({
-          attachments: materialized.attachments,
-          assetIds,
-          session,
-        });
-
-        const { event } = await persistUserMessage(
-          session,
-          targetUserId,
-          payload.id,
-          rawContent,
-          ownership.attachments,
-          attachmentsHash,
-          ownership.assetIds,
-          resolvedSessionKey,
-        );
-        await new Promise<void>((resolve) => {
-          session.socket.send(JSON.stringify({ type: "ack", id: payload.id }), (err) => {
-            if (!err) {
-              markAckSent(session.deviceId, payload.id);
-            }
-            resolve();
           });
-        });
-        broadcastToSessionKey(resolvedSessionKey, event);
+          broadcastToSessionKey(resolvedSessionKey, event);
 
-        const attachmentSummary = describeClawlineAttachments(ownership.attachments);
-        const inboundBody = attachmentSummary
-          ? `${rawContent}\n\n${attachmentSummary}`
-          : rawContent;
-        const inboundImages = clawlineAttachmentsToImages(ownership.attachments);
+          const attachmentSummary = describeClawlineAttachments(ownership.attachments);
+          const inboundBody = attachmentSummary
+            ? `${rawContent}\n\n${attachmentSummary}`
+            : rawContent;
+          const inboundImages = clawlineAttachmentsToImages(ownership.attachments);
 
-        const channelLabel = "clawline";
-        const routeSessionKey = resolvedSessionKey;
-        const route = {
-          agentId: mainSessionAgentId,
-          channel: "clawline",
-          accountId: DEFAULT_ACCOUNT_ID,
-          sessionKey: routeSessionKey,
-          mainSessionKey,
-        };
-        const peerId = session.peerId;
+          const channelLabel = "clawline";
+          const routeSessionKey = resolvedSessionKey;
+          const route = {
+            agentId: mainSessionAgentId,
+            channel: "clawline",
+            accountId: DEFAULT_ACCOUNT_ID,
+            sessionKey: routeSessionKey,
+            mainSessionKey,
+          };
+          const peerId = session.peerId;
 
-        const deliveryTarget = ClawlineDeliveryTarget.fromParts(session.userId, streamSuffix);
-        const systemPromptParts = [adapterOverrides.systemPrompt?.trim() || null].filter(
-          (entry): entry is string => Boolean(entry),
-        );
-        const groupSystemPrompt =
-          systemPromptParts.length > 0 ? systemPromptParts.join("\n\n") : undefined;
-        const ctxPayload = finalizeInboundContext({
-          Body: inboundBody,
-          RawBody: rawContent,
-          CommandBody: rawContent,
-          From: `${channelLabel}:${peerId}`,
-          To: `device:${session.deviceId}`,
-          SessionKey: route.sessionKey,
-          AccountId: route.accountId,
-          MessageSid: payload.id,
-          ChatType: "direct",
-          SenderName: session.claimedName ?? session.deviceInfo?.model ?? peerId,
-          SenderId: session.userId,
-          Provider: "clawline",
-          Surface: channelLabel,
-          OriginatingChannel: channelLabel,
-          OriginatingTo: deliveryTarget.toString(),
-          GroupSystemPrompt: groupSystemPrompt,
-          CommandAuthorized: true,
-        });
-        const updateLastRoute =
-          streamSuffix === "dm" && session.dmScope !== "main"
-            ? {
-                // DM cross-session "follow me" write: tell agent:main:main where this user is currently talking.
-                sessionKey: route.mainSessionKey,
-                channel: "clawline",
-                to: deliveryTarget.toString(),
-                accountId: route.accountId,
-              }
-            : undefined;
-        await recordInboundSession({
-          storePath: sessionStorePath,
-          sessionKey: route.sessionKey,
-          ctx: ctxPayload,
-          updateLastRoute,
-          onRecordError: (err) => {
-            logger.warn?.(`[clawline] failed recording inbound session: ${formatError(err)}`);
-          },
-        });
-
-        const fallbackText = adapterOverrides.responseFallback?.trim() ?? "";
-        const prefixContext: ResponsePrefixContext = {
-          identityName: resolveIdentityName(openClawCfg, route.agentId),
-        };
-
-        // Track activity state for typing indicator
-        let activitySignaled = false;
-        const sendActivitySignal = async (isActive: boolean) => {
-          logger.info?.("[clawline] activity_signal", {
-            isActive,
-            messageId: payload.id,
+          const deliveryTarget = ClawlineDeliveryTarget.fromParts(session.userId, streamSuffix);
+          const systemPromptParts = [adapterOverrides.systemPrompt?.trim() || null].filter(
+            (entry): entry is string => Boolean(entry),
+          );
+          const groupSystemPrompt =
+            systemPromptParts.length > 0 ? systemPromptParts.join("\n\n") : undefined;
+          const ctxPayload = finalizeInboundContext({
+            Body: inboundBody,
+            RawBody: rawContent,
+            CommandBody: rawContent,
+            From: `${channelLabel}:${peerId}`,
+            To: `device:${session.deviceId}`,
+            SessionKey: route.sessionKey,
+            AccountId: route.accountId,
+            MessageSid: payload.id,
+            ChatType: "direct",
+            SenderName: session.claimedName ?? session.deviceInfo?.model ?? peerId,
+            SenderId: session.userId,
+            Provider: "clawline",
+            Surface: channelLabel,
+            OriginatingChannel: channelLabel,
+            OriginatingTo: deliveryTarget.toString(),
+            GroupSystemPrompt: groupSystemPrompt,
+            CommandAuthorized: true,
+          });
+          const updateLastRoute =
+            streamSuffix === "dm" && session.dmScope !== "main"
+              ? {
+                  // DM cross-session "follow me" write: tell agent:main:main where this user is currently talking.
+                  sessionKey: route.mainSessionKey,
+                  channel: "clawline",
+                  to: deliveryTarget.toString(),
+                  accountId: route.accountId,
+                }
+              : undefined;
+          await recordInboundSession({
+            storePath: sessionStorePath,
             sessionKey: route.sessionKey,
+            ctx: ctxPayload,
+            updateLastRoute,
+            onRecordError: (err) => {
+              logger.warn?.(`[clawline] failed recording inbound session: ${formatError(err)}`);
+            },
           });
-          await sendJson(session.socket, {
-            type: "event",
-            event: "activity",
-            payload: {
+
+          const fallbackText = adapterOverrides.responseFallback?.trim() ?? "";
+          const prefixContext: ResponsePrefixContext = {
+            identityName: resolveIdentityName(openClawCfg, route.agentId),
+          };
+
+          // Track activity state for typing indicator
+          let activitySignaled = false;
+          const sendActivitySignal = async (isActive: boolean) => {
+            logger.info?.("[clawline] activity_signal", {
               isActive,
               messageId: payload.id,
               sessionKey: route.sessionKey,
-            },
-          });
-        };
-
-        const { dispatcher, replyOptions, markDispatchIdle } = createReplyDispatcherWithTyping({
-          responsePrefix: resolveEffectiveMessagesConfig(openClawCfg, route.agentId).responsePrefix,
-          responsePrefixContextProvider: () => prefixContext,
-          humanDelay: resolveHumanDelayConfig(openClawCfg, route.agentId),
-          deliver: async (replyPayload) => {
-            // Stop activity signal when first content arrives (streaming begins)
-            if (activitySignaled) {
-              activitySignaled = false;
-              void sendActivitySignal(false);
-            }
-            const mediaUrls = replyPayload.mediaUrls?.length
-              ? replyPayload.mediaUrls
-              : replyPayload.mediaUrl
-                ? [replyPayload.mediaUrl]
-                : [];
-            let attachments: NormalizedAttachment[] = [];
-            const trimmedText = replyPayload.text?.trim();
-            if (mediaUrls.length > 0) {
-              try {
-                const materialized = await materializeOutboundMediaUrls({
-                  mediaUrls,
-                  ownerUserId: targetUserId,
-                  uploaderDeviceId: session.deviceId,
-                });
-                attachments = materialized.attachments;
-              } catch (err) {
-                logger.warn?.(`[clawline] reply_media_attachment_failed: ${formatError(err)}`);
-              }
-            }
-            const assistantText =
-              trimmedText && trimmedText.length > 0
-                ? trimmedText
-                : attachments.length > 0
-                  ? ""
-                  : buildAssistantTextFromPayload(replyPayload, fallbackText);
-            if (assistantText === null) {
-              return;
-            }
-            const assistantEvent = await persistAssistantMessage(
-              session,
-              targetUserId,
-              assistantText,
-              route.sessionKey,
-              attachments,
-            );
-            broadcastToSessionKey(resolvedSessionKey, assistantEvent);
-          },
-          onError: (err, info) => {
-            logger.error?.("[clawline] reply_delivery_failed", {
-              kind: info.kind,
-              error: err instanceof Error ? err.message : String(err),
             });
-          },
-          onReplyStart: async () => {
-            // Signal that processing has started (for typing indicator)
-            if (!activitySignaled) {
-              activitySignaled = true;
-              await sendActivitySignal(true);
-            }
-          },
-        });
-
-        logger.info?.("[clawline] agent_run_start", {
-          messageId: payload.id,
-          sessionId: session.sessionId,
-          sessionKey: resolvedSessionKey,
-          userId: session.userId,
-          deviceId: session.deviceId,
-        });
-
-        let queuedFinal = false;
-        let deliveredCount = 0;
-        try {
-          const result = await dispatchReplyFromConfig({
-            ctx: ctxPayload,
-            cfg: openClawCfg,
-            dispatcher,
-            replyOptions: {
-              ...replyOptions,
-              images: inboundImages.length > 0 ? inboundImages : undefined,
-              onModelSelected: (ctx) => {
-                prefixContext.provider = ctx.provider;
-                prefixContext.model = extractShortModelName(ctx.model);
-                prefixContext.modelFull = `${ctx.provider}/${ctx.model}`;
-                prefixContext.thinkingLevel = ctx.thinkLevel ?? "off";
+            await sendJson(session.socket, {
+              type: "event",
+              event: "activity",
+              payload: {
+                isActive,
+                messageId: payload.id,
+                sessionKey: route.sessionKey,
               },
+            }).catch(() => {});
+          };
+
+          const { dispatcher, replyOptions, markDispatchIdle } = createReplyDispatcherWithTyping({
+            responsePrefix: resolveEffectiveMessagesConfig(openClawCfg, route.agentId)
+              .responsePrefix,
+            responsePrefixContextProvider: () => prefixContext,
+            humanDelay: resolveHumanDelayConfig(openClawCfg, route.agentId),
+            deliver: async (replyPayload) => {
+              // Stop activity signal when first content arrives (streaming begins)
+              if (activitySignaled) {
+                activitySignaled = false;
+                void sendActivitySignal(false);
+              }
+              const mediaUrls = replyPayload.mediaUrls?.length
+                ? replyPayload.mediaUrls
+                : replyPayload.mediaUrl
+                  ? [replyPayload.mediaUrl]
+                  : [];
+              let attachments: NormalizedAttachment[] = [];
+              const trimmedText = replyPayload.text?.trim();
+              if (mediaUrls.length > 0) {
+                try {
+                  const materialized = await materializeOutboundMediaUrls({
+                    mediaUrls,
+                    ownerUserId: targetUserId,
+                    uploaderDeviceId: session.deviceId,
+                  });
+                  attachments = materialized.attachments;
+                } catch (err) {
+                  logger.warn?.(`[clawline] reply_media_attachment_failed: ${formatError(err)}`);
+                }
+              }
+              const assistantText =
+                trimmedText && trimmedText.length > 0
+                  ? trimmedText
+                  : attachments.length > 0
+                    ? ""
+                    : buildAssistantTextFromPayload(replyPayload, fallbackText);
+              if (assistantText === null) {
+                return;
+              }
+              const assistantEvent = await persistAssistantMessage(
+                session,
+                targetUserId,
+                assistantText,
+                route.sessionKey,
+                attachments,
+              );
+              broadcastToSessionKey(resolvedSessionKey, assistantEvent);
             },
-            replyResolver: options.replyResolver,
+            onError: (err, info) => {
+              logger.error?.("[clawline] reply_delivery_failed", {
+                kind: info.kind,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            },
+            onReplyStart: async () => {
+              // Signal that processing has started (for typing indicator)
+              if (!activitySignaled) {
+                activitySignaled = true;
+                await sendActivitySignal(true);
+              }
+            },
           });
-          queuedFinal = result.queuedFinal;
-          // Count all delivered content (streaming blocks, tool results, and final replies)
-          deliveredCount = result.counts.block + result.counts.tool + result.counts.final;
-        } catch (err) {
-          logger.error?.(`[clawline] dispatch_failed: ${formatError(err)}`);
-          queuedFinal = false;
-        }
-        markDispatchIdle();
-        await dispatcher.waitForIdle();
 
-        // Always send activity=false when done
-        if (activitySignaled) {
-          activitySignaled = false;
-          void sendActivitySignal(false);
-        }
+          logger.info?.("[clawline] agent_run_start", {
+            messageId: payload.id,
+            sessionId: session.sessionId,
+            sessionKey: resolvedSessionKey,
+            userId: session.userId,
+            deviceId: session.deviceId,
+          });
 
-        // Check if message was successfully handled:
-        // 1. queuedFinal = true means a final reply was sent
-        // 2. deliveredCount > 0 means content was streamed (blocks/tools)
-        // 3. queueDepth > 0 means message was queued for later processing
-        const queueKey = route.sessionKey;
-        const queueDepth = getFollowupQueueDepth(queueKey);
-        const wasDelivered = queuedFinal || deliveredCount > 0;
-        const wasQueued = !wasDelivered && queueDepth > 0;
+          let queuedFinal = false;
+          let deliveredCount = 0;
+          try {
+            const result = await dispatchReplyFromConfig({
+              ctx: ctxPayload,
+              cfg: openClawCfg,
+              dispatcher,
+              replyOptions: {
+                ...replyOptions,
+                images: inboundImages.length > 0 ? inboundImages : undefined,
+                onModelSelected: (ctx) => {
+                  prefixContext.provider = ctx.provider;
+                  prefixContext.model = extractShortModelName(ctx.model);
+                  prefixContext.modelFull = `${ctx.provider}/${ctx.model}`;
+                  prefixContext.thinkingLevel = ctx.thinkLevel ?? "off";
+                },
+              },
+              replyResolver: options.replyResolver,
+            });
+            queuedFinal = result.queuedFinal;
+            // Count all delivered content (streaming blocks, tool results, and final replies)
+            deliveredCount = result.counts.block + result.counts.tool + result.counts.final;
+          } catch (err) {
+            logger.error?.(`[clawline] dispatch_failed: ${formatError(err)}`);
+            queuedFinal = false;
+          }
+          markDispatchIdle();
+          await dispatcher.waitForIdle();
 
-        logger.info?.("[clawline] agent_run_end", {
-          messageId: payload.id,
-          sessionId: session.sessionId,
-          sessionKey: resolvedSessionKey,
-          userId: session.userId,
-          deviceId: session.deviceId,
-          deliveredCount,
-          queuedFinal,
-          queueDepth,
-          wasDelivered,
-          wasQueued,
-        });
+          // Always send activity=false when done
+          if (activitySignaled) {
+            activitySignaled = false;
+            void sendActivitySignal(false);
+          }
 
-        if (!wasDelivered && !wasQueued) {
+          // Check if message was successfully handled:
+          // 1. queuedFinal = true means a final reply was sent
+          // 2. deliveredCount > 0 means content was streamed (blocks/tools)
+          // 3. queueDepth > 0 means message was queued for later processing
+          const queueKey = route.sessionKey;
+          const queueDepth = getFollowupQueueDepth(queueKey);
+          const wasDelivered = queuedFinal || deliveredCount > 0;
+          const wasQueued = !wasDelivered && queueDepth > 0;
+
+          logger.info?.("[clawline] agent_run_end", {
+            messageId: payload.id,
+            sessionId: session.sessionId,
+            sessionKey: resolvedSessionKey,
+            userId: session.userId,
+            deviceId: session.deviceId,
+            deliveredCount,
+            queuedFinal,
+            queueDepth,
+            wasDelivered,
+            wasQueued,
+          });
+
+          if (!wasDelivered && !wasQueued) {
+            updateMessageStreamingStmt.run(
+              MessageStreamingState.Failed,
+              session.deviceId,
+              payload.id,
+            );
+            await sendJson(session.socket, {
+              type: "error",
+              code: "server_error",
+              message: "Unable to deliver reply",
+              messageId: payload.id,
+            }).catch(() => {});
+            return;
+          }
+
+          // Message was either delivered or queued successfully
           updateMessageStreamingStmt.run(
-            MessageStreamingState.Failed,
+            wasQueued ? MessageStreamingState.Queued : MessageStreamingState.Finalized,
             session.deviceId,
             payload.id,
           );
-          await sendJson(session.socket, {
-            type: "error",
-            code: "server_error",
-            message: "Unable to deliver reply",
-            messageId: payload.id,
-          });
-          return;
-        }
-
-        // Message was either delivered or queued successfully
-        updateMessageStreamingStmt.run(
-          wasQueued ? MessageStreamingState.Queued : MessageStreamingState.Finalized,
-          session.deviceId,
-          payload.id,
-        );
-      });
+        },
+        { streamKey: resolvedSessionKey },
+      );
     } catch (err) {
       if (err instanceof ClientMessageError) {
         await sendJson(session.socket, { type: "error", code: err.code, message: err.message });
@@ -5294,255 +5291,264 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       const attachmentsHash = hashAttachments(attachments);
       const assetIds: string[] = [];
 
-      await runPerUserTask(session.userId, async () => {
-        if (!messageRateLimiter.attempt(session.deviceId)) {
-          throw new ClientMessageError("rate_limited", "Too many messages");
-        }
+      await runPerUserTask(
+        session.userId,
+        async () => {
+          if (!messageRateLimiter.attempt(session.deviceId)) {
+            throw new ClientMessageError("rate_limited", "Too many messages");
+          }
 
-        const clientId = `c_${randomUUID()}`;
+          const clientId = `c_${randomUUID()}`;
 
-        const { event } = await persistUserMessage(
-          session,
-          targetUserId,
-          clientId,
-          rawContent,
-          attachments,
-          attachmentsHash,
-          assetIds,
-          resolvedSessionKey,
-        );
-        broadcastToSessionKey(resolvedSessionKey, event);
+          const { event } = await persistUserMessage(
+            session,
+            targetUserId,
+            clientId,
+            rawContent,
+            attachments,
+            attachmentsHash,
+            assetIds,
+            resolvedSessionKey,
+          );
+          broadcastToSessionKey(resolvedSessionKey, event);
 
-        const attachmentSummary = describeClawlineAttachments(attachments);
-        const inboundBody = attachmentSummary
-          ? `${rawContent}\n\n${attachmentSummary}`
-          : rawContent;
-        const inboundImages = clawlineAttachmentsToImages(attachments);
+          const attachmentSummary = describeClawlineAttachments(attachments);
+          const inboundBody = attachmentSummary
+            ? `${rawContent}\n\n${attachmentSummary}`
+            : rawContent;
+          const inboundImages = clawlineAttachmentsToImages(attachments);
 
-        const channelLabel = "clawline";
-        const routeSessionKey = resolvedSessionKey;
-        const route = {
-          agentId: mainSessionAgentId,
-          channel: "clawline",
-          accountId: DEFAULT_ACCOUNT_ID,
-          sessionKey: routeSessionKey,
-          mainSessionKey,
-        };
-        const peerId = session.peerId;
+          const channelLabel = "clawline";
+          const routeSessionKey = resolvedSessionKey;
+          const route = {
+            agentId: mainSessionAgentId,
+            channel: "clawline",
+            accountId: DEFAULT_ACCOUNT_ID,
+            sessionKey: routeSessionKey,
+            mainSessionKey,
+          };
+          const peerId = session.peerId;
 
-        const deliveryTarget = ClawlineDeliveryTarget.fromParts(session.userId, streamSuffix);
-        const systemPromptParts = [adapterOverrides.systemPrompt?.trim() || null].filter(
-          (entry): entry is string => Boolean(entry),
-        );
-        const groupSystemPrompt =
-          systemPromptParts.length > 0 ? systemPromptParts.join("\n\n") : undefined;
-        const ctxPayload = finalizeInboundContext({
-          Body: inboundBody,
-          RawBody: rawContent,
-          CommandBody: rawContent,
-          From: `${channelLabel}:${peerId}`,
-          To: `device:${session.deviceId}`,
-          SessionKey: route.sessionKey,
-          AccountId: route.accountId,
-          MessageSid: clientId,
-          ChatType: "direct",
-          SenderName: session.claimedName ?? session.deviceInfo?.model ?? peerId,
-          SenderId: session.userId,
-          Provider: "clawline",
-          Surface: channelLabel,
-          OriginatingChannel: channelLabel,
-          OriginatingTo: deliveryTarget.toString(),
-          GroupSystemPrompt: groupSystemPrompt,
-          CommandAuthorized: true,
-        });
-        const updateLastRoute =
-          streamSuffix === "dm" && session.dmScope !== "main"
-            ? {
-                // DM cross-session "follow me" write: tell agent:main:main where this user is currently talking.
-                sessionKey: route.mainSessionKey,
-                channel: "clawline",
-                to: deliveryTarget.toString(),
-                accountId: route.accountId,
-              }
-            : undefined;
-        await recordInboundSession({
-          storePath: sessionStorePath,
-          sessionKey: route.sessionKey,
-          ctx: ctxPayload,
-          updateLastRoute,
-          onRecordError: (err) => {
-            logger.warn?.(`[clawline] failed recording inbound session: ${formatError(err)}`);
-          },
-        });
-
-        const fallbackText = adapterOverrides.responseFallback?.trim() ?? "";
-        const prefixContext: ResponsePrefixContext = {
-          identityName: resolveIdentityName(openClawCfg, route.agentId),
-        };
-
-        // Track activity state for typing indicator
-        let activitySignaled = false;
-        const sendActivitySignal = async (isActive: boolean) => {
-          logger.info?.("[clawline] activity_signal", {
-            isActive,
-            messageId: clientId,
-            sessionKey: route.sessionKey,
+          const deliveryTarget = ClawlineDeliveryTarget.fromParts(session.userId, streamSuffix);
+          const systemPromptParts = [adapterOverrides.systemPrompt?.trim() || null].filter(
+            (entry): entry is string => Boolean(entry),
+          );
+          const groupSystemPrompt =
+            systemPromptParts.length > 0 ? systemPromptParts.join("\n\n") : undefined;
+          const ctxPayload = finalizeInboundContext({
+            Body: inboundBody,
+            RawBody: rawContent,
+            CommandBody: rawContent,
+            From: `${channelLabel}:${peerId}`,
+            To: `device:${session.deviceId}`,
+            SessionKey: route.sessionKey,
+            AccountId: route.accountId,
+            MessageSid: clientId,
+            ChatType: "direct",
+            SenderName: session.claimedName ?? session.deviceInfo?.model ?? peerId,
+            SenderId: session.userId,
+            Provider: "clawline",
+            Surface: channelLabel,
+            OriginatingChannel: channelLabel,
+            OriginatingTo: deliveryTarget.toString(),
+            GroupSystemPrompt: groupSystemPrompt,
+            CommandAuthorized: true,
           });
-          await sendJson(session.socket, {
-            type: "event",
-            event: "activity",
-            payload: {
+          const updateLastRoute =
+            streamSuffix === "dm" && session.dmScope !== "main"
+              ? {
+                  // DM cross-session "follow me" write: tell agent:main:main where this user is currently talking.
+                  sessionKey: route.mainSessionKey,
+                  channel: "clawline",
+                  to: deliveryTarget.toString(),
+                  accountId: route.accountId,
+                }
+              : undefined;
+          await recordInboundSession({
+            storePath: sessionStorePath,
+            sessionKey: route.sessionKey,
+            ctx: ctxPayload,
+            updateLastRoute,
+            onRecordError: (err) => {
+              logger.warn?.(`[clawline] failed recording inbound session: ${formatError(err)}`);
+            },
+          });
+
+          const fallbackText = adapterOverrides.responseFallback?.trim() ?? "";
+          const prefixContext: ResponsePrefixContext = {
+            identityName: resolveIdentityName(openClawCfg, route.agentId),
+          };
+
+          // Track activity state for typing indicator
+          let activitySignaled = false;
+          const sendActivitySignal = async (isActive: boolean) => {
+            logger.info?.("[clawline] activity_signal", {
               isActive,
               messageId: clientId,
               sessionKey: route.sessionKey,
-            },
-          }).catch(() => {});
-        };
-
-        const { dispatcher, replyOptions, markDispatchIdle } = createReplyDispatcherWithTyping({
-          responsePrefix: resolveEffectiveMessagesConfig(openClawCfg, route.agentId).responsePrefix,
-          responsePrefixContextProvider: () => prefixContext,
-          humanDelay: resolveHumanDelayConfig(openClawCfg, route.agentId),
-          deliver: async (replyPayload) => {
-            // Stop activity signal when first content arrives (streaming begins)
-            if (activitySignaled) {
-              activitySignaled = false;
-              void sendActivitySignal(false);
-            }
-            const mediaUrls = replyPayload.mediaUrls?.length
-              ? replyPayload.mediaUrls
-              : replyPayload.mediaUrl
-                ? [replyPayload.mediaUrl]
-                : [];
-            let replyAttachments: NormalizedAttachment[] = [];
-            const trimmedText = replyPayload.text?.trim();
-            if (mediaUrls.length > 0) {
-              try {
-                const materialized = await materializeOutboundMediaUrls({
-                  mediaUrls,
-                  ownerUserId: targetUserId,
-                  uploaderDeviceId: session.deviceId,
-                });
-                replyAttachments = materialized.attachments;
-              } catch (err) {
-                logger.warn?.(`[clawline] reply_media_attachment_failed: ${formatError(err)}`);
-              }
-            }
-            const assistantText =
-              trimmedText && trimmedText.length > 0
-                ? trimmedText
-                : replyAttachments.length > 0
-                  ? ""
-                  : buildAssistantTextFromPayload(replyPayload, fallbackText);
-            if (assistantText === null) {
-              return;
-            }
-            const assistantEvent = await persistAssistantMessage(
-              session,
-              targetUserId,
-              assistantText,
-              route.sessionKey,
-              replyAttachments,
-            );
-            broadcastToSessionKey(resolvedSessionKey, assistantEvent);
-          },
-          onError: (err, info) => {
-            logger.error?.("[clawline] reply_delivery_failed", {
-              kind: info.kind,
-              error: err instanceof Error ? err.message : String(err),
             });
-          },
-          onReplyStart: async () => {
-            // Signal that processing has started (for typing indicator)
-            if (!activitySignaled) {
-              activitySignaled = true;
-              await sendActivitySignal(true);
-            }
-          },
-        });
-
-        logger.info?.("[clawline] agent_run_start", {
-          messageId: clientId,
-          sessionId: session.sessionId,
-          sessionKey: resolvedSessionKey,
-          userId: session.userId,
-          deviceId: session.deviceId,
-          sourceMessageId,
-          interactiveAction: action,
-        });
-
-        let queuedFinal = false;
-        let deliveredCount = 0;
-        try {
-          const result = await dispatchReplyFromConfig({
-            ctx: ctxPayload,
-            cfg: openClawCfg,
-            dispatcher,
-            replyOptions: {
-              ...replyOptions,
-              images: inboundImages.length > 0 ? inboundImages : undefined,
-              onModelSelected: (ctx) => {
-                prefixContext.provider = ctx.provider;
-                prefixContext.model = extractShortModelName(ctx.model);
-                prefixContext.modelFull = `${ctx.provider}/${ctx.model}`;
-                prefixContext.thinkingLevel = ctx.thinkLevel ?? "off";
+            await sendJson(session.socket, {
+              type: "event",
+              event: "activity",
+              payload: {
+                isActive,
+                messageId: clientId,
+                sessionKey: route.sessionKey,
               },
+            }).catch(() => {});
+          };
+
+          const { dispatcher, replyOptions, markDispatchIdle } = createReplyDispatcherWithTyping({
+            responsePrefix: resolveEffectiveMessagesConfig(openClawCfg, route.agentId)
+              .responsePrefix,
+            responsePrefixContextProvider: () => prefixContext,
+            humanDelay: resolveHumanDelayConfig(openClawCfg, route.agentId),
+            deliver: async (replyPayload) => {
+              // Stop activity signal when first content arrives (streaming begins)
+              if (activitySignaled) {
+                activitySignaled = false;
+                void sendActivitySignal(false);
+              }
+              const mediaUrls = replyPayload.mediaUrls?.length
+                ? replyPayload.mediaUrls
+                : replyPayload.mediaUrl
+                  ? [replyPayload.mediaUrl]
+                  : [];
+              let replyAttachments: NormalizedAttachment[] = [];
+              const trimmedText = replyPayload.text?.trim();
+              if (mediaUrls.length > 0) {
+                try {
+                  const materialized = await materializeOutboundMediaUrls({
+                    mediaUrls,
+                    ownerUserId: targetUserId,
+                    uploaderDeviceId: session.deviceId,
+                  });
+                  replyAttachments = materialized.attachments;
+                } catch (err) {
+                  logger.warn?.(`[clawline] reply_media_attachment_failed: ${formatError(err)}`);
+                }
+              }
+              const assistantText =
+                trimmedText && trimmedText.length > 0
+                  ? trimmedText
+                  : replyAttachments.length > 0
+                    ? ""
+                    : buildAssistantTextFromPayload(replyPayload, fallbackText);
+              if (assistantText === null) {
+                return;
+              }
+              const assistantEvent = await persistAssistantMessage(
+                session,
+                targetUserId,
+                assistantText,
+                route.sessionKey,
+                replyAttachments,
+              );
+              broadcastToSessionKey(resolvedSessionKey, assistantEvent);
             },
-            replyResolver: options.replyResolver,
+            onError: (err, info) => {
+              logger.error?.("[clawline] reply_delivery_failed", {
+                kind: info.kind,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            },
+            onReplyStart: async () => {
+              // Signal that processing has started (for typing indicator)
+              if (!activitySignaled) {
+                activitySignaled = true;
+                await sendActivitySignal(true);
+              }
+            },
           });
-          queuedFinal = result.queuedFinal;
-          // Count all delivered content (streaming blocks, tool results, and final replies)
-          deliveredCount = result.counts.block + result.counts.tool + result.counts.final;
-        } catch (err) {
-          logger.error?.(`[clawline] dispatch_failed: ${formatError(err)}`);
-          queuedFinal = false;
-        }
-        markDispatchIdle();
-        await dispatcher.waitForIdle();
 
-        // Always send activity=false when done
-        if (activitySignaled) {
-          activitySignaled = false;
-          void sendActivitySignal(false);
-        }
-
-        const queueKey = route.sessionKey;
-        const queueDepth = getFollowupQueueDepth(queueKey);
-        const wasDelivered = queuedFinal || deliveredCount > 0;
-        const wasQueued = !wasDelivered && queueDepth > 0;
-
-        logger.info?.("[clawline] agent_run_end", {
-          messageId: clientId,
-          sessionId: session.sessionId,
-          sessionKey: resolvedSessionKey,
-          userId: session.userId,
-          deviceId: session.deviceId,
-          deliveredCount,
-          queuedFinal,
-          queueDepth,
-          wasDelivered,
-          wasQueued,
-          sourceMessageId,
-          interactiveAction: action,
-        });
-
-        if (!wasDelivered && !wasQueued) {
-          updateMessageStreamingStmt.run(MessageStreamingState.Failed, session.deviceId, clientId);
-          await sendJson(session.socket, {
-            type: "error",
-            code: "server_error",
-            message: "Unable to deliver reply",
+          logger.info?.("[clawline] agent_run_start", {
             messageId: clientId,
-          }).catch(() => {});
-          return;
-        }
+            sessionId: session.sessionId,
+            sessionKey: resolvedSessionKey,
+            userId: session.userId,
+            deviceId: session.deviceId,
+            sourceMessageId,
+            interactiveAction: action,
+          });
 
-        updateMessageStreamingStmt.run(
-          wasQueued ? MessageStreamingState.Queued : MessageStreamingState.Finalized,
-          session.deviceId,
-          clientId,
-        );
-      });
+          let queuedFinal = false;
+          let deliveredCount = 0;
+          try {
+            const result = await dispatchReplyFromConfig({
+              ctx: ctxPayload,
+              cfg: openClawCfg,
+              dispatcher,
+              replyOptions: {
+                ...replyOptions,
+                images: inboundImages.length > 0 ? inboundImages : undefined,
+                onModelSelected: (ctx) => {
+                  prefixContext.provider = ctx.provider;
+                  prefixContext.model = extractShortModelName(ctx.model);
+                  prefixContext.modelFull = `${ctx.provider}/${ctx.model}`;
+                  prefixContext.thinkingLevel = ctx.thinkLevel ?? "off";
+                },
+              },
+              replyResolver: options.replyResolver,
+            });
+            queuedFinal = result.queuedFinal;
+            // Count all delivered content (streaming blocks, tool results, and final replies)
+            deliveredCount = result.counts.block + result.counts.tool + result.counts.final;
+          } catch (err) {
+            logger.error?.(`[clawline] dispatch_failed: ${formatError(err)}`);
+            queuedFinal = false;
+          }
+          markDispatchIdle();
+          await dispatcher.waitForIdle();
+
+          // Always send activity=false when done
+          if (activitySignaled) {
+            activitySignaled = false;
+            void sendActivitySignal(false);
+          }
+
+          const queueKey = route.sessionKey;
+          const queueDepth = getFollowupQueueDepth(queueKey);
+          const wasDelivered = queuedFinal || deliveredCount > 0;
+          const wasQueued = !wasDelivered && queueDepth > 0;
+
+          logger.info?.("[clawline] agent_run_end", {
+            messageId: clientId,
+            sessionId: session.sessionId,
+            sessionKey: resolvedSessionKey,
+            userId: session.userId,
+            deviceId: session.deviceId,
+            deliveredCount,
+            queuedFinal,
+            queueDepth,
+            wasDelivered,
+            wasQueued,
+            sourceMessageId,
+            interactiveAction: action,
+          });
+
+          if (!wasDelivered && !wasQueued) {
+            updateMessageStreamingStmt.run(
+              MessageStreamingState.Failed,
+              session.deviceId,
+              clientId,
+            );
+            await sendJson(session.socket, {
+              type: "error",
+              code: "server_error",
+              message: "Unable to deliver reply",
+              messageId: clientId,
+            }).catch(() => {});
+            return;
+          }
+
+          updateMessageStreamingStmt.run(
+            wasQueued ? MessageStreamingState.Queued : MessageStreamingState.Finalized,
+            session.deviceId,
+            clientId,
+          );
+        },
+        { streamKey: resolvedSessionKey },
+      );
     } catch (err) {
       if (err instanceof ClientMessageError) {
         await sendJson(session.socket, {
@@ -6587,7 +6593,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       await closeWithTimeout((cb) => wss.close(cb), "wss");
       await closeWithTimeout((cb) => terminalWss.close(cb), "terminalWss");
       await closeWithTimeout((cb) => httpServer.close(cb), "httpServer");
-      await Promise.allSettled(Array.from(perUserQueue.values()));
+      await perUserTaskQueue.drain();
       await writeQueue.catch(() => {});
       disposeDatabaseResources();
       started = false;
