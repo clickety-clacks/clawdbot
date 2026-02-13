@@ -384,7 +384,12 @@ async function uploadAsset(port: number, token: string, data: Buffer, mimeType: 
   return response.json() as Promise<{ assetId: string; mimeType: string; size: number }>;
 }
 
-async function authenticateDevice(port: number, deviceId: string, token: string) {
+async function authenticateDevice(
+  port: number,
+  deviceId: string,
+  token: string,
+  options: { authPayload?: Record<string, unknown> } = {},
+) {
   const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
   await waitForOpen(ws);
   // Buffer messages to avoid races (auth_result, stream_snapshot, and session_info can arrive fast).
@@ -395,6 +400,7 @@ async function authenticateDevice(port: number, deviceId: string, token: string)
       protocolVersion: PROTOCOL_VERSION,
       deviceId,
       token,
+      ...(options.authPayload ?? {}),
     }),
   );
   const auth = await queue.next();
@@ -1102,6 +1108,137 @@ describe.sequential("clawline provider server", () => {
       );
       adminWs.terminate();
       userWs.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("echoes terminal_bubbles_v1 in auth_result when client advertises support", async () => {
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      userId: "feature_user",
+      isAdmin: false,
+      tokenDelivered: false,
+      lastSeenAt: null,
+    });
+    const ctx = await setupTestServer([entry]);
+    try {
+      const pair = await performPairRequest(ctx.port, entry.deviceId);
+      const { ws, auth } = await authenticateDevice(
+        ctx.port,
+        entry.deviceId,
+        pair.token as string,
+        {
+          authPayload: {
+            clientFeatures: ["terminal_bubbles_v1"],
+            client: {
+              id: "clawline-ios-tests",
+              features: ["terminal_bubbles_v1"],
+            },
+          },
+        },
+      );
+      expect(auth.features).toEqual(
+        expect.arrayContaining(["session_info", "terminal_bubbles_v1"]),
+      );
+      ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("filters terminal attachments unless top-level clientFeatures advertises terminal_bubbles_v1", async () => {
+    const noFeatureDeviceId = randomUUID();
+    const withFeatureDeviceId = randomUUID();
+    const baseEntry = {
+      claimedName: "QA Sim",
+      deviceInfo: {
+        platform: "iOS",
+        model: "iPhone",
+      },
+      userId: "feature_gate",
+      isAdmin: false,
+      tokenDelivered: true,
+      createdAt: Date.now() - 10_000,
+      lastSeenAt: Date.now() - 5_000,
+    };
+    const ctx = await setupTestServer([
+      {
+        ...baseEntry,
+        deviceId: noFeatureDeviceId,
+      },
+      {
+        ...baseEntry,
+        deviceId: withFeatureDeviceId,
+      },
+    ]);
+    try {
+      const noFeaturePair = await performPairRequest(ctx.port, noFeatureDeviceId);
+      const withFeaturePair = await performPairRequest(ctx.port, withFeatureDeviceId);
+      const { ws: noFeatureWs } = await authenticateDevice(
+        ctx.port,
+        noFeatureDeviceId,
+        noFeaturePair.token as string,
+      );
+      const { ws: withFeatureWs, auth: withFeatureAuth } = await authenticateDevice(
+        ctx.port,
+        withFeatureDeviceId,
+        withFeaturePair.token as string,
+        {
+          authPayload: {
+            clientFeatures: ["terminal_bubbles_v1"],
+          },
+        },
+      );
+      expect(withFeatureAuth.features).toEqual(
+        expect.arrayContaining(["session_info", "terminal_bubbles_v1"]),
+      );
+
+      const descriptor = {
+        version: 1,
+        terminalSessionId: `ts_${randomUUID()}`,
+        title: "gateway logs",
+      };
+      const base64 = Buffer.from(JSON.stringify(descriptor), "utf8").toString("base64");
+      const noFeatureEventPromise = waitForMessage(noFeatureWs);
+      const withFeatureEventPromise = waitForMessage(withFeatureWs);
+      await ctx.server.sendMessage({
+        target: "feature_gate",
+        text: "",
+        attachments: [
+          {
+            data: base64,
+            mimeType: "application/vnd.clawline.terminal-session+json",
+          },
+        ],
+      });
+
+      const noFeatureEvent = await noFeatureEventPromise;
+      const withFeatureEvent = await withFeatureEventPromise;
+      const withFeatureAttachments = Array.isArray(withFeatureEvent.attachments)
+        ? withFeatureEvent.attachments
+        : [];
+      const noFeatureAttachments = Array.isArray(noFeatureEvent.attachments)
+        ? noFeatureEvent.attachments
+        : [];
+
+      expect(
+        withFeatureAttachments.some(
+          (attachment) =>
+            attachment?.type === "document" &&
+            attachment?.mimeType === "application/vnd.clawline.terminal-session+json",
+        ),
+      ).toBe(true);
+      expect(
+        noFeatureAttachments.some(
+          (attachment) =>
+            attachment?.type === "document" &&
+            attachment?.mimeType === "application/vnd.clawline.terminal-session+json",
+        ),
+      ).toBe(false);
+
+      noFeatureWs.terminate();
+      withFeatureWs.terminate();
     } finally {
       await ctx.cleanup();
     }

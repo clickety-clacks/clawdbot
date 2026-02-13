@@ -200,7 +200,10 @@ const INLINE_IMAGE_MIME_TYPES = new Set([
 const TERMINAL_SESSION_MIME = "application/vnd.clawline.terminal-session+json";
 const INTERACTIVE_HTML_MIME = "application/vnd.clawline.interactive-html+json";
 const INTERACTIVE_CALLBACK_MIME = "application/vnd.clawline.interactive-callback+json";
+const CLIENT_FEATURE_TERMINAL_BUBBLES_V1 = "terminal_bubbles_v1";
+const SERVER_FEATURE_SESSION_INFO = "session_info";
 const INLINE_DOCUMENT_MIME_TYPES = new Set([TERMINAL_SESSION_MIME, INTERACTIVE_HTML_MIME]);
+const SUPPORTED_CLIENT_FEATURES = new Set([CLIENT_FEATURE_TERMINAL_BUBBLES_V1]);
 const MAX_INTERACTIVE_ACTION_CHARS = 128;
 const MAX_INTERACTIVE_DATA_BYTES = 64 * 1024;
 const MAX_ALERT_BODY_BYTES = 4 * 1024;
@@ -265,6 +268,89 @@ function formatError(err: unknown): string {
   } catch {
     return String(err);
   }
+}
+
+function parseClientFeatures(payload: unknown): Set<string> {
+  const out = new Set<string>();
+  const addValues = (value: unknown) => {
+    if (!Array.isArray(value)) {
+      return;
+    }
+    for (const item of value) {
+      if (typeof item !== "string") {
+        continue;
+      }
+      const normalized = item.trim().toLowerCase();
+      if (!normalized || !SUPPORTED_CLIENT_FEATURES.has(normalized)) {
+        continue;
+      }
+      out.add(normalized);
+    }
+  };
+  if (!payload || typeof payload !== "object") {
+    return out;
+  }
+  const record = payload as { clientFeatures?: unknown; client?: unknown };
+  addValues(record.clientFeatures);
+  if (record.client && typeof record.client === "object") {
+    const clientRecord = record.client as { features?: unknown };
+    addValues(clientRecord.features);
+  }
+  return out;
+}
+
+function normalizeMimeForComparison(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const normalized = value.split(";", 1)[0]?.trim().toLowerCase();
+  return normalized && normalized.length > 0 ? normalized : null;
+}
+
+function isTerminalSessionDocumentAttachment(value: unknown): boolean {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const attachment = value as { type?: unknown; mimeType?: unknown };
+  if (attachment.type !== "document") {
+    return false;
+  }
+  return normalizeMimeForComparison(attachment.mimeType) === TERMINAL_SESSION_MIME;
+}
+
+function buildAuthResultFeatures(session: Session): string[] {
+  const features = [SERVER_FEATURE_SESSION_INFO];
+  if (session.clientFeatures.has(CLIENT_FEATURE_TERMINAL_BUBBLES_V1)) {
+    features.push(CLIENT_FEATURE_TERMINAL_BUBBLES_V1);
+  }
+  return features;
+}
+
+function normalizePayloadForSession(
+  session: Session,
+  payload: ServerMessage,
+  normalizedMainSessionKey: string,
+): ServerMessage | null {
+  const effectiveSessionKey = payload.sessionKey ?? session.sessionKey;
+  if (effectiveSessionKey.toLowerCase() === normalizedMainSessionKey && !session.isAdmin) {
+    return null;
+  }
+  let attachments = payload.attachments;
+  if (
+    Array.isArray(attachments) &&
+    attachments.length > 0 &&
+    !session.clientFeatures.has(CLIENT_FEATURE_TERMINAL_BUBBLES_V1)
+  ) {
+    const filtered = attachments.filter(
+      (attachment) => !isTerminalSessionDocumentAttachment(attachment),
+    );
+    attachments = filtered.length > 0 ? filtered : undefined;
+  }
+  return {
+    ...payload,
+    sessionKey: effectiveSessionKey,
+    attachments,
+  };
 }
 
 function sanitizeLabel(label?: string): string | undefined {
@@ -688,6 +774,7 @@ type Session = {
   deviceId: string;
   userId: string;
   isAdmin: boolean;
+  clientFeatures: Set<string>;
   sessionId: string;
   /** Default session key for legacy clients that omit payload.sessionKey (routes to Main stream). */
   sessionKey: string;
@@ -1087,6 +1174,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const tmuxBackend = createTerminalTmuxBackend(config, logger);
   const sessionStorePath = options.sessionStorePath;
   const mainSessionKey = options.mainSessionKey?.trim() || "agent:main:main";
+  const normalizedMainKey = mainSessionKey.toLowerCase();
   const mainSessionAgentId = resolveAgentIdFromSessionKey(mainSessionKey);
 
   const resolveAssistantSenderName = (sessionKey: string) =>
@@ -3089,7 +3177,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     let decisionReason = "missing_session_key";
     let decisionAction = "fallback_main_session";
 
-    const normalizedMainKey = mainSessionKey.toLowerCase();
     if (typeof rawSessionKey === "string") {
       if (trimmedSessionKey.length === 0) {
         decisionReason = "empty_session_key";
@@ -4250,7 +4337,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       replayCount: limited.length,
       replayTruncated: combined.length > limited.length,
       historyReset: !lastMessageId,
-      features: ["session_info"],
+      features: buildAuthResultFeatures(session),
       dmScope: sessionInfo.dmScope,
       sessionKeys: sessionInfo.subscribedSessionKeys,
     };
@@ -4276,83 +4363,73 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     await sendJson(session.socket, { type: "stream_snapshot", streams }).catch(() => {});
     await sendSessionInfo(session, sessionInfo);
     for (const event of limited) {
-      if (
-        typeof event.sessionKey === "string" &&
-        event.sessionKey.toLowerCase() === normalizedMainKey &&
-        !session.isAdmin
-      ) {
+      const normalized = normalizePayloadForSession(session, event, mainSessionKey.toLowerCase());
+      if (!normalized) {
         continue;
       }
       logger.info("replay_send", {
         deviceId: session.deviceId,
         userId: session.userId,
-        messageId: event.id,
-        sessionKey: event.sessionKey,
-        streaming: event.streaming,
-        attachmentCount: Array.isArray(event.attachments) ? event.attachments.length : 0,
+        messageId: normalized.id,
+        sessionKey: normalized.sessionKey,
+        streaming: normalized.streaming,
+        attachmentCount: Array.isArray(normalized.attachments) ? normalized.attachments.length : 0,
         replay: true,
       });
-      const stats = summarizeAttachmentStats(event.attachments);
+      const stats = summarizeAttachmentStats(normalized.attachments);
       if (stats) {
         logger.info?.(
           `[clawline:http] ws_send_message attachmentCount=${stats.count} inlineBytes=${stats.inlineBytes} assetCount=${stats.assetCount} replay=true`,
           {
             deviceId: session.deviceId,
             userId: session.userId,
-            messageId: event.id,
+            messageId: normalized.id,
             attachmentCount: stats.count,
             inlineBytes: stats.inlineBytes,
             assetCount: stats.assetCount,
-            streaming: event.streaming,
+            streaming: normalized.streaming,
             replay: true,
           },
         );
       }
-      await sendJson(session.socket, event);
+      await sendJson(session.socket, normalized).catch(() => {});
     }
   }
 
   function sendPayloadToSession(session: Session, payload: ServerMessage) {
-    const normalizedMainKey = mainSessionKey.toLowerCase();
-    if (!payload.sessionKey) {
-      payload.sessionKey = session.sessionKey;
-    }
-    if (
-      typeof payload.sessionKey === "string" &&
-      payload.sessionKey.toLowerCase() === normalizedMainKey &&
-      !session.isAdmin
-    ) {
+    const normalized = normalizePayloadForSession(session, payload, mainSessionKey.toLowerCase());
+    if (!normalized) {
       return;
     }
     if (session.socket.readyState !== WebSocket.OPEN) {
       return;
     }
-    const stats = summarizeAttachmentStats(payload.attachments);
+    const stats = summarizeAttachmentStats(normalized.attachments);
     if (stats) {
       logger.info?.(
         `[clawline:http] ws_send_message attachmentCount=${stats.count} inlineBytes=${stats.inlineBytes} assetCount=${stats.assetCount} replay=false`,
         {
           deviceId: session.deviceId,
           userId: session.userId,
-          messageId: payload.id,
+          messageId: normalized.id,
           attachmentCount: stats.count,
           inlineBytes: stats.inlineBytes,
           assetCount: stats.assetCount,
-          streaming: payload.streaming,
+          streaming: normalized.streaming,
           replay: false,
         },
       );
     }
-    session.socket.send(JSON.stringify(payload), (err) => {
+    session.socket.send(JSON.stringify(normalized), (err) => {
       if (err) {
         session.socket.close();
         return;
       }
-      const role = payload.role ?? "assistant";
-      const streaming = Boolean(payload.streaming);
-      const sessionKey = payload.sessionKey;
-      const messageId = payload.id;
-      const payloadText = typeof payload.content === "string" ? payload.content : "";
+      const role = normalized.role ?? "assistant";
+      const streaming = Boolean(normalized.streaming);
+      const sessionKey = normalized.sessionKey;
+      const messageId = normalized.id;
+      const payloadText = typeof normalized.content === "string" ? normalized.content : "";
       const payloadTextLen = payloadText.trim().length;
       const pendingKey = messageId || sessionKey || "";
       const logDecision = (decision: "skip" | "attempt", reason: string, textLen: number) => {
@@ -6306,11 +6383,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       return;
     }
     const peerId = derivePeerId(entry);
+    const clientFeatures = parseClientFeatures(payload);
     const session: Session = {
       socket: ws,
       deviceId: entry.deviceId,
       userId: entry.userId,
       isAdmin: entry.isAdmin,
+      clientFeatures,
       sessionId: `session_${randomUUID()}`,
       sessionKey: "",
       sessionKeys: [],
