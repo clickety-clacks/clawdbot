@@ -1,6 +1,5 @@
-import type { AgentToolResult, OpenClawConfig } from "openclaw/plugin-sdk";
-import { jsonResult } from "openclaw/plugin-sdk";
 import type {
+  AgentToolResult,
   ChannelMessageActionAdapter,
   ChannelMessageActionName,
   OpenClawConfig,
@@ -62,7 +61,7 @@ function resolveClawlineDbPath(cfg: OpenClawConfig): string {
   }
   // Default path
   const homeDir = os.homedir();
-  return path.join(homeDir, ".clawdbot", "clawline", "clawline.sqlite");
+  return path.join(homeDir, ".openclaw", "clawline", "clawline.sqlite");
 }
 
 function parseEventPayload(row: EventRow): ParsedMessage {
@@ -320,8 +319,8 @@ async function readClawlineMessages(params: {
       queryParams.push(params.userId);
     }
 
-    query += ` ORDER BY timestamp DESC LIMIT ?`;
-    queryParams.push(Math.min(limit, 100)); // Cap at 100
+    const targetLimit = Math.min(limit, 100);
+    query += ` ORDER BY timestamp DESC LIMIT ? OFFSET ?`;
 
     const stmt = db.prepare(query);
     const messages: ParsedMessage[] = [];
@@ -356,12 +355,7 @@ async function readClawlineMessages(params: {
       }
     }
 
-    // Filter to only actual messages (user_message, server_message)
-    messages = messages.filter((m) => m.type === "user_message" || m.type === "server_message");
-
-    // Reverse to get chronological order
     messages.reverse();
-
     return { ok: true, messages };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

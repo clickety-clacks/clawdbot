@@ -15,33 +15,26 @@ import {
 
 export const LEGACY_CONFIG_MIGRATIONS_PART_3: LegacyConfigMigration[] = [
   {
-    id: "memorySearch->agents.defaults.memorySearch",
-    describe: "Move top-level memorySearch to agents.defaults.memorySearch",
+    id: "clawline->channels.clawline",
+    describe: "Move clawline config under channels.clawline",
     apply: (raw, changes) => {
-      const legacyMemorySearch = getRecord(raw.memorySearch);
-      if (!legacyMemorySearch) {
+      const clawline = getRecord(raw.clawline);
+      if (!clawline) {
         return;
       }
-
-      const agents = ensureRecord(raw, "agents");
-      const defaults = ensureRecord(agents, "defaults");
-      const existing = getRecord(defaults.memorySearch);
-      if (!existing) {
-        defaults.memorySearch = legacyMemorySearch;
-        changes.push("Moved memorySearch → agents.defaults.memorySearch.");
+      const channels = ensureRecord(raw, "channels");
+      const existing = getRecord(channels.clawline);
+      if (existing) {
+        mergeMissing(existing, clawline);
+        changes.push("Merged clawline → channels.clawline.");
+      } else if (channels.clawline === undefined) {
+        channels.clawline = clawline;
+        changes.push("Moved clawline → channels.clawline.");
       } else {
-        // agents.defaults stays authoritative; legacy top-level config only fills gaps.
-        const merged = structuredClone(existing);
-        mergeMissing(merged, legacyMemorySearch);
-        defaults.memorySearch = merged;
-        changes.push(
-          "Merged memorySearch → agents.defaults.memorySearch (filled missing fields from legacy; kept explicit agents.defaults values).",
-        );
+        channels.clawline = clawline;
+        changes.push("Replaced channels.clawline with clawline config.");
       }
-
-      agents.defaults = defaults;
-      raw.agents = agents;
-      delete raw.memorySearch;
+      delete raw.clawline;
     },
   },
   {

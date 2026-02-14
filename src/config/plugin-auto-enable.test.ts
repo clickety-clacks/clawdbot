@@ -60,6 +60,18 @@ describe("applyPluginAutoEnable", () => {
     expect(result.config.plugins?.entries?.["google-antigravity-auth"]?.enabled).toBe(true);
   });
 
+  it("registers clawline plugin as disabled when clawline is configured", () => {
+    const result = applyPluginAutoEnable({
+      config: {
+        channels: { clawline: { enabled: true } },
+      },
+      env: {},
+    });
+
+    expect(result.config.plugins?.entries?.clawline?.enabled).toBe(false);
+    expect(result.changes.join("\n")).toContain("clawline configured, not enabled yet.");
+  });
+
   it("skips when plugins are globally disabled", () => {
     const result = applyPluginAutoEnable({
       config: {
