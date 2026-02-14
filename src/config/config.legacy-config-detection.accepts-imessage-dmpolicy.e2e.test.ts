@@ -153,17 +153,6 @@ describe("legacy config detection", () => {
     expect(res.config?.messages?.tts?.auto).toBe("always");
     expect(res.config?.messages?.tts?.enabled).toBeUndefined();
   });
-  it("migrates clawline config to channels.clawline", async () => {
-    vi.resetModules();
-    const { migrateLegacyConfig } = await import("./config.js");
-    const res = migrateLegacyConfig({
-      clawline: { enabled: true, port: 18792 },
-    });
-    expect(res.changes).toContain("Moved clawline → channels.clawline.");
-    expect(res.config?.channels?.clawline?.enabled).toBe(true);
-    expect(res.config?.channels?.clawline?.port).toBe(18792);
-    expect((res.config as { clawline?: unknown })?.clawline).toBeUndefined();
-  });
   it("migrates legacy model config to agent.models + model lists", async () => {
     const res = migrateLegacyConfig({
       agent: {

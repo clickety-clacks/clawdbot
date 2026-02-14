@@ -2,14 +2,14 @@ import os from "node:os";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as logging from "../logging.js";
 
-import { afterEach, describe, expect, it, vi } from "vitest";
-
-const createService = vi.fn();
-const shutdown = vi.fn();
-const registerUnhandledRejectionHandler = vi.fn();
-
-const logWarn = vi.fn();
-const logDebug = vi.fn();
+const mocks = vi.hoisted(() => ({
+  createService: vi.fn(),
+  shutdown: vi.fn(),
+  registerUnhandledRejectionHandler: vi.fn(),
+  logWarn: vi.fn(),
+  logDebug: vi.fn(),
+}));
+const { createService, shutdown, registerUnhandledRejectionHandler, logWarn, logDebug } = mocks;
 
 const asString = (value: unknown, fallback: string) =>
   typeof value === "string" && value.trim() ? value : fallback;

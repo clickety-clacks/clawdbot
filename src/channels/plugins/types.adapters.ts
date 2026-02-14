@@ -80,7 +80,13 @@ export type ChannelOutboundContext = {
   replyToId?: string | null;
   threadId?: string | number | null;
   accountId?: string | null;
+  identity?: OutboundIdentity;
   deps?: OutboundSendDeps;
+  silent?: boolean;
+};
+
+export type ChannelOutboundPayloadContext = ChannelOutboundContext & {
+  payload: ReplyPayload;
 };
 
 export type ChannelOutboundAdapter = {

@@ -16,8 +16,7 @@ export async function updateSessionStoreAfterAgentRun(params: {
   sessionId: string;
   sessionKey: string;
   storePath: string;
-  /** @deprecated Kept for API compatibility but no longer used; fresh data is read inside the lock */
-  sessionStore?: Record<string, SessionEntry>;
+  sessionStore: Record<string, SessionEntry>;
   defaultProvider: string;
   defaultModel: string;
   fallbackProvider?: string;
@@ -29,6 +28,7 @@ export async function updateSessionStoreAfterAgentRun(params: {
     sessionId,
     sessionKey,
     storePath,
+    sessionStore,
     defaultProvider,
     defaultModel,
     fallbackProvider,
@@ -44,33 +44,44 @@ export async function updateSessionStoreAfterAgentRun(params: {
   const contextTokens =
     params.contextTokensOverride ?? lookupContextTokens(modelUsed) ?? DEFAULT_CONTEXT_TOKENS;
 
-  // Read fresh inside the lock to avoid clobbering concurrent writes during the agent run.
+  const entry = sessionStore[sessionKey] ?? {
+    sessionId,
+    updatedAt: Date.now(),
+  };
+  const next: SessionEntry = {
+    ...entry,
+    sessionId,
+    updatedAt: Date.now(),
+    modelProvider: providerUsed,
+    model: modelUsed,
+    contextTokens,
+  };
+  if (isCliProvider(providerUsed, cfg)) {
+    const cliSessionId = result.meta.agentMeta?.sessionId?.trim();
+    if (cliSessionId) {
+      setCliSessionId(next, providerUsed, cliSessionId);
+    }
+  }
+  next.abortedLastRun = result.meta.aborted ?? false;
+  if (hasNonzeroUsage(usage)) {
+    const input = usage.input ?? 0;
+    const output = usage.output ?? 0;
+    const totalTokens =
+      deriveSessionTotalTokens({
+        usage,
+        contextTokens,
+        promptTokens,
+      }) ?? input;
+    next.inputTokens = input;
+    next.outputTokens = output;
+    next.totalTokens = totalTokens;
+    next.totalTokensFresh = true;
+  }
+  if (compactionsThisRun > 0) {
+    next.compactionCount = (entry.compactionCount ?? 0) + compactionsThisRun;
+  }
+  sessionStore[sessionKey] = next;
   await updateSessionStore(storePath, (store) => {
-    const entry = store[sessionKey] ?? {
-      sessionId,
-      updatedAt: Date.now(),
-    };
-    const next: SessionEntry = {
-      ...entry,
-      sessionId,
-      updatedAt: Date.now(),
-      modelProvider: providerUsed,
-      model: modelUsed,
-      contextTokens,
-    };
-    if (isCliProvider(providerUsed, cfg)) {
-      const cliSessionId = result.meta.agentMeta?.sessionId?.trim();
-      if (cliSessionId) setCliSessionId(next, providerUsed, cliSessionId);
-    }
-    next.abortedLastRun = result.meta.aborted ?? false;
-    if (hasNonzeroUsage(usage)) {
-      const input = usage.input ?? 0;
-      const output = usage.output ?? 0;
-      const promptTokens = input + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
-      next.inputTokens = input;
-      next.outputTokens = output;
-      next.totalTokens = promptTokens > 0 ? promptTokens : (usage.total ?? input);
-    }
     store[sessionKey] = next;
   });
 }

@@ -103,6 +103,9 @@ function logSlotWarnings(warnings: string[]) {
   if (warnings.length === 0) {
     return;
   }
+  for (const warning of warnings) {
+    defaultRuntime.log(theme.warn(warning));
+  }
 }
 
 export function registerPluginsCli(program: Command) {

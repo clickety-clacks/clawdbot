@@ -96,6 +96,7 @@ export type OpenClawConfig = {
   canvasHost?: CanvasHostConfig;
   talk?: TalkConfig;
   gateway?: GatewayConfig;
+  memory?: MemoryConfig;
 };
 
 export type ConfigValidationIssue = {

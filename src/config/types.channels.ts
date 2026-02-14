@@ -8,8 +8,6 @@ import type { SignalConfig } from "./types.signal.js";
 import type { SlackConfig } from "./types.slack.js";
 import type { TelegramConfig } from "./types.telegram.js";
 import type { WhatsAppConfig } from "./types.whatsapp.js";
-import type { ClawlineConfig } from "./types.clawline.js";
-import type { GroupPolicy } from "./types.base.js";
 
 export type ChannelHeartbeatVisibilityConfig = {
   /** Show HEARTBEAT_OK acknowledgments in chat (default: false). */
@@ -50,6 +48,7 @@ export type ChannelsConfig = {
   signal?: SignalConfig;
   imessage?: IMessageConfig;
   msteams?: MSTeamsConfig;
-  clawline?: ClawlineConfig;
-  [key: string]: unknown;
+  // Extension channels use dynamic keys - use ExtensionChannelConfig in extensions
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  [key: string]: any;
 };

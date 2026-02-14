@@ -2,12 +2,8 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import fs from "node:fs/promises";
-import path from "node:path";
-
-import type { ClawdbotConfig } from "../../config/config.js";
-import { setActivePluginRegistry } from "../../plugins/runtime.js";
-import { createIMessageTestPlugin, createTestRegistry } from "../../test-utils/channel-plugins.js";
+import type { ChannelPlugin } from "../../channels/plugins/types.js";
+import type { OpenClawConfig } from "../../config/config.js";
 import { slackPlugin } from "../../../extensions/slack/src/channel.js";
 import { telegramPlugin } from "../../../extensions/telegram/src/channel.js";
 import { whatsappPlugin } from "../../../extensions/whatsapp/src/channel.js";
@@ -455,43 +451,6 @@ describe("runMessageAction sendAttachment hydration", () => {
     );
   });
 
-  it("accepts buffer objects for sendAttachment", async () => {
-    const cfg = {
-      channels: {
-        bluebubbles: {
-          enabled: true,
-          serverUrl: "http://localhost:1234",
-          password: "test-password",
-        },
-      },
-    } as OpenClawConfig;
-
-    vi.mocked(loadWebMedia).mockClear();
-
-    const result = await runMessageAction({
-      cfg,
-      action: "sendAttachment",
-      params: {
-        channel: "bluebubbles",
-        target: "+15551234567",
-        buffer: Buffer.from("ok"),
-        contentType: "text/plain",
-        filename: "note.txt",
-      },
-    });
-
-    expect(result.kind).toBe("action");
-    expect(result.payload).toMatchObject({
-      ok: true,
-      filename: "note.txt",
-      contentType: "text/plain",
-    });
-    expect((result.payload as { buffer?: string }).buffer).toBe(
-      Buffer.from("ok").toString("base64"),
-    );
-    expect(vi.mocked(loadWebMedia)).not.toHaveBeenCalled();
-  });
-
   it("rewrites sandboxed media paths for sendAttachment", async () => {
     const cfg = {
       channels: {
@@ -521,33 +480,6 @@ describe("runMessageAction sendAttachment hydration", () => {
     } finally {
       await fs.rm(sandboxDir, { recursive: true, force: true });
     }
-  });
-
-  it("allows localhost media fetches for sendAttachment", async () => {
-    const cfg = {
-      channels: {
-        bluebubbles: {
-          enabled: true,
-          serverUrl: "http://localhost:1234",
-          password: "test-password",
-        },
-      },
-    } as OpenClawConfig;
-
-    await runMessageAction({
-      cfg,
-      action: "sendAttachment",
-      params: {
-        channel: "bluebubbles",
-        target: "+15551234567",
-        media: "http://127.0.0.1:18999/terminal.json",
-        message: "caption",
-      },
-    });
-
-    const call = vi.mocked(loadWebMedia).mock.calls[0];
-    expect(call?.[0]).toBe("http://127.0.0.1:18999/terminal.json");
-    expect(call?.[2]).toEqual({ ssrfPolicy: { allowedHostnames: ["127.0.0.1"] } });
   });
 });
 
@@ -883,92 +815,5 @@ describe("runMessageAction accountId defaults", () => {
     };
     expect(ctx.accountId).toBe("ops");
     expect(ctx.params.accountId).toBe("ops");
-  });
-});
-
-describe("runMessageAction send inline attachment", () => {
-  const inlinePlugin: ChannelPlugin = {
-    id: "imessage",
-    meta: {
-      id: "imessage",
-      label: "iMessage",
-      selectionLabel: "iMessage",
-      docsPath: "/channels/imessage",
-      blurb: "Inline media test plugin.",
-    },
-    capabilities: { chatTypes: ["direct"], media: true },
-    config: {
-      listAccountIds: () => ["default"],
-      resolveAccount: () => ({ enabled: true }),
-      isConfigured: () => true,
-    },
-    outbound: {
-      deliveryMode: "direct",
-      sendText: async () => ({
-        channel: "imessage",
-        messageId: "m_text",
-      }),
-      sendMedia: async ({ mediaUrl }) => {
-        if (!mediaUrl) {
-          throw new Error("missing mediaUrl");
-        }
-        const data = await fs.readFile(mediaUrl);
-        (inlinePlugin.outbound as { lastMedia?: Buffer }).lastMedia = data;
-        (inlinePlugin.outbound as { lastPath?: string }).lastPath = mediaUrl;
-        return {
-          channel: "imessage",
-          messageId: "m_media",
-        };
-      },
-    },
-  };
-
-  beforeEach(() => {
-    setActivePluginRegistry(
-      createTestRegistry([
-        {
-          pluginId: "imessage",
-          source: "test",
-          plugin: inlinePlugin,
-        },
-      ]),
-    );
-  });
-
-  afterEach(() => {
-    setActivePluginRegistry(createTestRegistry([]));
-  });
-
-  it("writes buffer attachments to a temp file and cleans up", async () => {
-    const cfg = {
-      channels: {
-        imessage: { enabled: true },
-      },
-    } as ClawdbotConfig;
-
-    const pngBase64 =
-      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIW2NgYGBgAAAABQABDQottAAAAABJRU5ErkJggg==";
-
-    const result = await runMessageAction({
-      cfg,
-      action: "send",
-      params: {
-        channel: "imessage",
-        target: "+15551234567",
-        message: "",
-        buffer: pngBase64,
-        contentType: "image/png",
-        filename: "tiny",
-      },
-    });
-
-    expect(result.kind).toBe("send");
-    const lastPath = (inlinePlugin.outbound as { lastPath?: string }).lastPath;
-    const lastMedia = (inlinePlugin.outbound as { lastMedia?: Buffer }).lastMedia;
-    expect(lastPath).toBeTruthy();
-    expect(lastMedia?.byteLength).toBeGreaterThan(0);
-    if (!lastPath) throw new Error("missing temp media path");
-    expect(path.extname(lastPath)).toBe(".png");
-    await expect(fs.stat(lastPath)).rejects.toThrow();
   });
 });

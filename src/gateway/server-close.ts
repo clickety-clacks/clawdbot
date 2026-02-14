@@ -5,9 +5,6 @@ import type { HeartbeatRunner } from "../infra/heartbeat-runner.js";
 import type { PluginServicesHandle } from "../plugins/services.js";
 import { type ChannelId, listChannelPlugins } from "../channels/plugins/index.js";
 import { stopGmailWatcher } from "../hooks/gmail-watcher.js";
-import type { NodeBridgeServer } from "../infra/bridge/server.js";
-import type { PluginServicesHandle } from "../plugins/services.js";
-import type { ClawlineServiceHandle } from "../clawline/service.js";
 
 export function createGatewayCloseHandler(params: {
   bonjourStop: (() => Promise<void>) | null;
@@ -16,7 +13,6 @@ export function createGatewayCloseHandler(params: {
   canvasHostServer: CanvasHostServer | null;
   stopChannel: (name: ChannelId, accountId?: string) => Promise<void>;
   pluginServices: PluginServicesHandle | null;
-  clawlineService: ClawlineServiceHandle | null;
   cron: { stop: () => void };
   heartbeatRunner: HeartbeatRunner;
   nodePresenceTimers: Map<string, ReturnType<typeof setInterval>>;
@@ -70,9 +66,6 @@ export function createGatewayCloseHandler(params: {
     }
     if (params.pluginServices) {
       await params.pluginServices.stop().catch(() => {});
-    }
-    if (params.clawlineService) {
-      await params.clawlineService.stop().catch(() => {});
     }
     await stopGmailWatcher();
     params.cron.stop();

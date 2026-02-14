@@ -1,14 +1,6 @@
-import { CHAT_CHANNEL_ORDER, type ChatChannelId, normalizeChatChannelId } from "../registry.js";
-import { discordPlugin } from "./discord.js";
-import { imessagePlugin } from "./imessage.js";
-import { msteamsPlugin } from "./msteams.js";
-import { signalPlugin } from "./signal.js";
-import { slackPlugin } from "./slack.js";
-import { telegramPlugin } from "./telegram.js";
-import { clawlinePlugin } from "./clawline.js";
 import type { ChannelId, ChannelPlugin } from "./types.js";
-import { clawlinePlugin } from "./clawline.js";
 import { requireActivePluginRegistry } from "../../plugins/runtime.js";
+import { CHAT_CHANNEL_ORDER, type ChatChannelId, normalizeAnyChannelId } from "../registry.js";
 
 // Channel plugins registry (runtime).
 //
@@ -16,8 +8,6 @@ import { requireActivePluginRegistry } from "../../plugins/runtime.js";
 // Shared code paths (reply flow, command auth, sandbox explain) should depend on `src/channels/dock.ts`
 // instead, and only call `getChannelPlugin()` at execution boundaries.
 //
-const CORE_CHANNELS: ChannelPlugin[] = [clawlinePlugin];
-
 // Channel plugins are registered by the plugin loader (extensions/ or configured paths).
 function listPluginChannels(): ChannelPlugin[] {
   const registry = requireActivePluginRegistry();
@@ -39,8 +29,8 @@ function dedupeChannels(channels: ChannelPlugin[]): ChannelPlugin[] {
 }
 
 export function listChannelPlugins(): ChannelPlugin[] {
-  const combined = dedupeChannels([...CORE_CHANNELS, ...listPluginChannels()]);
-  return combined.sort((a, b) => {
+  const combined = dedupeChannels(listPluginChannels());
+  return combined.toSorted((a, b) => {
     const indexA = CHAT_CHANNEL_ORDER.indexOf(a.id as ChatChannelId);
     const indexB = CHAT_CHANNEL_ORDER.indexOf(b.id as ChatChannelId);
     const orderA = a.meta.order ?? (indexA === -1 ? 999 : indexA);
@@ -66,13 +56,29 @@ export function normalizeChannelId(raw?: string | null): ChannelId | null {
   return normalizeAnyChannelId(raw);
 }
 export {
-  discordPlugin,
-  imessagePlugin,
-  msteamsPlugin,
-  signalPlugin,
-  slackPlugin,
-  telegramPlugin,
-  whatsappPlugin,
-  clawlinePlugin,
-};
+  listDiscordDirectoryGroupsFromConfig,
+  listDiscordDirectoryPeersFromConfig,
+  listSlackDirectoryGroupsFromConfig,
+  listSlackDirectoryPeersFromConfig,
+  listTelegramDirectoryGroupsFromConfig,
+  listTelegramDirectoryPeersFromConfig,
+  listWhatsAppDirectoryGroupsFromConfig,
+  listWhatsAppDirectoryPeersFromConfig,
+} from "./directory-config.js";
+export {
+  applyChannelMatchMeta,
+  buildChannelKeyCandidates,
+  normalizeChannelSlug,
+  resolveChannelEntryMatch,
+  resolveChannelEntryMatchWithFallback,
+  resolveChannelMatchConfig,
+  resolveNestedAllowlistDecision,
+  type ChannelEntryMatch,
+  type ChannelMatchSource,
+} from "./channel-config.js";
+export {
+  formatAllowlistMatchMeta,
+  type AllowlistMatch,
+  type AllowlistMatchSource,
+} from "./allowlist-match.js";
 export type { ChannelId, ChannelPlugin } from "./types.js";

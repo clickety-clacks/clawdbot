@@ -1,20 +1,20 @@
-import {
-  buildBootstrapContextFiles,
-  resolveBootstrapMaxChars,
-} from "../../agents/pi-embedded-helpers.js";
-import { createClawdbotCodingTools } from "../../agents/pi-tools.js";
-import { resolveSandboxRuntimeStatus } from "../../agents/sandbox.js";
-import { buildWorkspaceSkillSnapshot } from "../../agents/skills.js";
-import { buildAgentSystemPrompt } from "../../agents/system-prompt.js";
-import { buildSystemPromptReport } from "../../agents/system-prompt-report.js";
-import { buildToolSummaryMap } from "../../agents/tool-summaries.js";
-import {
-  filterBootstrapFilesForSession,
-  loadWorkspaceBootstrapFiles,
-} from "../../agents/workspace.js";
 import type { SessionSystemPromptReport } from "../../config/sessions/types.js";
 import type { ReplyPayload } from "../types.js";
 import type { HandleCommandsParams } from "./commands-types.js";
+import { resolveSessionAgentIds } from "../../agents/agent-scope.js";
+import { resolveBootstrapContextForRun } from "../../agents/bootstrap-files.js";
+import { resolveDefaultModelForAgent } from "../../agents/model-selection.js";
+import { resolveBootstrapMaxChars } from "../../agents/pi-embedded-helpers.js";
+import { createOpenClawCodingTools } from "../../agents/pi-tools.js";
+import { resolveSandboxRuntimeStatus } from "../../agents/sandbox.js";
+import { buildWorkspaceSkillSnapshot } from "../../agents/skills.js";
+import { getSkillsSnapshotVersion } from "../../agents/skills/refresh.js";
+import { buildSystemPromptParams } from "../../agents/system-prompt-params.js";
+import { buildSystemPromptReport } from "../../agents/system-prompt-report.js";
+import { buildAgentSystemPrompt } from "../../agents/system-prompt.js";
+import { buildToolSummaryMap } from "../../agents/tool-summaries.js";
+import { getRemoteSkillEligibility } from "../../infra/skills-remote.js";
+import { buildTtsSystemPromptHint } from "../../tts/tts.js";
 
 function estimateTokensFromChars(chars: number): number {
   return Math.ceil(Math.max(0, chars) / 4);
@@ -29,8 +29,12 @@ function formatCharsAndTokens(chars: number): string {
 }
 
 function parseContextArgs(commandBodyNormalized: string): string {
-  if (commandBodyNormalized === "/context") return "";
-  if (commandBodyNormalized.startsWith("/context ")) return commandBodyNormalized.slice(8).trim();
+  if (commandBodyNormalized === "/context") {
+    return "";
+  }
+  if (commandBodyNormalized.startsWith("/context ")) {
+    return commandBodyNormalized.slice(8).trim();
+  }
   return "";
 }
 
@@ -38,7 +42,7 @@ function formatListTop(
   entries: Array<{ name: string; value: number }>,
   cap: number,
 ): { lines: string[]; omitted: number } {
-  const sorted = [...entries].sort((a, b) => b.value - a.value);
+  const sorted = [...entries].toSorted((a, b) => b.value - a.value);
   const top = sorted.slice(0, cap);
   const omitted = Math.max(0, sorted.length - top.length);
   const lines = top.map((e) => `- ${e.name}: ${formatCharsAndTokens(e.value)}`);
@@ -49,20 +53,25 @@ async function resolveContextReport(
   params: HandleCommandsParams,
 ): Promise<SessionSystemPromptReport> {
   const existing = params.sessionEntry?.systemPromptReport;
-  if (existing && existing.source === "run") return existing;
+  if (existing && existing.source === "run") {
+    return existing;
+  }
 
   const workspaceDir = params.workspaceDir;
   const bootstrapMaxChars = resolveBootstrapMaxChars(params.cfg);
-  const bootstrapFiles = filterBootstrapFilesForSession(
-    await loadWorkspaceBootstrapFiles(workspaceDir),
-    params.sessionKey,
-  );
-  const injectedFiles = buildBootstrapContextFiles(bootstrapFiles, {
-    maxChars: bootstrapMaxChars,
+  const { bootstrapFiles, contextFiles: injectedFiles } = await resolveBootstrapContextForRun({
+    workspaceDir,
+    config: params.cfg,
+    sessionKey: params.sessionKey,
+    sessionId: params.sessionEntry?.sessionId,
   });
   const skillsSnapshot = (() => {
     try {
-      return buildWorkspaceSkillSnapshot(workspaceDir, { config: params.cfg });
+      return buildWorkspaceSkillSnapshot(workspaceDir, {
+        config: params.cfg,
+        eligibility: { remote: getRemoteSkillEligibility() },
+        snapshotVersion: getSkillsSnapshotVersion(workspaceDir),
+      });
     } catch {
       return { prompt: "", skills: [], resolvedSkills: [] };
     }
@@ -74,11 +83,16 @@ async function resolveContextReport(
   });
   const tools = (() => {
     try {
-      return createClawdbotCodingTools({
+      return createOpenClawCodingTools({
         config: params.cfg,
         workspaceDir,
         sessionKey: params.sessionKey,
         messageProvider: params.command.channel,
+        groupId: params.sessionEntry?.groupId ?? undefined,
+        groupChannel: params.sessionEntry?.groupChannel ?? undefined,
+        groupSpace: params.sessionEntry?.space ?? undefined,
+        spawnedBy: params.sessionEntry?.spawnedBy ?? undefined,
+        senderIsOwner: params.command.senderIsOwner,
         modelProvider: params.provider,
         modelId: params.model,
       });
@@ -88,13 +102,29 @@ async function resolveContextReport(
   })();
   const toolSummaries = buildToolSummaryMap(tools);
   const toolNames = tools.map((t) => t.name);
-  const runtimeInfo = {
-    host: "unknown",
-    os: "unknown",
-    arch: "unknown",
-    node: process.version,
-    model: `${params.provider}/${params.model}`,
-  };
+  const { sessionAgentId } = resolveSessionAgentIds({
+    sessionKey: params.sessionKey,
+    config: params.cfg,
+  });
+  const defaultModelRef = resolveDefaultModelForAgent({
+    cfg: params.cfg,
+    agentId: sessionAgentId,
+  });
+  const defaultModelLabel = `${defaultModelRef.provider}/${defaultModelRef.model}`;
+  const { runtimeInfo, userTimezone, userTime, userTimeFormat } = buildSystemPromptParams({
+    config: params.cfg,
+    agentId: sessionAgentId,
+    workspaceDir,
+    cwd: process.cwd(),
+    runtime: {
+      host: "unknown",
+      os: "unknown",
+      arch: "unknown",
+      node: process.version,
+      model: `${params.provider}/${params.model}`,
+      defaultModel: defaultModelLabel,
+    },
+  });
   const sandboxInfo = sandboxRuntime.sandboxed
     ? {
         enabled: true,
@@ -102,10 +132,11 @@ async function resolveContextReport(
         workspaceAccess: "rw" as const,
         elevated: {
           allowed: params.elevated.allowed,
-          defaultLevel: params.resolvedElevatedLevel === "off" ? ("off" as const) : ("on" as const),
+          defaultLevel: (params.resolvedElevatedLevel ?? "off") as "on" | "off" | "ask" | "full",
         },
       }
     : { enabled: false };
+  const ttsHint = params.cfg ? buildTtsSystemPromptHint(params.cfg) : undefined;
 
   const systemPrompt = buildAgentSystemPrompt({
     workspaceDir,
@@ -117,13 +148,16 @@ async function resolveContextReport(
     toolNames,
     toolSummaries,
     modelAliasLines: [],
-    userTimezone: "",
-    userTime: "",
+    userTimezone,
+    userTime,
+    userTimeFormat,
     contextFiles: injectedFiles,
     skillsPrompt,
     heartbeatPrompt: undefined,
+    ttsHint,
     runtimeInfo,
     sandboxInfo,
+    memoryCitationsMode: params.cfg?.memory?.citations,
   });
 
   return buildSystemPromptReport({
@@ -237,7 +271,7 @@ export async function buildContextReply(params: HandleCommandsParams): Promise<R
     );
     const toolPropsLines = report.tools.entries
       .filter((t) => t.propertiesCount != null)
-      .sort((a, b) => (b.propertiesCount ?? 0) - (a.propertiesCount ?? 0))
+      .toSorted((a, b) => (b.propertiesCount ?? 0) - (a.propertiesCount ?? 0))
       .slice(0, 30)
       .map((t) => `- ${t.name}: ${t.propertiesCount} params`);
 

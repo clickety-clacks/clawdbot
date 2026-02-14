@@ -37,10 +37,6 @@ const PROVIDER_PLUGIN_IDS: Array<{ pluginId: string; providerId: string }> = [
   { pluginId: "minimax-portal-auth", providerId: "minimax-portal" },
 ];
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value && typeof value === "object" && !Array.isArray(value));
-}
-
 function hasNonEmptyString(value: unknown): boolean {
   return typeof value === "string" && value.trim().length > 0;
 }
@@ -193,14 +189,7 @@ function isWhatsAppConfigured(cfg: OpenClawConfig): boolean {
   return recordHasKeys(entry);
 }
 
-function isClawlineConfigured(cfg: ClawdbotConfig): boolean {
-  const entry = cfg.clawline;
-  if (!isRecord(entry)) return false;
-  if (entry.enabled === false) return false;
-  return true;
-}
-
-function isGenericChannelConfigured(cfg: ClawdbotConfig, channelId: string): boolean {
+function isGenericChannelConfigured(cfg: OpenClawConfig, channelId: string): boolean {
   const entry = resolveChannelConfig(cfg, channelId);
   return recordHasKeys(entry);
 }
@@ -345,12 +334,6 @@ function resolveConfiguredPlugins(
         reason: `${channelId} configured`,
       });
     }
-  }
-  if (isClawlineConfigured(cfg)) {
-    changes.push({
-      pluginId: "clawline",
-      reason: "clawline configured",
-    });
   }
   for (const mapping of PROVIDER_PLUGIN_IDS) {
     if (isProviderConfigured(cfg, mapping.providerId)) {

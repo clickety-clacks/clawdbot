@@ -316,14 +316,6 @@ export function createSubsystemLogger(subsystem: string): SubsystemLogger {
   return logger;
 }
 
-const globalKey = "__clawdbotCreateSubsystemLogger";
-const globalRef = globalThis as typeof globalThis & {
-  [globalKey]?: (subsystem: string) => SubsystemLogger;
-};
-if (!globalRef[globalKey]) {
-  globalRef[globalKey] = createSubsystemLogger;
-}
-
 export function runtimeForLogger(
   logger: SubsystemLogger,
   exit: RuntimeEnv["exit"] = defaultRuntime.exit,

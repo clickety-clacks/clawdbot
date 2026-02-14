@@ -9,7 +9,6 @@ const execFileSyncMock = vi.fn();
 describe("cli credentials", () => {
   beforeEach(() => {
     vi.useFakeTimers();
-    vi.resetModules();
   });
 
   afterEach(async () => {

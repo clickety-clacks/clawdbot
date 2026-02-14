@@ -132,7 +132,7 @@ export function resolveImageModelConfigForTool(params: {
   } else if (primary.provider === "openai" && openaiOk) {
     preferred = "openai/gpt-5-mini";
   } else if (primary.provider === "anthropic" && anthropicOk) {
-    preferred = "anthropic/claude-opus-4-6";
+    preferred = ANTHROPIC_IMAGE_PRIMARY;
   }
 
   if (preferred?.trim()) {
@@ -140,7 +140,7 @@ export function resolveImageModelConfigForTool(params: {
       addFallback("openai/gpt-5-mini");
     }
     if (anthropicOk) {
-      addFallback("anthropic/claude-opus-4-6");
+      addFallback(ANTHROPIC_IMAGE_FALLBACK);
     }
     // Don't duplicate primary in fallbacks.
     const pruned = fallbacks.filter((ref) => ref !== preferred);
@@ -153,7 +153,7 @@ export function resolveImageModelConfigForTool(params: {
   // Cross-provider fallback when we can't pair with the primary provider.
   if (openaiOk) {
     if (anthropicOk) {
-      addFallback("anthropic/claude-opus-4-6");
+      addFallback(ANTHROPIC_IMAGE_FALLBACK);
     }
     return {
       primary: "openai/gpt-5-mini",
@@ -161,7 +161,10 @@ export function resolveImageModelConfigForTool(params: {
     };
   }
   if (anthropicOk) {
-    return { primary: "anthropic/claude-opus-4-6" };
+    return {
+      primary: ANTHROPIC_IMAGE_PRIMARY,
+      fallbacks: [ANTHROPIC_IMAGE_FALLBACK],
+    };
   }
 
   return null;

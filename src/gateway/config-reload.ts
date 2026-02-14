@@ -81,7 +81,6 @@ const BASE_RELOAD_RULES_TAIL: ReloadRule[] = [
   { prefix: "skills", kind: "none" },
   { prefix: "plugins", kind: "restart" },
   { prefix: "ui", kind: "none" },
-  { prefix: "clawline", kind: "restart" },
   { prefix: "gateway", kind: "restart" },
   { prefix: "discovery", kind: "restart" },
   { prefix: "canvasHost", kind: "restart" },

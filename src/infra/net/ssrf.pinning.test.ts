@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-
-import { createPinnedLookup, resolvePinnedHostname } from "./ssrf.js";
+import {
+  createPinnedLookup,
+  resolvePinnedHostname,
+  resolvePinnedHostnameWithPolicy,
+} from "./ssrf.js";
 
 describe("ssrf pinning", () => {
   it("pins resolved addresses for the target hostname", async () => {
