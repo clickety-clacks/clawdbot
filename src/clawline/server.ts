@@ -68,7 +68,7 @@ import { optimizeImageToJpeg } from "../web/media.js";
 import { clawlineAttachmentsToImages } from "./attachments.js";
 import { ClientMessageError, HttpError } from "./errors.js";
 import { createAssetHandlers } from "./http-assets.js";
-import { createPerUserTaskQueue } from "./per-user-task-queue.js";
+import { createPerUserTaskQueue, resolvePerUserTaskQueueKey } from "./per-user-task-queue.js";
 import { SlidingWindowRateLimiter } from "./rate-limiter.js";
 import { ClawlineDeliveryTarget } from "./routing.js";
 import { clawlineSessionFileName } from "./session-key.js";
@@ -4821,6 +4821,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         : [session.sessionKey];
       // Legacy clients may omit sessionKey; default to the Main stream session key.
       const resolvedSessionKey = normalizedPayloadSessionKey || session.sessionKey;
+      const ingressQueueKey = resolvePerUserTaskQueueKey({
+        userId: session.userId,
+        streamKey: resolvedSessionKey,
+      });
       if (
         !allowedSessionKeys.some(
           (sessionKey) =>
@@ -4847,16 +4851,21 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         }
         streamSuffix = parsed.streamSuffix;
       }
-      logger.info?.("[clawline] inbound message routing", {
-        messageId: payload.id,
-        payloadSessionKey: payload.sessionKey,
-        resolvedSessionKey,
-        streamSuffix,
-        sessionIsAdmin: session.isAdmin,
-        userId: session.userId,
-        deviceId: session.deviceId,
-        sessionKey: session.sessionKey,
-      });
+      logger.info?.(
+        `[clawline] inbound message routing payloadSessionKey=${payloadSessionKey || "<none>"} ` +
+          `resolvedSessionKey=${resolvedSessionKey} queueKey=${ingressQueueKey}`,
+        {
+          messageId: payload.id,
+          payloadSessionKey: payload.sessionKey,
+          resolvedSessionKey,
+          ingressQueueKey,
+          streamSuffix,
+          sessionIsAdmin: session.isAdmin,
+          userId: session.userId,
+          deviceId: session.deviceId,
+          sessionKey: session.sessionKey,
+        },
+      );
       if (streamSuffix === "global" && !session.isAdmin) {
         throw new ClientMessageError("forbidden", "Admin channel requires admin access");
       }
