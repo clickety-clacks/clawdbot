@@ -50,7 +50,7 @@ import { getFollowupQueueDepth, resolveQueueSettings } from "../auto-reply/reply
 import { createReplyDispatcherWithTyping } from "../auto-reply/reply/reply-dispatcher.js";
 import { extractShortModelName } from "../auto-reply/reply/response-prefix-template.js";
 import { recordInboundSession } from "../channels/session.js";
-import { resolveAgentIdFromSessionKey } from "../config/sessions.js";
+import { resolveAgentIdFromSessionKey, resolveSessionTranscriptPath } from "../config/sessions.js";
 import { callGateway } from "../gateway/call.js";
 import {
   createPinnedDispatcher,
@@ -71,7 +71,6 @@ import { createAssetHandlers } from "./http-assets.js";
 import { createPerUserTaskQueue } from "./per-user-task-queue.js";
 import { SlidingWindowRateLimiter } from "./rate-limiter.js";
 import { ClawlineDeliveryTarget } from "./routing.js";
-import { clawlineSessionFileName } from "./session-key.js";
 import { recordClawlineSessionActivity } from "./session-store.js";
 import { deepMerge } from "./utils/deep-merge.js";
 
@@ -4778,10 +4777,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       storePath: sessionStorePath,
       sessionKey: session.sessionKey,
       sessionId: session.sessionId,
-      sessionFile: path.join(
-        sessionTranscriptsDir,
-        `${clawlineSessionFileName(session.sessionKey)}.jsonl`,
-      ),
+      sessionFile: resolveSessionTranscriptPath(session.sessionId, mainSessionAgentId),
       displayName: session.claimedName ?? session.deviceInfo?.model ?? null,
       logger,
     });
