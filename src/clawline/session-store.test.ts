@@ -45,6 +45,34 @@ describe("recordClawlineSessionActivity", () => {
     expect(updatedEntry.updatedAt).toBeGreaterThanOrEqual(firstUpdatedAt);
   });
 
+  it("preserves transcript binding across reconnect activity", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "clawline-session-stable-binding-"));
+    const storePath = path.join(dir, "sessions.json");
+    const sessionKey = "agent:main:clawline:flynn:main";
+
+    await recordClawlineSessionActivity({
+      storePath,
+      sessionKey,
+      sessionId: "session_first",
+      sessionFile: "/tmp/transcript-first.jsonl",
+      displayName: "Main",
+    });
+
+    await recordClawlineSessionActivity({
+      storePath,
+      sessionKey,
+      sessionId: "session_second",
+      sessionFile: "/tmp/transcript-second.jsonl",
+      displayName: "Main",
+    });
+
+    const store = loadSessionStore(storePath);
+    const entry = store[sessionKey];
+    expect(entry).toBeDefined();
+    expect(entry.sessionId).toBe("session_first");
+    expect(entry.sessionFile).toBe("/tmp/transcript-first.jsonl");
+  });
+
   it("does not set lastTo on connect", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "clawline-session-lastto-"));
     const storePath = path.join(dir, "sessions.json");
