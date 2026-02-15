@@ -109,11 +109,13 @@ describe("gateway server sessions", () => {
           lastChannel: "whatsapp",
           lastTo: "+1555",
           lastAccountId: "work",
+          sessionFile: path.join(dir, "sess-main.jsonl"),
         },
         "discord:group:dev": {
           sessionId: "sess-group",
           updatedAt: stale,
           totalTokens: 50,
+          sessionFile: path.join(dir, "sess-group.jsonl"),
         },
         "agent:main:subagent:one": {
           sessionId: "sess-subagent",
@@ -337,6 +339,26 @@ describe("gateway server sessions", () => {
     expect(compactedLines).toHaveLength(3);
     const filesAfterCompact = await fs.readdir(dir);
     expect(filesAfterCompact.some((f) => f.startsWith("sess-main.jsonl.bak."))).toBe(true);
+
+    const resetMain = await rpcReq<{
+      ok: true;
+      key: string;
+      entry: { sessionId: string; sessionFile?: string };
+    }>(ws, "sessions.reset", { key: "agent:main:main" });
+    expect(resetMain.ok).toBe(true);
+    expect(resetMain.payload?.key).toBe("agent:main:main");
+    expect(resetMain.payload?.entry.sessionId).not.toBe("sess-main");
+    expect(resetMain.payload?.entry.sessionFile).toBe(path.join(dir, "sess-main.jsonl"));
+
+    const resetCustom = await rpcReq<{
+      ok: true;
+      key: string;
+      entry: { sessionId: string; sessionFile?: string };
+    }>(ws, "sessions.reset", { key: "agent:main:discord:group:dev" });
+    expect(resetCustom.ok).toBe(true);
+    expect(resetCustom.payload?.key).toBe("agent:main:discord:group:dev");
+    expect(resetCustom.payload?.entry.sessionId).not.toBe("sess-group");
+    expect(resetCustom.payload?.entry.sessionFile).toBe(path.join(dir, "sess-group.jsonl"));
 
     const deleted = await rpcReq<{ ok: true; deleted: boolean }>(ws, "sessions.delete", {
       key: "agent:main:discord:group:dev",

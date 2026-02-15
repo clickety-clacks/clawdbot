@@ -20,13 +20,15 @@ export async function recordClawlineSessionActivity(params: {
     // This prevents race conditions with concurrent updateLastRoute writes.
     await updateSessionStore(storePath, (store) => {
       const existing = store[sessionKey];
+      const stableSessionId = existing?.sessionId ?? sessionId;
+      const stableSessionFile = existing?.sessionFile ?? sessionFile;
       const patch: Partial<SessionEntry> = {
-        sessionId,
+        sessionId: stableSessionId,
         channel: CLAWLINE_SESSION_CHANNEL,
         chatType: "direct",
         displayName: label,
         label,
-        sessionFile,
+        sessionFile: stableSessionFile,
         lastChannel: CLAWLINE_SESSION_CHANNEL,
       };
       // Don't set lastTo on connect; only update it after an actual user message.
