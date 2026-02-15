@@ -18,6 +18,9 @@ Gateway can expose a small HTTP webhook endpoint for external triggers.
     enabled: true,
     token: "shared-secret",
     path: "/hooks",
+    // Optional: append this file (trimmed) to POST /hooks/wake text.
+    // Ignored when missing/blank.
+    wakeOverlayPath: "~/.openclaw/hooks/wake-overlay.txt",
     // Optional: restrict explicit `agentId` routing to this allowlist.
     // Omit or include "*" to allow any agent.
     // Set [] to deny all explicit `agentId` routing.
@@ -56,6 +59,9 @@ Effect:
 
 - Enqueues a system event for the **main** session
 - If `mode=now`, triggers an immediate heartbeat
+- If `hooks.wakeOverlayPath` is set and the file has non-whitespace content, appends it to `text` with one blank line (`\n\n`) separator.
+- If the overlay file is missing/blank, behavior is unchanged.
+- If appending overlay would exceed `hooks.maxBodyBytes`, OpenClaw sends base `text` only and logs a warning.
 
 ### `POST /hooks/agent`
 

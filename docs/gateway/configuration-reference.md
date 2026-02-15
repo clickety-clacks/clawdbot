@@ -1975,6 +1975,7 @@ See [Multiple Gateways](/gateway/multiple-gateways).
     token: "shared-secret",
     path: "/hooks",
     maxBodyBytes: 262144,
+    wakeOverlayPath: "~/.openclaw/hooks/wake-overlay.txt",
     defaultSessionKey: "hook:ingress",
     allowRequestSessionKey: false,
     allowedSessionKeyPrefixes: ["hook:"],
@@ -2004,6 +2005,9 @@ Auth: `Authorization: Bearer <token>` or `x-openclaw-token: <token>`.
 **Endpoints:**
 
 - `POST /hooks/wake` → `{ text, mode?: "now"|"next-heartbeat" }`
+  - Optional `hooks.wakeOverlayPath` appends trimmed file contents to `text` at request time using `\n\n` separator.
+  - Missing/blank overlay files are ignored.
+  - If `text + overlay` would exceed `hooks.maxBodyBytes`, overlay is skipped and base `text` is used.
 - `POST /hooks/agent` → `{ message, name?, agentId?, sessionKey?, wakeMode?, deliver?, channel?, to?, model?, thinking?, timeoutSeconds? }`
   - `sessionKey` from request payload is accepted only when `hooks.allowRequestSessionKey=true` (default: `false`).
 - `POST /hooks/<name>` → resolved via `hooks.mappings`
@@ -2017,6 +2021,7 @@ Auth: `Authorization: Bearer <token>` or `x-openclaw-token: <token>`.
   - `transform.module` must be a relative path and stays within `hooks.transformsDir` (absolute paths and traversal are rejected).
 - `agentId` routes to a specific agent; unknown IDs fall back to default.
 - `allowedAgentIds`: restricts explicit routing (`*` or omitted = allow all, `[]` = deny all).
+- `wakeOverlayPath`: optional file path to append to direct `POST /hooks/wake` text at request time.
 - `defaultSessionKey`: optional fixed session key for hook agent runs without explicit `sessionKey`.
 - `allowRequestSessionKey`: allow `/hooks/agent` callers to set `sessionKey` (default: `false`).
 - `allowedSessionKeyPrefixes`: optional prefix allowlist for explicit `sessionKey` values (request + mapping), e.g. `["hook:"]`.

@@ -138,6 +138,8 @@ export type HooksConfig = {
    */
   allowedAgentIds?: string[];
   maxBodyBytes?: number;
+  /** Optional file path appended to `/hooks/wake` text (with one blank line separator). */
+  wakeOverlayPath?: string;
   presets?: string[];
   transformsDir?: string;
   mappings?: HookMappingConfig[];

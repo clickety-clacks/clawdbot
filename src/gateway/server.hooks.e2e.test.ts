@@ -1,3 +1,6 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, test } from "vitest";
 import { resolveMainSessionKeyFromConfig } from "../config/sessions.js";
 import { drainSystemEvents, peekSystemEvents } from "../infra/system-events.js";
@@ -196,6 +199,50 @@ describe("gateway server hooks", () => {
       expect(resBadJson.status).toBe(400);
     } finally {
       await server.close();
+    }
+  });
+
+  test("applies hooks.wakeOverlayPath for /hooks/wake and reads file per request", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-hooks-wake-overlay-"));
+    const overlayPath = path.join(tempDir, "wake-overlay.txt");
+    testState.hooksConfig = {
+      enabled: true,
+      token: "hook-secret",
+      wakeOverlayPath: overlayPath,
+    };
+    const port = await getFreePort();
+    const server = await startGatewayServer(port);
+    try {
+      await fs.writeFile(overlayPath, "Overlay one\n", "utf8");
+      const first = await fetch(`http://127.0.0.1:${port}/hooks/wake`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer hook-secret",
+        },
+        body: JSON.stringify({ text: "Wake A", mode: "next-heartbeat" }),
+      });
+      expect(first.status).toBe(200);
+      const firstEvents = await waitForSystemEvent();
+      expect(firstEvents).toContain("Wake A\n\nOverlay one");
+      drainSystemEvents(resolveMainKey());
+
+      await fs.writeFile(overlayPath, "Overlay two\n", "utf8");
+      const second = await fetch(`http://127.0.0.1:${port}/hooks/wake`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer hook-secret",
+        },
+        body: JSON.stringify({ text: "Wake B", mode: "next-heartbeat" }),
+      });
+      expect(second.status).toBe(200);
+      const secondEvents = await waitForSystemEvent();
+      expect(secondEvents).toContain("Wake B\n\nOverlay two");
+      drainSystemEvents(resolveMainKey());
+    } finally {
+      await server.close();
+      await fs.rm(tempDir, { recursive: true, force: true });
     }
   });
 

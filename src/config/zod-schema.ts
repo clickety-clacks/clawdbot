@@ -309,6 +309,7 @@ export const OpenClawSchema = z
         allowedSessionKeyPrefixes: z.array(z.string()).optional(),
         allowedAgentIds: z.array(z.string()).optional(),
         maxBodyBytes: z.number().int().positive().optional(),
+        wakeOverlayPath: z.string().optional(),
         presets: z.array(z.string()).optional(),
         transformsDir: z.string().optional(),
         mappings: z.array(HookMappingSchema).optional(),

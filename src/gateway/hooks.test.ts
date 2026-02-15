@@ -29,11 +29,13 @@ describe("gateway hooks helpers", () => {
         enabled: true,
         token: "secret",
         path: "hooks///",
+        wakeOverlayPath: "  ~/.openclaw/hooks/wake-overlay.txt  ",
       },
     } as OpenClawConfig;
     const resolved = resolveHooksConfig(base);
     expect(resolved?.basePath).toBe("/hooks");
     expect(resolved?.token).toBe("secret");
+    expect(resolved?.wakeOverlayPath).toBe("~/.openclaw/hooks/wake-overlay.txt");
     expect(resolved?.sessionPolicy.allowRequestSessionKey).toBe(false);
   });
 
