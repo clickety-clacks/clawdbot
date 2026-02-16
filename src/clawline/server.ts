@@ -3166,18 +3166,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     if (!value) {
       return false;
     }
-    const trimmed = value.trim();
-    if (!trimmed) {
-      return false;
-    }
-    if (trimmed === "global") {
-      return true;
-    }
-    return (
-      /^agent:[^:]+:main$/i.test(trimmed) ||
-      /^agent:[^:]+:clawline:[^:]+:main$/i.test(trimmed) ||
-      /^agent:[^:]+:clawline:dm:[^:]+$/i.test(trimmed)
-    );
+    return value.trim().length > 0;
   }
 
   function resolveAlertSessionKey(rawSessionKey?: string) {

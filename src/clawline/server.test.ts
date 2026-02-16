@@ -1300,6 +1300,37 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("routes alerts to dynamic stream session keys without fallback", async () => {
+    const entry = createAllowlistEntry();
+    const ctx = await setupTestServer([entry]);
+    const authHeader = await createAuthHeader(ctx, entry);
+    const streamSessionKey = "agent:main:clawline:flynn:s_019cae77";
+    try {
+      const response = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: authHeader },
+        body: JSON.stringify({
+          message: "Check dynamic stream",
+          source: "codex",
+          sessionKey: streamSessionKey,
+        }),
+      });
+      expect(response.status).toBe(200);
+      expect(enqueueAnnounceMock).toHaveBeenCalledTimes(1);
+      const call = enqueueAnnounceMock.mock.calls[0]?.[0] as {
+        key?: string;
+        item?: { origin?: { channel?: string; to?: string } };
+      };
+      expect(call?.key).toBe(streamSessionKey);
+      expect(call?.item?.origin).toEqual({
+        channel: "clawline",
+        to: streamSessionKey,
+      });
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("routes alerts to main session keys without explicit channel/to", async () => {
     const entry = createAllowlistEntry();
     const ctx = await setupTestServer([entry]);
