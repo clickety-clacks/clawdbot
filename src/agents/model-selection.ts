@@ -20,6 +20,7 @@ const ANTHROPIC_MODEL_ALIASES: Record<string, string> = {
   "opus-4.6": "claude-opus-4-6",
   "opus-4.5": "claude-opus-4-5",
   "sonnet-4.5": "claude-sonnet-4-5",
+  "sonnet-4.6": "claude-sonnet-4-6",
 };
 
 function normalizeAliasKey(value: string): string {
