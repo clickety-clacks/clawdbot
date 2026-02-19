@@ -2,6 +2,7 @@ import { loadConfig } from "../config/config.js";
 import { callGateway } from "../gateway/call.js";
 import { onAgentEvent } from "../infra/agent-events.js";
 import { type DeliveryContext, normalizeDeliveryContext } from "../utils/delivery-context.js";
+import { resetAnnounceQueuesForTests } from "./subagent-announce-queue.js";
 import { runSubagentAnnounceFlow, type SubagentRunOutcome } from "./subagent-announce.js";
 import {
   loadSubagentRegistryFromDisk,
@@ -33,6 +34,7 @@ let listenerStarted = false;
 let listenerStop: (() => void) | null = null;
 // Use var to avoid TDZ when init runs across circular imports during bootstrap.
 var restoreAttempted = false;
+const SUBAGENT_ANNOUNCE_TIMEOUT_MS = 120_000;
 
 function persistSubagentRuns() {
   try {
@@ -68,7 +70,7 @@ function resumeSubagentRun(runId: string) {
       requesterOrigin,
       requesterDisplayKey: entry.requesterDisplayKey,
       task: entry.task,
-      timeoutMs: 30_000,
+      timeoutMs: SUBAGENT_ANNOUNCE_TIMEOUT_MS,
       cleanup: entry.cleanup,
       waitForCompletion: false,
       startedAt: entry.startedAt,
@@ -213,6 +215,8 @@ function ensureListener() {
     if (phase === "error") {
       const error = typeof evt.data?.error === "string" ? evt.data.error : undefined;
       entry.outcome = { status: "error", error };
+    } else if (evt.data?.aborted) {
+      entry.outcome = { status: "timeout" };
     } else {
       entry.outcome = { status: "ok" };
     }
@@ -229,7 +233,7 @@ function ensureListener() {
       requesterOrigin,
       requesterDisplayKey: entry.requesterDisplayKey,
       task: entry.task,
-      timeoutMs: 30_000,
+      timeoutMs: SUBAGENT_ANNOUNCE_TIMEOUT_MS,
       cleanup: entry.cleanup,
       waitForCompletion: false,
       startedAt: entry.startedAt,
@@ -247,14 +251,14 @@ function finalizeSubagentCleanup(runId: string, cleanup: "delete" | "keep", didA
   if (!entry) {
     return;
   }
-  if (cleanup === "delete") {
-    subagentRuns.delete(runId);
+  if (!didAnnounce) {
+    // Allow retry on the next wake if announce was deferred or failed.
+    entry.cleanupHandled = false;
     persistSubagentRuns();
     return;
   }
-  if (!didAnnounce) {
-    // Allow retry on the next wake if the announce failed.
-    entry.cleanupHandled = false;
+  if (cleanup === "delete") {
+    subagentRuns.delete(runId);
     persistSubagentRuns();
     return;
   }
@@ -335,7 +339,7 @@ async function waitForSubagentCompletion(runId: string, waitTimeoutMs: number) {
       },
       timeoutMs: timeoutMs + 10_000,
     });
-    if (wait?.status !== "ok" && wait?.status !== "error") {
+    if (wait?.status !== "ok" && wait?.status !== "error" && wait?.status !== "timeout") {
       return;
     }
     const entry = subagentRuns.get(runId);
@@ -357,7 +361,11 @@ async function waitForSubagentCompletion(runId: string, waitTimeoutMs: number) {
     }
     const waitError = typeof wait.error === "string" ? wait.error : undefined;
     entry.outcome =
-      wait.status === "error" ? { status: "error", error: waitError } : { status: "ok" };
+      wait.status === "error"
+        ? { status: "error", error: waitError }
+        : wait.status === "timeout"
+          ? { status: "timeout" }
+          : { status: "ok" };
     mutated = true;
     if (mutated) {
       persistSubagentRuns();
@@ -373,7 +381,7 @@ async function waitForSubagentCompletion(runId: string, waitTimeoutMs: number) {
       requesterOrigin,
       requesterDisplayKey: entry.requesterDisplayKey,
       task: entry.task,
-      timeoutMs: 30_000,
+      timeoutMs: SUBAGENT_ANNOUNCE_TIMEOUT_MS,
       cleanup: entry.cleanup,
       waitForCompletion: false,
       startedAt: entry.startedAt,
@@ -388,9 +396,10 @@ async function waitForSubagentCompletion(runId: string, waitTimeoutMs: number) {
   }
 }
 
-export function resetSubagentRegistryForTests() {
+export function resetSubagentRegistryForTests(opts?: { persist?: boolean }) {
   subagentRuns.clear();
   resumedRuns.clear();
+  resetAnnounceQueuesForTests();
   stopSweeper();
   restoreAttempted = false;
   if (listenerStop) {
@@ -398,7 +407,9 @@ export function resetSubagentRegistryForTests() {
     listenerStop = null;
   }
   listenerStarted = false;
-  persistSubagentRuns();
+  if (opts?.persist !== false) {
+    persistSubagentRuns();
+  }
 }
 
 export function addSubagentRunForTests(entry: SubagentRunRecord) {

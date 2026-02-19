@@ -6,6 +6,7 @@ import type { OutboundSendDeps } from "./deliver.js";
 import type { MessagePollResult, MessageSendResult } from "./message.js";
 import { dispatchChannelMessageAction } from "../../channels/plugins/message-actions.js";
 import { appendAssistantMessageToSessionTranscript } from "../../config/sessions.js";
+import { throwIfAborted } from "./abort.js";
 import { sendMessage, sendPoll } from "./message.js";
 
 export type OutboundGatewayContext = {
@@ -33,6 +34,7 @@ export type OutboundSendContext = {
     mediaUrls?: string[];
   };
   abortSignal?: AbortSignal;
+  silent?: boolean;
 };
 
 function extractToolPayload(result: AgentToolResult<unknown>): unknown {
@@ -59,14 +61,6 @@ function extractToolPayload(result: AgentToolResult<unknown>): unknown {
   return result.content ?? result;
 }
 
-function throwIfAborted(abortSignal?: AbortSignal): void {
-  if (abortSignal?.aborted) {
-    const err = new Error("Message send aborted");
-    err.name = "AbortError";
-    throw err;
-  }
-}
-
 export async function executeSendAction(params: {
   ctx: OutboundSendContext;
   to: string;
@@ -75,6 +69,8 @@ export async function executeSendAction(params: {
   mediaUrls?: string[];
   gifPlayback?: boolean;
   bestEffort?: boolean;
+  replyToId?: string;
+  threadId?: string | number;
 }): Promise<{
   handledBy: "plugin" | "core";
   payload: unknown;
@@ -124,6 +120,8 @@ export async function executeSendAction(params: {
     mediaUrls: params.mediaUrls,
     channel: params.ctx.channel || undefined,
     accountId: params.ctx.accountId ?? undefined,
+    replyToId: params.replyToId,
+    threadId: params.threadId,
     gifPlayback: params.gifPlayback,
     dryRun: params.ctx.dryRun,
     bestEffort: params.bestEffort ?? undefined,
@@ -131,6 +129,7 @@ export async function executeSendAction(params: {
     gateway: params.ctx.gateway,
     mirror: params.ctx.mirror,
     abortSignal: params.ctx.abortSignal,
+    silent: params.ctx.silent,
   });
 
   return {
@@ -146,7 +145,10 @@ export async function executePollAction(params: {
   question: string;
   options: string[];
   maxSelections: number;
+  durationSeconds?: number;
   durationHours?: number;
+  threadId?: string;
+  isAnonymous?: boolean;
 }): Promise<{
   handledBy: "plugin" | "core";
   payload: unknown;
@@ -179,8 +181,13 @@ export async function executePollAction(params: {
     question: params.question,
     options: params.options,
     maxSelections: params.maxSelections,
+    durationSeconds: params.durationSeconds ?? undefined,
     durationHours: params.durationHours ?? undefined,
     channel: params.ctx.channel,
+    accountId: params.ctx.accountId ?? undefined,
+    threadId: params.threadId ?? undefined,
+    silent: params.ctx.silent ?? undefined,
+    isAnonymous: params.isAnonymous ?? undefined,
     dryRun: params.ctx.dryRun,
     gateway: params.ctx.gateway,
   });

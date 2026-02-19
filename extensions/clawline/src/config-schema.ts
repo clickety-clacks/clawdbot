@@ -70,6 +70,8 @@ const StreamsSchema = z
   .object({
     chunkPersistIntervalMs: z.number().int().positive().optional(),
     chunkBufferBytes: z.number().int().positive().optional(),
+    maxStreamsPerUser: z.number().int().positive().optional(),
+    maxDisplayNameBytes: z.number().int().positive().optional(),
   })
   .strict()
   .optional();

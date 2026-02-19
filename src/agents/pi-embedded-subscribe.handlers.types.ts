@@ -2,12 +2,14 @@ import type { AgentEvent, AgentMessage } from "@mariozechner/pi-agent-core";
 import type { ReplyDirectiveParseResult } from "../auto-reply/reply/reply-directives.js";
 import type { ReasoningLevel } from "../auto-reply/thinking.js";
 import type { InlineCodeState } from "../markdown/code-spans.js";
+import type { HookRunner } from "../plugins/hooks.js";
 import type { EmbeddedBlockChunker } from "./pi-embedded-block-chunker.js";
 import type { MessagingToolSend } from "./pi-embedded-messaging.js";
 import type {
   BlockReplyChunking,
   SubscribeEmbeddedPiSessionParams,
 } from "./pi-embedded-subscribe.types.js";
+import type { NormalizedUsage } from "./usage.js";
 
 export type EmbeddedSubscribeLogger = {
   debug: (message: string) => void;
@@ -53,13 +55,16 @@ export type EmbeddedPiSubscribeState = {
   compactionInFlight: boolean;
   pendingCompactionRetry: number;
   compactionRetryResolve?: () => void;
+  compactionRetryReject?: (reason?: unknown) => void;
   compactionRetryPromise: Promise<void> | null;
+  unsubscribed: boolean;
 
   messagingToolSentTexts: string[];
   messagingToolSentTextsNormalized: string[];
   messagingToolSentTargets: MessagingToolSend[];
   pendingMessagingTexts: Map<string, string>;
   pendingMessagingTargets: Map<string, MessagingToolSend>;
+  lastAssistant?: AgentMessage;
 };
 
 export type EmbeddedPiSubscribeContext = {
@@ -68,6 +73,8 @@ export type EmbeddedPiSubscribeContext = {
   log: EmbeddedSubscribeLogger;
   blockChunking?: BlockReplyChunking;
   blockChunker: EmbeddedBlockChunker | null;
+  hookRunner?: HookRunner;
+  noteLastAssistant: (msg: AgentMessage) => void;
 
   shouldEmitToolResult: () => boolean;
   shouldEmitToolOutput: () => boolean;
@@ -100,6 +107,10 @@ export type EmbeddedPiSubscribeContext = {
   noteCompactionRetry: () => void;
   resolveCompactionRetry: () => void;
   maybeResolveCompactionWait: () => void;
+  recordAssistantUsage: (usage: unknown) => void;
+  incrementCompactionCount: () => void;
+  getUsageTotals: () => NormalizedUsage | undefined;
+  getCompactionCount: () => number;
 };
 
 export type EmbeddedPiSubscribeEvent =

@@ -26,6 +26,39 @@ export type NormalizedAttachment =
   | { type: "image"; mimeType: string; data: string; assetId?: string }
   | { type: "asset"; assetId: string }
   | { type: "document"; mimeType: string; data: string };
+
+export type StreamSessionKind = "main" | "dm" | "global_dm" | "custom";
+
+export type StreamSession = {
+  sessionKey: string;
+  displayName: string;
+  kind: StreamSessionKind;
+  orderIndex: number;
+  isBuiltIn: boolean;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type StreamSnapshotServerMessage = {
+  type: "stream_snapshot";
+  streams: StreamSession[];
+};
+
+export type StreamCreatedServerMessage = {
+  type: "stream_created";
+  stream: StreamSession;
+};
+
+export type StreamUpdatedServerMessage = {
+  type: "stream_updated";
+  stream: StreamSession;
+};
+
+export type StreamDeletedServerMessage = {
+  type: "stream_deleted";
+  sessionKey: string;
+};
+
 export type ClawlineOutboundAttachmentInput = {
   data: string;
   mimeType?: string;
@@ -123,6 +156,8 @@ export interface ProviderConfig {
   streams: {
     chunkPersistIntervalMs: number;
     chunkBufferBytes: number;
+    maxStreamsPerUser: number;
+    maxDisplayNameBytes: number;
   };
 }
 

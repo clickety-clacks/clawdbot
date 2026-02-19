@@ -20,6 +20,10 @@ describe("resolveClawlineConfig", () => {
     expect(cfg.terminal.tmux.ssh.target).toBe("");
     expect(cfg.network.bindAddress).toBe("127.0.0.1");
     expect(cfg.network.allowInsecurePublic).toBe(false);
+    expect(cfg.streams.maxStreamsPerUser).toBe(32);
+    expect(cfg.streams.maxDisplayNameBytes).toBe(120);
+    expect(Object.hasOwn(cfg.streams, "allowBuiltInRename")).toBe(false);
+    expect(Object.hasOwn(cfg.streams, "allowBuiltInDelete")).toBe(false);
   });
 
   it("merges overrides from config", () => {
@@ -37,6 +41,10 @@ describe("resolveClawlineConfig", () => {
           media: {
             storagePath: "/tmp/media",
           },
+          streams: {
+            maxStreamsPerUser: 64,
+            maxDisplayNameBytes: 80,
+          },
           alertInstructionsPath: "/tmp/clawline/alerts.md",
         },
       },
@@ -50,6 +58,8 @@ describe("resolveClawlineConfig", () => {
     expect(cfg.network.bindAddress).toBe("0.0.0.0");
     expect(cfg.network.allowInsecurePublic).toBe(true);
     expect(cfg.network.allowedOrigins).toEqual(["https://example.com"]);
+    expect(cfg.streams.maxStreamsPerUser).toBe(64);
+    expect(cfg.streams.maxDisplayNameBytes).toBe(80);
   });
 
   it("expands tildes in configurable paths", () => {

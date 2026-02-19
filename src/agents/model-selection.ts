@@ -19,6 +19,7 @@ export type ModelAliasIndex = {
 const ANTHROPIC_MODEL_ALIASES: Record<string, string> = {
   "opus-4.6": "claude-opus-4-6",
   "opus-4.5": "claude-opus-4-5",
+  "sonnet-4.6": "claude-sonnet-4-6",
   "sonnet-4.5": "claude-sonnet-4-5",
 };
 
@@ -302,6 +303,9 @@ export function buildAllowedModelSet(params: {
     } else if (configuredProviders[providerKey] != null) {
       // Explicitly configured providers should be allowlist-able even when
       // they don't exist in the curated model catalog.
+      allowedKeys.add(key);
+    } else if (normalizeProviderId(parsed.provider) === normalizeProviderId(params.defaultProvider)) {
+      // Always allow explicitly configured models from the default provider (e.g. anthropic oauth)
       allowedKeys.add(key);
     }
   }

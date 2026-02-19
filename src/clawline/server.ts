@@ -30,6 +30,12 @@ import type {
   ClawlineOutboundAttachmentInput,
   ClawlineOutboundSendParams,
   ClawlineOutboundSendResult,
+  StreamSession,
+  StreamSessionKind,
+  StreamSnapshotServerMessage,
+  StreamCreatedServerMessage,
+  StreamUpdatedServerMessage,
+  StreamDeletedServerMessage,
 } from "./domain.js";
 import {
   resolveEffectiveMessagesConfig,
@@ -44,9 +50,8 @@ import { getFollowupQueueDepth, resolveQueueSettings } from "../auto-reply/reply
 import { createReplyDispatcherWithTyping } from "../auto-reply/reply/reply-dispatcher.js";
 import { extractShortModelName } from "../auto-reply/reply/response-prefix-template.js";
 import { recordInboundSession } from "../channels/session.js";
-import { resolveAgentIdFromSessionKey } from "../config/sessions.js";
+import { resolveAgentIdFromSessionKey, resolveSessionTranscriptPath } from "../config/sessions.js";
 import { callGateway } from "../gateway/call.js";
-import { GATEWAY_CLIENT_MODES, GATEWAY_CLIENT_NAMES } from "../gateway/protocol/client-info.js";
 import {
   createPinnedDispatcher,
   resolvePinnedHostname,
@@ -63,9 +68,9 @@ import { optimizeImageToJpeg } from "../web/media.js";
 import { clawlineAttachmentsToImages } from "./attachments.js";
 import { ClientMessageError, HttpError } from "./errors.js";
 import { createAssetHandlers } from "./http-assets.js";
+import { createPerUserTaskQueue } from "./per-user-task-queue.js";
 import { SlidingWindowRateLimiter } from "./rate-limiter.js";
 import { ClawlineDeliveryTarget } from "./routing.js";
-import { clawlineSessionFileName } from "./session-key.js";
 import { recordClawlineSessionActivity } from "./session-store.js";
 import { deepMerge } from "./utils/deep-merge.js";
 
@@ -192,6 +197,14 @@ const INLINE_IMAGE_MIME_TYPES = new Set([
   "image/heic",
 ]);
 const TERMINAL_SESSION_MIME = "application/vnd.clawline.terminal-session+json";
+const INTERACTIVE_HTML_MIME = "application/vnd.clawline.interactive-html+json";
+const INTERACTIVE_CALLBACK_MIME = "application/vnd.clawline.interactive-callback+json";
+const CLIENT_FEATURE_TERMINAL_BUBBLES_V1 = "terminal_bubbles_v1";
+const SERVER_FEATURE_SESSION_INFO = "session_info";
+const INLINE_DOCUMENT_MIME_TYPES = new Set([TERMINAL_SESSION_MIME, INTERACTIVE_HTML_MIME]);
+const SUPPORTED_CLIENT_FEATURES = new Set([CLIENT_FEATURE_TERMINAL_BUBBLES_V1]);
+const MAX_INTERACTIVE_ACTION_CHARS = 128;
+const MAX_INTERACTIVE_DATA_BYTES = 64 * 1024;
 const MAX_ALERT_BODY_BYTES = 4 * 1024;
 const MAX_MEDIA_REDIRECTS = 5;
 const REDIRECT_STATUS_CODES = new Set([301, 302, 303, 307, 308]);
@@ -202,6 +215,15 @@ const EXEC_COMPLETION_ALERT_PROMPT =
 const USER_ID_MAX_LENGTH = 48;
 const COMBINING_MARKS_REGEX = /[\u0300-\u036f]/g;
 const WEBROOT_PREFIX = "/www";
+const STREAM_DB_VERSION = 2;
+const STREAM_SUFFIX_REGEX = /^s_[0-9a-f]{8}$/;
+const STREAM_DISPLAY_NAME_FALLBACK = "Stream";
+const STREAM_IDEMPOTENCY_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+const STREAM_IDEMPOTENCY_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
+const STREAM_OPERATION_CREATE = "create_stream";
+const STREAM_OPERATION_DELETE = "delete_stream";
+const MAX_STREAMS_BODY_BYTES = 16 * 1024;
+const STREAM_SESSION_KEY_PATH_DECODE_PASSES = 4;
 
 function truncateUtf8(value: string, maxBytes: number): string {
   if (Buffer.byteLength(value, "utf8") <= maxBytes) {
@@ -220,6 +242,18 @@ function truncateUtf8(value: string, maxBytes: number): string {
   return result;
 }
 
+function safeJsonStringify(value: unknown): { json: string; bytes: number } {
+  // JSON.stringify(undefined) returns undefined; normalize to "null" so we always have JSON.
+  let json: string | undefined;
+  try {
+    json = JSON.stringify(value === undefined ? null : value) ?? "null";
+  } catch {
+    throw new ClientMessageError("invalid_message", "Invalid JSON payload");
+  }
+  const bytes = Buffer.byteLength(json, "utf8");
+  return { json, bytes };
+}
+
 function formatError(err: unknown): string {
   if (err instanceof Error) {
     return err.stack ?? `${err.name}: ${err.message}`;
@@ -235,6 +269,89 @@ function formatError(err: unknown): string {
   }
 }
 
+function parseClientFeatures(payload: unknown): Set<string> {
+  const out = new Set<string>();
+  const addValues = (value: unknown) => {
+    if (!Array.isArray(value)) {
+      return;
+    }
+    for (const item of value) {
+      if (typeof item !== "string") {
+        continue;
+      }
+      const normalized = item.trim().toLowerCase();
+      if (!normalized || !SUPPORTED_CLIENT_FEATURES.has(normalized)) {
+        continue;
+      }
+      out.add(normalized);
+    }
+  };
+  if (!payload || typeof payload !== "object") {
+    return out;
+  }
+  const record = payload as { clientFeatures?: unknown; client?: unknown };
+  addValues(record.clientFeatures);
+  if (record.client && typeof record.client === "object") {
+    const clientRecord = record.client as { features?: unknown };
+    addValues(clientRecord.features);
+  }
+  return out;
+}
+
+function normalizeMimeForComparison(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const normalized = value.split(";", 1)[0]?.trim().toLowerCase();
+  return normalized && normalized.length > 0 ? normalized : null;
+}
+
+function isTerminalSessionDocumentAttachment(value: unknown): boolean {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const attachment = value as { type?: unknown; mimeType?: unknown };
+  if (attachment.type !== "document") {
+    return false;
+  }
+  return normalizeMimeForComparison(attachment.mimeType) === TERMINAL_SESSION_MIME;
+}
+
+function buildAuthResultFeatures(session: Session): string[] {
+  const features = [SERVER_FEATURE_SESSION_INFO];
+  if (session.clientFeatures.has(CLIENT_FEATURE_TERMINAL_BUBBLES_V1)) {
+    features.push(CLIENT_FEATURE_TERMINAL_BUBBLES_V1);
+  }
+  return features;
+}
+
+function normalizePayloadForSession(
+  session: Session,
+  payload: ServerMessage,
+  normalizedMainSessionKey: string,
+): ServerMessage | null {
+  const effectiveSessionKey = payload.sessionKey ?? session.sessionKey;
+  if (effectiveSessionKey.toLowerCase() === normalizedMainSessionKey && !session.isAdmin) {
+    return null;
+  }
+  let attachments = payload.attachments;
+  if (
+    Array.isArray(attachments) &&
+    attachments.length > 0 &&
+    !session.clientFeatures.has(CLIENT_FEATURE_TERMINAL_BUBBLES_V1)
+  ) {
+    const filtered = attachments.filter(
+      (attachment) => !isTerminalSessionDocumentAttachment(attachment),
+    );
+    attachments = filtered.length > 0 ? filtered : undefined;
+  }
+  return {
+    ...payload,
+    sessionKey: effectiveSessionKey,
+    attachments,
+  };
+}
+
 function sanitizeLabel(label?: string): string | undefined {
   if (typeof label !== "string") {
     return undefined;
@@ -244,6 +361,20 @@ function sanitizeLabel(label?: string): string | undefined {
     return undefined;
   }
   return truncateUtf8(stripped, 64);
+}
+
+function sanitizeStreamDisplayName(value: unknown, maxBytes: number): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const stripped = value.replace(CONTROL_CHARS_REGEX, "").trim();
+  if (!stripped) {
+    return null;
+  }
+  if (Buffer.byteLength(stripped, "utf8") > maxBytes) {
+    return null;
+  }
+  return stripped;
 }
 
 function sanitizeDeviceInfo(info: DeviceInfo): DeviceInfo {
@@ -310,24 +441,6 @@ function normalizeAllowlistEntry(entry: AllowlistEntry) {
   }
 }
 
-async function notifyGatewayOfPending(entry: PendingEntry) {
-  const name = entry.claimedName ?? "New device";
-  const platform = entry.deviceInfo.platform || "Unknown platform";
-  const text = `New device pending approval: ${name} (${platform})`;
-  try {
-    await callGateway({
-      method: "wake",
-      params: { text, mode: "now" },
-      clientName: GATEWAY_CLIENT_NAMES.CLI,
-      mode: GATEWAY_CLIENT_MODES.BACKEND,
-      clientDisplayName: "clawline",
-      clientVersion: "clawline",
-    });
-  } catch (error) {
-    throw error instanceof Error ? error : new Error(String(error));
-  }
-}
-
 function normalizeAttachmentsInput(
   raw: unknown,
   mediaConfig: ProviderConfig["media"],
@@ -381,6 +494,41 @@ function normalizeAttachmentsInput(
   return { attachments, inlineBytes, assetIds };
 }
 
+function isStrictBase64(input: string): boolean {
+  const compact = input.replace(/\s+/g, "");
+  if (!compact || compact.length % 4 !== 0) {
+    return false;
+  }
+  if (!/^[a-zA-Z0-9+/]*={0,2}$/.test(compact)) {
+    return false;
+  }
+  try {
+    const roundTrip = Buffer.from(compact, "base64").toString("base64");
+    const stripPadding = (value: string) => value.replace(/=+$/g, "");
+    return stripPadding(roundTrip) === stripPadding(compact);
+  } catch {
+    return false;
+  }
+}
+
+function maybeEncodeJsonDocumentPayload(data: string, mimeType: string): string {
+  if (mimeType !== TERMINAL_SESSION_MIME && mimeType !== INTERACTIVE_HTML_MIME) {
+    return data;
+  }
+  if (isStrictBase64(data)) {
+    return data.replace(/\s+/g, "");
+  }
+  const trimmed = data.trim();
+  if (!trimmed) {
+    return data;
+  }
+  const looksLikeJson = trimmed.startsWith("{") || trimmed.startsWith("[");
+  if (!looksLikeJson) {
+    return data;
+  }
+  return Buffer.from(trimmed, "utf8").toString("base64");
+}
+
 function normalizeOutboundAttachmentData(input: ClawlineOutboundAttachmentInput): {
   data: string;
   mimeType: string;
@@ -391,15 +539,19 @@ function normalizeOutboundAttachmentData(input: ClawlineOutboundAttachmentInput)
   }
   let mimeType = typeof input.mimeType === "string" ? input.mimeType.trim() : "";
   let data = rawData;
-  const match = /^data:([^;]+);base64,(.*)$/i.exec(rawData);
+  const match = /^data:([^;,]+)(?:;[^,]*)*;base64,([\s\S]*)$/i.exec(rawData);
   if (match) {
     mimeType = mimeType || match[1].trim();
-    data = match[2].trim();
+    data = match[2].replace(/\s+/g, "");
   }
   if (!mimeType) {
     mimeType = "application/octet-stream";
   }
-  return { data, mimeType: mimeType.toLowerCase() };
+  const normalizedMime = mimeType.toLowerCase();
+  return {
+    data: maybeEncodeJsonDocumentPayload(data, normalizedMime),
+    mimeType: normalizedMime,
+  };
 }
 
 function buildClawlinePersonalSessionKey(agentId: string, userId: string): string {
@@ -409,11 +561,54 @@ function buildClawlinePersonalSessionKey(agentId: string, userId: string): strin
 function buildClawlineUserStreamSessionKey(
   agentId: string,
   userId: string,
-  streamSuffix: "main" | "dm",
+  streamSuffix: string,
 ): string {
   const normalizedAgentId = (agentId ?? "").trim().toLowerCase() || "main";
   const normalizedUserId = sanitizeUserId(userId).toLowerCase();
-  return `agent:${normalizedAgentId}:clawline:${normalizedUserId}:${streamSuffix}`;
+  const normalizedSuffix = sanitizeUserId(streamSuffix).toLowerCase();
+  return `agent:${normalizedAgentId}:clawline:${normalizedUserId}:${normalizedSuffix}`;
+}
+
+function isCustomStreamSuffix(value: string): boolean {
+  return STREAM_SUFFIX_REGEX.test(value.trim().toLowerCase());
+}
+
+function generateCustomStreamSuffix(): string {
+  return `s_${randomBytes(4).toString("hex")}`;
+}
+
+function parseClawlineUserSessionKey(sessionKey: string): {
+  agentId: string;
+  userId: string;
+  streamSuffix: string;
+} | null {
+  const parts = sessionKey.split(":");
+  if (parts.length !== 5) {
+    return null;
+  }
+  if (parts[0]?.toLowerCase() !== "agent" || parts[2]?.toLowerCase() !== "clawline") {
+    return null;
+  }
+  const agentId = (parts[1] ?? "").trim().toLowerCase();
+  const userId = sanitizeUserId(parts[3]).toLowerCase();
+  const streamSuffix = sanitizeUserId(parts[4]).toLowerCase();
+  if (!agentId || !userId || !streamSuffix) {
+    return null;
+  }
+  return { agentId, userId, streamSuffix };
+}
+
+function streamKindToDisplayName(kind: StreamSessionKind): string {
+  if (kind === "main") {
+    return "Personal";
+  }
+  if (kind === "dm") {
+    return "DM";
+  }
+  if (kind === "global_dm") {
+    return "Global DM";
+  }
+  return STREAM_DISPLAY_NAME_FALLBACK;
 }
 
 function isClawlinePersonalUserStreamSessionKey(sessionKey: string, userId?: string): boolean {
@@ -439,7 +634,7 @@ function isClawlinePersonalUserStreamSessionKey(sessionKey: string, userId?: str
     return false;
   }
   const suffix = parts[4]?.toLowerCase();
-  return suffix === "main" || suffix === "dm";
+  return suffix === "main" || suffix === "dm" || isCustomStreamSuffix(suffix ?? "");
 }
 
 function decodeTerminalSessionDescriptorFromBase64(data: string): {
@@ -583,6 +778,7 @@ type Session = {
   deviceId: string;
   userId: string;
   isAdmin: boolean;
+  clientFeatures: Set<string>;
   sessionId: string;
   /** Default session key for legacy clients that omit payload.sessionKey (routes to Main stream). */
   sessionKey: string;
@@ -594,7 +790,7 @@ type Session = {
   personalSessionKey: string;
   /** dmScope in effect when session was provisioned (debug/UX only). */
   dmScope: string;
-  /** DM session key (resolved via core; may alias to agent:main:main when dmScope=main). */
+  /** DM stream session key (agent:<id>:clawline:<userId>:dm). */
   dmSessionKey: string;
   /** Global DM session key (shared operator session; admin-only). */
   globalSessionKey: string;
@@ -626,6 +822,29 @@ type ServerMessage = {
   sessionKey?: string;
   attachments?: unknown[];
   deviceId?: string;
+};
+
+type StreamServerMessage =
+  | StreamSnapshotServerMessage
+  | StreamCreatedServerMessage
+  | StreamUpdatedServerMessage
+  | StreamDeletedServerMessage;
+
+type StreamSessionRow = {
+  userId: string;
+  sessionKey: string;
+  displayName: string;
+  kind: StreamSessionKind;
+  orderIndex: number;
+  isBuiltIn: number;
+  createdAt: number;
+  updatedAt: number;
+};
+
+type StreamMutationIdempotencyRecord = {
+  status: number;
+  requestKey: string;
+  response: Record<string, unknown>;
 };
 
 enum MessageStreamingState {
@@ -708,6 +927,8 @@ const DEFAULT_CONFIG: ProviderConfig = {
   streams: {
     chunkPersistIntervalMs: 100,
     chunkBufferBytes: 1_048_576,
+    maxStreamsPerUser: 32,
+    maxDisplayNameBytes: 120,
   },
 };
 
@@ -953,10 +1174,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     (options.config as { adapterOverrides?: ClawlineAdapterOverrides } | undefined)
       ?.adapterOverrides ?? {};
   const openClawCfg = options.openClawConfig;
+  const dmScope = openClawCfg.session?.dmScope ?? "main";
   const logger: Logger = options.logger ?? console;
   const tmuxBackend = createTerminalTmuxBackend(config, logger);
   const sessionStorePath = options.sessionStorePath;
   const mainSessionKey = options.mainSessionKey?.trim() || "agent:main:main";
+  const normalizedMainKey = mainSessionKey.toLowerCase();
   const mainSessionAgentId = resolveAgentIdFromSessionKey(mainSessionKey);
 
   const resolveAssistantSenderName = (sessionKey: string) =>
@@ -977,33 +1200,26 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const sessionKeyEq = (a: string, b: string) => normalizeSessionKey(a) === normalizeSessionKey(b);
 
   const buildSessionInfo = (userId: string, isAdmin: boolean) => {
-    const dmScope = openClawCfg.session?.dmScope ?? "main";
     const mainStreamSessionKey = buildClawlinePersonalSessionKey(mainSessionAgentId, userId);
     const globalSessionKey = mainSessionKey;
-    const dmSessionKey =
-      dmScope === "main"
-        ? mainStreamSessionKey
-        : buildClawlineUserStreamSessionKey(mainSessionAgentId, userId, "dm");
-
-    const provisioned = [mainStreamSessionKey, dmSessionKey, globalSessionKey];
-    const provisionedSessionKeys = Array.from(
-      new Map(provisioned.map((key) => [normalizeSessionKey(key), key])).values(),
+    const dmSessionKey = buildClawlineUserStreamSessionKey(mainSessionAgentId, userId, "dm");
+    const seededStreams = ensureStreamSessionsForUser({ userId, isAdmin });
+    const visibleStreamKeys = filterStreamAccess(seededStreams, isAdmin).map(
+      (stream) => stream.sessionKey,
     );
-
-    // Only subscribe sockets to sessions they are allowed to receive.
-    // - Main stream is always visible.
-    // - DM stream is visible only when dmScope != main (otherwise it aliases the main stream).
-    // - Global stream is admin-only.
-    const subscribed: string[] = [mainStreamSessionKey];
+    const fallbackKeys = [mainStreamSessionKey];
     if (dmScope !== "main") {
-      subscribed.push(dmSessionKey);
+      fallbackKeys.push(dmSessionKey);
     }
     if (isAdmin) {
-      subscribed.push(globalSessionKey);
+      fallbackKeys.push(globalSessionKey);
     }
-    const subscribedSessionKeys = Array.from(
-      new Map(subscribed.map((key) => [normalizeSessionKey(key), key])).values(),
+    const dedupeKeys = (keys: string[]) =>
+      Array.from(new Map(keys.map((key) => [normalizeSessionKey(key), key])).values());
+    const provisionedSessionKeys = dedupeKeys(
+      visibleStreamKeys.length > 0 ? visibleStreamKeys : fallbackKeys,
     );
+    const subscribedSessionKeys = provisionedSessionKeys;
 
     return {
       dmScope,
@@ -1037,6 +1253,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     };
     await sendJson(session.socket, payload).catch(() => {});
   };
+  async function notifyGatewayOfPending(entry: PendingEntry) {
+    const name = entry.claimedName ?? "New device";
+    const platform = entry.deviceInfo.platform || "Unknown platform";
+    const text = `New device pending approval: ${name} (${platform})`;
+    await wakeGatewayForAlert(text, mainSessionKey);
+  }
   const alertInstructionsPath =
     typeof config.alertInstructionsPath === "string" &&
     config.alertInstructionsPath.trim().length > 0
@@ -1102,64 +1324,616 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   let selectEventsAfterStmt!: SqliteStatement;
   let selectEventsTailStmt!: SqliteStatement;
   let selectEventByIdStmt!: SqliteStatement;
+  let selectEventPayloadForUserStmt!: SqliteStatement;
   let selectEventsAfterTimestampStmt!: SqliteStatement;
+  let selectStreamSessionsByUserStmt!: SqliteStatement;
+  let selectStreamSessionByKeyStmt!: SqliteStatement;
+  let selectStreamMaxOrderStmt!: SqliteStatement;
+  let insertStreamSessionStmt!: SqliteStatement;
+  let updateStreamSessionDisplayNameStmt!: SqliteStatement;
+  let updateStreamSessionBuiltInMetadataStmt!: SqliteStatement;
+  let deleteStreamSessionStmt!: SqliteStatement;
+  let selectStreamIdempotencyStmt!: SqliteStatement;
+  let insertStreamIdempotencyStmt!: SqliteStatement;
+  let deleteExpiredStreamIdempotencyStmt!: SqliteStatement;
+  let deleteMessageAssetsBySessionStmt!: SqliteStatement;
+  let deleteMessagesBySessionStmt!: SqliteStatement;
+  let deleteEventsBySessionStmt!: SqliteStatement;
+  let selectOrphanedAssetsForUserStmt!: SqliteStatement;
+  let deleteOrphanedAssetByIdStmt!: SqliteStatement;
   let insertUserMessageTx!: ReturnType<SqliteDatabase["transaction"]>;
   let insertEventTx!: ReturnType<SqliteDatabase["transaction"]>;
+  let deleteStreamDataTx!: ReturnType<SqliteDatabase["transaction"]>;
   let handleUpload!: AssetHandlers["handleUpload"];
   let handleDownload!: AssetHandlers["handleDownload"];
   let cleanupTmpDirectory!: AssetHandlers["cleanupTmpDirectory"];
   let cleanupOrphanedAssetFiles!: AssetHandlers["cleanupOrphanedAssetFiles"];
   let cleanupUnreferencedAssets!: AssetHandlers["cleanupUnreferencedAssets"];
+  let streamIdempotencyCleanupInterval: ReturnType<typeof setInterval> | null = null;
 
-  function migrateLegacyClawlineSessionKeys(database: SqliteDatabase) {
-    const selectLegacy = database.prepare(
-      `SELECT id, payloadJson FROM events WHERE payloadJson LIKE '%"sessionKey"%' AND payloadJson LIKE '%clawline:dm:%'`,
+  const normalizeStoredSessionKey = (rawSessionKey: string, fallbackUserId?: string): string => {
+    const trimmed = rawSessionKey.trim();
+    if (!trimmed) {
+      if (fallbackUserId) {
+        return buildClawlinePersonalSessionKey(mainSessionAgentId, fallbackUserId);
+      }
+      return "";
+    }
+    if (sessionKeyEq(trimmed, mainSessionKey)) {
+      return mainSessionKey;
+    }
+    const parsed = parseClawlineUserSessionKey(trimmed);
+    if (parsed) {
+      if (parsed.streamSuffix === "main" || parsed.streamSuffix === "dm") {
+        return buildClawlineUserStreamSessionKey(
+          parsed.agentId,
+          parsed.userId,
+          parsed.streamSuffix,
+        );
+      }
+      if (isCustomStreamSuffix(parsed.streamSuffix)) {
+        return buildClawlineUserStreamSessionKey(
+          parsed.agentId,
+          parsed.userId,
+          parsed.streamSuffix,
+        );
+      }
+    }
+    const legacyParts = trimmed.split(":");
+    if (
+      legacyParts.length === 5 &&
+      legacyParts[0]?.toLowerCase() === "agent" &&
+      legacyParts[2]?.toLowerCase() === "clawline" &&
+      legacyParts[3]?.toLowerCase() === "dm"
+    ) {
+      const agentId = (legacyParts[1] ?? "").trim().toLowerCase() || "main";
+      const legacyUserId = sanitizeUserId(legacyParts[4]).toLowerCase();
+      if (!legacyUserId) {
+        return "";
+      }
+      return buildClawlinePersonalSessionKey(agentId, legacyUserId);
+    }
+    if (fallbackUserId) {
+      return buildClawlinePersonalSessionKey(mainSessionAgentId, fallbackUserId);
+    }
+    return "";
+  };
+
+  const streamSessionFromRow = (row: StreamSessionRow): StreamSession => ({
+    sessionKey: row.sessionKey,
+    displayName: row.displayName,
+    kind: row.kind,
+    orderIndex: row.orderIndex,
+    isBuiltIn: row.isBuiltIn === 1,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  });
+
+  const streamResponseSort = (a: StreamSession, b: StreamSession) => {
+    if (a.orderIndex !== b.orderIndex) {
+      return a.orderIndex - b.orderIndex;
+    }
+    return a.sessionKey.localeCompare(b.sessionKey);
+  };
+
+  const readStreamSessionsForUser = (userId: string): StreamSession[] => {
+    if (!selectStreamSessionsByUserStmt) {
+      return [];
+    }
+    const rows = selectStreamSessionsByUserStmt.all(userId) as StreamSessionRow[];
+    return rows.map(streamSessionFromRow).toSorted(streamResponseSort);
+  };
+
+  const filterStreamAccess = (streams: StreamSession[], isAdmin: boolean): StreamSession[] => {
+    if (isAdmin) {
+      return streams;
+    }
+    return streams.filter((stream) => !sessionKeyEq(stream.sessionKey, mainSessionKey));
+  };
+
+  const applyStreamSubscriptionsToSession = (session: Session, streams: StreamSession[]) => {
+    const visible = filterStreamAccess(streams, session.isAdmin);
+    const keys = Array.from(
+      new Map(
+        visible.map((stream) => [normalizeSessionKey(stream.sessionKey), stream.sessionKey]),
+      ).values(),
     );
-    const updateEvent = database.prepare(
-      `UPDATE events SET payloadJson = ?, payloadBytes = ? WHERE id = ?`,
+    session.provisionedSessionKeys = keys;
+    session.sessionKeys = keys;
+    if (!keys.some((key) => sessionKeyEq(key, session.sessionKey))) {
+      const preferred = keys.find((key) => sessionKeyEq(key, session.personalSessionKey));
+      session.sessionKey = preferred ?? keys[0] ?? session.personalSessionKey;
+    }
+  };
+
+  const syncUserSessionSubscriptions = (userId: string, streams?: StreamSession[]) => {
+    const resolved = streams ?? readStreamSessionsForUser(userId);
+    const sessions = userSessions.get(userId);
+    if (!sessions) {
+      return;
+    }
+    for (const session of sessions) {
+      applyStreamSubscriptionsToSession(session, resolved);
+    }
+  };
+
+  const seedDefaultStreamsForUser = (params: {
+    userId: string;
+    isAdmin: boolean;
+    now: number;
+  }): StreamSession[] => {
+    const entries: Array<{
+      sessionKey: string;
+      kind: StreamSessionKind;
+      displayName: string;
+      orderIndex: number;
+      isBuiltIn: number;
+    }> = [];
+    const mainKey = buildClawlinePersonalSessionKey(mainSessionAgentId, params.userId);
+    entries.push({
+      sessionKey: mainKey,
+      kind: "main",
+      displayName: streamKindToDisplayName("main"),
+      orderIndex: entries.length,
+      isBuiltIn: 1,
+    });
+    if (dmScope !== "main") {
+      entries.push({
+        sessionKey: buildClawlineUserStreamSessionKey(mainSessionAgentId, params.userId, "dm"),
+        kind: "dm",
+        displayName: `${params.userId} DM`,
+        orderIndex: entries.length,
+        isBuiltIn: 1,
+      });
+    }
+    if (params.isAdmin) {
+      entries.push({
+        sessionKey: mainSessionKey,
+        kind: "global_dm",
+        displayName: "Global DM",
+        orderIndex: entries.length,
+        isBuiltIn: 1,
+      });
+    }
+    for (const entry of entries) {
+      insertStreamSessionStmt.run(
+        params.userId,
+        entry.sessionKey,
+        entry.displayName,
+        entry.kind,
+        entry.orderIndex,
+        entry.isBuiltIn,
+        params.now,
+        params.now,
+      );
+    }
+    return readStreamSessionsForUser(params.userId);
+  };
+
+  const ensureStreamSessionsForUser = (params: {
+    userId: string;
+    isAdmin: boolean;
+  }): StreamSession[] => {
+    if (!selectStreamSessionsByUserStmt || !insertStreamSessionStmt || !selectStreamMaxOrderStmt) {
+      const fallback: StreamSession[] = [
+        {
+          sessionKey: buildClawlinePersonalSessionKey(mainSessionAgentId, params.userId),
+          displayName: streamKindToDisplayName("main"),
+          kind: "main",
+          orderIndex: 0,
+          isBuiltIn: true,
+          createdAt: 0,
+          updatedAt: 0,
+        },
+      ];
+      if (dmScope !== "main") {
+        fallback.push({
+          sessionKey: buildClawlineUserStreamSessionKey(mainSessionAgentId, params.userId, "dm"),
+          displayName: `${params.userId} DM`,
+          kind: "dm",
+          orderIndex: fallback.length,
+          isBuiltIn: true,
+          createdAt: 0,
+          updatedAt: 0,
+        });
+      }
+      if (params.isAdmin) {
+        fallback.push({
+          sessionKey: mainSessionKey,
+          displayName: "Global DM",
+          kind: "global_dm",
+          orderIndex: fallback.length,
+          isBuiltIn: true,
+          createdAt: 0,
+          updatedAt: 0,
+        });
+      }
+      return fallback;
+    }
+    const now = nowMs();
+    let streams = readStreamSessionsForUser(params.userId);
+    if (streams.length === 0) {
+      streams = seedDefaultStreamsForUser({
+        userId: params.userId,
+        isAdmin: params.isAdmin,
+        now,
+      });
+    }
+    const builtIns: Array<{
+      sessionKey: string;
+      kind: StreamSessionKind;
+      displayName: string;
+    }> = [
+      {
+        sessionKey: buildClawlinePersonalSessionKey(mainSessionAgentId, params.userId),
+        kind: "main",
+        displayName: streamKindToDisplayName("main"),
+      },
+    ];
+    if (dmScope !== "main") {
+      builtIns.push({
+        sessionKey: buildClawlineUserStreamSessionKey(mainSessionAgentId, params.userId, "dm"),
+        kind: "dm",
+        displayName: `${params.userId} DM`,
+      });
+    }
+    if (params.isAdmin) {
+      builtIns.push({
+        sessionKey: mainSessionKey,
+        kind: "global_dm",
+        displayName: "Global DM",
+      });
+    }
+    let maxOrderRow = selectStreamMaxOrderStmt.get(params.userId) as { maxOrder: number | null };
+    let nextOrder = (maxOrderRow?.maxOrder ?? -1) + 1;
+    const streamByKey = new Map(
+      streams.map((stream) => [normalizeSessionKey(stream.sessionKey), stream] as const),
     );
-    let updated = 0;
-    const runMigration = database.transaction(() => {
-      for (const row of selectLegacy.iterate() as IterableIterator<{
-        id: string;
-        payloadJson: string;
-      }>) {
-        let payload: ServerMessage;
-        try {
-          payload = JSON.parse(row.payloadJson) as ServerMessage;
-        } catch {
+    let changed = false;
+    for (const builtIn of builtIns) {
+      const existing = streamByKey.get(normalizeSessionKey(builtIn.sessionKey));
+      if (!existing) {
+        insertStreamSessionStmt.run(
+          params.userId,
+          builtIn.sessionKey,
+          builtIn.displayName,
+          builtIn.kind,
+          nextOrder,
+          1,
+          now,
+          now,
+        );
+        nextOrder += 1;
+        changed = true;
+        continue;
+      }
+      if (
+        existing.kind !== builtIn.kind ||
+        existing.displayName !== builtIn.displayName ||
+        !existing.isBuiltIn
+      ) {
+        updateStreamSessionBuiltInMetadataStmt.run(
+          builtIn.displayName,
+          builtIn.kind,
+          now,
+          params.userId,
+          builtIn.sessionKey,
+        );
+        changed = true;
+      }
+    }
+    if (changed) {
+      streams = readStreamSessionsForUser(params.userId);
+    }
+    return streams;
+  };
+
+  function migrateDatabaseToV2(database: SqliteDatabase) {
+    const tableHasColumn = (tableName: string, columnName: string): boolean => {
+      const rows = database.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{
+        name: string;
+      }>;
+      return rows.some((row) => row.name === columnName);
+    };
+
+    const currentVersion = Number(database.pragma("user_version", { simple: true }) ?? 0);
+
+    if (!tableHasColumn("events", "eventType")) {
+      database.exec(`ALTER TABLE events ADD COLUMN eventType TEXT NOT NULL DEFAULT 'message'`);
+    }
+    if (!tableHasColumn("events", "sessionKey")) {
+      database.exec(`ALTER TABLE events ADD COLUMN sessionKey TEXT`);
+    }
+
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS stream_sessions (
+        userId TEXT NOT NULL,
+        sessionKey TEXT NOT NULL,
+        displayName TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        orderIndex INTEGER NOT NULL,
+        isBuiltIn INTEGER NOT NULL,
+        createdAt INTEGER NOT NULL,
+        updatedAt INTEGER NOT NULL,
+        PRIMARY KEY (userId, sessionKey),
+        UNIQUE (userId, orderIndex)
+      );
+      CREATE INDEX IF NOT EXISTS idx_stream_sessions_user_order
+        ON stream_sessions(userId, orderIndex);
+      CREATE TABLE IF NOT EXISTS stream_idempotency (
+        userId TEXT NOT NULL,
+        idempotencyKey TEXT NOT NULL,
+        operation TEXT NOT NULL,
+        responseJson TEXT NOT NULL,
+        createdAt INTEGER NOT NULL,
+        PRIMARY KEY (userId, idempotencyKey)
+      );
+      CREATE INDEX IF NOT EXISTS idx_stream_idempotency_created
+        ON stream_idempotency(createdAt);
+      CREATE INDEX IF NOT EXISTS idx_events_user_type_sequence
+        ON events(userId, eventType, sequence);
+      CREATE INDEX IF NOT EXISTS idx_events_user_session_sequence
+        ON events(userId, sessionKey, sequence);
+    `);
+
+    const knownUsers = new Set<string>();
+    for (const entry of allowlist.entries) {
+      const userId = sanitizeUserId(entry.userId);
+      if (userId) {
+        knownUsers.add(userId);
+      }
+    }
+    const userRows = database.prepare(`SELECT DISTINCT userId FROM events`).all() as Array<{
+      userId: string;
+    }>;
+    for (const row of userRows) {
+      const userId = sanitizeUserId(row.userId);
+      if (userId) {
+        knownUsers.add(userId);
+      }
+    }
+    const streamUsers = database
+      .prepare(`SELECT DISTINCT userId FROM stream_sessions`)
+      .all() as Array<{ userId: string }>;
+    for (const row of streamUsers) {
+      const userId = sanitizeUserId(row.userId);
+      if (userId) {
+        knownUsers.add(userId);
+      }
+    }
+
+    const historicalByUser = new Map<string, Set<string>>();
+    const collectKey = (userId: string, rawSessionKey: string) => {
+      const normalizedUserId = sanitizeUserId(userId);
+      if (!normalizedUserId) {
+        return;
+      }
+      const normalizedSessionKey = normalizeStoredSessionKey(rawSessionKey, normalizedUserId);
+      if (!normalizedSessionKey) {
+        return;
+      }
+      const set = historicalByUser.get(normalizedUserId) ?? new Set<string>();
+      set.add(normalizedSessionKey);
+      historicalByUser.set(normalizedUserId, set);
+      knownUsers.add(normalizedUserId);
+    };
+
+    const eventSessionRows = database
+      .prepare(`SELECT DISTINCT userId, sessionKey FROM events WHERE sessionKey IS NOT NULL`)
+      .all() as Array<{ userId: string; sessionKey: string }>;
+    for (const row of eventSessionRows) {
+      collectKey(row.userId, row.sessionKey);
+    }
+
+    if (tableHasColumn("messages", "sessionKey")) {
+      const messageSessionRows = database
+        .prepare(`SELECT DISTINCT userId, sessionKey FROM messages WHERE sessionKey IS NOT NULL`)
+        .all() as Array<{ userId: string; sessionKey: string }>;
+      for (const row of messageSessionRows) {
+        collectKey(row.userId, row.sessionKey);
+      }
+    }
+
+    const isAdminUserId = new Set(
+      allowlist.entries
+        .filter((entry) => entry.isAdmin)
+        .map((entry) => sanitizeUserId(entry.userId))
+        .filter((value) => value.length > 0),
+    );
+    const now = nowMs();
+    const selectMaxOrderForUser = database.prepare(
+      `SELECT MAX(orderIndex) as maxOrder FROM stream_sessions WHERE userId = ?`,
+    );
+    const insertStreamSession = database.prepare(
+      `INSERT OR IGNORE INTO stream_sessions
+         (userId, sessionKey, displayName, kind, orderIndex, isBuiltIn, createdAt, updatedAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    const selectExistingStreamsForUser = database.prepare(
+      `SELECT sessionKey, kind, displayName, isBuiltIn FROM stream_sessions WHERE userId = ?`,
+    );
+    const updateBuiltInStreamMetadata = database.prepare(
+      `UPDATE stream_sessions
+       SET displayName = ?, kind = ?, isBuiltIn = 1, updatedAt = ?
+       WHERE userId = ? AND sessionKey = ?`,
+    );
+
+    const insertCustomStreamsForUser = (userId: string, discovered: Set<string>) => {
+      const existing = database
+        .prepare(`SELECT sessionKey FROM stream_sessions WHERE userId = ?`)
+        .all(userId) as Array<{ sessionKey: string }>;
+      const existingKeys = new Set(existing.map((row) => normalizeSessionKey(row.sessionKey)));
+      let maxOrder = (selectMaxOrderForUser.get(userId) as { maxOrder: number | null } | undefined)
+        ?.maxOrder;
+      if (maxOrder == null) {
+        maxOrder = -1;
+      }
+      for (const key of Array.from(discovered).toSorted()) {
+        if (sessionKeyEq(key, mainSessionKey)) {
           continue;
         }
-        const sessionKey = typeof payload.sessionKey === "string" ? payload.sessionKey.trim() : "";
-        if (!sessionKey) {
+        const parsed = parseClawlineUserSessionKey(key);
+        if (!parsed || parsed.userId !== sanitizeUserId(userId).toLowerCase()) {
           continue;
         }
-        const parts = sessionKey.split(":");
-        if (parts.length < 5) {
+        if (parsed.streamSuffix === "main" || parsed.streamSuffix === "dm") {
           continue;
         }
-        if (parts[0] !== "agent" || parts[2] !== "clawline" || parts[3] !== "dm") {
+        if (!isCustomStreamSuffix(parsed.streamSuffix)) {
           continue;
         }
-        const normalizedUserId = sanitizeUserId(parts[4]).toLowerCase();
+        if (existingKeys.has(normalizeSessionKey(key))) {
+          continue;
+        }
+        maxOrder += 1;
+        insertStreamSession.run(
+          userId,
+          key,
+          STREAM_DISPLAY_NAME_FALLBACK,
+          "custom",
+          maxOrder,
+          0,
+          now,
+          now,
+        );
+        existingKeys.add(normalizeSessionKey(key));
+      }
+    };
+
+    const ensureBuiltInsForUser = (userId: string) => {
+      const discovered = historicalByUser.get(userId) ?? new Set<string>();
+      const builtIns: Array<{ sessionKey: string; kind: StreamSessionKind; displayName: string }> =
+        [
+          {
+            sessionKey: buildClawlinePersonalSessionKey(mainSessionAgentId, userId),
+            kind: "main",
+            displayName: streamKindToDisplayName("main"),
+          },
+        ];
+      if (dmScope !== "main") {
+        builtIns.push({
+          sessionKey: buildClawlineUserStreamSessionKey(mainSessionAgentId, userId, "dm"),
+          kind: "dm",
+          displayName: `${userId} DM`,
+        });
+      }
+      if (
+        isAdminUserId.has(userId) ||
+        Array.from(discovered).some((sessionKey) => sessionKeyEq(sessionKey, mainSessionKey))
+      ) {
+        builtIns.push({
+          sessionKey: mainSessionKey,
+          kind: "global_dm",
+          displayName: "Global DM",
+        });
+      }
+      const existingRows = selectExistingStreamsForUser.all(userId) as Array<{
+        sessionKey: string;
+        kind: StreamSessionKind;
+        displayName: string;
+        isBuiltIn: number;
+      }>;
+      const byKey = new Map(existingRows.map((row) => [normalizeSessionKey(row.sessionKey), row]));
+      let maxOrder = (selectMaxOrderForUser.get(userId) as { maxOrder: number | null } | undefined)
+        ?.maxOrder;
+      if (maxOrder == null) {
+        maxOrder = -1;
+      }
+      for (const builtIn of builtIns) {
+        const existing = byKey.get(normalizeSessionKey(builtIn.sessionKey));
+        if (!existing) {
+          maxOrder += 1;
+          insertStreamSession.run(
+            userId,
+            builtIn.sessionKey,
+            builtIn.displayName,
+            builtIn.kind,
+            maxOrder,
+            1,
+            now,
+            now,
+          );
+          continue;
+        }
+        if (
+          existing.kind !== builtIn.kind ||
+          existing.displayName !== builtIn.displayName ||
+          existing.isBuiltIn !== 1
+        ) {
+          updateBuiltInStreamMetadata.run(
+            builtIn.displayName,
+            builtIn.kind,
+            now,
+            userId,
+            builtIn.sessionKey,
+          );
+        }
+      }
+    };
+
+    for (const userId of Array.from(knownUsers).toSorted()) {
+      ensureBuiltInsForUser(userId);
+      if (currentVersion < STREAM_DB_VERSION) {
+        const discovered = historicalByUser.get(userId) ?? new Set<string>();
+        insertCustomStreamsForUser(userId, discovered);
+      }
+    }
+
+    if (currentVersion >= STREAM_DB_VERSION) {
+      return;
+    }
+
+    const selectEventsForBackfill = database.prepare(
+      `SELECT id, userId, payloadJson, sessionKey
+       FROM events
+       WHERE eventType = 'message'`,
+    );
+    const updateEventSessionKey = database.prepare(`UPDATE events SET sessionKey = ? WHERE id = ?`);
+    const backfillRows = selectEventsForBackfill.all() as Array<{
+      id: string;
+      userId: string;
+      payloadJson: string;
+      sessionKey: string | null;
+    }>;
+    const runBackfill = database.transaction(() => {
+      for (const row of backfillRows) {
+        const normalizedUserId = sanitizeUserId(row.userId);
         if (!normalizedUserId) {
           continue;
         }
-        const agentId = parts[1] || "main";
-        const nextSessionKey = buildClawlinePersonalSessionKey(agentId, normalizedUserId);
-        if (nextSessionKey === sessionKey) {
-          continue;
+        let resolvedSessionKey = normalizeStoredSessionKey(row.sessionKey ?? "");
+        if (!resolvedSessionKey) {
+          try {
+            const payload = JSON.parse(row.payloadJson) as {
+              type?: unknown;
+              sessionKey?: unknown;
+            };
+            if (payload.type === "message" && typeof payload.sessionKey === "string") {
+              resolvedSessionKey = normalizeStoredSessionKey(payload.sessionKey, normalizedUserId);
+            }
+          } catch {
+            resolvedSessionKey = "";
+          }
         }
-        payload.sessionKey = nextSessionKey;
-        const payloadJson = JSON.stringify(payload);
-        updateEvent.run(payloadJson, Buffer.byteLength(payloadJson, "utf8"), row.id);
-        updated += 1;
+        if (!resolvedSessionKey) {
+          resolvedSessionKey = buildClawlinePersonalSessionKey(
+            mainSessionAgentId,
+            normalizedUserId,
+          );
+        }
+        if (!row.sessionKey || !sessionKeyEq(row.sessionKey, resolvedSessionKey)) {
+          updateEventSessionKey.run(resolvedSessionKey, row.id);
+        }
+        collectKey(normalizedUserId, resolvedSessionKey);
       }
     });
-    runMigration();
-    if (updated > 0) {
-      logger.info?.("[clawline] migrated_legacy_session_keys", { updated });
+    runBackfill();
+
+    for (const [userId, discovered] of historicalByUser) {
+      insertCustomStreamsForUser(userId, discovered);
     }
+
+    database.pragma(`user_version = ${STREAM_DB_VERSION}`);
   }
 
   function initializeDatabaseResources(): boolean {
@@ -1181,7 +1955,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         originatingDeviceId TEXT,
         payloadJson TEXT NOT NULL,
         payloadBytes INTEGER NOT NULL,
-        timestamp INTEGER NOT NULL
+        timestamp INTEGER NOT NULL,
+        eventType TEXT NOT NULL DEFAULT 'message',
+        sessionKey TEXT
       );
       CREATE UNIQUE INDEX IF NOT EXISTS idx_events_userId_sequence ON events(userId, sequence);
       CREATE INDEX IF NOT EXISTS idx_events_userId ON events(userId);
@@ -1222,12 +1998,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       CREATE INDEX IF NOT EXISTS idx_message_assets_assetId ON message_assets(assetId);
     `);
 
-    migrateLegacyClawlineSessionKeys(newDb);
+    migrateDatabaseToV2(newDb);
 
     sequenceStatement = userSequenceStmt(newDb);
     insertEventStmt = newDb.prepare(
-      `INSERT INTO events (id, userId, sequence, originatingDeviceId, payloadJson, payloadBytes, timestamp)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO events
+         (id, userId, sequence, originatingDeviceId, payloadJson, payloadBytes, timestamp, eventType, sessionKey)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     updateMessageAckStmt = newDb.prepare(
       `UPDATE messages SET ackSent = 1 WHERE deviceId = ? AND clientId = ?`,
@@ -1260,6 +2037,86 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
          )`,
     );
     deleteAssetStmt = newDb.prepare(
+      `DELETE FROM assets
+       WHERE assetId = ?
+         AND NOT EXISTS (
+           SELECT 1 FROM message_assets WHERE message_assets.assetId = assets.assetId
+         )`,
+    );
+    selectStreamSessionsByUserStmt = newDb.prepare(
+      `SELECT userId, sessionKey, displayName, kind, orderIndex, isBuiltIn, createdAt, updatedAt
+       FROM stream_sessions
+       WHERE userId = ?
+       ORDER BY orderIndex ASC`,
+    );
+    selectStreamSessionByKeyStmt = newDb.prepare(
+      `SELECT userId, sessionKey, displayName, kind, orderIndex, isBuiltIn, createdAt, updatedAt
+       FROM stream_sessions
+       WHERE userId = ? AND sessionKey = ?`,
+    );
+    selectStreamMaxOrderStmt = newDb.prepare(
+      `SELECT MAX(orderIndex) as maxOrder FROM stream_sessions WHERE userId = ?`,
+    );
+    insertStreamSessionStmt = newDb.prepare(
+      `INSERT INTO stream_sessions
+         (userId, sessionKey, displayName, kind, orderIndex, isBuiltIn, createdAt, updatedAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    updateStreamSessionDisplayNameStmt = newDb.prepare(
+      `UPDATE stream_sessions
+       SET displayName = ?, updatedAt = ?
+       WHERE userId = ? AND sessionKey = ?`,
+    );
+    updateStreamSessionBuiltInMetadataStmt = newDb.prepare(
+      `UPDATE stream_sessions
+       SET displayName = ?, kind = ?, isBuiltIn = 1, updatedAt = ?
+       WHERE userId = ? AND sessionKey = ?`,
+    );
+    deleteStreamSessionStmt = newDb.prepare(
+      `DELETE FROM stream_sessions WHERE userId = ? AND sessionKey = ?`,
+    );
+    selectStreamIdempotencyStmt = newDb.prepare(
+      `SELECT operation, responseJson FROM stream_idempotency WHERE userId = ? AND idempotencyKey = ?`,
+    );
+    insertStreamIdempotencyStmt = newDb.prepare(
+      `INSERT INTO stream_idempotency (userId, idempotencyKey, operation, responseJson, createdAt)
+       VALUES (?, ?, ?, ?, ?)`,
+    );
+    deleteExpiredStreamIdempotencyStmt = newDb.prepare(
+      `DELETE FROM stream_idempotency WHERE createdAt < ?`,
+    );
+    deleteMessageAssetsBySessionStmt = newDb.prepare(
+      `DELETE FROM message_assets
+       WHERE EXISTS (
+         SELECT 1
+         FROM messages
+         JOIN events ON events.id = messages.serverEventId
+         WHERE messages.deviceId = message_assets.deviceId
+           AND messages.clientId = message_assets.clientId
+           AND messages.userId = ?
+           AND events.userId = ?
+           AND events.sessionKey = ?
+       )`,
+    );
+    deleteMessagesBySessionStmt = newDb.prepare(
+      `DELETE FROM messages
+       WHERE userId = ?
+         AND serverEventId IN (
+           SELECT id FROM events WHERE userId = ? AND sessionKey = ?
+         )`,
+    );
+    deleteEventsBySessionStmt = newDb.prepare(
+      `DELETE FROM events WHERE userId = ? AND sessionKey = ?`,
+    );
+    selectOrphanedAssetsForUserStmt = newDb.prepare(
+      `SELECT assetId
+       FROM assets
+       WHERE userId = ?
+         AND NOT EXISTS (
+           SELECT 1 FROM message_assets WHERE message_assets.assetId = assets.assetId
+         )`,
+    );
+    deleteOrphanedAssetByIdStmt = newDb.prepare(
       `DELETE FROM assets
        WHERE assetId = ?
          AND NOT EXISTS (
@@ -1340,6 +2197,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           payloadJson,
           payloadBytes,
           timestamp,
+          "message",
+          sessionKey,
         );
         insertMessageStmt.run(
           session.deviceId,
@@ -1360,22 +2219,38 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     );
 
     selectEventsAfterStmt = newDb.prepare(
-      `SELECT id, payloadJson FROM events WHERE userId = ? AND sequence > ? ORDER BY sequence ASC`,
+      `SELECT id, payloadJson
+       FROM events
+       WHERE userId = ? AND eventType = 'message' AND sequence > ?
+       ORDER BY sequence ASC`,
     );
     selectEventsTailStmt = newDb.prepare(
-      `SELECT id, payloadJson FROM events WHERE userId = ? ORDER BY sequence DESC LIMIT ?`,
+      `SELECT id, payloadJson
+       FROM events
+       WHERE userId = ? AND eventType = 'message'
+       ORDER BY sequence DESC LIMIT ?`,
     );
     selectEventByIdStmt = newDb.prepare(
-      `SELECT id, userId, sequence, timestamp FROM events WHERE id = ?`,
+      `SELECT id, userId, sequence, timestamp FROM events WHERE id = ? AND eventType = 'message'`,
+    );
+    selectEventPayloadForUserStmt = newDb.prepare(
+      `SELECT payloadJson FROM events WHERE userId = ? AND id = ? AND eventType = 'message'`,
     );
     selectEventsAfterTimestampStmt = newDb.prepare(
-      `SELECT id, payloadJson FROM events WHERE userId = ? AND timestamp > ? ORDER BY sequence ASC`,
+      `SELECT id, payloadJson
+       FROM events
+       WHERE userId = ? AND eventType = 'message' AND timestamp > ?
+       ORDER BY sequence ASC`,
     );
     insertEventTx = newDb.transaction(
       (event: ServerMessage, userId: string, originatingDeviceId?: string) => {
         const payloadJson = JSON.stringify(event);
         const payloadBytes = Buffer.byteLength(payloadJson, "utf8");
         const sequenceRow = sequenceStatement.get(userId) as { sequence: number };
+        const normalizedSessionKey =
+          typeof event.sessionKey === "string"
+            ? normalizeStoredSessionKey(event.sessionKey, userId)
+            : "";
         insertEventStmt.run(
           event.id,
           userId,
@@ -1384,10 +2259,32 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           payloadJson,
           payloadBytes,
           event.timestamp,
+          "message",
+          normalizedSessionKey || null,
         );
         return sequenceRow.sequence;
       },
     );
+
+    deleteStreamDataTx = newDb.transaction((params: { userId: string; sessionKey: string }) => {
+      const orphanCandidates = selectOrphanedAssetsForUserStmt.all(params.userId) as Array<{
+        assetId: string;
+      }>;
+      deleteMessageAssetsBySessionStmt.run(params.userId, params.userId, params.sessionKey);
+      deleteMessagesBySessionStmt.run(params.userId, params.userId, params.sessionKey);
+      deleteEventsBySessionStmt.run(params.userId, params.sessionKey);
+      deleteStreamSessionStmt.run(params.userId, params.sessionKey);
+      const deletedAssetIds: string[] = [];
+      for (const row of orphanCandidates) {
+        const result = deleteOrphanedAssetByIdStmt.run(row.assetId);
+        if (result.changes > 0) {
+          deletedAssetIds.push(row.assetId);
+        }
+      }
+      return deletedAssetIds;
+    });
+
+    deleteExpiredStreamIdempotencyStmt.run(nowMs() - STREAM_IDEMPOTENCY_RETENTION_MS);
 
     db = newDb;
     return true;
@@ -1427,11 +2324,17 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         resolved.push({ type: "image", mimeType, data });
         continue;
       }
-      if (mimeType === TERMINAL_SESSION_MIME) {
-        // Terminal sessions must be delivered inline so the client can decode the descriptor without
-        // fetching an asset. Keep this small (descriptor JSON only).
+      if (INLINE_DOCUMENT_MIME_TYPES.has(mimeType)) {
+        // Certain document descriptors must stay inline so clients can render immediately without
+        // downloading an asset first.
         if (buffer.length > config.media.maxInlineBytes) {
-          throw new Error("Clawline terminal session descriptor exceeds maxInlineBytes");
+          if (mimeType === TERMINAL_SESSION_MIME) {
+            throw new Error("Clawline terminal session descriptor exceeds maxInlineBytes");
+          }
+          if (mimeType === INTERACTIVE_HTML_MIME) {
+            throw new Error("Clawline interactive HTML descriptor exceeds maxInlineBytes");
+          }
+          throw new Error("Clawline inline document descriptor exceeds maxInlineBytes");
         }
         resolved.push({ type: "document", mimeType, data });
         continue;
@@ -1650,6 +2553,26 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         logHttpRequest("download_complete", { assetId });
         return;
       }
+      if (parsedUrl.pathname === "/api/streams") {
+        if (req.method === "GET") {
+          await handleListStreamsRequest(req, res);
+          return;
+        }
+        if (req.method === "POST") {
+          await handleCreateStreamRequest(req, res);
+          return;
+        }
+      }
+      if (parsedUrl.pathname.startsWith("/api/streams/")) {
+        if (req.method === "PATCH") {
+          await handleRenameStreamRequest(req, res);
+          return;
+        }
+        if (req.method === "DELETE") {
+          await handleDeleteStreamRequest(req, res);
+          return;
+        }
+      }
       if (
         parsedUrl.pathname === WEBROOT_PREFIX ||
         parsedUrl.pathname.startsWith(`${WEBROOT_PREFIX}/`)
@@ -1667,6 +2590,17 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       });
       res.writeHead(404).end();
     } catch (err) {
+      const pathName = req.url ? new URL(req.url, "http://localhost").pathname : "";
+      const isStreamApi = pathName === "/api/streams" || pathName.startsWith("/api/streams/");
+      if (isStreamApi) {
+        if (err instanceof HttpError) {
+          sendStreamApiError(res, err.status, err.code, err.message);
+        } else {
+          logger.error?.(`http_request_failed: ${formatError(err)}`);
+          sendStreamApiError(res, 500, "server_error", "Internal error");
+        }
+        return;
+      }
       logger.error?.(`http_request_failed: ${formatError(err)}`);
       if (!res.headersSent) {
         sendHttpError(res, 500, "server_error", "Internal error");
@@ -1854,7 +2788,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     return { raw: rawText, message, source, sessionKey };
   }
 
-  async function readRequestBody(req: http.IncomingMessage, limit: number): Promise<Buffer> {
+  async function readRequestBody(
+    req: http.IncomingMessage,
+    limit: number,
+    tooLargeMessage = "Alert payload too large",
+  ): Promise<Buffer> {
     return await new Promise<Buffer>((resolve, reject) => {
       const chunks: Buffer[] = [];
       let size = 0;
@@ -1877,7 +2815,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           cleanup();
           chunks.length = 0;
           req.destroy();
-          reject(new HttpError(413, "payload_too_large", "Alert payload too large"));
+          reject(new HttpError(413, "payload_too_large", tooLargeMessage));
           return;
         }
         chunks.push(chunk);
@@ -2228,18 +3166,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     if (!value) {
       return false;
     }
-    const trimmed = value.trim();
-    if (!trimmed) {
-      return false;
-    }
-    if (trimmed === "global") {
-      return true;
-    }
-    return (
-      /^agent:[^:]+:main$/i.test(trimmed) ||
-      /^agent:[^:]+:clawline:[^:]+:main$/i.test(trimmed) ||
-      /^agent:[^:]+:clawline:dm:[^:]+$/i.test(trimmed)
-    );
+    return value.trim().length > 0;
   }
 
   function resolveAlertSessionKey(rawSessionKey?: string) {
@@ -2249,7 +3176,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     let decisionReason = "missing_session_key";
     let decisionAction = "fallback_main_session";
 
-    const normalizedMainKey = mainSessionKey.toLowerCase();
     if (typeof rawSessionKey === "string") {
       if (trimmedSessionKey.length === 0) {
         decisionReason = "empty_session_key";
@@ -2430,7 +3356,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const faceSpeakDedupe = new Map<string, number>();
   const sessionsByDevice = new Map<string, Session>();
   const userSessions = new Map<string, Set<Session>>();
-  const perUserQueue = new Map<string, Promise<unknown>>();
+  const perUserTaskQueue = createPerUserTaskQueue({
+    onTaskError: (err) => {
+      logger.warn?.(`per_user_task_failed: ${formatError(err)}`);
+    },
+  });
   const pairRateLimiter = new SlidingWindowRateLimiter(config.pairing.maxRequestsPerMinute, 60_000);
   const authRateLimiter = new SlidingWindowRateLimiter(config.auth.maxAttemptsPerMinute, 60_000);
   const messageRateLimiter = new SlidingWindowRateLimiter(
@@ -2522,12 +3452,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           lastSeenAt: now,
           tmuxSessionName: descriptor.terminalSessionId,
         });
-        const ensured = await ensureTmuxSessionExists(descriptor.terminalSessionId);
-        if (!ensured) {
-          throw new Error(
-            "Failed to start terminal session (tmux). Check provider terminal.tmux configuration.",
-          );
-        }
         filtered.push(attachment);
         continue;
       }
@@ -2584,20 +3508,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     return null;
   }
 
-  function runPerUserTask<T>(userId: string, task: () => Promise<T>): Promise<T> {
-    const previous = perUserQueue.get(userId) ?? Promise.resolve();
-    const next = previous
-      .catch((err) => {
-        logger.warn?.(`per_user_task_failed: ${formatError(err)}`);
-      })
-      .then(task)
-      .finally(() => {
-        if (perUserQueue.get(userId) === next) {
-          perUserQueue.delete(userId);
-        }
-      });
-    perUserQueue.set(userId, next);
-    return next;
+  function runPerUserTask<T>(
+    userId: string,
+    task: () => Promise<T>,
+    opts?: { streamKey?: string },
+  ): Promise<T> {
+    return perUserTaskQueue.run({ userId, streamKey: opts?.streamKey }, task);
   }
 
   function enqueueWriteTask<T>(task: () => T | Promise<T>): Promise<T> {
@@ -2731,6 +3647,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         if (state && state.authenticated) {
           state.isAdmin = entry.isAdmin;
         }
+        const streams = filterStreamAccess(
+          ensureStreamSessionsForUser({ userId: session.userId, isAdmin: entry.isAdmin }),
+          entry.isAdmin,
+        );
+        syncUserSessionSubscriptions(session.userId, streams);
+        void sendJson(session.socket, { type: "stream_snapshot", streams }).catch(() => {});
         void sendSessionInfo(session, info);
       }
     }
@@ -2837,6 +3759,48 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     res.end(JSON.stringify({ type: "error", code, message }));
   }
 
+  function sendStreamApiError(
+    res: http.ServerResponse,
+    status: number,
+    code: string,
+    message: string,
+  ) {
+    res.setHeader("Content-Type", "application/json");
+    res.writeHead(status);
+    res.end(JSON.stringify({ error: { code, message } }));
+  }
+
+  function normalizeStreamMutationSessionKeyForUser(userId: string, sessionKey: string): string {
+    // Mutation paths must never fall back to a default stream key.
+    // If the path key is malformed, return not-found semantics.
+    const normalized = normalizeStoredSessionKey(sessionKey);
+    if (!normalized) {
+      return "";
+    }
+    if (sessionKeyEq(normalized, mainSessionKey)) {
+      return mainSessionKey;
+    }
+    const parsed = parseClawlineUserSessionKey(normalized);
+    if (!parsed) {
+      return "";
+    }
+    if (parsed.userId !== sanitizeUserId(userId).toLowerCase()) {
+      return "";
+    }
+    if (
+      parsed.streamSuffix !== "main" &&
+      parsed.streamSuffix !== "dm" &&
+      !isCustomStreamSuffix(parsed.streamSuffix)
+    ) {
+      return "";
+    }
+    return normalized;
+  }
+
+  function streamMutationRequestKey(operation: string, payload: Record<string, unknown>): string {
+    return JSON.stringify({ operation, payload });
+  }
+
   function authenticateHttpRequest(req: http.IncomingMessage) {
     const header = req.headers.authorization;
     if (!header || !header.startsWith("Bearer ")) {
@@ -2869,6 +3833,411 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     return { deviceId, userId: entry.userId, isAdmin: entry.isAdmin };
   }
 
+  async function ensureStreamsForAuthedUser(auth: {
+    userId: string;
+    isAdmin: boolean;
+  }): Promise<StreamSession[]> {
+    return runPerUserTask(auth.userId, async () =>
+      enqueueWriteTask(() => {
+        const streams = ensureStreamSessionsForUser({ userId: auth.userId, isAdmin: auth.isAdmin });
+        syncUserSessionSubscriptions(auth.userId, streams);
+        return filterStreamAccess(streams, auth.isAdmin);
+      }),
+    );
+  }
+
+  function loadStreamRowForUser(userId: string, sessionKey: string): StreamSessionRow | null {
+    const row = selectStreamSessionByKeyStmt.get(userId, sessionKey) as
+      | StreamSessionRow
+      | undefined;
+    return row ?? null;
+  }
+
+  function cleanupExpiredStreamIdempotencyRows() {
+    deleteExpiredStreamIdempotencyStmt.run(nowMs() - STREAM_IDEMPOTENCY_RETENTION_MS);
+  }
+
+  function readIdempotencyRecord(params: {
+    userId: string;
+    idempotencyKey: string;
+    operation: string;
+    requestKey: string;
+  }): { status: number; response: Record<string, unknown> } | null {
+    const row = selectStreamIdempotencyStmt.get(params.userId, params.idempotencyKey) as
+      | { operation: string; responseJson: string }
+      | undefined;
+    if (!row) {
+      return null;
+    }
+    let parsed: StreamMutationIdempotencyRecord | null = null;
+    try {
+      parsed = JSON.parse(row.responseJson) as StreamMutationIdempotencyRecord;
+    } catch {
+      parsed = null;
+    }
+    if (!parsed) {
+      throw new HttpError(409, "idempotency_key_reused", "Idempotency key was already used");
+    }
+    if (row.operation !== params.operation || parsed.requestKey !== params.requestKey) {
+      throw new HttpError(409, "idempotency_key_reused", "Idempotency key was already used");
+    }
+    return { status: parsed.status, response: parsed.response };
+  }
+
+  function storeIdempotencyRecord(params: {
+    userId: string;
+    idempotencyKey: string;
+    operation: string;
+    requestKey: string;
+    status: number;
+    response: Record<string, unknown>;
+  }) {
+    const payload: StreamMutationIdempotencyRecord = {
+      status: params.status,
+      requestKey: params.requestKey,
+      response: params.response,
+    };
+    insertStreamIdempotencyStmt.run(
+      params.userId,
+      params.idempotencyKey,
+      params.operation,
+      JSON.stringify(payload),
+      nowMs(),
+    );
+  }
+
+  async function broadcastStreamEvent(userId: string, payload: StreamServerMessage) {
+    const sessions = userSessions.get(userId);
+    if (!sessions || sessions.size === 0) {
+      return;
+    }
+    const sends: Promise<boolean>[] = [];
+    for (const session of sessions) {
+      sends.push(sendJson(session.socket, payload));
+    }
+    await Promise.allSettled(sends);
+  }
+
+  async function handleListStreamsRequest(req: http.IncomingMessage, res: http.ServerResponse) {
+    const auth = authenticateHttpRequest(req);
+    const streams = await ensureStreamsForAuthedUser(auth);
+    res.setHeader("Content-Type", "application/json");
+    res.writeHead(200);
+    res.end(JSON.stringify({ streams }));
+  }
+
+  async function parseStreamsRequestBody(
+    req: http.IncomingMessage,
+  ): Promise<Record<string, unknown>> {
+    const raw = await readRequestBody(req, MAX_STREAMS_BODY_BYTES, "Stream payload too large");
+    if (raw.length === 0) {
+      return {};
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw.toString("utf8"));
+    } catch {
+      throw new HttpError(400, "invalid_json", "Stream payload must be valid JSON");
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new HttpError(400, "invalid_request", "Stream payload must be an object");
+    }
+    return parsed as Record<string, unknown>;
+  }
+
+  function parseSessionKeyPath(pathname: string): string {
+    const prefix = "/api/streams/";
+    if (!pathname.startsWith(prefix)) {
+      throw new HttpError(404, "stream_not_found", "Stream not found");
+    }
+    const raw = pathname.slice(prefix.length);
+    if (!raw || raw.includes("/")) {
+      throw new HttpError(404, "stream_not_found", "Stream not found");
+    }
+    try {
+      // Some clients can double-encode path components (e.g. %3A -> %253A).
+      // Decode a bounded number of passes so stream mutations remain compatible.
+      let decoded = raw;
+      for (let pass = 0; pass < STREAM_SESSION_KEY_PATH_DECODE_PASSES; pass += 1) {
+        const next = decodeURIComponent(decoded);
+        if (next === decoded) {
+          break;
+        }
+        decoded = next;
+      }
+      const trimmed = decoded.trim();
+      if (!trimmed || trimmed.includes("/")) {
+        throw new HttpError(400, "invalid_session_key", "Invalid session key");
+      }
+      return trimmed;
+    } catch (err) {
+      if (err instanceof HttpError) {
+        throw err;
+      }
+      throw new HttpError(400, "invalid_session_key", "Invalid session key");
+    }
+  }
+
+  async function handleCreateStreamRequest(req: http.IncomingMessage, res: http.ServerResponse) {
+    const auth = authenticateHttpRequest(req);
+    const body = await parseStreamsRequestBody(req);
+    const idempotencyKey =
+      typeof body.idempotencyKey === "string" ? body.idempotencyKey.trim() : "";
+    const displayName = sanitizeStreamDisplayName(
+      body.displayName,
+      config.streams.maxDisplayNameBytes,
+    );
+    if (!displayName) {
+      throw new HttpError(400, "invalid_display_name", "Display name is required");
+    }
+    if (!idempotencyKey) {
+      throw new HttpError(400, "invalid_request", "idempotencyKey is required");
+    }
+    const requestKey = streamMutationRequestKey(STREAM_OPERATION_CREATE, { displayName });
+    const existingIdempotent = readIdempotencyRecord({
+      userId: auth.userId,
+      idempotencyKey,
+      operation: STREAM_OPERATION_CREATE,
+      requestKey,
+    });
+    if (existingIdempotent) {
+      res.setHeader("Content-Type", "application/json");
+      res.writeHead(existingIdempotent.status);
+      res.end(JSON.stringify(existingIdempotent.response));
+      return;
+    }
+    const { stream, responseBody } = await runPerUserTask(auth.userId, async () =>
+      enqueueWriteTask(() => {
+        const availableStreams = ensureStreamSessionsForUser({
+          userId: auth.userId,
+          isAdmin: auth.isAdmin,
+        });
+        const visibleStreams = filterStreamAccess(availableStreams, auth.isAdmin);
+        if (visibleStreams.length >= config.streams.maxStreamsPerUser) {
+          throw new HttpError(409, "stream_limit_reached", "Stream limit reached");
+        }
+        const now = nowMs();
+        const maxOrderRow = selectStreamMaxOrderStmt.get(auth.userId) as {
+          maxOrder: number | null;
+        };
+        let nextOrder = (maxOrderRow?.maxOrder ?? -1) + 1;
+        let nextSessionKey = "";
+        for (let attempts = 0; attempts < 8; attempts += 1) {
+          const suffix = generateCustomStreamSuffix();
+          const candidate = buildClawlineUserStreamSessionKey(
+            mainSessionAgentId,
+            auth.userId,
+            suffix,
+          );
+          const existing = loadStreamRowForUser(auth.userId, candidate);
+          if (!existing) {
+            nextSessionKey = candidate;
+            break;
+          }
+        }
+        if (!nextSessionKey) {
+          throw new HttpError(500, "server_error", "Unable to allocate stream key");
+        }
+        let inserted = false;
+        let lastOrderConflict = false;
+        for (let attempts = 0; attempts < 2; attempts += 1) {
+          lastOrderConflict = false;
+          try {
+            insertStreamSessionStmt.run(
+              auth.userId,
+              nextSessionKey,
+              displayName,
+              "custom",
+              nextOrder,
+              0,
+              now,
+              now,
+            );
+            inserted = true;
+            break;
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            if (message.includes("stream_sessions.userId, stream_sessions.orderIndex")) {
+              lastOrderConflict = true;
+              const recomputed = selectStreamMaxOrderStmt.get(auth.userId) as {
+                maxOrder: number | null;
+              };
+              nextOrder = (recomputed?.maxOrder ?? -1) + 1;
+              continue;
+            }
+            throw err;
+          }
+        }
+        if (!inserted) {
+          if (lastOrderConflict) {
+            throw new HttpError(409, "stream_limit_reached", "Unable to allocate stream order");
+          }
+          throw new HttpError(500, "server_error", "Unable to create stream");
+        }
+        const row = loadStreamRowForUser(auth.userId, nextSessionKey);
+        if (!row) {
+          throw new HttpError(500, "server_error", "Created stream is missing");
+        }
+        const created = streamSessionFromRow(row);
+        const synced = ensureStreamSessionsForUser({ userId: auth.userId, isAdmin: auth.isAdmin });
+        syncUserSessionSubscriptions(auth.userId, synced);
+        const response = { stream: created };
+        storeIdempotencyRecord({
+          userId: auth.userId,
+          idempotencyKey,
+          operation: STREAM_OPERATION_CREATE,
+          requestKey,
+          status: 201,
+          response,
+        });
+        return { stream: created, responseBody: response };
+      }),
+    );
+    await broadcastStreamEvent(auth.userId, { type: "stream_created", stream });
+    res.setHeader("Content-Type", "application/json");
+    res.writeHead(201);
+    res.end(JSON.stringify(responseBody));
+  }
+
+  async function handleRenameStreamRequest(req: http.IncomingMessage, res: http.ServerResponse) {
+    const auth = authenticateHttpRequest(req);
+    const sessionKeyInput = parseSessionKeyPath(
+      new URL(req.url ?? "", "http://localhost").pathname,
+    );
+    const sessionKey = normalizeStreamMutationSessionKeyForUser(auth.userId, sessionKeyInput);
+    if (!sessionKey) {
+      throw new HttpError(404, "stream_not_found", "Stream not found");
+    }
+    const body = await parseStreamsRequestBody(req);
+    const displayName = sanitizeStreamDisplayName(
+      body.displayName,
+      config.streams.maxDisplayNameBytes,
+    );
+    if (!displayName) {
+      throw new HttpError(400, "invalid_display_name", "Display name is required");
+    }
+    const stream = await runPerUserTask(auth.userId, async () =>
+      enqueueWriteTask(() => {
+        const streams = ensureStreamSessionsForUser({ userId: auth.userId, isAdmin: auth.isAdmin });
+        syncUserSessionSubscriptions(auth.userId, streams);
+        const existing = loadStreamRowForUser(auth.userId, sessionKey);
+        if (!existing) {
+          throw new HttpError(404, "stream_not_found", "Stream not found");
+        }
+        if (existing.isBuiltIn === 1) {
+          throw new HttpError(
+            409,
+            "built_in_stream_rename_forbidden",
+            "Built-in streams cannot be renamed",
+          );
+        }
+        const now = nowMs();
+        updateStreamSessionDisplayNameStmt.run(displayName, now, auth.userId, sessionKey);
+        const updated = loadStreamRowForUser(auth.userId, sessionKey);
+        if (!updated) {
+          throw new HttpError(404, "stream_not_found", "Stream not found");
+        }
+        const mapped = streamSessionFromRow(updated);
+        const synced = ensureStreamSessionsForUser({ userId: auth.userId, isAdmin: auth.isAdmin });
+        syncUserSessionSubscriptions(auth.userId, synced);
+        return mapped;
+      }),
+    );
+    await broadcastStreamEvent(auth.userId, { type: "stream_updated", stream });
+    res.setHeader("Content-Type", "application/json");
+    res.writeHead(200);
+    res.end(JSON.stringify({ stream }));
+  }
+
+  async function handleDeleteStreamRequest(req: http.IncomingMessage, res: http.ServerResponse) {
+    const auth = authenticateHttpRequest(req);
+    const userActionHeaderRaw = req.headers["x-clawline-user-action"];
+    const userActionHeader = Array.isArray(userActionHeaderRaw)
+      ? userActionHeaderRaw[0]
+      : userActionHeaderRaw;
+    if (
+      typeof userActionHeader === "string" &&
+      userActionHeader.trim().length > 0 &&
+      userActionHeader.trim().toLowerCase() !== "delete_stream"
+    ) {
+      throw new HttpError(
+        409,
+        "stream_delete_requires_user_action",
+        "Stream delete requires explicit user action",
+      );
+    }
+    const sessionKeyInput = parseSessionKeyPath(
+      new URL(req.url ?? "", "http://localhost").pathname,
+    );
+    const sessionKey = normalizeStreamMutationSessionKeyForUser(auth.userId, sessionKeyInput);
+    if (!sessionKey) {
+      throw new HttpError(404, "stream_not_found", "Stream not found");
+    }
+    const body = await parseStreamsRequestBody(req);
+    const idempotencyKey =
+      typeof body.idempotencyKey === "string" ? body.idempotencyKey.trim() : "";
+    const requestKey = streamMutationRequestKey(STREAM_OPERATION_DELETE, { sessionKey });
+    if (idempotencyKey) {
+      const existingIdempotent = readIdempotencyRecord({
+        userId: auth.userId,
+        idempotencyKey,
+        operation: STREAM_OPERATION_DELETE,
+        requestKey,
+      });
+      if (existingIdempotent) {
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(existingIdempotent.status);
+        res.end(JSON.stringify(existingIdempotent.response));
+        return;
+      }
+    }
+    const responseBody = await runPerUserTask(auth.userId, async () =>
+      enqueueWriteTask(async () => {
+        const streams = ensureStreamSessionsForUser({ userId: auth.userId, isAdmin: auth.isAdmin });
+        const visibleStreams = filterStreamAccess(streams, auth.isAdmin);
+        const existing = loadStreamRowForUser(auth.userId, sessionKey);
+        if (!existing) {
+          throw new HttpError(404, "stream_not_found", "Stream not found");
+        }
+        if (existing.isBuiltIn === 1) {
+          throw new HttpError(
+            409,
+            "built_in_stream_delete_forbidden",
+            "Built-in streams cannot be deleted",
+          );
+        }
+        if (visibleStreams.length <= 1) {
+          throw new HttpError(409, "last_stream_delete_forbidden", "Cannot delete the last stream");
+        }
+        const deletedAssetIds = deleteStreamDataTx({
+          userId: auth.userId,
+          sessionKey,
+        }) as string[];
+        for (const assetId of deletedAssetIds) {
+          await safeUnlink(path.join(assetsDir, assetId));
+        }
+        const synced = ensureStreamSessionsForUser({ userId: auth.userId, isAdmin: auth.isAdmin });
+        syncUserSessionSubscriptions(auth.userId, synced);
+        const response = { deletedSessionKey: sessionKey };
+        if (idempotencyKey) {
+          storeIdempotencyRecord({
+            userId: auth.userId,
+            idempotencyKey,
+            operation: STREAM_OPERATION_DELETE,
+            requestKey,
+            status: 200,
+            response,
+          });
+        }
+        return response;
+      }),
+    );
+    await broadcastStreamEvent(auth.userId, { type: "stream_deleted", sessionKey });
+    res.setHeader("Content-Type", "application/json");
+    res.writeHead(200);
+    res.end(JSON.stringify(responseBody));
+  }
+
   async function safeUnlink(filePath: string) {
     try {
       await fs.unlink(filePath);
@@ -2885,38 +4254,24 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     // All messages are stored under the real userId; sessionKey determines routing.
     // Query once to get all messages for this user.
     const transcriptTargets: Array<{ userId: string }> = [{ userId: session.userId }];
-    const expectedMainStreamSessionKey =
-      session.personalSessionKey ??
-      buildClawlinePersonalSessionKey(mainSessionAgentId, session.userId);
-    const expectedDmSessionKey = session.dmSessionKey;
-    const expectedGlobalSessionKey = session.globalSessionKey ?? mainSessionKey;
+    const expectedMainStreamSessionKey = buildClawlinePersonalSessionKey(
+      mainSessionAgentId,
+      session.userId,
+    );
+    const expectedGlobalSessionKey = mainSessionKey;
     const normalizedMainKey = mainSessionKey.toLowerCase();
-    const normalizedMainStreamKey = expectedMainStreamSessionKey.toLowerCase();
-    const normalizedDmKey = expectedDmSessionKey ? expectedDmSessionKey.toLowerCase() : null;
     const normalizeEventRouting = (event: ServerMessage): void => {
       const rawSessionKey = typeof event.sessionKey === "string" ? event.sessionKey.trim() : "";
-      if (!rawSessionKey) {
+      const normalized = normalizeStoredSessionKey(rawSessionKey, session.userId);
+      if (!normalized) {
         event.sessionKey = expectedMainStreamSessionKey;
         return;
       }
-      const normalizedSessionKey = rawSessionKey.toLowerCase();
-      if (normalizedSessionKey === normalizedMainKey) {
+      if (sessionKeyEq(normalized, expectedGlobalSessionKey)) {
         event.sessionKey = expectedGlobalSessionKey;
         return;
       }
-      if (normalizedSessionKey === normalizedMainStreamKey) {
-        event.sessionKey = expectedMainStreamSessionKey;
-        return;
-      }
-      if (normalizedDmKey && normalizedSessionKey === normalizedDmKey) {
-        event.sessionKey = expectedDmSessionKey;
-        return;
-      }
-      logger.warn?.("[clawline] replay_session_key_unrecognized", {
-        messageId: event.id,
-        sessionKey: rawSessionKey,
-      });
-      event.sessionKey = rawSessionKey;
+      event.sessionKey = normalized;
     };
     let anchor: { userId: string; sequence: number; timestamp: number } | null = null;
     if (lastMessageId) {
@@ -2976,10 +4331,20 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       replayCount: limited.length,
       replayTruncated: combined.length > limited.length,
       historyReset: !lastMessageId,
-      features: ["session_info"],
+      features: buildAuthResultFeatures(session),
       dmScope: sessionInfo.dmScope,
       sessionKeys: sessionInfo.subscribedSessionKeys,
     };
+    const streams = await runPerUserTask(session.userId, async () =>
+      enqueueWriteTask(() => {
+        const seeded = ensureStreamSessionsForUser({
+          userId: session.userId,
+          isAdmin: session.isAdmin,
+        });
+        syncUserSessionSubscriptions(session.userId, seeded);
+        return filterStreamAccess(seeded, session.isAdmin);
+      }),
+    );
     // Debug logging for duplicate investigation
     logger.info("replay_complete", {
       deviceId: session.deviceId,
@@ -2989,85 +4354,76 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       lastEventId: limited[limited.length - 1]?.id,
     });
     await sendJson(session.socket, payload).catch(() => {});
+    await sendJson(session.socket, { type: "stream_snapshot", streams }).catch(() => {});
     await sendSessionInfo(session, sessionInfo);
     for (const event of limited) {
-      if (
-        typeof event.sessionKey === "string" &&
-        event.sessionKey.toLowerCase() === normalizedMainKey &&
-        !session.isAdmin
-      ) {
+      const normalized = normalizePayloadForSession(session, event, mainSessionKey.toLowerCase());
+      if (!normalized) {
         continue;
       }
       logger.info("replay_send", {
         deviceId: session.deviceId,
         userId: session.userId,
-        messageId: event.id,
-        sessionKey: event.sessionKey,
-        streaming: event.streaming,
-        attachmentCount: Array.isArray(event.attachments) ? event.attachments.length : 0,
+        messageId: normalized.id,
+        sessionKey: normalized.sessionKey,
+        streaming: normalized.streaming,
+        attachmentCount: Array.isArray(normalized.attachments) ? normalized.attachments.length : 0,
         replay: true,
       });
-      const stats = summarizeAttachmentStats(event.attachments);
+      const stats = summarizeAttachmentStats(normalized.attachments);
       if (stats) {
         logger.info?.(
           `[clawline:http] ws_send_message attachmentCount=${stats.count} inlineBytes=${stats.inlineBytes} assetCount=${stats.assetCount} replay=true`,
           {
             deviceId: session.deviceId,
             userId: session.userId,
-            messageId: event.id,
+            messageId: normalized.id,
             attachmentCount: stats.count,
             inlineBytes: stats.inlineBytes,
             assetCount: stats.assetCount,
-            streaming: event.streaming,
+            streaming: normalized.streaming,
             replay: true,
           },
         );
       }
-      await sendJson(session.socket, event).catch(() => {});
+      await sendJson(session.socket, normalized).catch(() => {});
     }
   }
 
   function sendPayloadToSession(session: Session, payload: ServerMessage) {
-    const normalizedMainKey = mainSessionKey.toLowerCase();
-    if (!payload.sessionKey) {
-      payload.sessionKey = session.sessionKey;
-    }
-    if (
-      typeof payload.sessionKey === "string" &&
-      payload.sessionKey.toLowerCase() === normalizedMainKey &&
-      !session.isAdmin
-    ) {
+    const normalized = normalizePayloadForSession(session, payload, mainSessionKey.toLowerCase());
+    if (!normalized) {
       return;
     }
     if (session.socket.readyState !== WebSocket.OPEN) {
       return;
     }
-    const stats = summarizeAttachmentStats(payload.attachments);
+    const stats = summarizeAttachmentStats(normalized.attachments);
     if (stats) {
       logger.info?.(
         `[clawline:http] ws_send_message attachmentCount=${stats.count} inlineBytes=${stats.inlineBytes} assetCount=${stats.assetCount} replay=false`,
         {
           deviceId: session.deviceId,
           userId: session.userId,
-          messageId: payload.id,
+          messageId: normalized.id,
           attachmentCount: stats.count,
           inlineBytes: stats.inlineBytes,
           assetCount: stats.assetCount,
-          streaming: payload.streaming,
+          streaming: normalized.streaming,
           replay: false,
         },
       );
     }
-    session.socket.send(JSON.stringify(payload), (err) => {
+    session.socket.send(JSON.stringify(normalized), (err) => {
       if (err) {
         session.socket.close();
         return;
       }
-      const role = payload.role ?? "assistant";
-      const streaming = Boolean(payload.streaming);
-      const sessionKey = payload.sessionKey;
-      const messageId = payload.id;
-      const payloadText = typeof payload.content === "string" ? payload.content : "";
+      const role = normalized.role ?? "assistant";
+      const streaming = Boolean(normalized.streaming);
+      const sessionKey = normalized.sessionKey;
+      const messageId = normalized.id;
+      const payloadText = typeof normalized.content === "string" ? normalized.content : "";
       const payloadTextLen = payloadText.trim().length;
       const pendingKey = messageId || sessionKey || "";
       const logDecision = (decision: "skip" | "attempt", reason: string, textLen: number) => {
@@ -3268,10 +4624,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     ) {
       try {
         const parsed = ClawlineDeliveryTarget.fromString(normalizedTargetInput);
-        const suffix = parsed.sessionLabel();
-        if (suffix === "main" || suffix === "dm" || suffix === "global") {
-          deliveryTarget = parsed;
-        }
+        deliveryTarget = parsed;
       } catch {
         // Not a delivery target.
       }
@@ -3284,16 +4637,14 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       const suffix = deliveryTarget.sessionLabel();
       const userId = deliveryTarget.userId();
       target = resolveSendTarget(userId);
-      const dmScope = openClawCfg.session?.dmScope ?? "main";
       if (suffix === "main") {
         sessionKeyHint = buildClawlinePersonalSessionKey(mainSessionAgentId, userId);
       } else if (suffix === "global") {
         sessionKeyHint = mainSessionKey;
-      } else {
-        sessionKeyHint =
-          dmScope === "main"
-            ? buildClawlinePersonalSessionKey(mainSessionAgentId, userId)
-            : buildClawlineUserStreamSessionKey(mainSessionAgentId, userId, "dm");
+      } else if (suffix === "dm") {
+        sessionKeyHint = buildClawlineUserStreamSessionKey(mainSessionAgentId, userId, "dm");
+      } else if (isCustomStreamSuffix(suffix)) {
+        sessionKeyHint = buildClawlineUserStreamSessionKey(mainSessionAgentId, userId, suffix);
       }
     } else {
       target = resolveSendTarget(normalizedTargetInput);
@@ -3306,6 +4657,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       // Boundary normalization: accept user/device targets, but use fully-qualified session keys
       // internally so all Clawline routing stays session-key-based.
       buildClawlinePersonalSessionKey(mainSessionAgentId, target.userId);
+    const normalizedResolvedSessionKey = normalizeStreamMutationSessionKeyForUser(
+      target.userId,
+      resolvedSessionKey,
+    );
+    if (!normalizedResolvedSessionKey) {
+      throw new Error("stream_not_found");
+    }
 
     let outboundAttachments = {
       attachments: [] as NormalizedAttachment[],
@@ -3335,18 +4693,35 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       type: "message",
       id: generateServerMessageId(),
       role: "assistant",
-      sender: resolveAssistantSenderName(resolvedSessionKey),
+      sender: resolveAssistantSenderName(normalizedResolvedSessionKey),
       content: text,
       timestamp: nowMs(),
       streaming: false,
-      sessionKey: resolvedSessionKey,
+      sessionKey: normalizedResolvedSessionKey,
       attachments:
         outboundAttachments.attachments.length > 0 ? outboundAttachments.attachments : undefined,
     };
-    await runPerUserTask(target.userId, async () => {
-      await appendEvent(event, target.userId);
+    // Do not route outbound sends through runPerUserTask: inbound processing holds that queue for
+    // the entire agent turn, which can stall sendAttachment rich-bubble delivery until timeout.
+    await enqueueWriteTask(() => {
+      const targetIsAdmin = allowlist.entries.some(
+        (entry) =>
+          entry.isAdmin &&
+          entry.userId.toLowerCase() === sanitizeUserId(target.userId).toLowerCase(),
+      );
+      const streams = ensureStreamSessionsForUser({
+        userId: target.userId,
+        isAdmin: targetIsAdmin,
+      });
+      if (
+        !streams.some((stream) => sessionKeyEq(stream.sessionKey, normalizedResolvedSessionKey))
+      ) {
+        throw new Error("stream_not_found");
+      }
+      syncUserSessionSubscriptions(target.userId, streams);
+      insertEventTx(event, target.userId);
     });
-    broadcastToSessionKey(resolvedSessionKey, event);
+    broadcastToSessionKey(normalizedResolvedSessionKey, event);
     return {
       messageId: event.id,
       userId: target.userId,
@@ -3391,10 +4766,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       storePath: sessionStorePath,
       sessionKey: session.sessionKey,
       sessionId: session.sessionId,
-      sessionFile: path.join(
-        sessionTranscriptsDir,
-        `${clawlineSessionFileName(session.sessionKey)}.jsonl`,
-      ),
+      sessionFile: resolveSessionTranscriptPath(session.sessionId, mainSessionAgentId),
       displayName: session.claimedName ?? session.deviceInfo?.model ?? null,
       logger,
     });
@@ -3423,20 +4795,26 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       const attachmentsHash = hashAttachments(attachmentsInfo.attachments);
       const payloadSessionKey =
         typeof payload.sessionKey === "string" ? payload.sessionKey.trim() : "";
+      const normalizedPayloadSessionKey = payloadSessionKey
+        ? normalizeStreamMutationSessionKeyForUser(session.userId, payloadSessionKey)
+        : "";
+      if (payloadSessionKey && !normalizedPayloadSessionKey) {
+        throw new ClientMessageError("stream_not_found", "Stream not found");
+      }
       const allowedSessionKeys = session.provisionedSessionKeys?.length
         ? session.provisionedSessionKeys
         : [session.sessionKey];
       // Legacy clients may omit sessionKey; default to the Main stream session key.
-      const resolvedSessionKey = payloadSessionKey || session.sessionKey;
+      const resolvedSessionKey = normalizedPayloadSessionKey || session.sessionKey;
       if (
-        payloadSessionKey &&
         !allowedSessionKeys.some(
-          (sessionKey) => sessionKey.toLowerCase() === payloadSessionKey.toLowerCase(),
+          (sessionKey) =>
+            normalizeSessionKey(sessionKey) === normalizeSessionKey(resolvedSessionKey),
         )
       ) {
-        throw new ClientMessageError("invalid_message", "Invalid sessionKey");
+        throw new ClientMessageError("stream_not_found", "Stream not found");
       }
-      let streamSuffix: "main" | "dm" | "global" = "main";
+      let streamSuffix = "main";
       if (sessionKeyEq(resolvedSessionKey, session.personalSessionKey)) {
         streamSuffix = "main";
       } else if (
@@ -3446,8 +4824,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         streamSuffix = "dm";
       } else if (sessionKeyEq(resolvedSessionKey, session.globalSessionKey)) {
         streamSuffix = "global";
-      } else if (payloadSessionKey) {
-        throw new ClientMessageError("invalid_message", "Invalid sessionKey");
+      } else {
+        const parsed = parseClawlineUserSessionKey(resolvedSessionKey);
+        const normalizedUserId = sanitizeUserId(session.userId).toLowerCase();
+        if (!parsed || parsed.userId !== normalizedUserId) {
+          throw new ClientMessageError("stream_not_found", "Stream not found");
+        }
+        streamSuffix = parsed.streamSuffix;
       }
       logger.info?.("[clawline] inbound message routing", {
         messageId: payload.id,
@@ -3464,304 +4847,315 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       }
       const targetUserId = session.userId;
 
-      await runPerUserTask(session.userId, async () => {
-        const existing = selectMessageStmt.get(session.deviceId, payload.id) as
-          | {
-              deviceId: string;
-              contentHash: string;
-              attachmentsHash: string;
-              streaming: number;
-              ackSent: number;
+      await runPerUserTask(
+        session.userId,
+        async () => {
+          const existing = selectMessageStmt.get(session.deviceId, payload.id) as
+            | {
+                deviceId: string;
+                contentHash: string;
+                attachmentsHash: string;
+                streaming: number;
+                ackSent: number;
+              }
+            | undefined;
+          const incomingHash = sha256(rawContent);
+          if (existing) {
+            if (
+              existing.contentHash !== incomingHash ||
+              existing.attachmentsHash !== attachmentsHash
+            ) {
+              throw new ClientMessageError("invalid_message", "Duplicate mismatch");
             }
-          | undefined;
-        const incomingHash = sha256(rawContent);
-        if (existing) {
-          if (
-            existing.contentHash !== incomingHash ||
-            existing.attachmentsHash !== attachmentsHash
-          ) {
-            throw new ClientMessageError("invalid_message", "Duplicate mismatch");
+            if (existing.streaming === (MessageStreamingState.Failed as number)) {
+              throw new ClientMessageError("invalid_message", "Message failed");
+            }
+            if (existing.ackSent === 0) {
+              session.socket.send(JSON.stringify({ type: "ack", id: payload.id }), (err) => {
+                if (!err) {
+                  markAckSent(session.deviceId, payload.id);
+                }
+              });
+            } else {
+              session.socket.send(JSON.stringify({ type: "ack", id: payload.id }), () => {});
+            }
+            return;
           }
-          if (existing.streaming === (MessageStreamingState.Failed as number)) {
-            throw new ClientMessageError("invalid_message", "Message failed");
+
+          if (!messageRateLimiter.attempt(session.deviceId)) {
+            throw new ClientMessageError("rate_limited", "Too many messages");
           }
-          if (existing.ackSent === 0) {
+
+          const materialized = await materializeInlineAttachments({
+            attachments: attachmentsInfo.attachments,
+            ownerUserId: targetUserId,
+            deviceId: session.deviceId,
+          });
+          const assetIds = attachmentsInfo.assetIds.concat(materialized.inlineAssetIds);
+          const ownership = await ensureChannelAttachmentOwnership({
+            attachments: materialized.attachments,
+            assetIds,
+            session,
+          });
+
+          const { event } = await persistUserMessage(
+            session,
+            targetUserId,
+            payload.id,
+            rawContent,
+            ownership.attachments,
+            attachmentsHash,
+            ownership.assetIds,
+            resolvedSessionKey,
+          );
+          await new Promise<void>((resolve) => {
             session.socket.send(JSON.stringify({ type: "ack", id: payload.id }), (err) => {
               if (!err) {
                 markAckSent(session.deviceId, payload.id);
               }
+              resolve();
             });
-          } else {
-            session.socket.send(JSON.stringify({ type: "ack", id: payload.id }), () => {});
-          }
-          return;
-        }
-
-        if (!messageRateLimiter.attempt(session.deviceId)) {
-          throw new ClientMessageError("rate_limited", "Too many messages");
-        }
-
-        const materialized = await materializeInlineAttachments({
-          attachments: attachmentsInfo.attachments,
-          ownerUserId: targetUserId,
-          deviceId: session.deviceId,
-        });
-        const assetIds = attachmentsInfo.assetIds.concat(materialized.inlineAssetIds);
-        const ownership = await ensureChannelAttachmentOwnership({
-          attachments: materialized.attachments,
-          assetIds,
-          session,
-        });
-
-        const { event } = await persistUserMessage(
-          session,
-          targetUserId,
-          payload.id,
-          rawContent,
-          ownership.attachments,
-          attachmentsHash,
-          ownership.assetIds,
-          resolvedSessionKey,
-        );
-        await new Promise<void>((resolve) => {
-          session.socket.send(JSON.stringify({ type: "ack", id: payload.id }), (err) => {
-            if (!err) {
-              markAckSent(session.deviceId, payload.id);
-            }
-            resolve();
           });
-        });
-        broadcastToSessionKey(resolvedSessionKey, event);
+          broadcastToSessionKey(resolvedSessionKey, event);
 
-        const attachmentSummary = describeClawlineAttachments(ownership.attachments);
-        const inboundBody = attachmentSummary
-          ? `${rawContent}\n\n${attachmentSummary}`
-          : rawContent;
-        const inboundImages = clawlineAttachmentsToImages(ownership.attachments);
+          const attachmentSummary = describeClawlineAttachments(ownership.attachments);
+          const inboundBody = attachmentSummary
+            ? `${rawContent}\n\n${attachmentSummary}`
+            : rawContent;
+          const inboundImages = clawlineAttachmentsToImages(ownership.attachments);
 
-        const channelLabel = "clawline";
-        const routeSessionKey = resolvedSessionKey;
-        const route = {
-          agentId: mainSessionAgentId,
-          channel: "clawline",
-          accountId: DEFAULT_ACCOUNT_ID,
-          sessionKey: routeSessionKey,
-          mainSessionKey,
-        };
-        const peerId = session.peerId;
+          const channelLabel = "clawline";
+          const routeSessionKey = resolvedSessionKey;
+          const route = {
+            agentId: mainSessionAgentId,
+            channel: "clawline",
+            accountId: DEFAULT_ACCOUNT_ID,
+            sessionKey: routeSessionKey,
+            mainSessionKey,
+          };
+          const peerId = session.peerId;
 
-        const deliveryTarget = ClawlineDeliveryTarget.fromParts(session.userId, streamSuffix);
-        const ctxPayload = finalizeInboundContext({
-          Body: inboundBody,
-          RawBody: rawContent,
-          CommandBody: rawContent,
-          From: `${channelLabel}:${peerId}`,
-          To: `device:${session.deviceId}`,
-          SessionKey: route.sessionKey,
-          AccountId: route.accountId,
-          MessageSid: payload.id,
-          ChatType: "direct",
-          SenderName: session.claimedName ?? session.deviceInfo?.model ?? peerId,
-          SenderId: session.userId,
-          Provider: "clawline",
-          Surface: channelLabel,
-          OriginatingChannel: channelLabel,
-          OriginatingTo: deliveryTarget.toString(),
-          CommandAuthorized: true,
-        });
-        const updateLastRoute =
-          streamSuffix === "dm" && session.dmScope !== "main"
-            ? {
-                // DM cross-session "follow me" write: tell agent:main:main where this user is currently talking.
-                sessionKey: route.mainSessionKey,
-                channel: "clawline",
-                to: deliveryTarget.toString(),
-                accountId: route.accountId,
-              }
-            : undefined;
-        await recordInboundSession({
-          storePath: sessionStorePath,
-          sessionKey: route.sessionKey,
-          ctx: ctxPayload,
-          updateLastRoute,
-          onRecordError: (err) => {
-            logger.warn?.(`[clawline] failed recording inbound session: ${formatError(err)}`);
-          },
-        });
-
-        const fallbackText = adapterOverrides.responseFallback?.trim() ?? "";
-        const prefixContext: ResponsePrefixContext = {
-          identityName: resolveIdentityName(openClawCfg, route.agentId),
-        };
-
-        // Track activity state for typing indicator
-        let activitySignaled = false;
-        const sendActivitySignal = async (isActive: boolean) => {
-          logger.info?.("[clawline] activity_signal", {
-            isActive,
-            messageId: payload.id,
+          const deliveryTarget = ClawlineDeliveryTarget.fromParts(session.userId, streamSuffix);
+          const systemPromptParts = [adapterOverrides.systemPrompt?.trim() || null].filter(
+            (entry): entry is string => Boolean(entry),
+          );
+          const groupSystemPrompt =
+            systemPromptParts.length > 0 ? systemPromptParts.join("\n\n") : undefined;
+          const ctxPayload = finalizeInboundContext({
+            Body: inboundBody,
+            RawBody: rawContent,
+            CommandBody: rawContent,
+            From: `${channelLabel}:${peerId}`,
+            To: `device:${session.deviceId}`,
+            SessionKey: route.sessionKey,
+            AccountId: route.accountId,
+            MessageSid: payload.id,
+            ChatType: "direct",
+            SenderName: session.claimedName ?? session.deviceInfo?.model ?? peerId,
+            SenderId: session.userId,
+            Provider: "clawline",
+            Surface: channelLabel,
+            OriginatingChannel: channelLabel,
+            OriginatingTo: deliveryTarget.toString(),
+            GroupSystemPrompt: groupSystemPrompt,
+            CommandAuthorized: true,
+          });
+          const updateLastRoute =
+            streamSuffix === "dm" && session.dmScope !== "main"
+              ? {
+                  // DM cross-session "follow me" write: tell agent:main:main where this user is currently talking.
+                  sessionKey: route.mainSessionKey,
+                  channel: "clawline",
+                  to: deliveryTarget.toString(),
+                  accountId: route.accountId,
+                }
+              : undefined;
+          await recordInboundSession({
+            storePath: sessionStorePath,
             sessionKey: route.sessionKey,
+            ctx: ctxPayload,
+            updateLastRoute,
+            onRecordError: (err) => {
+              logger.warn?.(`[clawline] failed recording inbound session: ${formatError(err)}`);
+            },
           });
-          await sendJson(session.socket, {
-            type: "event",
-            event: "activity",
-            payload: {
+
+          const fallbackText = adapterOverrides.responseFallback?.trim() ?? "";
+          const prefixContext: ResponsePrefixContext = {
+            identityName: resolveIdentityName(openClawCfg, route.agentId),
+          };
+
+          // Track activity state for typing indicator
+          let activitySignaled = false;
+          const sendActivitySignal = async (isActive: boolean) => {
+            logger.info?.("[clawline] activity_signal", {
               isActive,
               messageId: payload.id,
               sessionKey: route.sessionKey,
-            },
-          }).catch(() => {});
-        };
-
-        const { dispatcher, replyOptions, markDispatchIdle } = createReplyDispatcherWithTyping({
-          responsePrefix: resolveEffectiveMessagesConfig(openClawCfg, route.agentId).responsePrefix,
-          responsePrefixContextProvider: () => prefixContext,
-          humanDelay: resolveHumanDelayConfig(openClawCfg, route.agentId),
-          deliver: async (replyPayload) => {
-            // Stop activity signal when first content arrives (streaming begins)
-            if (activitySignaled) {
-              activitySignaled = false;
-              void sendActivitySignal(false);
-            }
-            const mediaUrls = replyPayload.mediaUrls?.length
-              ? replyPayload.mediaUrls
-              : replyPayload.mediaUrl
-                ? [replyPayload.mediaUrl]
-                : [];
-            let attachments: NormalizedAttachment[] = [];
-            const trimmedText = replyPayload.text?.trim();
-            if (mediaUrls.length > 0) {
-              try {
-                const materialized = await materializeOutboundMediaUrls({
-                  mediaUrls,
-                  ownerUserId: targetUserId,
-                  uploaderDeviceId: session.deviceId,
-                });
-                attachments = materialized.attachments;
-              } catch (err) {
-                logger.warn?.(`[clawline] reply_media_attachment_failed: ${formatError(err)}`);
-              }
-            }
-            const assistantText =
-              trimmedText && trimmedText.length > 0
-                ? trimmedText
-                : attachments.length > 0
-                  ? ""
-                  : buildAssistantTextFromPayload(replyPayload, fallbackText);
-            if (assistantText === null) {
-              return;
-            }
-            const assistantEvent = await persistAssistantMessage(
-              session,
-              targetUserId,
-              assistantText,
-              route.sessionKey,
-              attachments,
-            );
-            broadcastToSessionKey(resolvedSessionKey, assistantEvent);
-          },
-          onError: (err, info) => {
-            logger.error?.("[clawline] reply_delivery_failed", {
-              kind: info.kind,
-              error: err instanceof Error ? err.message : String(err),
             });
-          },
-          onReplyStart: async () => {
-            // Signal that processing has started (for typing indicator)
-            if (!activitySignaled) {
-              activitySignaled = true;
-              await sendActivitySignal(true);
-            }
-          },
-        });
-
-        logger.info?.("[clawline] agent_run_start", {
-          messageId: payload.id,
-          sessionId: session.sessionId,
-          sessionKey: resolvedSessionKey,
-          userId: session.userId,
-          deviceId: session.deviceId,
-        });
-
-        let queuedFinal = false;
-        let deliveredCount = 0;
-        try {
-          const result = await dispatchReplyFromConfig({
-            ctx: ctxPayload,
-            cfg: openClawCfg,
-            dispatcher,
-            replyOptions: {
-              ...replyOptions,
-              images: inboundImages.length > 0 ? inboundImages : undefined,
-              onModelSelected: (ctx) => {
-                prefixContext.provider = ctx.provider;
-                prefixContext.model = extractShortModelName(ctx.model);
-                prefixContext.modelFull = `${ctx.provider}/${ctx.model}`;
-                prefixContext.thinkingLevel = ctx.thinkLevel ?? "off";
+            await sendJson(session.socket, {
+              type: "event",
+              event: "activity",
+              payload: {
+                isActive,
+                messageId: payload.id,
+                sessionKey: route.sessionKey,
               },
+            }).catch(() => {});
+          };
+
+          const { dispatcher, replyOptions, markDispatchIdle } = createReplyDispatcherWithTyping({
+            responsePrefix: resolveEffectiveMessagesConfig(openClawCfg, route.agentId)
+              .responsePrefix,
+            responsePrefixContextProvider: () => prefixContext,
+            humanDelay: resolveHumanDelayConfig(openClawCfg, route.agentId),
+            deliver: async (replyPayload) => {
+              // Stop activity signal when first content arrives (streaming begins)
+              if (activitySignaled) {
+                activitySignaled = false;
+                void sendActivitySignal(false);
+              }
+              const mediaUrls = replyPayload.mediaUrls?.length
+                ? replyPayload.mediaUrls
+                : replyPayload.mediaUrl
+                  ? [replyPayload.mediaUrl]
+                  : [];
+              let attachments: NormalizedAttachment[] = [];
+              const trimmedText = replyPayload.text?.trim();
+              if (mediaUrls.length > 0) {
+                try {
+                  const materialized = await materializeOutboundMediaUrls({
+                    mediaUrls,
+                    ownerUserId: targetUserId,
+                    uploaderDeviceId: session.deviceId,
+                  });
+                  attachments = materialized.attachments;
+                } catch (err) {
+                  logger.warn?.(`[clawline] reply_media_attachment_failed: ${formatError(err)}`);
+                }
+              }
+              const assistantText =
+                trimmedText && trimmedText.length > 0
+                  ? trimmedText
+                  : attachments.length > 0
+                    ? ""
+                    : buildAssistantTextFromPayload(replyPayload, fallbackText);
+              if (assistantText === null) {
+                return;
+              }
+              const assistantEvent = await persistAssistantMessage(
+                session,
+                targetUserId,
+                assistantText,
+                route.sessionKey,
+                attachments,
+              );
+              broadcastToSessionKey(resolvedSessionKey, assistantEvent);
             },
-            replyResolver: options.replyResolver,
+            onError: (err, info) => {
+              logger.error?.("[clawline] reply_delivery_failed", {
+                kind: info.kind,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            },
+            onReplyStart: async () => {
+              // Signal that processing has started (for typing indicator)
+              if (!activitySignaled) {
+                activitySignaled = true;
+                await sendActivitySignal(true);
+              }
+            },
           });
-          queuedFinal = result.queuedFinal;
-          // Count all delivered content (streaming blocks, tool results, and final replies)
-          deliveredCount = result.counts.block + result.counts.tool + result.counts.final;
-        } catch (err) {
-          logger.error?.(`[clawline] dispatch_failed: ${formatError(err)}`);
-          queuedFinal = false;
-        }
-        markDispatchIdle();
-        await dispatcher.waitForIdle();
 
-        // Always send activity=false when done
-        if (activitySignaled) {
-          activitySignaled = false;
-          void sendActivitySignal(false);
-        }
+          logger.info?.("[clawline] agent_run_start", {
+            messageId: payload.id,
+            sessionId: session.sessionId,
+            sessionKey: resolvedSessionKey,
+            userId: session.userId,
+            deviceId: session.deviceId,
+          });
 
-        // Check if message was successfully handled:
-        // 1. queuedFinal = true means a final reply was sent
-        // 2. deliveredCount > 0 means content was streamed (blocks/tools)
-        // 3. queueDepth > 0 means message was queued for later processing
-        const queueKey = route.sessionKey;
-        const queueDepth = getFollowupQueueDepth(queueKey);
-        const wasDelivered = queuedFinal || deliveredCount > 0;
-        const wasQueued = !wasDelivered && queueDepth > 0;
+          let queuedFinal = false;
+          let deliveredCount = 0;
+          try {
+            const result = await dispatchReplyFromConfig({
+              ctx: ctxPayload,
+              cfg: openClawCfg,
+              dispatcher,
+              replyOptions: {
+                ...replyOptions,
+                images: inboundImages.length > 0 ? inboundImages : undefined,
+                onModelSelected: (ctx) => {
+                  prefixContext.provider = ctx.provider;
+                  prefixContext.model = extractShortModelName(ctx.model);
+                  prefixContext.modelFull = `${ctx.provider}/${ctx.model}`;
+                  prefixContext.thinkingLevel = ctx.thinkLevel ?? "off";
+                },
+              },
+              replyResolver: options.replyResolver,
+            });
+            queuedFinal = result.queuedFinal;
+            // Count all delivered content (streaming blocks, tool results, and final replies)
+            deliveredCount = result.counts.block + result.counts.tool + result.counts.final;
+          } catch (err) {
+            logger.error?.(`[clawline] dispatch_failed: ${formatError(err)}`);
+            queuedFinal = false;
+          }
+          markDispatchIdle();
+          await dispatcher.waitForIdle();
 
-        logger.info?.("[clawline] agent_run_end", {
-          messageId: payload.id,
-          sessionId: session.sessionId,
-          sessionKey: resolvedSessionKey,
-          userId: session.userId,
-          deviceId: session.deviceId,
-          deliveredCount,
-          queuedFinal,
-          queueDepth,
-          wasDelivered,
-          wasQueued,
-        });
+          // Always send activity=false when done
+          if (activitySignaled) {
+            activitySignaled = false;
+            void sendActivitySignal(false);
+          }
 
-        if (!wasDelivered && !wasQueued) {
+          // Check if message was successfully handled:
+          // 1. queuedFinal = true means a final reply was sent
+          // 2. deliveredCount > 0 means content was streamed (blocks/tools)
+          // 3. queueDepth > 0 means message was queued for later processing
+          const queueKey = route.sessionKey;
+          const queueDepth = getFollowupQueueDepth(queueKey);
+          const wasDelivered = queuedFinal || deliveredCount > 0;
+          const wasQueued = !wasDelivered && queueDepth > 0;
+
+          logger.info?.("[clawline] agent_run_end", {
+            messageId: payload.id,
+            sessionId: session.sessionId,
+            sessionKey: resolvedSessionKey,
+            userId: session.userId,
+            deviceId: session.deviceId,
+            deliveredCount,
+            queuedFinal,
+            queueDepth,
+            wasDelivered,
+            wasQueued,
+          });
+
+          if (!wasDelivered && !wasQueued) {
+            updateMessageStreamingStmt.run(
+              MessageStreamingState.Failed,
+              session.deviceId,
+              payload.id,
+            );
+            await sendJson(session.socket, {
+              type: "error",
+              code: "server_error",
+              message: "Unable to deliver reply",
+              messageId: payload.id,
+            }).catch(() => {});
+            return;
+          }
+
+          // Message was either delivered or queued successfully
           updateMessageStreamingStmt.run(
-            MessageStreamingState.Failed,
+            wasQueued ? MessageStreamingState.Queued : MessageStreamingState.Finalized,
             session.deviceId,
             payload.id,
           );
-          await sendJson(session.socket, {
-            type: "error",
-            code: "server_error",
-            message: "Unable to deliver reply",
-            messageId: payload.id,
-          }).catch(() => {});
-          return;
-        }
-
-        // Message was either delivered or queued successfully
-        updateMessageStreamingStmt.run(
-          wasQueued ? MessageStreamingState.Queued : MessageStreamingState.Finalized,
-          session.deviceId,
-          payload.id,
-        );
-      });
+        },
+        { streamKey: resolvedSessionKey },
+      );
     } catch (err) {
       if (err instanceof ClientMessageError) {
         await sendJson(session.socket, {
@@ -3790,6 +5184,392 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         code: "server_error",
         message: "Message processing failed",
         messageId: payload?.id,
+      }).catch(() => {});
+    }
+  }
+
+  // oxlint-disable-next-line typescript/no-explicit-any
+  async function processInteractiveCallback(session: Session, payload: any) {
+    try {
+      const sourceMessageId = typeof payload.messageId === "string" ? payload.messageId.trim() : "";
+      if (!sourceMessageId) {
+        throw new ClientMessageError("invalid_message", "Missing messageId");
+      }
+
+      const callbackPayload =
+        payload.payload && typeof payload.payload === "object"
+          ? (payload.payload as Record<string, unknown>)
+          : null;
+      const action =
+        callbackPayload && typeof callbackPayload.action === "string"
+          ? callbackPayload.action.trim()
+          : "";
+      if (!action) {
+        throw new ClientMessageError("invalid_message", "Missing action");
+      }
+      if (action.length > MAX_INTERACTIVE_ACTION_CHARS) {
+        throw new ClientMessageError("invalid_message", "action too long");
+      }
+
+      const dataValue = callbackPayload ? callbackPayload.data : null;
+      const { json: dataJson, bytes: dataBytes } = safeJsonStringify(dataValue);
+      if (dataBytes > MAX_INTERACTIVE_DATA_BYTES) {
+        throw new ClientMessageError("payload_too_large", "data payload too large");
+      }
+
+      // Best-effort: route the callback to the same sessionKey the source message was delivered on.
+      // Guard with userId to prevent cross-user routing.
+      let resolvedSessionKey = session.sessionKey;
+      const sourceRow = selectEventPayloadForUserStmt.get(session.userId, sourceMessageId) as
+        | { payloadJson: string }
+        | undefined;
+      if (sourceRow && typeof sourceRow.payloadJson === "string") {
+        const parsed = parseServerMessage(sourceRow.payloadJson, logger);
+        const hinted = typeof parsed?.sessionKey === "string" ? parsed.sessionKey.trim() : "";
+        if (hinted) {
+          resolvedSessionKey = hinted;
+        }
+      }
+
+      const allowedSessionKeys = session.provisionedSessionKeys?.length
+        ? session.provisionedSessionKeys
+        : [session.sessionKey];
+      if (
+        !allowedSessionKeys.some(
+          (sessionKey) => sessionKey.toLowerCase() === resolvedSessionKey.toLowerCase(),
+        )
+      ) {
+        resolvedSessionKey = session.sessionKey;
+      }
+
+      let streamSuffix: "main" | "dm" | "global" = "main";
+      if (sessionKeyEq(resolvedSessionKey, session.personalSessionKey)) {
+        streamSuffix = "main";
+      } else if (
+        session.dmScope !== "main" &&
+        sessionKeyEq(resolvedSessionKey, session.dmSessionKey)
+      ) {
+        streamSuffix = "dm";
+      } else if (sessionKeyEq(resolvedSessionKey, session.globalSessionKey)) {
+        streamSuffix = "global";
+      }
+      if (streamSuffix === "global" && !session.isAdmin) {
+        throw new ClientMessageError("forbidden", "Admin channel requires admin access");
+      }
+
+      const callbackEnvelope = {
+        messageId: sourceMessageId,
+        payload: { action, data: dataValue === undefined ? null : dataValue },
+      };
+      const { json: callbackJson } = safeJsonStringify(callbackEnvelope);
+      const docAttachment: NormalizedAttachment = {
+        type: "document",
+        mimeType: INTERACTIVE_CALLBACK_MIME,
+        data: Buffer.from(callbackJson, "utf8").toString("base64"),
+      };
+
+      const prefix = `[Interactive] action=${action} -- `;
+      const maxBytes = config.sessions.maxMessageBytes;
+      const prefixBytes = Buffer.byteLength(prefix, "utf8");
+      // Ensure the text fallback stays within maxMessageBytes even when data is near the 64KB cap.
+      const dataBudget = Math.max(0, maxBytes - prefixBytes);
+      const dataForText =
+        Buffer.byteLength(dataJson, "utf8") <= dataBudget
+          ? dataJson
+          : `${truncateUtf8(dataJson, Math.max(0, dataBudget - 3))}...`;
+      const rawContent = `${prefix}${dataForText}`;
+
+      const targetUserId = session.userId;
+      const attachments: NormalizedAttachment[] = [docAttachment];
+      const attachmentsHash = hashAttachments(attachments);
+      const assetIds: string[] = [];
+
+      await runPerUserTask(
+        session.userId,
+        async () => {
+          if (!messageRateLimiter.attempt(session.deviceId)) {
+            throw new ClientMessageError("rate_limited", "Too many messages");
+          }
+
+          const clientId = `c_${randomUUID()}`;
+
+          const { event } = await persistUserMessage(
+            session,
+            targetUserId,
+            clientId,
+            rawContent,
+            attachments,
+            attachmentsHash,
+            assetIds,
+            resolvedSessionKey,
+          );
+          broadcastToSessionKey(resolvedSessionKey, event);
+
+          const attachmentSummary = describeClawlineAttachments(attachments);
+          const inboundBody = attachmentSummary
+            ? `${rawContent}\n\n${attachmentSummary}`
+            : rawContent;
+          const inboundImages = clawlineAttachmentsToImages(attachments);
+
+          const channelLabel = "clawline";
+          const routeSessionKey = resolvedSessionKey;
+          const route = {
+            agentId: mainSessionAgentId,
+            channel: "clawline",
+            accountId: DEFAULT_ACCOUNT_ID,
+            sessionKey: routeSessionKey,
+            mainSessionKey,
+          };
+          const peerId = session.peerId;
+
+          const deliveryTarget = ClawlineDeliveryTarget.fromParts(session.userId, streamSuffix);
+          const systemPromptParts = [adapterOverrides.systemPrompt?.trim() || null].filter(
+            (entry): entry is string => Boolean(entry),
+          );
+          const groupSystemPrompt =
+            systemPromptParts.length > 0 ? systemPromptParts.join("\n\n") : undefined;
+          const ctxPayload = finalizeInboundContext({
+            Body: inboundBody,
+            RawBody: rawContent,
+            CommandBody: rawContent,
+            From: `${channelLabel}:${peerId}`,
+            To: `device:${session.deviceId}`,
+            SessionKey: route.sessionKey,
+            AccountId: route.accountId,
+            MessageSid: clientId,
+            ChatType: "direct",
+            SenderName: session.claimedName ?? session.deviceInfo?.model ?? peerId,
+            SenderId: session.userId,
+            Provider: "clawline",
+            Surface: channelLabel,
+            OriginatingChannel: channelLabel,
+            OriginatingTo: deliveryTarget.toString(),
+            GroupSystemPrompt: groupSystemPrompt,
+            CommandAuthorized: true,
+          });
+          const updateLastRoute =
+            streamSuffix === "dm" && session.dmScope !== "main"
+              ? {
+                  // DM cross-session "follow me" write: tell agent:main:main where this user is currently talking.
+                  sessionKey: route.mainSessionKey,
+                  channel: "clawline",
+                  to: deliveryTarget.toString(),
+                  accountId: route.accountId,
+                }
+              : undefined;
+          await recordInboundSession({
+            storePath: sessionStorePath,
+            sessionKey: route.sessionKey,
+            ctx: ctxPayload,
+            updateLastRoute,
+            onRecordError: (err) => {
+              logger.warn?.(`[clawline] failed recording inbound session: ${formatError(err)}`);
+            },
+          });
+
+          const fallbackText = adapterOverrides.responseFallback?.trim() ?? "";
+          const prefixContext: ResponsePrefixContext = {
+            identityName: resolveIdentityName(openClawCfg, route.agentId),
+          };
+
+          // Track activity state for typing indicator
+          let activitySignaled = false;
+          const sendActivitySignal = async (isActive: boolean) => {
+            logger.info?.("[clawline] activity_signal", {
+              isActive,
+              messageId: clientId,
+              sessionKey: route.sessionKey,
+            });
+            await sendJson(session.socket, {
+              type: "event",
+              event: "activity",
+              payload: {
+                isActive,
+                messageId: clientId,
+                sessionKey: route.sessionKey,
+              },
+            }).catch(() => {});
+          };
+
+          const { dispatcher, replyOptions, markDispatchIdle } = createReplyDispatcherWithTyping({
+            responsePrefix: resolveEffectiveMessagesConfig(openClawCfg, route.agentId)
+              .responsePrefix,
+            responsePrefixContextProvider: () => prefixContext,
+            humanDelay: resolveHumanDelayConfig(openClawCfg, route.agentId),
+            deliver: async (replyPayload) => {
+              // Stop activity signal when first content arrives (streaming begins)
+              if (activitySignaled) {
+                activitySignaled = false;
+                void sendActivitySignal(false);
+              }
+              const mediaUrls = replyPayload.mediaUrls?.length
+                ? replyPayload.mediaUrls
+                : replyPayload.mediaUrl
+                  ? [replyPayload.mediaUrl]
+                  : [];
+              let replyAttachments: NormalizedAttachment[] = [];
+              const trimmedText = replyPayload.text?.trim();
+              if (mediaUrls.length > 0) {
+                try {
+                  const materialized = await materializeOutboundMediaUrls({
+                    mediaUrls,
+                    ownerUserId: targetUserId,
+                    uploaderDeviceId: session.deviceId,
+                  });
+                  replyAttachments = materialized.attachments;
+                } catch (err) {
+                  logger.warn?.(`[clawline] reply_media_attachment_failed: ${formatError(err)}`);
+                }
+              }
+              const assistantText =
+                trimmedText && trimmedText.length > 0
+                  ? trimmedText
+                  : replyAttachments.length > 0
+                    ? ""
+                    : buildAssistantTextFromPayload(replyPayload, fallbackText);
+              if (assistantText === null) {
+                return;
+              }
+              const assistantEvent = await persistAssistantMessage(
+                session,
+                targetUserId,
+                assistantText,
+                route.sessionKey,
+                replyAttachments,
+              );
+              broadcastToSessionKey(resolvedSessionKey, assistantEvent);
+            },
+            onError: (err, info) => {
+              logger.error?.("[clawline] reply_delivery_failed", {
+                kind: info.kind,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            },
+            onReplyStart: async () => {
+              // Signal that processing has started (for typing indicator)
+              if (!activitySignaled) {
+                activitySignaled = true;
+                await sendActivitySignal(true);
+              }
+            },
+          });
+
+          logger.info?.("[clawline] agent_run_start", {
+            messageId: clientId,
+            sessionId: session.sessionId,
+            sessionKey: resolvedSessionKey,
+            userId: session.userId,
+            deviceId: session.deviceId,
+            sourceMessageId,
+            interactiveAction: action,
+          });
+
+          let queuedFinal = false;
+          let deliveredCount = 0;
+          try {
+            const result = await dispatchReplyFromConfig({
+              ctx: ctxPayload,
+              cfg: openClawCfg,
+              dispatcher,
+              replyOptions: {
+                ...replyOptions,
+                images: inboundImages.length > 0 ? inboundImages : undefined,
+                onModelSelected: (ctx) => {
+                  prefixContext.provider = ctx.provider;
+                  prefixContext.model = extractShortModelName(ctx.model);
+                  prefixContext.modelFull = `${ctx.provider}/${ctx.model}`;
+                  prefixContext.thinkingLevel = ctx.thinkLevel ?? "off";
+                },
+              },
+              replyResolver: options.replyResolver,
+            });
+            queuedFinal = result.queuedFinal;
+            // Count all delivered content (streaming blocks, tool results, and final replies)
+            deliveredCount = result.counts.block + result.counts.tool + result.counts.final;
+          } catch (err) {
+            logger.error?.(`[clawline] dispatch_failed: ${formatError(err)}`);
+            queuedFinal = false;
+          }
+          markDispatchIdle();
+          await dispatcher.waitForIdle();
+
+          // Always send activity=false when done
+          if (activitySignaled) {
+            activitySignaled = false;
+            void sendActivitySignal(false);
+          }
+
+          const queueKey = route.sessionKey;
+          const queueDepth = getFollowupQueueDepth(queueKey);
+          const wasDelivered = queuedFinal || deliveredCount > 0;
+          const wasQueued = !wasDelivered && queueDepth > 0;
+
+          logger.info?.("[clawline] agent_run_end", {
+            messageId: clientId,
+            sessionId: session.sessionId,
+            sessionKey: resolvedSessionKey,
+            userId: session.userId,
+            deviceId: session.deviceId,
+            deliveredCount,
+            queuedFinal,
+            queueDepth,
+            wasDelivered,
+            wasQueued,
+            sourceMessageId,
+            interactiveAction: action,
+          });
+
+          if (!wasDelivered && !wasQueued) {
+            updateMessageStreamingStmt.run(
+              MessageStreamingState.Failed,
+              session.deviceId,
+              clientId,
+            );
+            await sendJson(session.socket, {
+              type: "error",
+              code: "server_error",
+              message: "Unable to deliver reply",
+              messageId: clientId,
+            }).catch(() => {});
+            return;
+          }
+
+          updateMessageStreamingStmt.run(
+            wasQueued ? MessageStreamingState.Queued : MessageStreamingState.Finalized,
+            session.deviceId,
+            clientId,
+          );
+        },
+        { streamKey: resolvedSessionKey },
+      );
+    } catch (err) {
+      if (err instanceof ClientMessageError) {
+        await sendJson(session.socket, {
+          type: "error",
+          code: err.code,
+          message: err.message,
+        }).catch(() => {});
+        return;
+      }
+      if (err instanceof HttpError) {
+        await sendJson(session.socket, {
+          type: "error",
+          code: err.code,
+          message: err.message,
+        }).catch(() => {});
+        return;
+      }
+      logger.error?.("[clawline] processInteractiveCallback_unexpected_error", {
+        error: err instanceof Error ? err.message : String(err),
+        messageId: payload?.messageId,
+        userId: session.userId,
+        deviceId: session.deviceId,
+      });
+      await sendJson(session.socket, {
+        type: "error",
+        code: "server_error",
+        message: "Message processing failed",
+        messageId: payload?.messageId,
       }).catch(() => {});
     }
   }
@@ -3962,6 +5742,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           break;
         case "message":
           await handleAuthedMessage(ws, payload);
+          break;
+        case "interactive-callback":
+          await handleAuthedInteractiveCallback(ws, payload);
           break;
         default:
           await sendJson(ws, { type: "error", code: "invalid_message", message: "Unknown type" });
@@ -4609,11 +6392,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       return;
     }
     const peerId = derivePeerId(entry);
+    const clientFeatures = parseClientFeatures(payload);
     const session: Session = {
       socket: ws,
       deviceId: entry.deviceId,
       userId: entry.userId,
       isAdmin: entry.isAdmin,
+      clientFeatures,
       sessionId: `session_${randomUUID()}`,
       sessionKey: "",
       sessionKeys: [],
@@ -4684,6 +6469,22 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     await processClientMessage(session, payload);
   }
 
+  // oxlint-disable-next-line typescript/no-explicit-any
+  async function handleAuthedInteractiveCallback(ws: WebSocket, payload: any) {
+    const state = connectionState.get(ws);
+    if (!state || !state.authenticated || !state.deviceId || !state.userId) {
+      await sendJson(ws, { type: "error", code: "auth_failed", message: "Not authenticated" });
+      ws.close();
+      return;
+    }
+    const session = sessionsByDevice.get(state.deviceId);
+    if (!session) {
+      await sendJson(ws, { type: "error", code: "auth_failed", message: "Session missing" });
+      return;
+    }
+    await processInteractiveCallback(session, payload);
+  }
+
   let started = false;
 
   const readBoundPort = () => {
@@ -4700,6 +6501,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       if (initialized) {
         await cleanupTmpDirectory();
         await cleanupOrphanedAssetFiles();
+      }
+      cleanupExpiredStreamIdempotencyRows();
+      if (!streamIdempotencyCleanupInterval) {
+        streamIdempotencyCleanupInterval = setInterval(() => {
+          cleanupExpiredStreamIdempotencyRows();
+        }, STREAM_IDEMPOTENCY_CLEANUP_INTERVAL_MS);
       }
       if (started) {
         return;
@@ -4729,6 +6536,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       clearInterval(pendingCleanupInterval);
       if (assetCleanupInterval) {
         clearInterval(assetCleanupInterval);
+      }
+      if (streamIdempotencyCleanupInterval) {
+        clearInterval(streamIdempotencyCleanupInterval);
+        streamIdempotencyCleanupInterval = null;
       }
       // Force-close any active clients so shutdown doesn't hang.
       for (const client of wss.clients) {
@@ -4775,6 +6586,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       await closeWithTimeout((cb) => wss.close(cb), "wss");
       await closeWithTimeout((cb) => terminalWss.close(cb), "terminalWss");
       await closeWithTimeout((cb) => httpServer.close(cb), "httpServer");
+      await perUserTaskQueue.drain();
+      await writeQueue.catch(() => {});
       disposeDatabaseResources();
       started = false;
     },
