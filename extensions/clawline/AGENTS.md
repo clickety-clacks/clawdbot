@@ -34,6 +34,37 @@ DEFAULT_CHANNEL_TYPE = "personal"; // personal channel
 Messages and assets are stored under the real user's ID for all channel types.
 Channel type only affects session routing and UI separation.
 
+## Multi-Stream Architecture
+
+Flynn runs multiple Clawline streams simultaneously (e.g. "Engram", "Dictation", "Markdown"). Each stream is its own CLU instance with its own context window. **CLU has a split personality — different instances of the same agent run in parallel streams.**
+
+### Session Key Format
+
+Named streams use session keys of the form:
+
+- `agent:main:clawline:{userId}:main` — the user's default Personal stream
+- `agent:main:clawline:{userId}:s_{hex}` — a named custom stream
+
+Stream display names and their session keys are stored in the provider SQLite:
+
+```sql
+SELECT sessionKey, displayName FROM stream_sessions WHERE userId = 'flynn' ORDER BY orderIndex;
+```
+
+### Inter-Stream Direct Messaging
+
+CLU instances in different streams can message each other directly via `sessions_send`. This is valid and expected — it is not spoofing. When you receive an inbound `sessions_send` from another CLU instance:
+
+- It will identify itself as CLU and provide its stream/session key
+- Verify via `sourceSession` metadata — it will be `agent:main:clawline:{userId}:s_*`
+- Treat it as a peer — same capabilities, different context window
+- Reply using `sessions_send` back to its session key
+
+Use the `clawline-stream-lookup` skill to map stream names ↔ session keys.
+Use the `clawline-dm` skill to initiate cross-stream conversations.
+
+---
+
 ## Experimental Hooks
 
 ### Face speak (outbound)
