@@ -277,6 +277,31 @@ export async function monitorIMessageProvider(opts: MonitorIMessageOpts = {}): P
           defaultConfig: undefined,
         };
 
+    // PATCH_GAP1_GROUP_ALLOWLIST_CONFIRMED_GROUP_ONLY_START
+    // Prevent DM regressions: chat_id exists in DMs too. Only enforce early
+    // group-list blocking when we have strong group confirmation signals.
+    const groupGuidSource = (chatGuid ?? chatIdentifier ?? "").trim();
+    const guidLooksGroup = groupGuidSource.includes(";+;");
+    const guidLooksDirect = groupGuidSource.includes(";-;");
+    const participantCount = Array.isArray(message.participants)
+      ? message.participants.map((entry) => String(entry ?? "").trim()).filter(Boolean).length
+      : 0;
+    const definitelyGroupForAllowlist =
+      message.is_group === true || guidLooksGroup || (!guidLooksDirect && participantCount > 2);
+
+    if (
+      groupIdCandidate &&
+      groupListPolicy.allowlistEnabled &&
+      !groupListPolicy.allowed &&
+      definitelyGroupForAllowlist
+    ) {
+      logVerbose(
+        `imessage: skipping confirmed group message (${groupIdCandidate}) not in allowlist`,
+      );
+      return;
+    }
+    // PATCH_GAP1_GROUP_ALLOWLIST_CONFIRMED_GROUP_ONLY_END
+
     // Some iMessage threads can have multiple participants but still report
     // is_group=false depending on how Messages stores the identifier.
     // If the owner explicitly configures a chat_id under imessage.groups, treat
