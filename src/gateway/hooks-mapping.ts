@@ -1,7 +1,7 @@
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import type { HookMessageChannel } from "./hooks.js";
 import { CONFIG_PATH, type HookMappingConfig, type HooksConfig } from "../config/config.js";
+import type { HookMessageChannel } from "./hooks.js";
 
 export type HookMappingResolved = {
   id: string;
@@ -325,14 +325,15 @@ function validateAction(action: HookAction): HookMappingResult {
 }
 
 async function loadTransform(transform: HookMappingTransformResolved): Promise<HookTransformFn> {
-  const cached = transformCache.get(transform.modulePath);
+  const cacheKey = `${transform.modulePath}::${transform.exportName ?? "default"}`;
+  const cached = transformCache.get(cacheKey);
   if (cached) {
     return cached;
   }
   const url = pathToFileURL(transform.modulePath).href;
   const mod = (await import(url)) as Record<string, unknown>;
   const fn = resolveTransformFn(mod, transform.exportName);
-  transformCache.set(transform.modulePath, fn);
+  transformCache.set(cacheKey, fn);
   return fn;
 }
 

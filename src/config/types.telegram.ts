@@ -18,6 +18,8 @@ export type TelegramActionConfig = {
   editMessage?: boolean;
   /** Enable sticker actions (send and search). */
   sticker?: boolean;
+  /** Enable forum topic creation. */
+  createForumTopic?: boolean;
 };
 
 export type TelegramNetworkConfig = {
@@ -72,6 +74,8 @@ export type TelegramAccountConfig = {
   groups?: Record<string, TelegramGroupConfig>;
   /** DM allowlist (numeric Telegram user IDs). Onboarding can resolve @username to IDs. */
   allowFrom?: Array<string | number>;
+  /** Default delivery target for CLI `--deliver` when no explicit `--reply-to` is provided. */
+  defaultTo?: string | number;
   /** Optional allowlist for Telegram group senders (numeric Telegram user IDs). */
   groupAllowFrom?: Array<string | number>;
   /**
@@ -93,11 +97,11 @@ export type TelegramAccountConfig = {
   chunkMode?: "length" | "newline";
   /** Disable block streaming for this account. */
   blockStreaming?: boolean;
-  /** Chunking config for draft streaming in `streamMode: "block"`. */
+  /** Chunking config for Telegram stream previews in `streamMode: "block"`. */
   draftChunk?: BlockStreamingChunkConfig;
   /** Merge streamed block replies before sending. */
   blockStreamingCoalesce?: BlockStreamingCoalesceConfig;
-  /** Draft streaming mode for Telegram (off|partial|block). Default: partial. */
+  /** Telegram stream preview mode (off|partial|block). Default: partial. */
   streamMode?: "off" | "partial" | "block";
   mediaMaxMb?: number;
   /** Telegram API client timeout in seconds (grammY ApiClientOptions). */
@@ -141,6 +145,11 @@ export type TelegramAccountConfig = {
    * Use `"auto"` to derive `[{identity.name}]` from the routed agent.
    */
   responsePrefix?: string;
+  /**
+   * Per-channel ack reaction override.
+   * Telegram expects unicode emoji (e.g., "👀") rather than shortcodes.
+   */
+  ackReaction?: string;
 };
 
 export type TelegramTopicConfig = {
