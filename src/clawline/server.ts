@@ -4847,6 +4847,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       }
       const targetUserId = session.userId;
 
+      let runAgentDispatch: (() => Promise<void>) | null = null;
       await runPerUserTask(
         session.userId,
         async () => {
@@ -5067,95 +5068,102 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             },
           });
 
-          logger.info?.("[clawline] agent_run_start", {
-            messageId: payload.id,
-            sessionId: session.sessionId,
-            sessionKey: resolvedSessionKey,
-            userId: session.userId,
-            deviceId: session.deviceId,
-          });
-
-          let queuedFinal = false;
-          let deliveredCount = 0;
-          try {
-            const result = await dispatchReplyFromConfig({
-              ctx: ctxPayload,
-              cfg: openClawCfg,
-              dispatcher,
-              replyOptions: {
-                ...replyOptions,
-                images: inboundImages.length > 0 ? inboundImages : undefined,
-                onModelSelected: (ctx) => {
-                  prefixContext.provider = ctx.provider;
-                  prefixContext.model = extractShortModelName(ctx.model);
-                  prefixContext.modelFull = `${ctx.provider}/${ctx.model}`;
-                  prefixContext.thinkingLevel = ctx.thinkLevel ?? "off";
-                },
-              },
-              replyResolver: options.replyResolver,
+          runAgentDispatch = async () => {
+            logger.info?.("[clawline] agent_run_start", {
+              messageId: payload.id,
+              sessionId: session.sessionId,
+              sessionKey: resolvedSessionKey,
+              userId: session.userId,
+              deviceId: session.deviceId,
             });
-            queuedFinal = result.queuedFinal;
-            // Count all delivered content (streaming blocks, tool results, and final replies)
-            deliveredCount = result.counts.block + result.counts.tool + result.counts.final;
-          } catch (err) {
-            logger.error?.(`[clawline] dispatch_failed: ${formatError(err)}`);
-            queuedFinal = false;
-          }
-          markDispatchIdle();
-          await dispatcher.waitForIdle();
 
-          // Always send activity=false when done
-          if (activitySignaled) {
-            activitySignaled = false;
-            void sendActivitySignal(false);
-          }
+            let queuedFinal = false;
+            let deliveredCount = 0;
+            try {
+              const result = await dispatchReplyFromConfig({
+                ctx: ctxPayload,
+                cfg: openClawCfg,
+                dispatcher,
+                replyOptions: {
+                  ...replyOptions,
+                  images: inboundImages.length > 0 ? inboundImages : undefined,
+                  onModelSelected: (ctx) => {
+                    prefixContext.provider = ctx.provider;
+                    prefixContext.model = extractShortModelName(ctx.model);
+                    prefixContext.modelFull = `${ctx.provider}/${ctx.model}`;
+                    prefixContext.thinkingLevel = ctx.thinkLevel ?? "off";
+                  },
+                },
+                replyResolver: options.replyResolver,
+              });
+              queuedFinal = result.queuedFinal;
+              // Count all delivered content (streaming blocks, tool results, and final replies)
+              deliveredCount = result.counts.block + result.counts.tool + result.counts.final;
+            } catch (err) {
+              logger.error?.(`[clawline] dispatch_failed: ${formatError(err)}`);
+              queuedFinal = false;
+            }
+            markDispatchIdle();
+            await dispatcher.waitForIdle();
 
-          // Check if message was successfully handled:
-          // 1. queuedFinal = true means a final reply was sent
-          // 2. deliveredCount > 0 means content was streamed (blocks/tools)
-          // 3. queueDepth > 0 means message was queued for later processing
-          const queueKey = route.sessionKey;
-          const queueDepth = getFollowupQueueDepth(queueKey);
-          const wasDelivered = queuedFinal || deliveredCount > 0;
-          const wasQueued = !wasDelivered && queueDepth > 0;
+            // Always send activity=false when done
+            if (activitySignaled) {
+              activitySignaled = false;
+              void sendActivitySignal(false);
+            }
 
-          logger.info?.("[clawline] agent_run_end", {
-            messageId: payload.id,
-            sessionId: session.sessionId,
-            sessionKey: resolvedSessionKey,
-            userId: session.userId,
-            deviceId: session.deviceId,
-            deliveredCount,
-            queuedFinal,
-            queueDepth,
-            wasDelivered,
-            wasQueued,
-          });
+            // Check if message was successfully handled:
+            // 1. queuedFinal = true means a final reply was sent
+            // 2. deliveredCount > 0 means content was streamed (blocks/tools)
+            // 3. queueDepth > 0 means message was queued for later processing
+            const queueKey = route.sessionKey;
+            const queueDepth = getFollowupQueueDepth(queueKey);
+            const wasDelivered = queuedFinal || deliveredCount > 0;
+            const wasQueued = !wasDelivered && queueDepth > 0;
 
-          if (!wasDelivered && !wasQueued) {
+            logger.info?.("[clawline] agent_run_end", {
+              messageId: payload.id,
+              sessionId: session.sessionId,
+              sessionKey: resolvedSessionKey,
+              userId: session.userId,
+              deviceId: session.deviceId,
+              deliveredCount,
+              queuedFinal,
+              queueDepth,
+              wasDelivered,
+              wasQueued,
+            });
+
+            if (!wasDelivered && !wasQueued) {
+              updateMessageStreamingStmt.run(
+                MessageStreamingState.Failed,
+                session.deviceId,
+                payload.id,
+              );
+              await sendJson(session.socket, {
+                type: "error",
+                code: "server_error",
+                message: "Unable to deliver reply",
+                messageId: payload.id,
+              }).catch(() => {});
+              return;
+            }
+
+            // Message was either delivered or queued successfully
             updateMessageStreamingStmt.run(
-              MessageStreamingState.Failed,
+              wasQueued ? MessageStreamingState.Queued : MessageStreamingState.Finalized,
               session.deviceId,
               payload.id,
             );
-            await sendJson(session.socket, {
-              type: "error",
-              code: "server_error",
-              message: "Unable to deliver reply",
-              messageId: payload.id,
-            }).catch(() => {});
-            return;
-          }
-
-          // Message was either delivered or queued successfully
-          updateMessageStreamingStmt.run(
-            wasQueued ? MessageStreamingState.Queued : MessageStreamingState.Finalized,
-            session.deviceId,
-            payload.id,
-          );
+          };
         },
         { streamKey: resolvedSessionKey },
       );
+      const dispatchAgentRun = runAgentDispatch as (() => Promise<void>) | null;
+      if (!dispatchAgentRun) {
+        return;
+      }
+      await dispatchAgentRun();
     } catch (err) {
       if (err instanceof ClientMessageError) {
         await sendJson(session.socket, {
@@ -5284,6 +5292,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       const attachmentsHash = hashAttachments(attachments);
       const assetIds: string[] = [];
 
+      let runAgentDispatch: (() => Promise<void>) | null = null;
       await runPerUserTask(
         session.userId,
         async () => {
@@ -5454,94 +5463,101 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             },
           });
 
-          logger.info?.("[clawline] agent_run_start", {
-            messageId: clientId,
-            sessionId: session.sessionId,
-            sessionKey: resolvedSessionKey,
-            userId: session.userId,
-            deviceId: session.deviceId,
-            sourceMessageId,
-            interactiveAction: action,
-          });
-
-          let queuedFinal = false;
-          let deliveredCount = 0;
-          try {
-            const result = await dispatchReplyFromConfig({
-              ctx: ctxPayload,
-              cfg: openClawCfg,
-              dispatcher,
-              replyOptions: {
-                ...replyOptions,
-                images: inboundImages.length > 0 ? inboundImages : undefined,
-                onModelSelected: (ctx) => {
-                  prefixContext.provider = ctx.provider;
-                  prefixContext.model = extractShortModelName(ctx.model);
-                  prefixContext.modelFull = `${ctx.provider}/${ctx.model}`;
-                  prefixContext.thinkingLevel = ctx.thinkLevel ?? "off";
-                },
-              },
-              replyResolver: options.replyResolver,
+          runAgentDispatch = async () => {
+            logger.info?.("[clawline] agent_run_start", {
+              messageId: clientId,
+              sessionId: session.sessionId,
+              sessionKey: resolvedSessionKey,
+              userId: session.userId,
+              deviceId: session.deviceId,
+              sourceMessageId,
+              interactiveAction: action,
             });
-            queuedFinal = result.queuedFinal;
-            // Count all delivered content (streaming blocks, tool results, and final replies)
-            deliveredCount = result.counts.block + result.counts.tool + result.counts.final;
-          } catch (err) {
-            logger.error?.(`[clawline] dispatch_failed: ${formatError(err)}`);
-            queuedFinal = false;
-          }
-          markDispatchIdle();
-          await dispatcher.waitForIdle();
 
-          // Always send activity=false when done
-          if (activitySignaled) {
-            activitySignaled = false;
-            void sendActivitySignal(false);
-          }
+            let queuedFinal = false;
+            let deliveredCount = 0;
+            try {
+              const result = await dispatchReplyFromConfig({
+                ctx: ctxPayload,
+                cfg: openClawCfg,
+                dispatcher,
+                replyOptions: {
+                  ...replyOptions,
+                  images: inboundImages.length > 0 ? inboundImages : undefined,
+                  onModelSelected: (ctx) => {
+                    prefixContext.provider = ctx.provider;
+                    prefixContext.model = extractShortModelName(ctx.model);
+                    prefixContext.modelFull = `${ctx.provider}/${ctx.model}`;
+                    prefixContext.thinkingLevel = ctx.thinkLevel ?? "off";
+                  },
+                },
+                replyResolver: options.replyResolver,
+              });
+              queuedFinal = result.queuedFinal;
+              // Count all delivered content (streaming blocks, tool results, and final replies)
+              deliveredCount = result.counts.block + result.counts.tool + result.counts.final;
+            } catch (err) {
+              logger.error?.(`[clawline] dispatch_failed: ${formatError(err)}`);
+              queuedFinal = false;
+            }
+            markDispatchIdle();
+            await dispatcher.waitForIdle();
 
-          const queueKey = route.sessionKey;
-          const queueDepth = getFollowupQueueDepth(queueKey);
-          const wasDelivered = queuedFinal || deliveredCount > 0;
-          const wasQueued = !wasDelivered && queueDepth > 0;
+            // Always send activity=false when done
+            if (activitySignaled) {
+              activitySignaled = false;
+              void sendActivitySignal(false);
+            }
 
-          logger.info?.("[clawline] agent_run_end", {
-            messageId: clientId,
-            sessionId: session.sessionId,
-            sessionKey: resolvedSessionKey,
-            userId: session.userId,
-            deviceId: session.deviceId,
-            deliveredCount,
-            queuedFinal,
-            queueDepth,
-            wasDelivered,
-            wasQueued,
-            sourceMessageId,
-            interactiveAction: action,
-          });
+            const queueKey = route.sessionKey;
+            const queueDepth = getFollowupQueueDepth(queueKey);
+            const wasDelivered = queuedFinal || deliveredCount > 0;
+            const wasQueued = !wasDelivered && queueDepth > 0;
 
-          if (!wasDelivered && !wasQueued) {
+            logger.info?.("[clawline] agent_run_end", {
+              messageId: clientId,
+              sessionId: session.sessionId,
+              sessionKey: resolvedSessionKey,
+              userId: session.userId,
+              deviceId: session.deviceId,
+              deliveredCount,
+              queuedFinal,
+              queueDepth,
+              wasDelivered,
+              wasQueued,
+              sourceMessageId,
+              interactiveAction: action,
+            });
+
+            if (!wasDelivered && !wasQueued) {
+              updateMessageStreamingStmt.run(
+                MessageStreamingState.Failed,
+                session.deviceId,
+                clientId,
+              );
+              await sendJson(session.socket, {
+                type: "error",
+                code: "server_error",
+                message: "Unable to deliver reply",
+                messageId: clientId,
+              }).catch(() => {});
+              return;
+            }
+
             updateMessageStreamingStmt.run(
-              MessageStreamingState.Failed,
+              wasQueued ? MessageStreamingState.Queued : MessageStreamingState.Finalized,
               session.deviceId,
               clientId,
             );
-            await sendJson(session.socket, {
-              type: "error",
-              code: "server_error",
-              message: "Unable to deliver reply",
-              messageId: clientId,
-            }).catch(() => {});
-            return;
-          }
-
-          updateMessageStreamingStmt.run(
-            wasQueued ? MessageStreamingState.Queued : MessageStreamingState.Finalized,
-            session.deviceId,
-            clientId,
-          );
+          };
         },
         { streamKey: resolvedSessionKey },
       );
+      const dispatchAgentRun = runAgentDispatch as (() => Promise<void>) | null;
+      if (!dispatchAgentRun) {
+        return;
+      }
+      await dispatchAgentRun();
     } catch (err) {
       if (err instanceof ClientMessageError) {
         await sendJson(session.socket, {
