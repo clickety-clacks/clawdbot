@@ -2484,6 +2484,31 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     return { attachments: params.attachments, assetIds: params.assetIds };
   }
 
+  async function loadInboundAssetImage(assetId: string): Promise<{
+    data: string;
+    mimeType: string;
+  } | null> {
+    const asset = selectAssetStmt.get(assetId) as { mimeType: string } | undefined;
+    const mimeType = typeof asset?.mimeType === "string" ? asset.mimeType.trim().toLowerCase() : "";
+    if (!mimeType.startsWith("image/")) {
+      return null;
+    }
+    const assetPath = path.join(assetsDir, assetId);
+    try {
+      const buffer = await fs.readFile(assetPath);
+      if (buffer.length === 0) {
+        return null;
+      }
+      return {
+        mimeType,
+        data: buffer.toString("base64"),
+      };
+    } catch (err) {
+      logger.warn?.(`[clawline] asset_image_read_failed: ${formatError(err)}`, { assetId });
+      return null;
+    }
+  }
+
   type EventRow = { id: string; payloadJson: string };
 
   const logHttpRequest = (event: string, info?: Record<string, unknown>) => {
@@ -3336,7 +3361,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
   const connectionState = new WeakMap<WebSocket, ConnectionState>();
   type TerminalConnectionState =
-    | { authenticated: false }
+    | { authenticated: false; authInProgress?: boolean }
     | {
         authenticated: true;
         deviceId: string;
@@ -4631,8 +4656,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
 
     if (lowerTargetInput.startsWith("agent:")) {
-      sessionKeyHint = normalizedTargetInput;
       target = resolveSessionTargetFromSessionKey(normalizedTargetInput);
+      if (target.kind === "session") {
+        sessionKeyHint = target.sessionKey;
+      } else {
+        sessionKeyHint = normalizedTargetInput;
+      }
     } else if (deliveryTarget) {
       const suffix = deliveryTarget.sessionLabel();
       const userId = deliveryTarget.userId();
@@ -4923,7 +4952,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           const inboundBody = attachmentSummary
             ? `${rawContent}\n\n${attachmentSummary}`
             : rawContent;
-          const inboundImages = clawlineAttachmentsToImages(ownership.attachments);
+          const inboundImages = await clawlineAttachmentsToImages(ownership.attachments, {
+            loadAssetImage: loadInboundAssetImage,
+          });
 
           const channelLabel = "clawline";
           const routeSessionKey = resolvedSessionKey;
@@ -5318,7 +5349,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           const inboundBody = attachmentSummary
             ? `${rawContent}\n\n${attachmentSummary}`
             : rawContent;
-          const inboundImages = clawlineAttachmentsToImages(attachments);
+          const inboundImages = await clawlineAttachmentsToImages(attachments, {
+            loadAssetImage: loadInboundAssetImage,
+          });
 
           const channelLabel = "clawline";
           const routeSessionKey = resolvedSessionKey;
@@ -5639,6 +5672,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
   type ResolvedSendTarget =
     | { kind: "user"; userId: string }
+    | { kind: "session"; userId: string; sessionKey: string }
     | { kind: "device"; userId: string; deviceId: string };
 
   function resolveSessionTargetFromSessionKey(sessionKey: string): ResolvedSendTarget {
@@ -5652,26 +5686,26 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       if (!adminEntry) {
         throw new Error("No admin allowlist entry found for main session routing");
       }
-      return resolveUserTarget(adminEntry.userId);
+      return {
+        kind: "session",
+        userId: resolveUserTarget(adminEntry.userId).userId,
+        sessionKey: mainSessionKey,
+      };
     }
-    // Parse for storage only (userId); routing continues to rely on the session key itself.
-    const userId = extractUserIdFromSessionKey(trimmed);
-    if (!userId) {
+    const parsed = parseClawlineUserSessionKey(trimmed);
+    if (!parsed) {
       throw new Error("Invalid clawline session key");
     }
-    return resolveUserTarget(userId);
-  }
-
-  function extractUserIdFromSessionKey(sessionKey: string): string | null {
-    const parts = sessionKey.split(":");
-    if (parts.length < 5) {
-      return null;
-    }
-    if (parts[0]?.toLowerCase() !== "agent" || parts[2]?.toLowerCase() !== "clawline") {
-      return null;
-    }
-    const userId = parts[3]?.trim();
-    return userId ? userId : null;
+    const canonicalUserId = resolveUserTarget(parsed.userId).userId;
+    return {
+      kind: "session",
+      userId: canonicalUserId,
+      sessionKey: buildClawlineUserStreamSessionKey(
+        parsed.agentId,
+        canonicalUserId,
+        parsed.streamSuffix,
+      ),
+    };
   }
 
   function resolveSendTarget(raw: string): ResolvedSendTarget {
@@ -5805,6 +5839,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
     if (!state.authenticated) {
       if (isBinary) {
+        if ("authInProgress" in state && state.authInProgress) {
+          return;
+        }
         void sendJson(ws, { type: "terminal_error", message: "Expected terminal_auth" });
         ws.close();
         return;
@@ -5819,11 +5856,18 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         ws.close();
         return;
       }
+      if ("authInProgress" in state && state.authInProgress && payload?.type !== "terminal_auth") {
+        return;
+      }
       if (!payload || payload.type !== "terminal_auth") {
         void sendJson(ws, { type: "terminal_error", message: "Expected terminal_auth" });
         ws.close();
         return;
       }
+      if ("authInProgress" in state && state.authInProgress) {
+        return;
+      }
+      terminalConnectionState.set(ws, { authenticated: false, authInProgress: true });
       await handleTerminalAuth(ws, payload);
       return;
     }
@@ -5990,78 +6034,107 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         ? Math.max(0, Math.floor(payload.backfillLines))
         : 0;
 
-    let paneId = await resolveTmuxPaneId(record.tmuxSessionName);
-    if (!paneId) {
-      // If the session was referenced by a bubble but the tmux session hasn't been created yet,
-      // create it on-demand so auth succeeds.
-      const ensured = await ensureTmuxSessionExists(record.tmuxSessionName);
-      if (ensured) {
-        paneId = await resolveTmuxPaneId(record.tmuxSessionName);
-      }
-    }
-    if (!paneId) {
-      await sendJson(ws, { type: "terminal_error", message: "Terminal session is not running" });
-      ws.close();
-      return;
-    }
-
-    record.lastSeenAt = nowMs();
-    await sendJson(ws, {
-      type: "terminal_ready",
-      terminalSessionId,
-      cols,
-      rows,
-      readOnly: false,
-      maxBackfillLines: 5000,
-      backfillLinesActual: Math.min(backfillLines, 5000),
-    });
-
-    if (backfillLines > 0) {
-      const backfill = await captureTmuxBackfill(paneId, Math.min(backfillLines, 5000));
-      if (backfill.length > 0 && ws.readyState === WebSocket.OPEN) {
-        // Chunk to avoid giant frames.
-        const chunkSize = 32 * 1024;
-        for (let offset = 0; offset < backfill.length; offset += chunkSize) {
-          ws.send(backfill.subarray(offset, offset + chunkSize));
+    try {
+      logger.info?.("[clawline:terminal] terminal_auth_start", {
+        terminalSessionId,
+        tmuxSessionName: record.tmuxSessionName,
+        userId: entry.userId,
+        deviceId,
+        cols,
+        rows,
+        backfillLines,
+      });
+      let paneId = await resolveTmuxPaneId(record.tmuxSessionName);
+      if (!paneId) {
+        // If the session was referenced by a bubble but the tmux session hasn't been created yet,
+        // create it on-demand so auth succeeds.
+        const ensured = await ensureTmuxSessionExists(record.tmuxSessionName);
+        if (ensured) {
+          paneId = await resolveTmuxPaneId(record.tmuxSessionName);
         }
       }
-      await sendJson(ws, { type: "terminal_backfill_end" });
-    }
-
-    const { pty } = await tmuxBackend.spawnAttachPty({
-      sessionName: record.tmuxSessionName,
-      cols,
-      rows,
-    });
-
-    terminalConnectionState.set(ws, {
-      authenticated: true,
-      deviceId,
-      userId: entry.userId,
-      terminalSessionId,
-      tmuxSessionName: record.tmuxSessionName,
-      paneId,
-      pty,
-    });
-
-    pty.onData((data: string) => {
-      if (ws.readyState !== WebSocket.OPEN) {
+      if (!paneId) {
+        await sendJson(ws, { type: "terminal_error", message: "Terminal session is not running" });
+        ws.close();
         return;
       }
-      ws.send(Buffer.from(data, "utf8"));
-    });
 
-    pty.onExit((ev: { exitCode?: number }) => {
-      void sendJson(ws, {
-        type: "terminal_exit",
-        code: typeof ev.exitCode === "number" ? ev.exitCode : null,
+      record.lastSeenAt = nowMs();
+      await sendJson(ws, {
+        type: "terminal_ready",
+        terminalSessionId,
+        cols,
+        rows,
+        readOnly: false,
+        maxBackfillLines: 5000,
+        backfillLinesActual: Math.min(backfillLines, 5000),
       });
+
+      if (backfillLines > 0) {
+        const backfill = await captureTmuxBackfill(paneId, Math.min(backfillLines, 5000));
+        if (backfill.length > 0 && ws.readyState === WebSocket.OPEN) {
+          // Chunk to avoid giant frames.
+          const chunkSize = 32 * 1024;
+          for (let offset = 0; offset < backfill.length; offset += chunkSize) {
+            ws.send(backfill.subarray(offset, offset + chunkSize));
+          }
+        }
+        await sendJson(ws, { type: "terminal_backfill_end" });
+      }
+
+      const { pty } = await tmuxBackend.spawnAttachPty({
+        sessionName: record.tmuxSessionName,
+        cols,
+        rows,
+      });
+
+      terminalConnectionState.set(ws, {
+        authenticated: true,
+        deviceId,
+        userId: entry.userId,
+        terminalSessionId,
+        tmuxSessionName: record.tmuxSessionName,
+        paneId,
+        pty,
+      });
+      logger.info?.("[clawline:terminal] terminal_auth_ready", {
+        terminalSessionId,
+        tmuxSessionName: record.tmuxSessionName,
+        paneId,
+      });
+
+      pty.onData((data: string) => {
+        if (ws.readyState !== WebSocket.OPEN) {
+          return;
+        }
+        ws.send(Buffer.from(data, "utf8"));
+      });
+
+      pty.onExit((ev: { exitCode?: number }) => {
+        void sendJson(ws, {
+          type: "terminal_exit",
+          code: typeof ev.exitCode === "number" ? ev.exitCode : null,
+        });
+        try {
+          ws.close();
+        } catch {
+          // ignore
+        }
+      });
+    } catch (err) {
+      logger.warn?.("[clawline:terminal] terminal_auth_attach_failed", {
+        terminalSessionId,
+        tmuxSessionName: record.tmuxSessionName,
+        error: formatError(err),
+      });
+      await sendJson(ws, { type: "terminal_error", message: "Failed to attach terminal" });
       try {
         ws.close();
       } catch {
         // ignore
       }
-    });
+      terminalConnectionState.delete(ws);
+    }
   }
 
   async function resolveTmuxPaneId(tmuxSessionName: string): Promise<string | null> {
