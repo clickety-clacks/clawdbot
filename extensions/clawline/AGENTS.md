@@ -47,6 +47,28 @@ Example (local only):
 export CLU_FACE_SPEAK_URL="http://127.0.0.1:9001/speak"
 ```
 
+## Interactive Choices (System Prompt Nudge)
+
+For Clawline choice-style prompts, prefer interactive HTML bubbles so users can tap instead of typing.
+Use this for yes/no, multiple-choice, verification pickers, and batch forms.
+When interactive HTML is available, do not ask for plain-text typed choices.
+
+Technical contract lives in `extensions/clawline/skills/interactive-html/SKILL.md`.
+
+If you are editing `openclaw.json`, add/update `channels.clawline.adapter.systemPrompt` with guidance like:
+
+```json
+{
+  "channels": {
+    "clawline": {
+      "adapter": {
+        "systemPrompt": "When asking yes/no, multiple-choice, verification, or form-style questions on Clawline, prefer interactive HTML bubbles via message sendAttachment (application/vnd.clawline.interactive-html+json) so users can tap choices. Do not ask users to type plain-text choices when interactive HTML is available."
+      }
+    }
+  }
+}
+```
+
 ## Files
 
 - `server.ts` - WebSocket server, auth, sessions, routing
