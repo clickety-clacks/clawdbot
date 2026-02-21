@@ -1,14 +1,11 @@
 import type { Api, Model } from "@mariozechner/pi-ai";
-import type { RuntimeEnv } from "../../runtime.js";
-import type { ModelRow } from "./list.types.js";
-import { ensureAuthProfileStore } from "../../agents/auth-profiles.js";
 import { parseModelRef } from "../../agents/model-selection.js";
-import { resolveModel } from "../../agents/pi-embedded-runner/model.js";
-import { loadConfig } from "../../config/config.js";
+import type { RuntimeEnv } from "../../runtime.js";
 import { resolveConfiguredEntries } from "./list.configured.js";
 import { loadModelRegistry, toModelRow } from "./list.registry.js";
 import { printModelTable } from "./list.table.js";
-import { DEFAULT_PROVIDER, ensureFlagCompatibility, modelKey } from "./shared.js";
+import type { ModelRow } from "./list.types.js";
+import { DEFAULT_PROVIDER, ensureFlagCompatibility, isLocalBaseUrl, modelKey } from "./shared.js";
 
 export async function modelsListCommand(
   opts: {
@@ -21,6 +18,8 @@ export async function modelsListCommand(
   runtime: RuntimeEnv,
 ) {
   ensureFlagCompatibility(opts);
+  const { loadConfig } = await import("../../config/config.js");
+  const { ensureAuthProfileStore } = await import("../../agents/auth-profiles.js");
   const cfg = loadConfig();
   const authStore = ensureAuthProfileStore();
   const providerFilter = (() => {
@@ -48,22 +47,6 @@ export async function modelsListCommand(
   const configuredByKey = new Map(entries.map((entry) => [entry.key, entry]));
 
   const rows: ModelRow[] = [];
-
-  const isLocalBaseUrl = (baseUrl: string) => {
-    try {
-      const url = new URL(baseUrl);
-      const host = url.hostname.toLowerCase();
-      return (
-        host === "localhost" ||
-        host === "127.0.0.1" ||
-        host === "0.0.0.0" ||
-        host === "::1" ||
-        host.endsWith(".local")
-      );
-    } catch {
-      return false;
-    }
-  };
 
   if (opts.all) {
     const sorted = [...models].toSorted((a, b) => {
@@ -102,10 +85,8 @@ export async function modelsListCommand(
       }
       let model = modelByKey.get(entry.key);
       if (!model) {
-        const resolved = resolveModel(entry.ref.provider, entry.ref.model, undefined, cfg);
-        if (resolved.model && !resolved.error) {
-          model = resolved.model;
-        }
+        const { resolveModel } = await import("../../agents/pi-embedded-runner/model.js");
+        model = resolveModel(entry.ref.provider, entry.ref.model, undefined, cfg).model;
       }
       if (opts.local && model && !isLocalBaseUrl(model.baseUrl)) {
         continue;

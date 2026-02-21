@@ -1,27 +1,42 @@
-import JSZip from "jszip";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import JSZip from "jszip";
 import * as tar from "tar";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { extractArchive, resolveArchiveKind, resolvePackedRootDir } from "./archive.js";
 
-const tempDirs: string[] = [];
+let fixtureRoot = "";
+let fixtureCount = 0;
 
-async function makeTempDir() {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-archive-"));
-  tempDirs.push(dir);
+async function makeTempDir(prefix = "case") {
+  const dir = path.join(fixtureRoot, `${prefix}-${fixtureCount++}`);
+  await fs.mkdir(dir, { recursive: true });
   return dir;
 }
 
-afterEach(async () => {
-  for (const dir of tempDirs.splice(0)) {
-    try {
-      await fs.rm(dir, { recursive: true, force: true });
-    } catch {
-      // ignore cleanup failures
-    }
-  }
+async function expectExtractedSizeBudgetExceeded(params: {
+  archivePath: string;
+  destDir: string;
+  timeoutMs?: number;
+  maxExtractedBytes: number;
+}) {
+  await expect(
+    extractArchive({
+      archivePath: params.archivePath,
+      destDir: params.destDir,
+      timeoutMs: params.timeoutMs ?? 5_000,
+      limits: { maxExtractedBytes: params.maxExtractedBytes },
+    }),
+  ).rejects.toThrow("archive extracted size exceeds limit");
+}
+
+beforeAll(async () => {
+  fixtureRoot = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-archive-"));
+});
+
+afterAll(async () => {
+  await fs.rm(fixtureRoot, { recursive: true, force: true });
 });
 
 describe("archive utils", () => {
@@ -107,14 +122,11 @@ describe("archive utils", () => {
     await fs.writeFile(archivePath, await zip.generateAsync({ type: "nodebuffer" }));
 
     await fs.mkdir(extractDir, { recursive: true });
-    await expect(
-      extractArchive({
-        archivePath,
-        destDir: extractDir,
-        timeoutMs: 5_000,
-        limits: { maxExtractedBytes: 32 },
-      }),
-    ).rejects.toThrow("archive extracted size exceeds limit");
+    await expectExtractedSizeBudgetExceeded({
+      archivePath,
+      destDir: extractDir,
+      maxExtractedBytes: 32,
+    });
   });
 
   it("rejects archives that exceed archive size budget", async () => {
@@ -149,14 +161,11 @@ describe("archive utils", () => {
     await tar.c({ cwd: workDir, file: archivePath }, ["package"]);
 
     await fs.mkdir(extractDir, { recursive: true });
-    await expect(
-      extractArchive({
-        archivePath,
-        destDir: extractDir,
-        timeoutMs: 5_000,
-        limits: { maxExtractedBytes: 32 },
-      }),
-    ).rejects.toThrow("archive extracted size exceeds limit");
+    await expectExtractedSizeBudgetExceeded({
+      archivePath,
+      destDir: extractDir,
+      maxExtractedBytes: 32,
+    });
   });
 
   it("rejects tar entries with absolute extraction paths", async () => {
