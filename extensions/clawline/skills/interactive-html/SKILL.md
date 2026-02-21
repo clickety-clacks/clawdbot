@@ -73,9 +73,28 @@ Reserved actions:
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <style>
-      body { margin: 0; padding: 12px; background: var(--clawline-bubble-bg); color: var(--clawline-fg); font: 16px -apple-system, system-ui, sans-serif; }
-      .row { display: flex; gap: 8px; }
-      button { flex: 1; padding: 10px 12px; border-radius: 10px; border: 1px solid currentColor; background: transparent; color: inherit; }
+      body {
+        margin: 0;
+        padding: 12px;
+        background: var(--clawline-bubble-bg);
+        color: var(--clawline-fg);
+        font:
+          16px -apple-system,
+          system-ui,
+          sans-serif;
+      }
+      .row {
+        display: flex;
+        gap: 8px;
+      }
+      button {
+        flex: 1;
+        padding: 10px 12px;
+        border-radius: 10px;
+        border: 1px solid currentColor;
+        background: transparent;
+        color: inherit;
+      }
     </style>
   </head>
   <body>
@@ -104,10 +123,33 @@ Reserved actions:
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <style>
-      body { margin: 0; padding: 12px; background: var(--clawline-bubble-bg); color: var(--clawline-fg); font: 16px -apple-system, system-ui, sans-serif; }
-      fieldset { border: 0; padding: 0; margin: 0 0 10px; }
-      label { display: block; margin: 8px 0; }
-      button { width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid currentColor; background: transparent; color: inherit; }
+      body {
+        margin: 0;
+        padding: 12px;
+        background: var(--clawline-bubble-bg);
+        color: var(--clawline-fg);
+        font:
+          16px -apple-system,
+          system-ui,
+          sans-serif;
+      }
+      fieldset {
+        border: 0;
+        padding: 0;
+        margin: 0 0 10px;
+      }
+      label {
+        display: block;
+        margin: 8px 0;
+      }
+      button {
+        width: 100%;
+        padding: 10px 12px;
+        border-radius: 10px;
+        border: 1px solid currentColor;
+        background: transparent;
+        color: inherit;
+      }
     </style>
   </head>
   <body>
@@ -140,9 +182,28 @@ Reserved actions:
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <style>
-      body { margin: 0; padding: 12px; background: var(--clawline-bubble-bg); color: var(--clawline-fg); font: 16px -apple-system, system-ui, sans-serif; }
-      .grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
-      button { padding: 10px 0; border-radius: 10px; border: 1px solid currentColor; background: transparent; color: inherit; }
+      body {
+        margin: 0;
+        padding: 12px;
+        background: var(--clawline-bubble-bg);
+        color: var(--clawline-fg);
+        font:
+          16px -apple-system,
+          system-ui,
+          sans-serif;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(5, 1fr);
+        gap: 8px;
+      }
+      button {
+        padding: 10px 0;
+        border-radius: 10px;
+        border: 1px solid currentColor;
+        background: transparent;
+        color: inherit;
+      }
     </style>
   </head>
   <body>
