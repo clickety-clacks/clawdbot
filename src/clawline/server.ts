@@ -1179,7 +1179,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const tmuxBackend = createTerminalTmuxBackend(config, logger);
   const sessionStorePath = options.sessionStorePath;
   const mainSessionKey = options.mainSessionKey?.trim() || "agent:main:main";
-  const normalizedMainKey = mainSessionKey.toLowerCase();
+  const _normalizedMainKey = mainSessionKey.toLowerCase();
   const mainSessionAgentId = resolveAgentIdFromSessionKey(mainSessionKey);
 
   const resolveAssistantSenderName = (sessionKey: string) =>
@@ -4284,7 +4284,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       session.userId,
     );
     const expectedGlobalSessionKey = mainSessionKey;
-    const normalizedMainKey = mainSessionKey.toLowerCase();
+    const _normalizedMainKey = mainSessionKey.toLowerCase();
     const normalizeEventRouting = (event: ServerMessage): void => {
       const rawSessionKey = typeof event.sessionKey === "string" ? event.sessionKey.trim() : "";
       const normalized = normalizeStoredSessionKey(rawSessionKey, session.userId);
@@ -5809,8 +5809,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     if (state && state.authenticated) {
       try {
         state.pty?.kill?.();
-      } catch {
-        // ignore
+      } catch (err) {
+        logger.warn?.("[clawline:terminal] terminal_pty_kill_failed", {
+          terminalSessionId: state.terminalSessionId,
+          tmuxSessionName: state.tmuxSessionName,
+          error: formatError(err),
+        });
       }
     }
     terminalConnectionState.delete(ws);
@@ -5864,7 +5868,17 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           : Array.isArray(raw)
             ? Buffer.concat(raw)
             : Buffer.from(String(raw));
-      state.pty.write(buf.toString("utf8"));
+      try {
+        state.pty.write(buf.toString("utf8"));
+      } catch (err) {
+        logger.warn?.("[clawline:terminal] terminal_input_write_failed", {
+          terminalSessionId: state.terminalSessionId,
+          tmuxSessionName: state.tmuxSessionName,
+          error: formatError(err),
+        });
+        await sendJson(ws, { type: "terminal_error", message: "Failed to write terminal input" });
+        ws.close();
+      }
       return;
     }
 
@@ -5874,9 +5888,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     try {
       payload = JSON.parse(rawString);
     } catch {
+      await sendJson(ws, { type: "terminal_error", message: "Malformed JSON" });
+      ws.close();
       return;
     }
     if (!payload || typeof payload.type !== "string") {
+      await sendJson(ws, { type: "terminal_error", message: "Missing type" });
+      ws.close();
       return;
     }
     switch (payload.type) {
@@ -5886,18 +5904,37 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         if (cols > 0 && rows > 0) {
           try {
             state.pty.resize(cols, rows);
-          } catch {
-            // ignore
+          } catch (err) {
+            logger.warn?.("[clawline:terminal] terminal_resize_failed", {
+              terminalSessionId: state.terminalSessionId,
+              tmuxSessionName: state.tmuxSessionName,
+              cols,
+              rows,
+              error: formatError(err),
+            });
+            await sendJson(ws, { type: "terminal_error", message: "Failed to resize terminal" });
+            ws.close();
+            return;
           }
           void resizeTmuxPane(state.paneId, cols, rows);
+        } else {
+          await sendJson(ws, { type: "terminal_error", message: "Invalid terminal resize" });
+          ws.close();
         }
         break;
       }
       case "terminal_detach": {
         try {
           state.pty.kill();
-        } catch {
-          // ignore
+        } catch (err) {
+          logger.warn?.("[clawline:terminal] terminal_detach_kill_failed", {
+            terminalSessionId: state.terminalSessionId,
+            tmuxSessionName: state.tmuxSessionName,
+            error: formatError(err),
+          });
+          await sendJson(ws, { type: "terminal_error", message: "Failed to detach terminal" });
+          ws.close();
+          return;
         }
         void sendJson(ws, { type: "terminal_closed" });
         ws.close();
@@ -5907,14 +5944,23 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         void killTmuxSession(state.tmuxSessionName);
         try {
           state.pty.kill();
-        } catch {
-          // ignore
+        } catch (err) {
+          logger.warn?.("[clawline:terminal] terminal_close_kill_failed", {
+            terminalSessionId: state.terminalSessionId,
+            tmuxSessionName: state.tmuxSessionName,
+            error: formatError(err),
+          });
+          await sendJson(ws, { type: "terminal_error", message: "Failed to close terminal" });
+          ws.close();
+          return;
         }
         void sendJson(ws, { type: "terminal_closed" });
         ws.close();
         break;
       }
       default:
+        await sendJson(ws, { type: "terminal_error", message: "Unknown terminal message type" });
+        ws.close();
         break;
     }
   }
@@ -6129,7 +6175,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       );
       const paneId = String(stdout).trim().split(/\s+/)[0];
       return paneId ? paneId : null;
-    } catch {
+    } catch (err) {
+      logger.warn?.("[clawline:terminal] tmux_resolve_pane_failed", {
+        tmuxSessionName,
+        error: formatError(err),
+      });
       return null;
     }
   }
@@ -6144,7 +6194,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         { timeout: 3_000, maxBuffer: 10 * 1024 * 1024 },
       );
       return Buffer.from(String(stdout), "utf8");
-    } catch {
+    } catch (err) {
+      logger.warn?.("[clawline:terminal] tmux_capture_backfill_failed", {
+        paneId,
+        backfillLines,
+        error: formatError(err),
+      });
       return Buffer.alloc(0);
     }
   }
@@ -6186,8 +6241,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         ["resize-pane", "-t", paneId, "-x", String(cols), "-y", String(rows)],
         { timeout: 2_000, maxBuffer: 1024 * 1024 },
       );
-    } catch {
-      // ignore
+    } catch (err) {
+      logger.warn?.("[clawline:terminal] tmux_resize_pane_failed", {
+        paneId,
+        cols,
+        rows,
+        error: formatError(err),
+      });
     }
   }
 
@@ -6197,8 +6257,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         timeout: 2_000,
         maxBuffer: 1024 * 1024,
       });
-    } catch {
-      // ignore
+    } catch (err) {
+      logger.warn?.("[clawline:terminal] tmux_kill_session_failed", {
+        tmuxSessionName,
+        error: formatError(err),
+      });
     }
   }
 
