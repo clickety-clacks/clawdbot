@@ -36,15 +36,16 @@ Default userId for Flynn's streams: `'flynn'`
 
 ## Step 2 — Send the message
 
-```
-sessions_send(sessionKey="<resolved-key>", message="<your message>")
-```
+Use the `/alert` endpoint — **not** `sessions_send`. `sessions_send` blocks waiting for a return value that never arrives in cross-stream use.
 
-The target agent wakes, processes your message, and its reply is delivered back to your current session.
+```bash
+curl -s -X POST http://localhost:18800/alert \
+  -H "Content-Type: application/json" \
+  -d '{"sessionKey": "<resolved-key>", "message": "<your message>"}'
+```
 
 ## Tips
 
-- Tell the receiving agent your session key so it can reply back: `sessions_send(sessionKey="agent:main:clawline:flynn:s_b408fcd2", ...)`
-- If the agent can't find the `clawline-dm` skill, tell it to use `sessions_send` directly with your key
+- **Always include your session key** in the message body so the recipient knows how to reply back: e.g. `"Reply via POST to http://localhost:18800/alert with sessionKey agent:main:clawline:flynn:s_XXXX"`
 - For multi-turn conversations, keep a brief recap in each message — the other agent has its own context window
-- One-shot pings can also use `/alert <sessionKey> message` to inject a system alert
+- Get your own session key from `session_status` (🧵 Session line) before sending
