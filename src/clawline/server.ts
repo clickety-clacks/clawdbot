@@ -3206,7 +3206,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         decisionReason = "empty_session_key";
       } else if (isValid) {
         const normalized = trimmedSessionKey.toLowerCase();
-        if (normalized === normalizedMainKey) {
+        if (normalized === _normalizedMainKey) {
           resolvedSessionKey = mainSessionKey;
         } else {
           resolvedSessionKey = trimmedSessionKey;
