@@ -7,6 +7,7 @@ import {
   resolveStateDir,
 } from "../config/config.js";
 import { loadOrCreateDeviceIdentity } from "../infra/device-identity.js";
+import { pickPrimaryTailnetIPv4 } from "../infra/tailnet.js";
 import { loadGatewayTlsRuntime } from "../infra/tls/gateway.js";
 import {
   GATEWAY_CLIENT_MODES,
@@ -117,8 +118,10 @@ export function buildGatewayConnectionDetails(
   const localPort = resolveGatewayPort(config);
   const bindMode = config.gateway?.bind ?? "loopback";
   const scheme = tlsEnabled ? "wss" : "ws";
-  // Self-connections should always target loopback; bind mode only controls listener exposure.
-  const localUrl = `${scheme}://127.0.0.1:${localPort}`;
+  const tailnetIp = tlsEnabled && bindMode === "tailnet" ? pickPrimaryTailnetIPv4() : undefined;
+  const localHost = tailnetIp ?? "127.0.0.1";
+  const localUrl = `${scheme}://${localHost}:${localPort}`;
+  const localUrlSource = tailnetIp ? "local tailnet" : "local loopback";
   const urlOverride =
     typeof options.url === "string" && options.url.trim().length > 0
       ? options.url.trim()
@@ -133,7 +136,7 @@ export function buildGatewayConnectionDetails(
       ? "config gateway.remote.url"
       : remoteMisconfigured
         ? "missing gateway.remote.url (fallback local)"
-        : "local loopback";
+        : localUrlSource;
   const remoteFallbackNote = remoteMisconfigured
     ? "Warn: gateway.mode=remote but gateway.remote.url is missing; set gateway.remote.url or switch gateway.mode=local."
     : undefined;
