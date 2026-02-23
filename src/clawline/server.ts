@@ -3193,6 +3193,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   async function wakeGatewayForAlert(text: string, sessionKey?: string) {
     try {
       const resolvedSessionKey = resolveAlertSessionKey(sessionKey);
+      const gatewayToken =
+        openClawCfg.gateway?.auth?.token ||
+        (openClawCfg.gateway as { token?: string } | undefined)?.token;
 
       logger.info?.(`[clawline] alert_wake_start sessionKey=${resolvedSessionKey}`);
 
@@ -3202,6 +3205,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         const threadId =
           origin?.threadId != null && origin.threadId !== "" ? String(origin.threadId) : undefined;
         await callGateway({
+          token: gatewayToken,
           method: "agent",
           params: {
             sessionKey: item.sessionKey,
