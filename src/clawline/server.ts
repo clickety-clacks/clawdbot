@@ -1179,7 +1179,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const tmuxBackend = createTerminalTmuxBackend(config, logger);
   const sessionStorePath = options.sessionStorePath;
   const mainSessionKey = options.mainSessionKey?.trim() || "agent:main:main";
-  const _normalizedMainKey = mainSessionKey.toLowerCase();
   const mainSessionAgentId = resolveAgentIdFromSessionKey(mainSessionKey);
 
   const resolveAssistantSenderName = (sessionKey: string) =>
@@ -2762,8 +2761,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         sessionKey: payload.sessionKey ?? "undefined",
       });
       let text = buildAlertText(payload.message, payload.source);
-      const alertResolution = resolveAlertSessionKey(payload.sessionKey);
-      const pendingEvents = peekSystemEvents(alertResolution.resolvedSessionKey);
+      const alertResolvedKey = resolveAlertSessionKey(payload.sessionKey);
+      const pendingEvents = peekSystemEvents(alertResolvedKey);
       const hasExecCompletion = pendingEvents.some((event) => event.includes("Exec finished"));
       if (hasExecCompletion) {
         text = `${EXEC_COMPLETION_ALERT_PROMPT}\n\n${text}`;
@@ -3187,66 +3186,15 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
   }
 
-  function isValidAlertSessionKey(value?: string) {
-    if (!value) {
-      return false;
-    }
-    return value.trim().length > 0;
-  }
-
-  function resolveAlertSessionKey(rawSessionKey?: string) {
-    const trimmedSessionKey = rawSessionKey?.trim() ?? "";
-    const isValid = isValidAlertSessionKey(trimmedSessionKey);
-    let resolvedSessionKey = mainSessionKey;
-    let decisionReason = "missing_session_key";
-    let decisionAction = "fallback_main_session";
-
-    if (typeof rawSessionKey === "string") {
-      if (trimmedSessionKey.length === 0) {
-        decisionReason = "empty_session_key";
-      } else if (isValid) {
-        const normalized = trimmedSessionKey.toLowerCase();
-        if (normalized === _normalizedMainKey) {
-          resolvedSessionKey = mainSessionKey;
-        } else {
-          resolvedSessionKey = trimmedSessionKey;
-        }
-        decisionReason = "valid_session_key";
-        decisionAction = "use_provided_session_key";
-      } else {
-        decisionReason = "invalid_session_key";
-      }
-    }
-
-    return {
-      trimmedSessionKey,
-      isValid,
-      resolvedSessionKey,
-      decisionReason,
-      decisionAction,
-    };
+  function resolveAlertSessionKey(rawSessionKey?: string): string {
+    return rawSessionKey?.trim() || mainSessionKey;
   }
 
   async function wakeGatewayForAlert(text: string, sessionKey?: string) {
     try {
-      const rawSessionKey = typeof sessionKey === "string" ? sessionKey : undefined;
-      const { trimmedSessionKey, isValid, resolvedSessionKey, decisionReason, decisionAction } =
-        resolveAlertSessionKey(rawSessionKey);
+      const resolvedSessionKey = resolveAlertSessionKey(sessionKey);
 
-      logger.info?.(
-        `[clawline] alert_session_key_decision raw=${rawSessionKey ?? "undefined"} trimmed=${trimmedSessionKey || "undefined"} valid=${isValid} action=${decisionAction} reason=${decisionReason} resolved=${resolvedSessionKey}`,
-      );
-      if (decisionReason === "invalid_session_key") {
-        logger.warn?.("alert_session_key_invalid", { sessionKey: rawSessionKey });
-      }
-
-      const alertLog = (event: string, detail?: Record<string, unknown>) =>
-        logger.info?.(`[clawline] ${event}`, {
-          ...detail,
-          sessionKey: resolvedSessionKey,
-        });
-
-      alertLog("alert_wake_start");
+      logger.info?.(`[clawline] alert_wake_start sessionKey=${resolvedSessionKey}`);
 
       const queueSettings = resolveQueueSettings({ cfg: openClawCfg });
       const sendQueuedAlert = async (item: AnnounceQueueItem) => {
@@ -3294,7 +3242,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         send: sendQueuedAlert,
       });
 
-      alertLog("alert_wake_result", { outcome: "queued" });
+      logger.info?.(`[clawline] alert_wake_result outcome=queued sessionKey=${resolvedSessionKey}`);
     } catch (err) {
       logger.error?.(`alert_gateway_wake_failed: ${formatError(err)}`);
       throw err instanceof HttpError
@@ -4284,7 +4232,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       session.userId,
     );
     const expectedGlobalSessionKey = mainSessionKey;
-    const _normalizedMainKey = mainSessionKey.toLowerCase();
     const normalizeEventRouting = (event: ServerMessage): void => {
       const rawSessionKey = typeof event.sessionKey === "string" ? event.sessionKey.trim() : "";
       const normalized = normalizeStoredSessionKey(rawSessionKey, session.userId);
