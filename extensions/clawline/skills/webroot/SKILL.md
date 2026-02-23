@@ -11,15 +11,33 @@ The Clawline provider serves static files from a local directory.
 ## Configuration
 
 - Config key: channels.clawline.webRootPath
-- Discover the resolved path with: `openclaw gateway config.get channels.clawline.webRootPath`
-- URL prefix: /www on Clawline port (default 18800)
+- To find the webroot path, try reading the config key first:
+  ```
+  openclaw config get channels.clawline.webRootPath
+  ```
+  If no value is set, the default is: `~/.openclaw/workspace/www/`
+
+## Accessing files
+
+URL pattern: `http://<hostname>:<clawline-port>/www/<filename>`
+
+- The port is the Clawline provider port (`channels.clawline.port`, default 18800)
+- This is NOT the gateway port or any other internal port
+- Example: `http://localhost:18800/www/index.html`
 
 ## Usage
 
-webRootPath="$(openclaw gateway config.get channels.clawline.webRootPath)"
+```bash
+# Find the webroot directory
+webRootPath="$(openclaw config get channels.clawline.webRootPath 2>/dev/null || echo ~/.openclaw/workspace/www)"
 mkdir -p "$webRootPath"
+
+# Add a file
 echo '<h1>Hello</h1>' > "$webRootPath/index.html"
+
+# Verify it serves
 curl http://localhost:18800/www/index.html
+```
 
 ## Security
 
