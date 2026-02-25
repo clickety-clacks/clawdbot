@@ -1405,6 +1405,30 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("does not append alert instructions text when noOverlay is true", async () => {
+    const entry = createAllowlistEntry();
+    const ctx = await setupTestServer([entry], {
+      alertInstructionsText: "Follow up with Flynn ASAP.",
+    });
+    const authHeader = await createAuthHeader(ctx, entry);
+    try {
+      const response = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: authHeader },
+        body: JSON.stringify({ message: "Check on Flynn", source: "codex", noOverlay: true }),
+      });
+      expect(response.status).toBe(200);
+      const payload = await response.json();
+      expect(payload).toEqual({ ok: true });
+      const call = enqueueAnnounceMock.mock.calls[0]?.[0] as
+        | { item?: { prompt?: string } }
+        | undefined;
+      expect(call?.item?.prompt).toBe("System Alert: [codex] Check on Flynn");
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("initializes alert instructions file with default text when missing", async () => {
     const entry = createAllowlistEntry();
     const ctx = await setupTestServer([entry], { alertInstructionsText: null });
