@@ -1,0 +1,9 @@
+{
+  "id": "surf-ace",
+  "skills": ["./skills"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}
