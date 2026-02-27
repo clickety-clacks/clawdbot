@@ -192,6 +192,12 @@ function decodeDnsSdEscapes(value: string): string {
 
   for (let i = 0; i < value.length; i += 1) {
     const ch = value[i] ?? "";
+    if (ch === "\\" && i + 1 < value.length && /\s/.test(value[i + 1] ?? "")) {
+      pending += value[i + 1];
+      decoded = true;
+      i += 1;
+      continue;
+    }
     if (ch === "\\" && i + 3 < value.length) {
       const escaped = value.slice(i + 1, i + 4);
       if (/^[0-9]{3}$/.test(escaped)) {
@@ -228,6 +234,36 @@ function parseBrowseInstances(stdout: string): string[] {
     }
   }
   return Array.from(instances.values());
+}
+
+function splitDnsSdTokens(line: string): string[] {
+  const tokens: string[] = [];
+  let token = "";
+
+  const pushToken = () => {
+    if (!token) {
+      return;
+    }
+    tokens.push(token);
+    token = "";
+  };
+
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i] ?? "";
+    if (ch === "\\" && i + 1 < line.length && /\s/.test(line[i + 1] ?? "")) {
+      token += `\\${line[i + 1] ?? ""}`;
+      i += 1;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      pushToken();
+      continue;
+    }
+    token += ch;
+  }
+
+  pushToken();
+  return tokens;
 }
 
 function parseTxtTokens(tokens: string[]): Record<string, string> {
@@ -269,7 +305,7 @@ function parseResolve(stdout: string, instanceName: string): DiscoveryRecord | n
     }
 
     if (line.startsWith("txt") || line.includes("=")) {
-      const tokens = line.split(/\s+/).filter((entry) => entry.includes("="));
+      const tokens = splitDnsSdTokens(line).filter((entry) => entry.includes("="));
       const parsed = parseTxtTokens(tokens);
       if (Object.keys(parsed).length > 0) {
         txt = { ...txt, ...parsed };
