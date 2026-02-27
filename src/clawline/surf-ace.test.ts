@@ -25,10 +25,11 @@ describe("Surf Ace manager", () => {
       },
     ]);
 
-    const fetchImpl = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url =
         input instanceof URL ? input.toString() : typeof input === "string" ? input : input.url;
       const pathname = new URL(url).pathname;
+      const bodyText = typeof init?.body === "string" ? init.body : "";
 
       if (pathname === "/pair") {
         return new Response(JSON.stringify({ status: "ok", sessionToken: "tok_123" }), {
@@ -59,6 +60,14 @@ describe("Surf Ace manager", () => {
       }
       if (pathname === "/watch" || pathname === "/unwatch") {
         return new Response("", { status: 200 });
+      }
+      if (url === "http://localhost:18800/alert") {
+        const parsed = bodyText ? (JSON.parse(bodyText) as { sessionKey?: string }) : {};
+        expect(parsed.sessionKey).toBe("agent:main:clawline:flynn:main");
+        return new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
       }
 
       return new Response("not found", { status: 404 });
@@ -100,6 +109,7 @@ describe("Surf Ace manager", () => {
       screen: "Kitchen Display",
       enabled: true,
       debounce: { scroll_settle: 500 },
+      watcherSessionKey: "agent:main:clawline:flynn:main",
     });
     expect(watchResult.enabled).toBe(true);
 
@@ -109,6 +119,11 @@ describe("Surf Ace manager", () => {
       remoteAddress: "10.0.0.10",
     });
     expect(eventResult.statusCode).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "http://localhost:18800/alert",
+      expect.objectContaining({ method: "POST" }),
+    );
 
     const context = await manager.buildContextInjection({ userId: "flynn" });
     expect(context).toContain("## Surf Ace Screens");

@@ -161,6 +161,7 @@ export function createSurfAceTools(context: SurfAceToolContext): AnyAgentTool[] 
           screen,
           enabled,
           debounce: debounceFromArgs(args),
+          watcherSessionKey: context.agentSessionKey,
         });
         return jsonResult(result);
       },

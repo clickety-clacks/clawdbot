@@ -116,6 +116,7 @@ export interface SurfAceRuntime {
     screen: string;
     enabled: boolean;
     debounce?: SurfAceWatchDebounce;
+    watcherSessionKey?: string;
   }): Promise<SurfAceWatchResult>;
   handleInboundEvent(params: {
     screenId: string;
@@ -159,6 +160,7 @@ type ManagedScreen = SurfAceDiscoveredScreen & {
   consecutiveFailures: number;
   unreachable: boolean;
   eventSourceAddress: string | null;
+  watcherSessionKey: string | null;
 };
 
 function decodeDnsSdEscapes(value: string): string {
@@ -563,6 +565,7 @@ class SurfAceManager implements SurfAceRuntime {
     screen: string;
     enabled: boolean;
     debounce?: SurfAceWatchDebounce;
+    watcherSessionKey?: string;
   }): Promise<SurfAceWatchResult> {
     const screen = this.resolveUniqueScreen(params.screen);
     const token = this.requireSessionToken(screen);
@@ -584,6 +587,8 @@ class SurfAceManager implements SurfAceRuntime {
         body,
       });
       screen.watchEnabled = true;
+      const watcherSessionKey = params.watcherSessionKey?.trim();
+      screen.watcherSessionKey = watcherSessionKey ? watcherSessionKey : null;
     } else {
       await this.requestScreen({
         screen,
@@ -593,6 +598,7 @@ class SurfAceManager implements SurfAceRuntime {
         allowNoJson: true,
       });
       screen.watchEnabled = false;
+      screen.watcherSessionKey = null;
     }
 
     return {
@@ -627,6 +633,7 @@ class SurfAceManager implements SurfAceRuntime {
     }
 
     screen.lastEvent = params.payload as Record<string, unknown>;
+    void this.postWatcherAlert(screen, screen.lastEvent);
     return { statusCode: 200, body: { ok: true } };
   }
 
@@ -761,6 +768,7 @@ class SurfAceManager implements SurfAceRuntime {
           consecutiveFailures: existing?.consecutiveFailures ?? 0,
           unreachable: false,
           eventSourceAddress: resolvedSourceAddress,
+          watcherSessionKey: existing?.watcherSessionKey ?? null,
         };
 
         this.screensById.set(fingerprint, merged);
@@ -889,6 +897,35 @@ class SurfAceManager implements SurfAceRuntime {
       throw err;
     } finally {
       clearTimeout(timeout);
+    }
+  }
+
+  private async postWatcherAlert(
+    screen: ManagedScreen,
+    eventPayload: Record<string, unknown>,
+  ): Promise<void> {
+    const watcherSessionKey = screen.watcherSessionKey?.trim();
+    if (!watcherSessionKey) {
+      return;
+    }
+    const messagePayload = {
+      screenId: screen.id,
+      screenName: screen.name,
+      event: eventPayload,
+    };
+    const body = JSON.stringify({
+      sessionKey: watcherSessionKey,
+      message: JSON.stringify(messagePayload),
+      noOverlay: true,
+    });
+    try {
+      await this.fetchImpl("http://localhost:18800/alert", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body,
+      });
+    } catch {
+      // Silently fall back when alert forwarding is unavailable.
     }
   }
 

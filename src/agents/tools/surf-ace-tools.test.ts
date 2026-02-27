@@ -85,7 +85,12 @@ describe("createSurfAceTools", () => {
       }),
     );
     expect(runtime.watch).toHaveBeenCalledWith(
-      expect.objectContaining({ userId: "flynn", screen: "Kitchen", enabled: true }),
+      expect.objectContaining({
+        userId: "flynn",
+        screen: "Kitchen",
+        enabled: true,
+        watcherSessionKey: "agent:main:clawline:flynn:main",
+      }),
     );
     expect(runtime.clear).toHaveBeenCalledWith({ userId: "flynn", screen: "Kitchen" });
     expect(runtime.snapshot).toHaveBeenCalledWith({ userId: "flynn", screen: "Kitchen" });
