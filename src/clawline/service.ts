@@ -1,5 +1,6 @@
 import type { OpenClawConfig } from "../config/config.js";
 import type { Logger, ProviderServer } from "./domain.js";
+import type { SurfAceRuntime } from "./surf-ace.js";
 import {
   resolveStorePath,
   resolveMainSessionKey,
@@ -11,6 +12,7 @@ import { createProviderServer } from "./server.js";
 
 export type ClawlineServiceHandle = {
   stop: () => Promise<void>;
+  getSurfAceRuntime: () => SurfAceRuntime | null;
 };
 
 export async function startClawlineService(params: {
@@ -43,12 +45,11 @@ export async function startClawlineService(params: {
   logger.info?.(
     `[clawline] listening on ${providerConfig.network.bindAddress}:${server.getPort()}`,
   );
-  const handle = {
+  return {
     stop: async () => {
       setClawlineOutboundSender(null);
       await server.stop();
     },
-    getSurfAceRuntime: () => server.getSurfAceRuntime(),
+    getSurfAceRuntime: () => server.getSurfAceRuntime?.() ?? null,
   };
-  return handle as ClawlineServiceHandle;
 }
