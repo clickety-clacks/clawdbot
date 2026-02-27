@@ -34,4 +34,12 @@ describe("clawline plugin", () => {
     expect(normalize?.("device:ABCDEF-1234")).toBe("device:ABCDEF-1234");
     expect(normalize?.("USER:Flynn")).toBe("user:Flynn");
   });
+
+  it("reports healthy default runtime for health-monitor", () => {
+    expect(clawlinePlugin.status?.defaultRuntime).toMatchObject({
+      accountId: "default",
+      running: true,
+      connected: true,
+    });
+  });
 });

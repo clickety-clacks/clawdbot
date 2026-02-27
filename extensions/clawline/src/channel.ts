@@ -67,6 +67,15 @@ export const clawlinePlugin: ChannelPlugin<ResolvedClawlineAccount> = {
   },
   reload: { configPrefixes: ["channels.clawline"] },
   configSchema: buildChannelConfigSchema(ClawlineConfigSchema),
+  // Clawline runs as a plugin service, not a channel gateway startAccount loop.
+  // Mark runtime as running so gateway health-monitor does not treat it as stopped.
+  status: {
+    defaultRuntime: {
+      accountId: DEFAULT_ACCOUNT_ID,
+      running: true,
+      connected: true,
+    },
+  },
   actions: clawlineMessageActions,
   // Accept any target as valid - Clawline actions do their own filtering
   // via userId/channelType params, not standard target resolution.
