@@ -8,6 +8,7 @@ import { runCommandWithTimeout } from "../process/exec.js";
 
 const SURF_ACE_SERVICE_TYPE = "_surf-ace._tcp";
 const TRUST_STORE_FILE = "surf-ace-trust.json";
+const SCREEN_STATE_FILE = "surf-ace-screens.json";
 const DEFAULT_DISCOVERY_INTERVAL_MS = 5_000;
 const DEFAULT_DISCOVERY_TIMEOUT_MS = 1_500;
 const DEFAULT_HTTP_TIMEOUT_MS = 10_000;
@@ -137,6 +138,19 @@ type TrustedScreen = {
 type TrustStoreFile = {
   version: 1;
   entries: TrustedScreen[];
+};
+
+type PersistedScreenStateEntry = {
+  fingerprint: string;
+  host: string;
+  port: number;
+  sessionToken: string | null;
+  watchEnabled: boolean;
+};
+
+type ScreenStateFile = {
+  version: 1;
+  screens: PersistedScreenStateEntry[];
 };
 
 type DiscoveryRecord = {
@@ -365,6 +379,7 @@ class SurfAceManager implements SurfAceRuntime {
   private readonly discoverImpl: (timeoutMs: number) => Promise<DiscoveryRecord[]>;
   private readonly now: () => number;
   private readonly trustStorePath: string;
+  private readonly screenStatePath: string;
   private readonly discoveryIntervalMs: number;
   private readonly discoveryTimeoutMs: number;
   private readonly screensById = new Map<string, ManagedScreen>();
@@ -372,6 +387,7 @@ class SurfAceManager implements SurfAceRuntime {
   private callbackBaseUrl: string | null = null;
   private discoveryTimer: ReturnType<typeof setInterval> | null = null;
   private discoveryInFlight = false;
+  private screenStateWrite: Promise<void> = Promise.resolve();
 
   constructor(options: SurfAceManagerOptions) {
     this.logger = options.logger ?? console;
@@ -379,6 +395,7 @@ class SurfAceManager implements SurfAceRuntime {
     this.discoverImpl = options.discoverImpl ?? discoverSurfAceScreens;
     this.now = options.now ?? (() => Date.now());
     this.trustStorePath = path.join(options.statePath, TRUST_STORE_FILE);
+    this.screenStatePath = path.join(options.statePath, SCREEN_STATE_FILE);
     this.discoveryIntervalMs =
       options.discoveryIntervalMs && Number.isFinite(options.discoveryIntervalMs)
         ? Math.max(250, Math.floor(options.discoveryIntervalMs))
@@ -391,6 +408,8 @@ class SurfAceManager implements SurfAceRuntime {
 
   async start(): Promise<void> {
     await this.loadTrustStore();
+    await this.loadScreenState();
+    await this.reconnectPersistedScreens();
     await this.refreshDiscovery();
     if (!this.discoveryTimer) {
       this.discoveryTimer = setInterval(() => {
@@ -452,6 +471,7 @@ class SurfAceManager implements SurfAceRuntime {
         trustedAt: this.now(),
       });
       await this.persistTrustStore();
+      await this.persistScreenState();
 
       return {
         ok: true,
@@ -533,6 +553,7 @@ class SurfAceManager implements SurfAceRuntime {
     screen.status = screen.busy ? "busy" : "paired";
     screen.sourceRef = null;
     screen.lastSnapshot = null;
+    await this.persistScreenState();
 
     return {
       ok: true,
@@ -600,6 +621,7 @@ class SurfAceManager implements SurfAceRuntime {
       screen.watchEnabled = false;
       screen.watcherSessionKey = null;
     }
+    await this.persistScreenState();
 
     return {
       ok: true,
@@ -733,7 +755,6 @@ class SurfAceManager implements SurfAceRuntime {
     this.discoveryInFlight = true;
     try {
       const discovered = await this.discoverImpl(this.discoveryTimeoutMs);
-      const seen = new Set<string>();
 
       for (const record of discovered) {
         const fingerprint = normalizeFingerprint(record.txt.pk);
@@ -772,16 +793,10 @@ class SurfAceManager implements SurfAceRuntime {
         };
 
         this.screensById.set(fingerprint, merged);
-        seen.add(fingerprint);
-      }
-
-      for (const [id, screen] of this.screensById) {
-        if (!seen.has(id) && !screen.sessionToken) {
-          this.screensById.delete(id);
-        }
       }
 
       await this.tryAutoPairTrustedScreens();
+      await this.persistScreenState();
     } catch (err) {
       this.logger.warn?.(`[clawline:surf-ace] discovery_failed: ${String(err)}`);
     } finally {
@@ -927,6 +942,169 @@ class SurfAceManager implements SurfAceRuntime {
     } catch {
       // Silently fall back when alert forwarding is unavailable.
     }
+  }
+
+  private invalidateScreenSession(screen: ManagedScreen): void {
+    screen.sessionToken = null;
+    screen.watchEnabled = false;
+    screen.status = "discovered";
+    screen.busy = false;
+    screen.sourceRef = null;
+    screen.lastSnapshot = null;
+    screen.watcherSessionKey = null;
+  }
+
+  private async rearmWatch(screen: ManagedScreen, authToken: string): Promise<boolean> {
+    if (!this.callbackBaseUrl) {
+      return false;
+    }
+    const callbackUrl = `${this.callbackBaseUrl}/surf-ace/events/${encodeURIComponent(screen.id)}`;
+    const response = await this.requestScreen({
+      screen,
+      pathName: "/watch",
+      method: "POST",
+      authToken,
+      body: { callbackUrl },
+      allowedStatuses: [401, 403],
+    });
+    if (response.status === 401 || response.status === 403) {
+      this.invalidateScreenSession(screen);
+      return false;
+    }
+    return true;
+  }
+
+  private async reconnectPersistedScreens(): Promise<void> {
+    const pairedScreens = Array.from(this.screensById.values()).filter((screen) =>
+      Boolean(screen.sessionToken),
+    );
+    if (pairedScreens.length === 0) {
+      return;
+    }
+    await Promise.all(
+      pairedScreens.map(async (screen) => {
+        const token = screen.sessionToken?.trim();
+        if (!token) {
+          this.invalidateScreenSession(screen);
+          return;
+        }
+        try {
+          const response = await this.requestScreen({
+            screen,
+            pathName: "/snapshot",
+            method: "GET",
+            authToken: token,
+            allowNoJson: true,
+            allowedStatuses: [401, 403],
+          });
+          if (response.status === 401 || response.status === 403) {
+            this.invalidateScreenSession(screen);
+            return;
+          }
+          screen.status = "paired";
+          screen.busy = true;
+          if (screen.watchEnabled) {
+            const rearmed = await this.rearmWatch(screen, token);
+            screen.watchEnabled = rearmed;
+          }
+        } catch (err) {
+          this.logger.warn?.(
+            `[clawline:surf-ace] reconnect_failed(${screen.name}): ${String(err)}`,
+          );
+        }
+      }),
+    );
+    await this.persistScreenState();
+  }
+
+  private async loadScreenState(): Promise<void> {
+    this.screensById.clear();
+    let raw: string;
+    try {
+      raw = await fs.readFile(this.screenStatePath, "utf8");
+    } catch {
+      return;
+    }
+
+    let parsed: ScreenStateFile;
+    try {
+      parsed = JSON.parse(raw) as ScreenStateFile;
+    } catch (err) {
+      this.logger.warn?.(`[clawline:surf-ace] screen_state_parse_failed: ${String(err)}`);
+      return;
+    }
+
+    if (parsed.version !== 1 || !Array.isArray(parsed.screens)) {
+      return;
+    }
+
+    for (const entry of parsed.screens) {
+      const fingerprint = normalizeFingerprint(entry?.fingerprint);
+      const host = typeof entry?.host === "string" ? entry.host.trim() : "";
+      const rawPort = Number(entry?.port);
+      const port = Number.isFinite(rawPort) ? Math.floor(rawPort) : 0;
+      if (!fingerprint || !host || port <= 0) {
+        continue;
+      }
+
+      const tokenRaw = typeof entry.sessionToken === "string" ? entry.sessionToken.trim() : "";
+      const sessionToken = tokenRaw.length > 0 ? tokenRaw : null;
+      const name = fingerprint;
+      const instanceName = fingerprint;
+      const eventSourceAddress = await resolveExpectedSourceAddress(host);
+      const managed: ManagedScreen = {
+        id: fingerprint,
+        intake: "bonjour",
+        instanceName,
+        host,
+        port,
+        name,
+        protocolVersion: 1,
+        width: 0,
+        height: 0,
+        scale: 1,
+        contentTypes: 0,
+        busy: Boolean(sessionToken),
+        fingerprint,
+        status: sessionToken ? "paired" : "discovered",
+        sessionToken,
+        sourceRef: null,
+        watchEnabled: Boolean(entry.watchEnabled && sessionToken),
+        lastSnapshot: null,
+        lastEvent: null,
+        consecutiveFailures: 0,
+        unreachable: false,
+        eventSourceAddress,
+        watcherSessionKey: null,
+      };
+      this.screensById.set(fingerprint, managed);
+    }
+  }
+
+  private async persistScreenState(): Promise<void> {
+    const payload: ScreenStateFile = {
+      version: 1,
+      screens: Array.from(this.screensById.values())
+        .toSorted((a, b) =>
+          a.fingerprint.localeCompare(b.fingerprint, "en", { sensitivity: "base" }),
+        )
+        .map((screen) => ({
+          fingerprint: screen.fingerprint,
+          host: screen.host,
+          port: screen.port,
+          sessionToken: screen.sessionToken,
+          watchEnabled: screen.watchEnabled,
+        })),
+    };
+    this.screenStateWrite = this.screenStateWrite
+      .catch(() => {})
+      .then(async () => {
+        await fs.writeFile(this.screenStatePath, JSON.stringify(payload, null, 2));
+      })
+      .catch((err) => {
+        this.logger.warn?.(`[clawline:surf-ace] persist_screen_state_failed: ${String(err)}`);
+      });
+    await this.screenStateWrite;
   }
 
   private async loadTrustStore(): Promise<void> {

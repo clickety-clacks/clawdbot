@@ -4,6 +4,8 @@ import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { createSurfAceManager } from "./surf-ace.js";
 
+const SCREEN_STATE_FILE = "surf-ace-screens.json";
+
 describe("Surf Ace manager", () => {
   it("handles pair/push/snapshot/watch flows for discovered screens", async () => {
     const statePath = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-test-"));
@@ -178,6 +180,178 @@ describe("Surf Ace manager", () => {
     });
 
     expect(result.statusCode).toBe(403);
+    await manager.stop();
+    await fs.rm(statePath, { recursive: true, force: true });
+  });
+
+  it("restores paired screens from disk and rearms watch on startup", async () => {
+    const statePath = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-test-"));
+    const discoverImpl = vi.fn(async () => [
+      {
+        instanceName: "Kitchen Display",
+        host: "10.0.0.10",
+        port: 17777,
+        txt: {
+          name: "Kitchen Display",
+          v: "1",
+          w: "1920",
+          h: "1080",
+          s: "2",
+          cap: "31",
+          busy: "0",
+          pk: "a1b2c3d4",
+        },
+      },
+    ]);
+    const fetchInitial = vi.fn(async (input: RequestInfo | URL) => {
+      const url =
+        input instanceof URL ? input.toString() : typeof input === "string" ? input : input.url;
+      const pathname = new URL(url).pathname;
+      if (pathname === "/pair") {
+        return new Response(JSON.stringify({ status: "ok", sessionToken: "tok_restore" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (pathname === "/watch") {
+        return new Response("", { status: 200 });
+      }
+      return new Response(null, { status: 204 });
+    });
+
+    const firstManager = createSurfAceManager({
+      statePath,
+      discoverImpl,
+      fetchImpl: fetchInitial,
+      discoveryIntervalMs: 60_000,
+      discoveryTimeoutMs: 100,
+    });
+    firstManager.setCallbackBaseUrl("http://tars.local:18800");
+    await firstManager.start();
+    await firstManager.pair({ userId: "flynn", screen: "Kitchen Display" });
+    await firstManager.watch({ userId: "flynn", screen: "Kitchen Display", enabled: true });
+    await firstManager.stop();
+
+    const persistedPath = path.join(statePath, SCREEN_STATE_FILE);
+    const persistedRaw = await fs.readFile(persistedPath, "utf8");
+    const persisted = JSON.parse(persistedRaw) as {
+      screens: Array<{ fingerprint: string; sessionToken: string | null; watchEnabled: boolean }>;
+    };
+    expect(persisted.screens).toContainEqual(
+      expect.objectContaining({
+        fingerprint: "a1b2c3d4",
+        sessionToken: "tok_restore",
+        watchEnabled: true,
+      }),
+    );
+
+    const fetchRestore = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        input instanceof URL ? input.toString() : typeof input === "string" ? input : input.url;
+      const pathname = new URL(url).pathname;
+      if (pathname === "/snapshot") {
+        expect(init?.headers).toMatchObject({ Authorization: "Bearer tok_restore" });
+        return new Response(null, { status: 204 });
+      }
+      if (pathname === "/watch") {
+        const bodyText = typeof init?.body === "string" ? init.body : "";
+        expect(bodyText).toContain("/surf-ace/events/a1b2c3d4");
+        return new Response("", { status: 200 });
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    const restoredManager = createSurfAceManager({
+      statePath,
+      discoverImpl: async () => [],
+      fetchImpl: fetchRestore,
+      discoveryIntervalMs: 60_000,
+      discoveryTimeoutMs: 100,
+    });
+    restoredManager.setCallbackBaseUrl("http://tars.local:18800");
+    await restoredManager.start();
+
+    const restored = restoredManager.listScreens();
+    expect(restored).toHaveLength(1);
+    expect(restored[0]?.id).toBe("a1b2c3d4");
+    expect(restored[0]?.status).toBe("paired");
+    expect(restored[0]?.watchEnabled).toBe(true);
+    expect(restored[0]?.sessionToken).toBe("tok_restore");
+    expect(fetchRestore).toHaveBeenCalledWith(
+      expect.stringContaining("/snapshot"),
+      expect.objectContaining({ method: "GET" }),
+    );
+    expect(fetchRestore).toHaveBeenCalledWith(
+      expect.stringContaining("/watch"),
+      expect.objectContaining({ method: "POST" }),
+    );
+
+    await restoredManager.stop();
+    await fs.rm(statePath, { recursive: true, force: true });
+  });
+
+  it("marks restored screens as available when stored token is invalid", async () => {
+    const statePath = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-test-"));
+    const persistedPath = path.join(statePath, SCREEN_STATE_FILE);
+    await fs.writeFile(
+      persistedPath,
+      JSON.stringify(
+        {
+          version: 1,
+          screens: [
+            {
+              fingerprint: "deadbeef",
+              host: "10.0.0.55",
+              port: 17777,
+              sessionToken: "tok_old",
+              watchEnabled: true,
+            },
+          ],
+        },
+        null,
+        2,
+      ),
+    );
+
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url =
+        input instanceof URL ? input.toString() : typeof input === "string" ? input : input.url;
+      const pathname = new URL(url).pathname;
+      if (pathname === "/snapshot") {
+        return new Response("unauthorized", { status: 401 });
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    const manager = createSurfAceManager({
+      statePath,
+      discoverImpl: async () => [],
+      fetchImpl,
+      discoveryIntervalMs: 60_000,
+      discoveryTimeoutMs: 100,
+    });
+    manager.setCallbackBaseUrl("http://tars.local:18800");
+    await manager.start();
+
+    const screens = manager.listScreens();
+    expect(screens).toHaveLength(1);
+    expect(screens[0]?.id).toBe("deadbeef");
+    expect(screens[0]?.status).toBe("discovered");
+    expect(screens[0]?.sessionToken).toBeNull();
+    expect(screens[0]?.watchEnabled).toBe(false);
+
+    const persistedAfterRaw = await fs.readFile(persistedPath, "utf8");
+    const persistedAfter = JSON.parse(persistedAfterRaw) as {
+      screens: Array<{ fingerprint: string; sessionToken: string | null; watchEnabled: boolean }>;
+    };
+    expect(persistedAfter.screens).toContainEqual(
+      expect.objectContaining({
+        fingerprint: "deadbeef",
+        sessionToken: null,
+        watchEnabled: false,
+      }),
+    );
+
     await manager.stop();
     await fs.rm(statePath, { recursive: true, force: true });
   });
