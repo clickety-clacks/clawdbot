@@ -1270,6 +1270,22 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("handles Surf Ace event callback endpoint", async () => {
+    const ctx = await setupTestServer([]);
+    try {
+      const response = await fetch(`http://127.0.0.1:${ctx.port}/surf-ace/events/a1b2c3d4`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "text_selected", text: "oops" }),
+      });
+      expect(response.status).toBe(404);
+      const payload = (await response.json()) as { ok?: boolean; error?: string };
+      expect(payload).toEqual({ ok: false, error: "unknown_screen" });
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("routes alerts to personal session keys with explicit channel/to", async () => {
     const entry = createAllowlistEntry();
     const ctx = await setupTestServer([entry]);
