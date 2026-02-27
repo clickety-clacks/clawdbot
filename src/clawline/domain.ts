@@ -1,5 +1,6 @@
 import type { getReplyFromConfig } from "../auto-reply/reply.js";
 import type { OpenClawConfig } from "../config/config.js";
+import type { SurfAceRuntime } from "./surf-ace.js";
 
 export type DeviceInfo = {
   platform: string;
@@ -179,6 +180,7 @@ export interface ProviderServer {
   stop(): Promise<void>;
   getPort(): number;
   sendMessage(params: ClawlineOutboundSendParams): Promise<ClawlineOutboundSendResult>;
+  getSurfAceRuntime(): SurfAceRuntime;
 }
 
 export type Logger = Pick<typeof console, "info" | "warn" | "error">;

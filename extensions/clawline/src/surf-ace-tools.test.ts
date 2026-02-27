@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const runtime = {
   pair: vi.fn(),
@@ -8,7 +8,7 @@ const runtime = {
   snapshot: vi.fn(),
 };
 
-vi.mock("../../clawline/surf-ace-runtime.js", () => ({
+vi.mock("./surf-ace-runtime.js", () => ({
   requireClawlineSurfAceRuntime: () => runtime,
 }));
 
@@ -23,9 +23,11 @@ describe("createSurfAceTools", () => {
     runtime.snapshot.mockReset();
   });
 
-  it("creates the expected tool set", () => {
+  it("creates the expected tool set for clawline context", () => {
     const tools = createSurfAceTools({
-      agentSessionKey: "agent:main:clawline:flynn:main",
+      context: {
+        sessionKey: "agent:main:clawline:flynn:main",
+      },
     });
 
     expect(tools.map((tool) => tool.name).toSorted()).toEqual([
@@ -37,6 +39,17 @@ describe("createSurfAceTools", () => {
     ]);
   });
 
+  it("returns no tools outside clawline context", () => {
+    const tools = createSurfAceTools({
+      context: {
+        sessionKey: "agent:main:main",
+        messageChannel: "telegram",
+      },
+    });
+
+    expect(tools).toHaveLength(0);
+  });
+
   it("passes clawline user context to runtime calls", async () => {
     runtime.pair.mockResolvedValue({ ok: true, status: "paired" });
     runtime.push.mockResolvedValue({ ok: true, frameId: "fr_1" });
@@ -45,7 +58,9 @@ describe("createSurfAceTools", () => {
     runtime.snapshot.mockResolvedValue({ ok: true, status: "no_content" });
 
     const tools = createSurfAceTools({
-      agentSessionKey: "agent:main:clawline:flynn:main",
+      context: {
+        sessionKey: "agent:main:clawline:flynn:main",
+      },
     });
 
     const pair = tools.find((tool) => tool.name === "surf_ace_pair");

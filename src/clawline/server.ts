@@ -74,7 +74,6 @@ import { createPerUserTaskQueue } from "./per-user-task-queue.js";
 import { SlidingWindowRateLimiter } from "./rate-limiter.js";
 import { ClawlineDeliveryTarget } from "./routing.js";
 import { recordClawlineSessionActivity } from "./session-store.js";
-import { setClawlineSurfAceRuntime } from "./surf-ace-runtime.js";
 import { createSurfAceManager } from "./surf-ace.js";
 import { deepMerge } from "./utils/deep-merge.js";
 
@@ -6733,11 +6732,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       const surfAceCallbackBaseUrl = `${surfAceProtocol}://${resolveSurfAceCallbackHost()}:${port}`;
       surfAceManager.setCallbackBaseUrl(surfAceCallbackBaseUrl);
       await surfAceManager.start();
-      setClawlineSurfAceRuntime(surfAceManager);
       logger.info(`Provider listening on ${protocol}://${config.network.bindAddress}:${port}`);
     },
     async stop() {
-      setClawlineSurfAceRuntime(null);
       await surfAceManager.stop();
       if (!started) {
         return;
@@ -6807,5 +6804,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       return readBoundPort();
     },
     sendMessage: sendOutboundMessage,
+    getSurfAceRuntime: () => surfAceManager,
   };
 }

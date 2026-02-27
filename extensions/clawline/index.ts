@@ -1,9 +1,23 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { emptyPluginConfigSchema, startClawlineService } from "openclaw/plugin-sdk";
 import { clawlinePlugin } from "./src/channel.js";
+import { setClawlineSurfAceRuntime, type SurfAceRuntime } from "./src/surf-ace-runtime.js";
+import { createSurfAceTools } from "./src/surf-ace-tools.js";
 
 let serviceHandle: Awaited<ReturnType<typeof startClawlineService>> = null;
 let serviceStart: Promise<void> | null = null;
+
+function runtimeFromServiceHandle(
+  handle: Awaited<ReturnType<typeof startClawlineService>>,
+): SurfAceRuntime | null {
+  const runtimeResolver = (handle as { getSurfAceRuntime?: () => SurfAceRuntime | null } | null)
+    ?.getSurfAceRuntime;
+  if (!runtimeResolver) {
+    return null;
+  }
+  const runtime = runtimeResolver();
+  return runtime ? (runtime as SurfAceRuntime) : null;
+}
 
 const plugin = {
   id: "clawline",
@@ -12,6 +26,7 @@ const plugin = {
   configSchema: emptyPluginConfigSchema(),
   register(api: OpenClawPluginApi) {
     api.registerChannel({ plugin: clawlinePlugin });
+    api.registerTool((ctx) => createSurfAceTools({ context: ctx }));
     api.registerService({
       id: "clawline",
       start: async ({ config, logger }) => {
@@ -29,9 +44,11 @@ const plugin = {
         serviceStart = (async () => {
           try {
             serviceHandle = await startClawlineService({ config, logger });
+            setClawlineSurfAceRuntime(runtimeFromServiceHandle(serviceHandle));
           } catch (err) {
             logger.error?.(`clawline service failed to start: ${String(err)}`);
             serviceHandle = null;
+            setClawlineSurfAceRuntime(null);
           } finally {
             serviceStart = null;
           }
@@ -39,6 +56,7 @@ const plugin = {
         await serviceStart;
       },
       stop: async () => {
+        setClawlineSurfAceRuntime(null);
         if (!serviceHandle) {
           return;
         }

@@ -1,11 +1,20 @@
+import type { AnyAgentTool } from "openclaw/plugin-sdk";
 import { Type } from "@sinclair/typebox";
-import type { SurfAceSourceRef, SurfAceWatchDebounce } from "../../clawline/surf-ace.js";
-import type { AnyAgentTool } from "./common.js";
-import { requireClawlineSurfAceRuntime } from "../../clawline/surf-ace-runtime.js";
-import { stringEnum } from "../schema/typebox.js";
-import { jsonResult, readStringParam } from "./common.js";
+import type { SurfAceSourceRef, SurfAceWatchDebounce } from "./surf-ace-runtime.js";
+import { requireClawlineSurfAceRuntime } from "./surf-ace-runtime.js";
 
-const SurfAceContentTypeSchema = stringEnum(["html", "image", "pdf", "terminal", "markdown"]);
+type SurfAceToolContext = {
+  sessionKey?: string;
+  messageChannel?: string;
+};
+
+const SurfAceContentTypeSchema = Type.Union([
+  Type.Literal("html"),
+  Type.Literal("image"),
+  Type.Literal("pdf"),
+  Type.Literal("terminal"),
+  Type.Literal("markdown"),
+]);
 
 const SurfAcePairSchema = Type.Object({
   screen: Type.String({ description: "Surf Ace screen name or fingerprint." }),
@@ -47,6 +56,47 @@ const SurfAceSnapshotSchema = Type.Object({
     }),
   ),
 });
+
+function readStringParam(
+  params: Record<string, unknown>,
+  key: string,
+  opts: { required?: boolean } = {},
+): string | undefined {
+  const raw = params[key];
+  if (typeof raw !== "string") {
+    if (opts.required) {
+      throw new Error(`${key} required`);
+    }
+    return undefined;
+  }
+  const value = raw.trim();
+  if (!value) {
+    if (opts.required) {
+      throw new Error(`${key} required`);
+    }
+    return undefined;
+  }
+  return value;
+}
+
+function jsonResult(payload: unknown) {
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text: JSON.stringify(payload, null, 2),
+      },
+    ],
+    details: payload,
+  };
+}
+
+function isClawlineToolContext(context: SurfAceToolContext): boolean {
+  if (context.messageChannel?.toLowerCase() === "clawline") {
+    return true;
+  }
+  return context.sessionKey?.toLowerCase().includes(":clawline:") === true;
+}
 
 function resolveClawlineUserId(sessionKey: string | undefined): string | null {
   if (!sessionKey) {
@@ -96,25 +146,25 @@ function debounceFromArgs(args: Record<string, unknown>): SurfAceWatchDebounce |
   return Object.keys(debounce).length > 0 ? debounce : undefined;
 }
 
-type SurfAceToolContext = {
-  agentSessionKey?: string;
-};
+export function createSurfAceTools(params: { context: SurfAceToolContext }): AnyAgentTool[] {
+  const { context } = params;
+  if (!isClawlineToolContext(context)) {
+    return [];
+  }
 
-export function createSurfAceTools(context: SurfAceToolContext): AnyAgentTool[] {
-  const userId = resolveClawlineUserId(context.agentSessionKey);
+  const userId = resolveClawlineUserId(context.sessionKey);
 
   return [
     {
       label: "Surf Ace Pair",
       name: "surf_ace_pair",
-      description:
-        "Pair with a discovered Surf Ace screen (auto-pairs immediately — no PIN required).",
+      description: "Pair with a discovered Surf Ace screen (auto-pairs immediately, no PIN).",
       parameters: SurfAcePairSchema,
       execute: async (_toolCallId, rawArgs) => {
         const args = rawArgs as Record<string, unknown>;
         const runtime = requireClawlineSurfAceRuntime();
         const screen = readStringParam(args, "screen", { required: true });
-        const result = await runtime.pair({ userId, screen });
+        const result = await runtime.pair({ userId, screen: screen as string });
         return jsonResult(result);
       },
     },
@@ -136,8 +186,8 @@ export function createSurfAceTools(context: SurfAceToolContext): AnyAgentTool[] 
             : {};
         const result = await runtime.push({
           userId,
-          screen,
-          contentType,
+          screen: screen as string,
+          contentType: contentType as string,
           content,
           title,
           frameId,
@@ -158,10 +208,10 @@ export function createSurfAceTools(context: SurfAceToolContext): AnyAgentTool[] 
         const enabled = typeof args.enabled === "boolean" ? args.enabled : false;
         const result = await runtime.watch({
           userId,
-          screen,
+          screen: screen as string,
           enabled,
           debounce: debounceFromArgs(args),
-          watcherSessionKey: context.agentSessionKey,
+          watcherSessionKey: context.sessionKey,
         });
         return jsonResult(result);
       },
@@ -175,7 +225,7 @@ export function createSurfAceTools(context: SurfAceToolContext): AnyAgentTool[] 
         const args = rawArgs as Record<string, unknown>;
         const runtime = requireClawlineSurfAceRuntime();
         const screen = readStringParam(args, "screen", { required: true });
-        const result = await runtime.clear({ userId, screen });
+        const result = await runtime.clear({ userId, screen: screen as string });
         return jsonResult(result);
       },
     },

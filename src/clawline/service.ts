@@ -43,10 +43,12 @@ export async function startClawlineService(params: {
   logger.info?.(
     `[clawline] listening on ${providerConfig.network.bindAddress}:${server.getPort()}`,
   );
-  return {
+  const handle = {
     stop: async () => {
       setClawlineOutboundSender(null);
       await server.stop();
     },
+    getSurfAceRuntime: () => server.getSurfAceRuntime(),
   };
+  return handle as ClawlineServiceHandle;
 }
