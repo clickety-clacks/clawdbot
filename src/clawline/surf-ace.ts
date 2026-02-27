@@ -64,23 +64,11 @@ export type SurfAceWatchDebounce = Partial<{
   page_change: number;
 }>;
 
-export type SurfAcePairResult =
-  | {
-      ok: true;
-      status: "paired";
-      screen: SurfAceDiscoveredScreen;
-      mode: "auto" | "pin";
-    }
-  | {
-      ok: true;
-      status: "pin_required";
-      screen: SurfAceDiscoveredScreen;
-      challenge: {
-        pin_hash?: string;
-        nonce?: string;
-      };
-      mode: "pin";
-    };
+export type SurfAcePairResult = {
+  ok: true;
+  status: "paired";
+  screen: SurfAceDiscoveredScreen;
+};
 
 export type SurfAcePushResult = {
   ok: true;
@@ -108,12 +96,7 @@ export interface SurfAceRuntime {
   start(): Promise<void>;
   stop(): Promise<void>;
   setCallbackBaseUrl(url: string): void;
-  pair(params: {
-    userId: string | null;
-    screen: string;
-    pin?: string;
-    nonce?: string;
-  }): Promise<SurfAcePairResult>;
+  pair(params: { userId: string | null; screen: string }): Promise<SurfAcePairResult>;
   push(params: {
     userId: string | null;
     screen: string;
@@ -429,23 +412,9 @@ class SurfAceManager implements SurfAceRuntime {
     return Array.from(this.screensById.values()).map((screen) => this.toPublicScreen(screen));
   }
 
-  async pair(params: {
-    userId: string | null;
-    screen: string;
-    pin?: string;
-    nonce?: string;
-  }): Promise<SurfAcePairResult> {
+  async pair(params: { userId: string | null; screen: string }): Promise<SurfAcePairResult> {
     const screen = this.resolveUniqueScreen(params.screen);
-    const trusted = this.trustByFingerprint.has(screen.fingerprint);
-    const hasPin = typeof params.pin === "string" && params.pin.trim().length > 0;
-    const mode: "auto" | "pin" = hasPin ? "pin" : trusted ? "auto" : "pin";
-    const body: Record<string, unknown> = { mode };
-    if (hasPin) {
-      body.pin = params.pin?.trim();
-      if (typeof params.nonce === "string" && params.nonce.trim().length > 0) {
-        body.nonce = params.nonce.trim();
-      }
-    }
+    const body: Record<string, unknown> = { mode: "auto" };
 
     screen.status = "pairing";
     try {
@@ -454,7 +423,6 @@ class SurfAceManager implements SurfAceRuntime {
         pathName: "/pair",
         method: "POST",
         body,
-        allowedStatuses: [403, 429],
       });
 
       if (response.status === 409) {
@@ -462,32 +430,8 @@ class SurfAceManager implements SurfAceRuntime {
         screen.busy = true;
         throw new Error(`Screen "${screen.name}" is busy.`);
       }
-      if (response.status === 403) {
-        throw new Error(`Surf Ace PIN rejected for screen "${screen.name}".`);
-      }
-      if (response.status === 429) {
-        throw new Error(`Surf Ace pairing lockout active for screen "${screen.name}".`);
-      }
 
       const payload = response.json;
-      const status =
-        payload && typeof payload.status === "string" ? payload.status.trim().toLowerCase() : "";
-
-      if (status === "pin_required") {
-        screen.status = "discovered";
-        return {
-          ok: true,
-          status: "pin_required",
-          mode: "pin",
-          screen: this.toPublicScreen(screen),
-          challenge: {
-            pin_hash:
-              payload && typeof payload.pin_hash === "string" ? payload.pin_hash : undefined,
-            nonce: payload && typeof payload.nonce === "string" ? payload.nonce : undefined,
-          },
-        };
-      }
-
       const sessionToken =
         payload && typeof payload.sessionToken === "string" ? payload.sessionToken.trim() : "";
       if (!sessionToken) {
@@ -510,7 +454,6 @@ class SurfAceManager implements SurfAceRuntime {
       return {
         ok: true,
         status: "paired",
-        mode,
         screen: this.toPublicScreen(screen),
       };
     } catch (err) {

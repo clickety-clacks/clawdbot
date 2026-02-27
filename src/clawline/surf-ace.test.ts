@@ -25,20 +25,12 @@ describe("Surf Ace manager", () => {
       },
     ]);
 
-    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
       const url =
         input instanceof URL ? input.toString() : typeof input === "string" ? input : input.url;
       const pathname = new URL(url).pathname;
-      const bodyText = typeof init?.body === "string" ? init.body : "";
-      const body = bodyText ? (JSON.parse(bodyText) as Record<string, unknown>) : {};
 
-      if (pathname === "/pair" && body.mode === "pin" && !body.pin) {
-        return new Response(
-          JSON.stringify({ status: "pin_required", pin_hash: "abc", nonce: "nonce_1" }),
-          { status: 200, headers: { "content-type": "application/json" } },
-        );
-      }
-      if (pathname === "/pair" && body.mode === "pin" && body.pin === "1847") {
+      if (pathname === "/pair") {
         return new Response(JSON.stringify({ status: "ok", sessionToken: "tok_123" }), {
           status: 200,
           headers: { "content-type": "application/json" },
@@ -83,15 +75,8 @@ describe("Surf Ace manager", () => {
     await manager.start();
     manager.setCallbackBaseUrl("http://tars.local:18800");
 
-    const pairChallenge = await manager.pair({ userId: "flynn", screen: "Kitchen Display" });
-    expect(pairChallenge.status).toBe("pin_required");
-
-    const pairResult = await manager.pair({
-      userId: "flynn",
-      screen: "Kitchen Display",
-      pin: "1847",
-      nonce: "nonce_1",
-    });
+    // Auto-pair — no PIN
+    const pairResult = await manager.pair({ userId: "flynn", screen: "Kitchen Display" });
     expect(pairResult.status).toBe("paired");
 
     const pushResult = await manager.push({
@@ -146,45 +131,6 @@ describe("Surf Ace manager", () => {
     expect(discoverImpl).toHaveBeenCalled();
   });
 
-  it("surfaces pairing errors for invalid PIN and lockout responses", async () => {
-    const statePath = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-test-"));
-    const manager = createSurfAceManager({
-      statePath,
-      discoveryIntervalMs: 60_000,
-      discoverImpl: async () => [
-        {
-          instanceName: "Lab",
-          host: "10.0.0.30",
-          port: 17777,
-          txt: { name: "Lab", busy: "0", pk: "cafebabe" },
-        },
-      ],
-      fetchImpl: async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url =
-          input instanceof URL ? input.toString() : typeof input === "string" ? input : input.url;
-        if (new URL(url).pathname !== "/pair") {
-          return new Response("not found", { status: 404 });
-        }
-        const bodyText = typeof init?.body === "string" ? init.body : "";
-        const body = bodyText ? (JSON.parse(bodyText) as Record<string, unknown>) : {};
-        if (body.pin === "1111") {
-          return new Response(JSON.stringify({ error: "pin_incorrect" }), { status: 403 });
-        }
-        return new Response(JSON.stringify({ error: "lockout" }), { status: 429 });
-      },
-    });
-
-    await manager.start();
-    await expect(manager.pair({ userId: "flynn", screen: "Lab", pin: "1111" })).rejects.toThrow(
-      "PIN rejected",
-    );
-    await expect(manager.pair({ userId: "flynn", screen: "Lab", pin: "2222" })).rejects.toThrow(
-      "lockout",
-    );
-    await manager.stop();
-    await fs.rm(statePath, { recursive: true, force: true });
-  });
-
   it("rejects inbound events from mismatched source addresses", async () => {
     const statePath = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-test-"));
     const manager = createSurfAceManager({
@@ -206,7 +152,7 @@ describe("Surf Ace manager", () => {
     });
 
     await manager.start();
-    await manager.pair({ userId: "flynn", screen: "Office", pin: "1847" });
+    await manager.pair({ userId: "flynn", screen: "Office" });
     manager.setCallbackBaseUrl("http://127.0.0.1:18800");
     await manager.watch({ userId: "flynn", screen: "Office", enabled: true });
 

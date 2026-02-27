@@ -9,12 +9,6 @@ const SurfAceContentTypeSchema = stringEnum(["html", "image", "pdf", "terminal",
 
 const SurfAcePairSchema = Type.Object({
   screen: Type.String({ description: "Surf Ace screen name or fingerprint." }),
-  pin: Type.Optional(
-    Type.String({ description: "4-digit PIN shown on the screen (for PIN step 2)." }),
-  ),
-  nonce: Type.Optional(
-    Type.String({ description: "Nonce from pin_required challenge (for PIN step 2)." }),
-  ),
 });
 
 const SurfAcePushSchema = Type.Object({
@@ -114,15 +108,13 @@ export function createSurfAceTools(context: SurfAceToolContext): AnyAgentTool[] 
       label: "Surf Ace Pair",
       name: "surf_ace_pair",
       description:
-        "Pair with a discovered Surf Ace screen (auto for trusted screens, PIN for first-time screens).",
+        "Pair with a discovered Surf Ace screen (auto-pairs immediately — no PIN required).",
       parameters: SurfAcePairSchema,
       execute: async (_toolCallId, rawArgs) => {
         const args = rawArgs as Record<string, unknown>;
         const runtime = requireClawlineSurfAceRuntime();
         const screen = readStringParam(args, "screen", { required: true });
-        const pin = readStringParam(args, "pin");
-        const nonce = readStringParam(args, "nonce");
-        const result = await runtime.pair({ userId, screen, pin, nonce });
+        const result = await runtime.pair({ userId, screen });
         return jsonResult(result);
       },
     },

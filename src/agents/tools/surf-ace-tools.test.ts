@@ -73,8 +73,6 @@ describe("createSurfAceTools", () => {
     expect(runtime.pair).toHaveBeenCalledWith({
       userId: "flynn",
       screen: "Kitchen",
-      pin: undefined,
-      nonce: undefined,
     });
     expect(runtime.push).toHaveBeenCalledWith(
       expect.objectContaining({
