@@ -490,7 +490,11 @@ class SurfAceManager implements SurfAceRuntime {
 
       const payload = response.json;
       const sessionToken =
-        payload && typeof payload.sessionToken === "string" ? payload.sessionToken.trim() : "";
+        payload && typeof payload.token === "string"
+          ? payload.token.trim()
+          : payload && typeof payload.sessionToken === "string"
+            ? payload.sessionToken.trim()
+            : "";
       if (!sessionToken) {
         throw new Error(`Screen "${screen.name}" did not return a session token.`);
       }
