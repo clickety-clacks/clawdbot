@@ -159,6 +159,10 @@ export interface ProviderConfig {
     maxStreamsPerUser: number;
     maxDisplayNameBytes: number;
   };
+  surfAce: {
+    discoveryIntervalMs: number;
+    discoveryTimeoutMs: number;
+  };
 }
 
 export interface ProviderOptions {

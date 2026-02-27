@@ -74,6 +74,8 @@ import { createPerUserTaskQueue } from "./per-user-task-queue.js";
 import { SlidingWindowRateLimiter } from "./rate-limiter.js";
 import { ClawlineDeliveryTarget } from "./routing.js";
 import { recordClawlineSessionActivity } from "./session-store.js";
+import { setClawlineSurfAceRuntime } from "./surf-ace-runtime.js";
+import { createSurfAceManager } from "./surf-ace.js";
 import { deepMerge } from "./utils/deep-merge.js";
 
 export const PROTOCOL_VERSION = 1;
@@ -932,6 +934,10 @@ const DEFAULT_CONFIG: ProviderConfig = {
     maxStreamsPerUser: 32,
     maxDisplayNameBytes: 120,
   },
+  surfAce: {
+    discoveryIntervalMs: 5_000,
+    discoveryTimeoutMs: 1_500,
+  },
 };
 
 const ALLOWLIST_FILENAME = "allowlist.json";
@@ -1265,6 +1271,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     config.alertInstructionsPath.trim().length > 0
       ? path.resolve(config.alertInstructionsPath.trim())
       : null;
+  const surfAceManager = createSurfAceManager({
+    statePath: config.statePath,
+    logger,
+    discoveryIntervalMs: config.surfAce.discoveryIntervalMs,
+    discoveryTimeoutMs: config.surfAce.discoveryTimeoutMs,
+  });
 
   if (!config.network.allowInsecurePublic && !isLocalhost(config.network.bindAddress)) {
     throw new Error("allowInsecurePublic must be true to bind non-localhost");
@@ -2619,6 +2631,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         await handleAlertHttpRequest(req, res);
         return;
       }
+      if (req.method === "POST" && parsedUrl.pathname.startsWith("/surf-ace/events/")) {
+        await handleSurfAceEventHttpRequest(req, res, parsedUrl.pathname);
+        return;
+      }
       logHttpRequest("request_not_found", {
         method: req.method ?? "UNKNOWN",
         path: parsedUrl.pathname,
@@ -2833,6 +2849,45 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       throw new HttpError(400, "invalid_message", "Alert message is required");
     }
     return { raw: rawText, message, source, sessionKey, noOverlay };
+  }
+
+  async function handleSurfAceEventHttpRequest(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    pathname: string,
+  ) {
+    const prefix = "/surf-ace/events/";
+    const rawScreenId = pathname.slice(prefix.length).trim();
+    if (!rawScreenId || rawScreenId.includes("/")) {
+      sendHttpError(res, 404, "not_found", "Unknown Surf Ace screen");
+      return;
+    }
+
+    let payload: unknown;
+    try {
+      const raw = await readRequestBody(
+        req,
+        config.sessions.maxMessageBytes,
+        "Surf Ace event too large",
+      );
+      payload = raw.length > 0 ? (JSON.parse(raw.toString("utf8")) as unknown) : null;
+    } catch (err) {
+      if (err instanceof HttpError) {
+        sendHttpError(res, err.status, err.code, err.message);
+        return;
+      }
+      sendHttpError(res, 400, "invalid_json", "Surf Ace event must be valid JSON");
+      return;
+    }
+
+    const result = surfAceManager.handleInboundEvent({
+      screenId: rawScreenId,
+      payload,
+      remoteAddress: req.socket.remoteAddress,
+    });
+    res.setHeader("Content-Type", "application/json");
+    res.writeHead(result.statusCode);
+    res.end(JSON.stringify(result.body));
   }
 
   async function readRequestBody(
@@ -4942,9 +4997,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           const peerId = session.peerId;
 
           const deliveryTarget = ClawlineDeliveryTarget.fromParts(session.userId, streamSuffix);
-          const systemPromptParts = [adapterOverrides.systemPrompt?.trim() || null].filter(
-            (entry): entry is string => Boolean(entry),
-          );
+          const surfAceContext = await surfAceManager.buildContextInjection({
+            userId: session.userId,
+          });
+          const systemPromptParts = [
+            adapterOverrides.systemPrompt?.trim() || null,
+            surfAceContext,
+          ].filter((entry): entry is string => Boolean(entry));
           const groupSystemPrompt =
             systemPromptParts.length > 0 ? systemPromptParts.join("\n\n") : undefined;
           const ctxPayload = finalizeInboundContext({
@@ -5339,9 +5398,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           const peerId = session.peerId;
 
           const deliveryTarget = ClawlineDeliveryTarget.fromParts(session.userId, streamSuffix);
-          const systemPromptParts = [adapterOverrides.systemPrompt?.trim() || null].filter(
-            (entry): entry is string => Boolean(entry),
-          );
+          const surfAceContext = await surfAceManager.buildContextInjection({
+            userId: session.userId,
+          });
+          const systemPromptParts = [
+            adapterOverrides.systemPrompt?.trim() || null,
+            surfAceContext,
+          ].filter((entry): entry is string => Boolean(entry));
           const groupSystemPrompt =
             systemPromptParts.length > 0 ? systemPromptParts.join("\n\n") : undefined;
           const ctxPayload = finalizeInboundContext({
@@ -6620,6 +6683,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
     return addr.port;
   };
+  const resolveSurfAceCallbackHost = (): string => {
+    const bind = config.network.bindAddress.trim();
+    if (!bind || bind === "0.0.0.0" || bind === "::" || bind === "::0") {
+      return os.hostname();
+    }
+    return bind;
+  };
 
   return {
     async start() {
@@ -6651,9 +6721,16 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       started = true;
       const port = readBoundPort();
       const protocol = providerTls.enabled ? "wss" : "ws";
+      const surfAceProtocol = providerTls.enabled ? "https" : "http";
+      const surfAceCallbackBaseUrl = `${surfAceProtocol}://${resolveSurfAceCallbackHost()}:${port}`;
+      surfAceManager.setCallbackBaseUrl(surfAceCallbackBaseUrl);
+      await surfAceManager.start();
+      setClawlineSurfAceRuntime(surfAceManager);
       logger.info(`Provider listening on ${protocol}://${config.network.bindAddress}:${port}`);
     },
     async stop() {
+      setClawlineSurfAceRuntime(null);
+      await surfAceManager.stop();
       if (!started) {
         return;
       }

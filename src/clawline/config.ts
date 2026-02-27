@@ -121,6 +121,10 @@ const DEFAULTS: ResolvedClawlineConfig = {
     maxStreamsPerUser: 32,
     maxDisplayNameBytes: 120,
   },
+  surfAce: {
+    discoveryIntervalMs: 5_000,
+    discoveryTimeoutMs: 1_500,
+  },
 };
 
 export function resolveClawlineConfig(cfg: OpenClawConfig): ResolvedClawlineConfig {
