@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { lookup } from "node:dns/promises";
 import fs from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
@@ -10,7 +11,7 @@ const TRUST_STORE_FILE = "surf-ace-trust.json";
 const DEFAULT_DISCOVERY_INTERVAL_MS = 5_000;
 const DEFAULT_DISCOVERY_TIMEOUT_MS = 1_500;
 const DEFAULT_HTTP_TIMEOUT_MS = 10_000;
-const MAX_PROMPT_VISIBLE_TEXT_CHARS = 512;
+const MAX_PROMPT_VISIBLE_TEXT_CHARS = 4_096;
 
 export type SurfAceScreenStatus = "discovered" | "pairing" | "paired" | "busy";
 
@@ -36,7 +37,6 @@ export type SurfAceDiscoveredScreen = {
   intake: "bonjour";
   sessionToken: string | null;
   sourceRef: SurfAceSourceRef | null;
-  ownerUserId: string | null;
   watchEnabled: boolean;
   lastSnapshot: Record<string, unknown> | null;
   lastEvent: Record<string, unknown> | null;
@@ -175,6 +175,7 @@ type SurfAceManagerOptions = {
 type ManagedScreen = SurfAceDiscoveredScreen & {
   consecutiveFailures: number;
   unreachable: boolean;
+  eventSourceAddress: string | null;
 };
 
 function decodeDnsSdEscapes(value: string): string {
@@ -343,12 +344,30 @@ function isIpAddress(value: string): boolean {
   return net.isIP(value) !== 0;
 }
 
-function truncatePromptText(value: string, maxChars: number): string {
+async function resolveExpectedSourceAddress(host: string): Promise<string | null> {
+  const normalizedHost = normalizeAddressHost(host);
+  if (isIpAddress(normalizedHost)) {
+    return normalizedHost;
+  }
+  try {
+    const resolved = await lookup(normalizedHost);
+    return normalizeAddressHost(resolved.address);
+  } catch {
+    return null;
+  }
+}
+
+function truncatePromptText(value: string, maxBytes: number): string {
   const trimmed = value.trim();
-  if (trimmed.length <= maxChars) {
+  if (Buffer.byteLength(trimmed, "utf8") <= maxBytes) {
     return trimmed;
   }
-  return `${trimmed.slice(0, Math.max(0, maxChars - 3))}...`;
+  const byteBudget = Math.max(0, maxBytes - 3);
+  let out = trimmed;
+  while (out.length > 0 && Buffer.byteLength(out, "utf8") > byteBudget) {
+    out = out.slice(0, -1);
+  }
+  return `${out}...`;
 }
 
 function buildFrameId(): string {
@@ -435,12 +454,19 @@ class SurfAceManager implements SurfAceRuntime {
         pathName: "/pair",
         method: "POST",
         body,
+        allowedStatuses: [403, 429],
       });
 
       if (response.status === 409) {
         screen.status = "busy";
         screen.busy = true;
         throw new Error(`Screen "${screen.name}" is busy.`);
+      }
+      if (response.status === 403) {
+        throw new Error(`Surf Ace PIN rejected for screen "${screen.name}".`);
+      }
+      if (response.status === 429) {
+        throw new Error(`Surf Ace pairing lockout active for screen "${screen.name}".`);
       }
 
       const payload = response.json;
@@ -471,7 +497,6 @@ class SurfAceManager implements SurfAceRuntime {
       screen.sessionToken = sessionToken;
       screen.status = "paired";
       screen.busy = true;
-      screen.ownerUserId = params.userId;
       screen.unreachable = false;
       screen.consecutiveFailures = 0;
 
@@ -506,7 +531,6 @@ class SurfAceManager implements SurfAceRuntime {
     frameId?: string;
   }): Promise<SurfAcePushResult> {
     const screen = this.resolveUniqueScreen(params.screen);
-    this.assertScreenOwnedOrUnowned(screen, params.userId);
     const token = this.requireSessionToken(screen);
 
     const frameId = params.frameId?.trim() || buildFrameId();
@@ -551,7 +575,6 @@ class SurfAceManager implements SurfAceRuntime {
 
   async clear(params: { userId: string | null; screen: string }): Promise<SurfAceClearResult> {
     const screen = this.resolveUniqueScreen(params.screen);
-    this.assertScreenOwnedOrUnowned(screen, params.userId);
     const token = this.requireSessionToken(screen);
 
     await this.requestScreen({
@@ -562,11 +585,8 @@ class SurfAceManager implements SurfAceRuntime {
       allowNoJson: true,
     });
 
-    screen.sessionToken = null;
-    screen.status = screen.busy ? "busy" : "discovered";
+    screen.status = screen.busy ? "busy" : "paired";
     screen.sourceRef = null;
-    screen.ownerUserId = null;
-    screen.watchEnabled = false;
     screen.lastSnapshot = null;
 
     return {
@@ -581,15 +601,11 @@ class SurfAceManager implements SurfAceRuntime {
   }): Promise<SurfAceSnapshotResult[] | SurfAceSnapshotResult> {
     if (params.screen) {
       const screen = this.resolveUniqueScreen(params.screen);
-      this.assertScreenOwnedOrUnowned(screen, params.userId);
       return await this.snapshotForScreen(screen);
     }
 
     const eligible = Array.from(this.screensById.values()).filter((screen) => {
-      if (!screen.sessionToken) {
-        return false;
-      }
-      return !screen.ownerUserId || screen.ownerUserId === params.userId;
+      return Boolean(screen.sessionToken);
     });
 
     const results: SurfAceSnapshotResult[] = [];
@@ -606,7 +622,6 @@ class SurfAceManager implements SurfAceRuntime {
     debounce?: SurfAceWatchDebounce;
   }): Promise<SurfAceWatchResult> {
     const screen = this.resolveUniqueScreen(params.screen);
-    this.assertScreenOwnedOrUnowned(screen, params.userId);
     const token = this.requireSessionToken(screen);
 
     if (params.enabled) {
@@ -632,7 +647,6 @@ class SurfAceManager implements SurfAceRuntime {
         pathName: "/unwatch",
         method: "POST",
         authToken: token,
-        body: {},
         allowNoJson: true,
       });
       screen.watchEnabled = false;
@@ -659,12 +673,10 @@ class SurfAceManager implements SurfAceRuntime {
       return { statusCode: 409, body: { ok: false, error: "watch_not_enabled" } };
     }
 
-    if (params.remoteAddress && isIpAddress(screen.host)) {
-      const expected = normalizeAddressHost(screen.host);
-      const actual = normalizeAddressHost(params.remoteAddress);
-      if (expected !== actual) {
-        return { statusCode: 403, body: { ok: false, error: "source_mismatch" } };
-      }
+    const expectedSource = screen.eventSourceAddress;
+    const actualSource = params.remoteAddress ? normalizeAddressHost(params.remoteAddress) : null;
+    if (!expectedSource || !actualSource || expectedSource !== actualSource) {
+      return { statusCode: 403, body: { ok: false, error: "source_mismatch" } };
     }
 
     if (!params.payload || typeof params.payload !== "object" || Array.isArray(params.payload)) {
@@ -675,7 +687,7 @@ class SurfAceManager implements SurfAceRuntime {
     return { statusCode: 200, body: { ok: true } };
   }
 
-  async buildContextInjection(params: { userId: string }): Promise<string | null> {
+  async buildContextInjection(_params: { userId: string }): Promise<string | null> {
     const screens = Array.from(this.screensById.values()).toSorted((a, b) =>
       a.name.localeCompare(b.name, "en", { sensitivity: "base" }),
     );
@@ -692,10 +704,6 @@ class SurfAceManager implements SurfAceRuntime {
         lines.push(`- "${screen.name}" (${viewport}, ${status})`);
         continue;
       }
-      if (screen.ownerUserId && screen.ownerUserId !== params.userId) {
-        continue;
-      }
-
       const snap = await this.snapshotForScreen(screen);
       if (snap.status === "no_content") {
         lines.push(`- "${screen.name}" (${viewport}, paired): connected, no frame`);
@@ -784,6 +792,8 @@ class SurfAceManager implements SurfAceRuntime {
         }
         const existing = this.screensById.get(fingerprint);
         const name = normalizeScreenName(record);
+        const resolvedSourceAddress =
+          (await resolveExpectedSourceAddress(record.host)) ?? existing?.eventSourceAddress ?? null;
         const merged: ManagedScreen = {
           id: fingerprint,
           intake: "bonjour",
@@ -802,12 +812,12 @@ class SurfAceManager implements SurfAceRuntime {
             record.txt.busy === "1" ? "busy" : existing?.sessionToken ? "paired" : "discovered",
           sessionToken: existing?.sessionToken ?? null,
           sourceRef: existing?.sourceRef ?? null,
-          ownerUserId: existing?.ownerUserId ?? null,
           watchEnabled: existing?.watchEnabled ?? false,
           lastSnapshot: existing?.lastSnapshot ?? null,
           lastEvent: existing?.lastEvent ?? null,
           consecutiveFailures: existing?.consecutiveFailures ?? 0,
           unreachable: false,
+          eventSourceAddress: resolvedSourceAddress,
         };
 
         this.screensById.set(fingerprint, merged);
@@ -880,12 +890,6 @@ class SurfAceManager implements SurfAceRuntime {
     return token;
   }
 
-  private assertScreenOwnedOrUnowned(screen: ManagedScreen, userId: string | null): void {
-    if (screen.ownerUserId && userId && screen.ownerUserId !== userId) {
-      throw new Error(`Surf Ace screen "${screen.name}" is paired to another user session.`);
-    }
-  }
-
   private async requestScreen(params: {
     screen: ManagedScreen;
     pathName: string;
@@ -893,6 +897,7 @@ class SurfAceManager implements SurfAceRuntime {
     body?: Record<string, unknown>;
     authToken?: string;
     allowNoJson?: boolean;
+    allowedStatuses?: number[];
   }): Promise<{ status: number; json: Record<string, unknown> | null }> {
     const url = `http://${params.screen.host}:${params.screen.port}${params.pathName}`;
     const headers: Record<string, string> = {};
@@ -913,12 +918,8 @@ class SurfAceManager implements SurfAceRuntime {
         signal: controller.signal,
       });
 
-      if (
-        !response.ok &&
-        response.status !== 204 &&
-        response.status !== 409 &&
-        response.status !== 422
-      ) {
+      const allowedStatuses = new Set([204, 409, 422, ...(params.allowedStatuses ?? [])]);
+      if (!response.ok && !allowedStatuses.has(response.status)) {
         const bodyText = await response.text().catch(() => "");
         throw new Error(`Surf Ace HTTP ${response.status} at ${params.pathName}: ${bodyText}`);
       }
@@ -1007,7 +1008,6 @@ class SurfAceManager implements SurfAceRuntime {
       intake: screen.intake,
       sessionToken: screen.sessionToken,
       sourceRef: screen.sourceRef,
-      ownerUserId: screen.ownerUserId,
       watchEnabled: screen.watchEnabled,
       lastSnapshot: screen.lastSnapshot,
       lastEvent: screen.lastEvent,

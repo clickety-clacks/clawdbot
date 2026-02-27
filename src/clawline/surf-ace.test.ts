@@ -130,10 +130,59 @@ describe("Surf Ace manager", () => {
     expect(context).toContain("Kitchen Display");
     expect(context).toContain("sourceRef: agent:main:clawline:flynn:main#s_123");
 
+    await manager.clear({ userId: "flynn", screen: "Kitchen Display" });
+    const pushAfterClear = await manager.push({
+      userId: "flynn",
+      screen: "Kitchen Display",
+      contentType: "html",
+      content: { html: "<html><body>After Clear</body></html>" },
+      title: "After Clear",
+    });
+    expect(pushAfterClear.ok).toBe(true);
+
     await manager.stop();
     await fs.rm(statePath, { recursive: true, force: true });
     expect(fetchImpl).toHaveBeenCalled();
     expect(discoverImpl).toHaveBeenCalled();
+  });
+
+  it("surfaces pairing errors for invalid PIN and lockout responses", async () => {
+    const statePath = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-test-"));
+    const manager = createSurfAceManager({
+      statePath,
+      discoveryIntervalMs: 60_000,
+      discoverImpl: async () => [
+        {
+          instanceName: "Lab",
+          host: "10.0.0.30",
+          port: 17777,
+          txt: { name: "Lab", busy: "0", pk: "cafebabe" },
+        },
+      ],
+      fetchImpl: async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url =
+          input instanceof URL ? input.toString() : typeof input === "string" ? input : input.url;
+        if (new URL(url).pathname !== "/pair") {
+          return new Response("not found", { status: 404 });
+        }
+        const bodyText = typeof init?.body === "string" ? init.body : "";
+        const body = bodyText ? (JSON.parse(bodyText) as Record<string, unknown>) : {};
+        if (body.pin === "1111") {
+          return new Response(JSON.stringify({ error: "pin_incorrect" }), { status: 403 });
+        }
+        return new Response(JSON.stringify({ error: "lockout" }), { status: 429 });
+      },
+    });
+
+    await manager.start();
+    await expect(manager.pair({ userId: "flynn", screen: "Lab", pin: "1111" })).rejects.toThrow(
+      "PIN rejected",
+    );
+    await expect(manager.pair({ userId: "flynn", screen: "Lab", pin: "2222" })).rejects.toThrow(
+      "lockout",
+    );
+    await manager.stop();
+    await fs.rm(statePath, { recursive: true, force: true });
   });
 
   it("rejects inbound events from mismatched source addresses", async () => {
