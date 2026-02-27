@@ -814,6 +814,26 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("does not crash outbound sends when mediaUrl is an invalid local path", async () => {
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry]);
+    try {
+      const result = await ctx.server.sendMessage({
+        target: entry.userId,
+        text: "fallback text",
+        mediaUrl: "/tmp/not-http-url.png",
+      });
+      expect(result.attachments).toEqual([]);
+      expect(result.assetIds).toEqual([]);
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("does not deliver admin channel messages to non-admin sessions", async () => {
     const adminDeviceId = randomUUID();
     const userDeviceId = randomUUID();

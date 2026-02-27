@@ -4728,17 +4728,25 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       assetIds: [] as string[],
     };
     if (rawAttachments.length > 0) {
-      outboundAttachments = await materializeOutboundAttachments({
-        attachments: rawAttachments,
-        ownerUserId: target.userId,
-        uploaderDeviceId: target.kind === "device" ? target.deviceId : "server",
-      });
+      try {
+        outboundAttachments = await materializeOutboundAttachments({
+          attachments: rawAttachments,
+          ownerUserId: target.userId,
+          uploaderDeviceId: target.kind === "device" ? target.deviceId : "server",
+        });
+      } catch (err) {
+        logger.warn?.(`[clawline] outbound_attachment_materialize_failed: ${formatError(err)}`);
+      }
     } else if (mediaUrl) {
-      outboundAttachments = await materializeOutboundMediaUrls({
-        mediaUrls: [mediaUrl],
-        ownerUserId: target.userId,
-        uploaderDeviceId: target.kind === "device" ? target.deviceId : "server",
-      });
+      try {
+        outboundAttachments = await materializeOutboundMediaUrls({
+          mediaUrls: [mediaUrl],
+          ownerUserId: target.userId,
+          uploaderDeviceId: target.kind === "device" ? target.deviceId : "server",
+        });
+      } catch (err) {
+        logger.warn?.(`[clawline] outbound_media_attachment_failed: ${formatError(err)}`);
+      }
     }
 
     outboundAttachments.attachments = await filterOutboundAttachmentsForTerminalPolicy({
