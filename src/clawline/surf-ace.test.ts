@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createSurfAceManager } from "./surf-ace.js";
 
 const SCREEN_STATE_FILE = "surf-ace-screens.json";
+const TRUST_STORE_FILE = "surf-ace-trust.json";
 
 describe("Surf Ace manager", () => {
   it("handles pair/push/snapshot/watch flows for discovered screens", async () => {
@@ -220,6 +221,127 @@ describe("Surf Ace manager", () => {
     expect(fetchImpl).toHaveBeenCalledWith(
       "http://192.168.50.25:8765/pair",
       expect.objectContaining({ method: "POST" }),
+    );
+
+    await manager.stop();
+    await fs.rm(statePath, { recursive: true, force: true });
+  });
+
+  it("allows explicit pair when discovery marks the screen busy", async () => {
+    const statePath = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-test-"));
+    const manager = createSurfAceManager({
+      statePath,
+      discoverImpl: async () => [
+        {
+          instanceName: "Surf Ace - iPad",
+          host: "192.168.50.25",
+          port: 8765,
+          txt: {
+            name: "Surf Ace - iPad",
+            v: "1",
+            w: "1194",
+            h: "834",
+            s: "2",
+            cap: "31",
+            busy: "1",
+            pk: "23c71e1c",
+          },
+        },
+      ],
+      fetchImpl: vi.fn(async (input: RequestInfo | URL) => {
+        const url =
+          input instanceof URL ? input.toString() : typeof input === "string" ? input : input.url;
+        const pathname = new URL(url).pathname;
+        if (pathname === "/pair") {
+          return new Response(JSON.stringify({ status: "ok", sessionToken: "tok_busy_repair" }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response("not found", { status: 404 });
+      }),
+      discoveryIntervalMs: 60_000,
+      discoveryTimeoutMs: 100,
+    });
+
+    await manager.start();
+    const pairResult = await manager.pair({ userId: "flynn", screen: "Surf Ace - iPad" });
+    expect(pairResult.status).toBe("paired");
+    expect(pairResult.screen.sessionToken).toBe("tok_busy_repair");
+
+    await manager.stop();
+    await fs.rm(statePath, { recursive: true, force: true });
+  });
+
+  it("auto-pairs trusted screens even when discovery marks them busy", async () => {
+    const statePath = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-test-"));
+    await fs.writeFile(
+      path.join(statePath, TRUST_STORE_FILE),
+      JSON.stringify(
+        {
+          version: 1,
+          entries: [
+            {
+              fingerprint: "23c71e1c",
+              displayName: "Surf Ace - iPad",
+              trustedAt: 1,
+            },
+          ],
+        },
+        null,
+        2,
+      ),
+    );
+
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url =
+        input instanceof URL ? input.toString() : typeof input === "string" ? input : input.url;
+      const pathname = new URL(url).pathname;
+      if (pathname === "/pair") {
+        return new Response(JSON.stringify({ status: "ok", sessionToken: "tok_auto_busy" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    const manager = createSurfAceManager({
+      statePath,
+      discoverImpl: async () => [
+        {
+          instanceName: "Surf Ace - iPad",
+          host: "192.168.50.25",
+          port: 8765,
+          txt: {
+            name: "Surf Ace - iPad",
+            v: "1",
+            w: "1194",
+            h: "834",
+            s: "2",
+            cap: "31",
+            busy: "1",
+            pk: "23c71e1c",
+          },
+        },
+      ],
+      fetchImpl,
+      discoveryIntervalMs: 60_000,
+      discoveryTimeoutMs: 100,
+    });
+
+    await manager.start();
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "http://192.168.50.25:8765/pair",
+      expect.objectContaining({ method: "POST" }),
+    );
+
+    const screens = manager.listScreens();
+    expect(screens).toContainEqual(
+      expect.objectContaining({
+        id: "23c71e1c",
+        sessionToken: "tok_auto_busy",
+      }),
     );
 
     await manager.stop();

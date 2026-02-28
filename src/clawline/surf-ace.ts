@@ -617,12 +617,6 @@ class SurfAceManager implements SurfAceRuntime {
         body,
       });
 
-      if (response.status === 409) {
-        screen.status = "busy";
-        screen.busy = true;
-        throw new Error(`Screen "${screen.name}" is busy.`);
-      }
-
       const payload = response.json;
       const sessionToken =
         payload && typeof payload.token === "string"
@@ -1000,7 +994,7 @@ class SurfAceManager implements SurfAceRuntime {
 
   private async tryAutoPairTrustedScreens(): Promise<void> {
     for (const screen of this.screensById.values()) {
-      if (screen.busy || screen.sessionToken) {
+      if (screen.sessionToken) {
         continue;
       }
       if (!this.trustByFingerprint.has(screen.fingerprint)) {
