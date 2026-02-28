@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const runtime = {
+  register: vi.fn(),
   pair: vi.fn(),
   push: vi.fn(),
   watch: vi.fn(),
@@ -16,6 +17,7 @@ import { createSurfAceTools } from "./surf-ace-tools.js";
 
 describe("createSurfAceTools", () => {
   beforeEach(() => {
+    runtime.register.mockReset();
     runtime.pair.mockReset();
     runtime.push.mockReset();
     runtime.watch.mockReset();
@@ -34,6 +36,7 @@ describe("createSurfAceTools", () => {
       "surf_ace_clear",
       "surf_ace_pair",
       "surf_ace_push",
+      "surf_ace_register",
       "surf_ace_snapshot",
       "surf_ace_watch",
     ]);
@@ -51,6 +54,7 @@ describe("createSurfAceTools", () => {
   });
 
   it("passes clawline user context to runtime calls", async () => {
+    runtime.register.mockResolvedValue({ ok: true, screen: { id: "a1b2c3d4" } });
     runtime.pair.mockResolvedValue({ ok: true, status: "paired" });
     runtime.push.mockResolvedValue({ ok: true, frameId: "fr_1" });
     runtime.watch.mockResolvedValue({ ok: true, enabled: true });
@@ -63,12 +67,14 @@ describe("createSurfAceTools", () => {
       },
     });
 
+    const register = tools.find((tool) => tool.name === "surf_ace_register");
     const pair = tools.find((tool) => tool.name === "surf_ace_pair");
     const push = tools.find((tool) => tool.name === "surf_ace_push");
     const watch = tools.find((tool) => tool.name === "surf_ace_watch");
     const clear = tools.find((tool) => tool.name === "surf_ace_clear");
     const snapshot = tools.find((tool) => tool.name === "surf_ace_snapshot");
 
+    await register?.execute?.("call-0", { url: "http://192.168.50.25:8765" }, undefined);
     await pair?.execute?.("call-1", { screen: "Kitchen" }, undefined);
     await push?.execute?.(
       "call-2",
@@ -85,6 +91,10 @@ describe("createSurfAceTools", () => {
     await clear?.execute?.("call-4", { screen: "Kitchen" }, undefined);
     await snapshot?.execute?.("call-5", { screen: "Kitchen" }, undefined);
 
+    expect(runtime.register).toHaveBeenCalledWith({
+      userId: "flynn",
+      url: "http://192.168.50.25:8765",
+    });
     expect(runtime.pair).toHaveBeenCalledWith({
       userId: "flynn",
       screen: "Kitchen",

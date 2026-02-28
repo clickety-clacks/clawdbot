@@ -148,6 +148,106 @@ describe("Surf Ace manager", () => {
     expect(discoverImpl).toHaveBeenCalled();
   });
 
+  it("registers a Surf Ace screen manually by URL for normal pair flow", async () => {
+    const statePath = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-test-"));
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url =
+        input instanceof URL ? input.toString() : typeof input === "string" ? input : input.url;
+      const pathname = new URL(url).pathname;
+      if (pathname === "/identity") {
+        return new Response(
+          JSON.stringify({
+            fingerprint: "b1c2d3e4",
+            name: "Guest iPad",
+            v: 1,
+            w: 1194,
+            h: 834,
+            s: 2,
+            cap: 31,
+            busy: 0,
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        );
+      }
+      if (pathname === "/pair") {
+        return new Response(JSON.stringify({ status: "ok", sessionToken: "tok_manual" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    const manager = createSurfAceManager({
+      statePath,
+      discoverImpl: async () => [],
+      fetchImpl,
+      discoveryIntervalMs: 60_000,
+      discoveryTimeoutMs: 100,
+    });
+
+    await manager.start();
+    const registerResult = await manager.register({
+      userId: "flynn",
+      url: "http://192.168.50.25:8765",
+    });
+
+    expect(registerResult.ok).toBe(true);
+    expect(registerResult.screen).toMatchObject({
+      id: "b1c2d3e4",
+      fingerprint: "b1c2d3e4",
+      name: "Guest iPad",
+      host: "192.168.50.25",
+      port: 8765,
+      status: "discovered",
+      intake: "manual",
+      protocolVersion: 1,
+      width: 1194,
+      height: 834,
+      scale: 2,
+      contentTypes: 31,
+    });
+
+    const pairResult = await manager.pair({ userId: "flynn", screen: "Guest iPad" });
+    expect(pairResult.status).toBe("paired");
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "http://192.168.50.25:8765/identity",
+      expect.objectContaining({ method: "GET" }),
+    );
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "http://192.168.50.25:8765/pair",
+      expect.objectContaining({ method: "POST" }),
+    );
+
+    await manager.stop();
+    await fs.rm(statePath, { recursive: true, force: true });
+  });
+
+  it("rejects manual registration when identity fingerprint is missing", async () => {
+    const statePath = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-test-"));
+    const manager = createSurfAceManager({
+      statePath,
+      discoverImpl: async () => [],
+      fetchImpl: async () =>
+        new Response(JSON.stringify({ name: "No Fingerprint" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      discoveryIntervalMs: 60_000,
+      discoveryTimeoutMs: 100,
+    });
+
+    await manager.start();
+    await expect(
+      manager.register({ userId: "flynn", url: "http://192.168.50.99:8765" }),
+    ).rejects.toThrow("missing a valid fingerprint");
+    await manager.stop();
+    await fs.rm(statePath, { recursive: true, force: true });
+  });
+
   it("rejects inbound events from mismatched source addresses", async () => {
     const statePath = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-test-"));
     const manager = createSurfAceManager({

@@ -13,6 +13,7 @@ export type SurfAceWatchDebounce = Partial<{
 }>;
 
 export type SurfAceRuntime = {
+  register(params: { userId: string | null; url: string }): Promise<unknown>;
   pair(params: { userId: string | null; screen: string }): Promise<unknown>;
   push(params: {
     userId: string | null;

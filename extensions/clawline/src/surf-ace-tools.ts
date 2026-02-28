@@ -1,5 +1,5 @@
-import type { AnyAgentTool } from "openclaw/plugin-sdk";
 import { Type } from "@sinclair/typebox";
+import type { AnyAgentTool } from "openclaw/plugin-sdk";
 import type { SurfAceSourceRef, SurfAceWatchDebounce } from "./surf-ace-runtime.js";
 import { requireClawlineSurfAceRuntime } from "./surf-ace-runtime.js";
 
@@ -18,6 +18,12 @@ const SurfAceContentTypeSchema = Type.Union([
 
 const SurfAcePairSchema = Type.Object({
   screen: Type.String({ description: "Surf Ace screen name or fingerprint." }),
+});
+
+const SurfAceRegisterSchema = Type.Object({
+  url: Type.String({
+    description: "Surf Ace base URL, for example http://192.168.50.25:8765",
+  }),
 });
 
 const SurfAcePushSchema = Type.Object({
@@ -165,6 +171,19 @@ export function createSurfAceTools(params: { context: SurfAceToolContext }): Any
         const runtime = requireClawlineSurfAceRuntime();
         const screen = readStringParam(args, "screen", { required: true });
         const result = await runtime.pair({ userId, screen: screen as string });
+        return jsonResult(result);
+      },
+    },
+    {
+      label: "Surf Ace Register",
+      name: "surf_ace_register",
+      description: "Register a Surf Ace screen manually by URL when mDNS discovery is unavailable.",
+      parameters: SurfAceRegisterSchema,
+      execute: async (_toolCallId, rawArgs) => {
+        const args = rawArgs as Record<string, unknown>;
+        const runtime = requireClawlineSurfAceRuntime();
+        const url = readStringParam(args, "url", { required: true });
+        const result = await runtime.register({ userId, url: url as string });
         return jsonResult(result);
       },
     },

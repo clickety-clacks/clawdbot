@@ -3,8 +3,8 @@ import { lookup } from "node:dns/promises";
 import fs from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
-import type { Logger } from "./domain.js";
 import { runCommandWithTimeout } from "../process/exec.js";
+import type { Logger } from "./domain.js";
 
 const SURF_ACE_SERVICE_TYPE = "_surf-ace._tcp";
 const TRUST_STORE_FILE = "surf-ace-trust.json";
@@ -35,7 +35,7 @@ export type SurfAceDiscoveredScreen = {
   busy: boolean;
   fingerprint: string;
   status: SurfAceScreenStatus;
-  intake: "bonjour";
+  intake: "bonjour" | "manual";
   sessionToken: string | null;
   sourceRef: SurfAceSourceRef | null;
   watchEnabled: boolean;
@@ -71,6 +71,11 @@ export type SurfAcePairResult = {
   screen: SurfAceDiscoveredScreen;
 };
 
+export type SurfAceRegisterResult = {
+  ok: true;
+  screen: SurfAceDiscoveredScreen;
+};
+
 export type SurfAcePushResult = {
   ok: true;
   screen: SurfAceDiscoveredScreen;
@@ -97,6 +102,7 @@ export interface SurfAceRuntime {
   start(): Promise<void>;
   stop(): Promise<void>;
   setCallbackBaseUrl(url: string): void;
+  register(params: { userId: string | null; url: string }): Promise<SurfAceRegisterResult>;
   pair(params: { userId: string | null; screen: string }): Promise<SurfAcePairResult>;
   push(params: {
     userId: string | null;
@@ -379,6 +385,60 @@ function isIpAddress(value: string): boolean {
   return net.isIP(value) !== 0;
 }
 
+function parseScreenBaseUrl(rawUrl: string): URL {
+  const candidate = rawUrl.trim();
+  if (!candidate) {
+    throw new Error("url is required");
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(candidate);
+  } catch (err) {
+    throw new Error(`Invalid Surf Ace URL: ${String(err)}`, { cause: err });
+  }
+  if (parsed.protocol !== "http:") {
+    throw new Error("Surf Ace register URL must use http://");
+  }
+  parsed.username = "";
+  parsed.password = "";
+  parsed.search = "";
+  parsed.hash = "";
+  parsed.pathname = "/";
+  return parsed;
+}
+
+function parseOptionalNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.floor(value);
+  }
+  if (typeof value === "string" && value.trim().length > 0) {
+    const parsed = Number.parseInt(value, 10);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return undefined;
+}
+
+function parseOptionalBusy(value: unknown): boolean | undefined {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "number") {
+    return value === 1 ? true : value === 0 ? false : undefined;
+  }
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "1" || normalized === "true") {
+      return true;
+    }
+    if (normalized === "0" || normalized === "false") {
+      return false;
+    }
+  }
+  return undefined;
+}
+
 async function resolveExpectedSourceAddress(host: string): Promise<string | null> {
   const normalizedHost = normalizeAddressHost(host);
   if (isIpAddress(normalizedHost)) {
@@ -467,6 +527,65 @@ class SurfAceManager implements SurfAceRuntime {
 
   listScreens(): SurfAceDiscoveredScreen[] {
     return Array.from(this.screensById.values()).map((screen) => this.toPublicScreen(screen));
+  }
+
+  async register(params: { userId: string | null; url: string }): Promise<SurfAceRegisterResult> {
+    const baseUrl = parseScreenBaseUrl(params.url);
+    const response = await this.fetchIdentity(baseUrl);
+    const fingerprint = normalizeFingerprint(response.fingerprint);
+    if (!fingerprint) {
+      throw new Error("Surf Ace identity response is missing a valid fingerprint.");
+    }
+
+    const host = normalizeAddressHost(baseUrl.hostname);
+    const portRaw = baseUrl.port ? Number.parseInt(baseUrl.port, 10) : 80;
+    const port = Number.isFinite(portRaw) && portRaw > 0 ? portRaw : 80;
+    const existing = this.screensById.get(fingerprint);
+    const name =
+      typeof response.name === "string" && response.name.trim().length > 0
+        ? response.name.trim()
+        : (existing?.name ?? fingerprint);
+    const busy = response.busy ?? existing?.busy ?? false;
+    const status: SurfAceScreenStatus = busy
+      ? "busy"
+      : existing?.sessionToken
+        ? "paired"
+        : "discovered";
+    const eventSourceAddress =
+      (await resolveExpectedSourceAddress(host)) ?? existing?.eventSourceAddress ?? null;
+
+    const managed: ManagedScreen = {
+      id: fingerprint,
+      intake: "manual",
+      instanceName: name,
+      host,
+      port,
+      name,
+      protocolVersion: response.protocolVersion ?? existing?.protocolVersion ?? 1,
+      width: response.width ?? existing?.width ?? 0,
+      height: response.height ?? existing?.height ?? 0,
+      scale: response.scale ?? existing?.scale ?? 1,
+      contentTypes: response.contentTypes ?? existing?.contentTypes ?? 0,
+      busy,
+      fingerprint,
+      status,
+      sessionToken: existing?.sessionToken ?? null,
+      sourceRef: existing?.sourceRef ?? null,
+      watchEnabled: existing?.watchEnabled ?? false,
+      lastSnapshot: existing?.lastSnapshot ?? null,
+      lastEvent: existing?.lastEvent ?? null,
+      consecutiveFailures: existing?.consecutiveFailures ?? 0,
+      unreachable: existing?.unreachable ?? false,
+      eventSourceAddress,
+      watcherSessionKey: existing?.watcherSessionKey ?? null,
+    };
+
+    this.screensById.set(fingerprint, managed);
+    await this.persistScreenState();
+    return {
+      ok: true,
+      screen: this.toPublicScreen(managed),
+    };
   }
 
   async pair(params: { userId: string | null; screen: string }): Promise<SurfAcePairResult> {
@@ -950,6 +1069,82 @@ class SurfAceManager implements SurfAceRuntime {
         params.screen.unreachable = true;
       }
       throw err;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  private async fetchIdentity(baseUrl: URL): Promise<{
+    fingerprint: string;
+    name: string;
+    protocolVersion?: number;
+    width?: number;
+    height?: number;
+    scale?: number;
+    contentTypes?: number;
+    busy?: boolean;
+  }> {
+    const identityUrl = new URL("/identity", baseUrl);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), DEFAULT_HTTP_TIMEOUT_MS);
+    try {
+      const response = await this.fetchImpl(identityUrl.toString(), {
+        method: "GET",
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        throw new Error(`Surf Ace HTTP ${response.status} at /identity`);
+      }
+
+      const text = await response.text();
+      if (!text.trim()) {
+        throw new Error("Surf Ace identity response was empty.");
+      }
+
+      const parsed = JSON.parse(text) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("Surf Ace identity response must be an object.");
+      }
+      const identity = parsed as Record<string, unknown>;
+      const screen =
+        identity.screen && typeof identity.screen === "object" && !Array.isArray(identity.screen)
+          ? (identity.screen as Record<string, unknown>)
+          : null;
+      const readField = (...keys: string[]): unknown => {
+        for (const key of keys) {
+          if (key in identity) {
+            return identity[key];
+          }
+          if (screen && key in screen) {
+            return screen[key];
+          }
+        }
+        return undefined;
+      };
+
+      const fingerprintRaw = readField("fingerprint", "pk");
+      const fingerprint = typeof fingerprintRaw === "string" ? fingerprintRaw.trim() : "";
+      const nameRaw = readField("name", "displayName", "screenName", "instanceName");
+      const name =
+        typeof nameRaw === "string" && nameRaw.trim().length > 0
+          ? nameRaw.trim()
+          : fingerprint || "Surf Ace";
+
+      return {
+        fingerprint,
+        name,
+        protocolVersion: parseOptionalNumber(readField("protocolVersion", "v")),
+        width: parseOptionalNumber(readField("width", "w")),
+        height: parseOptionalNumber(readField("height", "h")),
+        scale: parseOptionalNumber(readField("scale", "s")),
+        contentTypes: parseOptionalNumber(readField("contentTypes", "cap")),
+        busy: parseOptionalBusy(readField("busy")),
+      };
+    } catch (err) {
+      throw new Error(
+        `Failed to fetch Surf Ace identity from ${baseUrl.toString()}: ${String(err)}`,
+        { cause: err },
+      );
     } finally {
       clearTimeout(timeout);
     }
