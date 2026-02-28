@@ -1,3 +1,4 @@
+import type { AgentCommandOpts } from "./agent/types.js";
 import {
   listAgentIds,
   resolveAgentDir,
@@ -61,7 +62,6 @@ import { deliverAgentCommandResult } from "./agent/delivery.js";
 import { resolveAgentRunContext } from "./agent/run-context.js";
 import { updateSessionStoreAfterAgentRun } from "./agent/session-store.js";
 import { resolveSession } from "./agent/session.js";
-import type { AgentCommandOpts } from "./agent/types.js";
 
 type PersistSessionEntryParams = {
   sessionStore: Record<string, SessionEntry>;
@@ -285,11 +285,17 @@ export async function agentCommand(
 
   try {
     if (opts.deliver === true) {
+      const requestChannel =
+        typeof opts.replyChannel === "string" && opts.replyChannel.trim()
+          ? opts.replyChannel.trim()
+          : typeof opts.channel === "string" && opts.channel.trim()
+            ? opts.channel.trim()
+            : undefined;
       const sendPolicy = resolveSendPolicy({
         cfg,
         entry: sessionEntry,
         sessionKey,
-        channel: sessionEntry?.channel,
+        channel: sessionEntry?.channel ?? requestChannel,
         chatType: sessionEntry?.chatType,
       });
       if (sendPolicy === "deny") {
