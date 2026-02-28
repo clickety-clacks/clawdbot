@@ -554,33 +554,49 @@ class SurfAceManager implements SurfAceRuntime {
     const eventSourceAddress =
       (await resolveExpectedSourceAddress(host)) ?? existing?.eventSourceAddress ?? null;
 
-    const managed: ManagedScreen = {
-      id: fingerprint,
-      intake: "manual",
-      instanceName: name,
-      host,
-      port,
-      name,
-      protocolVersion: response.protocolVersion ?? existing?.protocolVersion ?? 1,
-      width: response.width ?? existing?.width ?? 0,
-      height: response.height ?? existing?.height ?? 0,
-      scale: response.scale ?? existing?.scale ?? 1,
-      contentTypes: response.contentTypes ?? existing?.contentTypes ?? 0,
-      busy,
-      fingerprint,
-      status,
-      sessionToken: existing?.sessionToken ?? null,
-      sourceRef: existing?.sourceRef ?? null,
-      watchEnabled: existing?.watchEnabled ?? false,
-      lastSnapshot: existing?.lastSnapshot ?? null,
-      lastEvent: existing?.lastEvent ?? null,
-      consecutiveFailures: existing?.consecutiveFailures ?? 0,
-      unreachable: existing?.unreachable ?? false,
-      eventSourceAddress,
-      watcherSessionKey: existing?.watcherSessionKey ?? null,
-    };
-
-    this.screensById.set(fingerprint, managed);
+    let managed = existing;
+    if (managed) {
+      managed.intake = "manual";
+      managed.instanceName = name;
+      managed.host = host;
+      managed.port = port;
+      managed.name = name;
+      managed.protocolVersion = response.protocolVersion ?? managed.protocolVersion;
+      managed.width = response.width ?? managed.width;
+      managed.height = response.height ?? managed.height;
+      managed.scale = response.scale ?? managed.scale;
+      managed.contentTypes = response.contentTypes ?? managed.contentTypes;
+      managed.busy = busy;
+      managed.status = status;
+      managed.eventSourceAddress = eventSourceAddress;
+    } else {
+      managed = {
+        id: fingerprint,
+        intake: "manual",
+        instanceName: name,
+        host,
+        port,
+        name,
+        protocolVersion: response.protocolVersion ?? 1,
+        width: response.width ?? 0,
+        height: response.height ?? 0,
+        scale: response.scale ?? 1,
+        contentTypes: response.contentTypes ?? 0,
+        busy,
+        fingerprint,
+        status,
+        sessionToken: null,
+        sourceRef: null,
+        watchEnabled: false,
+        lastSnapshot: null,
+        lastEvent: null,
+        consecutiveFailures: 0,
+        unreachable: false,
+        eventSourceAddress,
+        watcherSessionKey: null,
+      };
+      this.screensById.set(fingerprint, managed);
+    }
     await this.persistScreenState();
     return {
       ok: true,
@@ -924,7 +940,27 @@ class SurfAceManager implements SurfAceRuntime {
         const name = normalizeScreenName(record);
         const resolvedSourceAddress =
           (await resolveExpectedSourceAddress(record.host)) ?? existing?.eventSourceAddress ?? null;
-        const merged: ManagedScreen = {
+        const busy = record.txt.busy === "1";
+
+        if (existing) {
+          existing.intake = "bonjour";
+          existing.instanceName = record.instanceName;
+          existing.host = record.host;
+          existing.port = record.port;
+          existing.name = name;
+          existing.protocolVersion = parseIntSafe(record.txt.v, 1);
+          existing.width = parseIntSafe(record.txt.w, 0);
+          existing.height = parseIntSafe(record.txt.h, 0);
+          existing.scale = parseIntSafe(record.txt.s, 1);
+          existing.contentTypes = parseIntSafe(record.txt.cap, 0);
+          existing.busy = busy;
+          existing.status = busy ? "busy" : existing.sessionToken ? "paired" : "discovered";
+          existing.unreachable = false;
+          existing.eventSourceAddress = resolvedSourceAddress;
+          continue;
+        }
+
+        const managed: ManagedScreen = {
           id: fingerprint,
           intake: "bonjour",
           instanceName: record.instanceName,
@@ -936,22 +972,21 @@ class SurfAceManager implements SurfAceRuntime {
           height: parseIntSafe(record.txt.h, 0),
           scale: parseIntSafe(record.txt.s, 1),
           contentTypes: parseIntSafe(record.txt.cap, 0),
-          busy: record.txt.busy === "1",
+          busy,
           fingerprint,
-          status:
-            record.txt.busy === "1" ? "busy" : existing?.sessionToken ? "paired" : "discovered",
-          sessionToken: existing?.sessionToken ?? null,
-          sourceRef: existing?.sourceRef ?? null,
-          watchEnabled: existing?.watchEnabled ?? false,
-          lastSnapshot: existing?.lastSnapshot ?? null,
-          lastEvent: existing?.lastEvent ?? null,
-          consecutiveFailures: existing?.consecutiveFailures ?? 0,
+          status: busy ? "busy" : "discovered",
+          sessionToken: null,
+          sourceRef: null,
+          watchEnabled: false,
+          lastSnapshot: null,
+          lastEvent: null,
+          consecutiveFailures: 0,
           unreachable: false,
           eventSourceAddress: resolvedSourceAddress,
-          watcherSessionKey: existing?.watcherSessionKey ?? null,
+          watcherSessionKey: null,
         };
 
-        this.screensById.set(fingerprint, merged);
+        this.screensById.set(fingerprint, managed);
       }
 
       await this.tryAutoPairTrustedScreens();

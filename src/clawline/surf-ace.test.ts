@@ -226,6 +226,78 @@ describe("Surf Ace manager", () => {
     await fs.rm(statePath, { recursive: true, force: true });
   });
 
+  it("keeps pair session token visible when discovery refresh runs during pair", async () => {
+    const statePath = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-test-"));
+    const discoverImpl = vi.fn(async () => [
+      {
+        instanceName: "Surf Ace - iPad",
+        host: "192.168.50.25",
+        port: 8765,
+        txt: {
+          name: "Surf Ace - iPad",
+          v: "1",
+          w: "1194",
+          h: "834",
+          s: "2",
+          cap: "31",
+          busy: "0",
+          pk: "23c71e1c",
+        },
+      },
+    ]);
+
+    let manager: ReturnType<typeof createSurfAceManager> | null = null;
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url =
+        input instanceof URL ? input.toString() : typeof input === "string" ? input : input.url;
+      const pathname = new URL(url).pathname;
+      if (pathname === "/pair") {
+        // Reproduce the bug: discovery refresh replaces the tracked object while pair is in-flight.
+        await (manager as { refreshDiscovery?: () => Promise<void> } | null)?.refreshDiscovery?.();
+        return new Response(JSON.stringify({ status: "ok", sessionToken: "tok_race" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (pathname === "/frame") {
+        return new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    manager = createSurfAceManager({
+      statePath,
+      discoverImpl,
+      fetchImpl,
+      discoveryIntervalMs: 60_000,
+      discoveryTimeoutMs: 100,
+    });
+
+    await manager.start();
+    const pairResult = await manager.pair({ userId: "flynn", screen: "Surf Ace - iPad" });
+    expect(pairResult.status).toBe("paired");
+
+    const pushResult = await manager.push({
+      userId: "flynn",
+      screen: "Surf Ace - iPad",
+      contentType: "html",
+      title: "Race Safe",
+      content: { html: "<html><body>Race Safe</body></html>" },
+    });
+
+    expect(pushResult.ok).toBe(true);
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "http://192.168.50.25:8765/frame",
+      expect.objectContaining({ method: "POST" }),
+    );
+
+    await manager.stop();
+    await fs.rm(statePath, { recursive: true, force: true });
+  });
+
   it("rejects manual registration when identity fingerprint is missing", async () => {
     const statePath = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-test-"));
     const manager = createSurfAceManager({
