@@ -2783,6 +2783,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     logHttpRequest("alert_request_start");
     try {
       const payload = await parseAlertPayload(req);
+      const alertResolvedKey = await resolveValidatedAlertSessionKey(payload.sessionKey);
       logger.info?.("[clawline] alert_received", {
         source: payload.source,
         hasSessionKey: Boolean(payload.sessionKey),
@@ -2792,7 +2793,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         sessionKey: payload.sessionKey ?? "undefined",
       });
       let text = buildAlertText(payload.message, payload.source);
-      const alertResolvedKey = resolveAlertSessionKey(payload.sessionKey);
       const pendingEvents = peekSystemEvents(alertResolvedKey);
       const hasExecCompletion = pendingEvents.some((event) => event.includes("Exec finished"));
       if (hasExecCompletion) {
@@ -2802,7 +2802,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       if (payload.noOverlay !== true) {
         text = await applyAlertInstructions(text);
       }
-      await wakeGatewayForAlert(text, payload.sessionKey);
+      await wakeGatewayForAlert(text, alertResolvedKey);
       res.setHeader("Content-Type", "application/json");
       res.writeHead(200);
       res.end(JSON.stringify({ ok: true }));
@@ -3265,6 +3265,50 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
   function resolveAlertSessionKey(rawSessionKey?: string): string {
     return rawSessionKey?.trim() || mainSessionKey;
+  }
+
+  async function resolveValidatedAlertSessionKey(rawSessionKey?: string): Promise<string> {
+    const resolvedSessionKey = resolveAlertSessionKey(rawSessionKey);
+    if (!resolvedSessionKey.toLowerCase().startsWith("agent:main:")) {
+      throw new HttpError(400, "invalid_session_key", "Invalid session key");
+    }
+    if (sessionKeyEq(resolvedSessionKey, mainSessionKey)) {
+      return mainSessionKey;
+    }
+
+    const parsed = parseClawlineUserSessionKey(resolvedSessionKey);
+    if (!parsed || parsed.agentId !== "main") {
+      throw new HttpError(400, "invalid_session_key", "Invalid session key");
+    }
+
+    const allowlistEntry = allowlist.entries.find(
+      (entry) => entry.userId.toLowerCase() === parsed.userId.toLowerCase(),
+    );
+    if (!allowlistEntry) {
+      throw new HttpError(404, "stream_not_found", "Stream not found");
+    }
+
+    const normalizedSessionKey = normalizeStreamMutationSessionKeyForUser(
+      allowlistEntry.userId,
+      resolvedSessionKey,
+    );
+    if (!normalizedSessionKey) {
+      throw new HttpError(400, "invalid_session_key", "Invalid session key");
+    }
+
+    const streamExists = await runPerUserTask(allowlistEntry.userId, async () =>
+      enqueueWriteTask(() => {
+        const streams = ensureStreamSessionsForUser({
+          userId: allowlistEntry.userId,
+          isAdmin: allowlistEntry.isAdmin,
+        });
+        return streams.some((stream) => sessionKeyEq(stream.sessionKey, normalizedSessionKey));
+      }),
+    );
+    if (!streamExists) {
+      throw new HttpError(404, "stream_not_found", "Stream not found");
+    }
+    return normalizedSessionKey;
   }
 
   async function wakeGatewayForAlert(text: string, sessionKey?: string) {

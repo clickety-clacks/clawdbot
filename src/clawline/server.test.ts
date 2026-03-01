@@ -1340,8 +1340,20 @@ describe.sequential("clawline provider server", () => {
     const entry = createAllowlistEntry();
     const ctx = await setupTestServer([entry]);
     const authHeader = await createAuthHeader(ctx, entry);
-    const streamSessionKey = "agent:main:clawline:flynn:s_019cae77";
     try {
+      const createResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: authHeader },
+        body: JSON.stringify({
+          displayName: "Ideas",
+          idempotencyKey: `alert-stream-${randomUUID()}`,
+        }),
+      });
+      expect(createResponse.status).toBe(201);
+      const created = (await createResponse.json()) as { stream?: { sessionKey?: string } };
+      const streamSessionKey = created.stream?.sessionKey;
+      expect(typeof streamSessionKey).toBe("string");
+
       const response = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: authHeader },
@@ -1501,6 +1513,56 @@ describe.sequential("clawline provider server", () => {
       expect(response.status).toBe(400);
       const data = (await response.json()) as { code?: string };
       expect(data.code).toBe("invalid_message");
+      expect(enqueueAnnounceMock).not.toHaveBeenCalled();
+      expect(gatewayCallMock).not.toHaveBeenCalled();
+      expect(sendMessageMock).not.toHaveBeenCalled();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("returns 400 for malformed alert session keys", async () => {
+    const entry = createAllowlistEntry();
+    const ctx = await setupTestServer([entry]);
+    const authHeader = await createAuthHeader(ctx, entry);
+    try {
+      const response = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: authHeader },
+        body: JSON.stringify({
+          message: "Bad key",
+          source: "codex",
+          sessionKey: "not-a-session-key",
+        }),
+      });
+      expect(response.status).toBe(400);
+      const data = (await response.json()) as { code?: string };
+      expect(data.code).toBe("invalid_session_key");
+      expect(enqueueAnnounceMock).not.toHaveBeenCalled();
+      expect(gatewayCallMock).not.toHaveBeenCalled();
+      expect(sendMessageMock).not.toHaveBeenCalled();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("returns 404 for unknown alert stream session keys", async () => {
+    const entry = createAllowlistEntry();
+    const ctx = await setupTestServer([entry]);
+    const authHeader = await createAuthHeader(ctx, entry);
+    try {
+      const response = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: authHeader },
+        body: JSON.stringify({
+          message: "Unknown stream",
+          source: "codex",
+          sessionKey: "agent:main:clawline:flynn:s_deadbeef",
+        }),
+      });
+      expect(response.status).toBe(404);
+      const data = (await response.json()) as { code?: string };
+      expect(data.code).toBe("stream_not_found");
       expect(enqueueAnnounceMock).not.toHaveBeenCalled();
       expect(gatewayCallMock).not.toHaveBeenCalled();
       expect(sendMessageMock).not.toHaveBeenCalled();
