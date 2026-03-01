@@ -419,6 +419,66 @@ describe("Surf Ace manager (WebSocket transport)", () => {
     await fs.rm(statePath, { recursive: true, force: true });
   });
 
+  it("strips WKWebView CSS noise prefix from snapshot visibleText", async () => {
+    const statePath = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-test-"));
+    const surface = await createMockSurface({
+      name: "Noise Surface",
+      surfaceId: "aa11bb22",
+      width: 1024,
+      height: 768,
+      scale: 2,
+    });
+
+    const manager = createSurfAceManager({
+      statePath,
+      discoverImpl: async () => [
+        {
+          instanceName: "Noise Surface",
+          host: surface.host,
+          port: surface.port,
+          txt: {
+            name: "Noise Surface",
+            v: "1",
+            w: "1024",
+            h: "768",
+            s: "2",
+            cap: "31",
+            busy: "0",
+            pk: "aa11bb22",
+            ws: "/ws",
+            tls: "0",
+          },
+        },
+      ],
+      discoveryIntervalMs: 60_000,
+      discoveryTimeoutMs: 100,
+    });
+
+    const noisyText =
+      "p.p1 {margin: 0.0px 0.0px 0.0px 0.0px} span.s1 {font-family: 'Helvetica'} ACTUAL_CONTENT_HERE";
+
+    await manager.start();
+    await manager.pair({ userId: "flynn", screen: "Noise Surface" });
+    await manager.push({
+      userId: "flynn",
+      screen: "Noise Surface",
+      contentType: "html",
+      content: { html: noisyText },
+      title: "Noisy",
+    });
+
+    const snapshot = await manager.snapshot({ userId: "flynn", screen: "Noise Surface" });
+    expect(snapshot.status).toBe("snapshot");
+    if (snapshot.status !== "snapshot") {
+      throw new Error("snapshot expected");
+    }
+    expect(snapshot.snapshot.visibleText).toBe("ACTUAL_CONTENT_HERE");
+
+    await manager.stop();
+    await surface.close();
+    await fs.rm(statePath, { recursive: true, force: true });
+  });
+
   it("allows explicit pair when discovery marks the screen busy", async () => {
     const statePath = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-test-"));
     const surface = await createMockSurface({

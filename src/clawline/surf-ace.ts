@@ -618,6 +618,17 @@ function normalizeValidSessionId(value: string | null | undefined): string | nul
   return SURF_ACE_SESSION_ID_PATTERN.test(token) ? token : null;
 }
 
+function stripCssNoiseFromVisibleText(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return "";
+  }
+  if (!/^(?:[\w.#][\w.]*)\s*\{/.test(trimmed)) {
+    return trimmed;
+  }
+  return trimmed.replace(/^([\w.#][\w.]*\s*\{[^}]*\}\s*)+/, "").trim();
+}
+
 class SurfAceManager implements SurfAceRuntime {
   private readonly logger: Logger;
   private readonly fetchImpl: typeof fetch;
@@ -1579,6 +1590,10 @@ class SurfAceManager implements SurfAceRuntime {
       includeDrawings: false,
     });
     const payload = clampSnapshotToRecord(response.payload);
+    const visibleText = payload.visibleText;
+    if (typeof visibleText === "string") {
+      payload.visibleText = stripCssNoiseFromVisibleText(visibleText);
+    }
     const frameId = typeof payload.frameId === "string" ? payload.frameId : null;
     const revision = parseOptionalNumber(payload.revision);
     if (revision !== undefined) {
