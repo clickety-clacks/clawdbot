@@ -1,9 +1,6 @@
-import type { Database as SqliteDatabase, Statement as SqliteStatement } from "better-sqlite3";
-import type { Stats } from "node:fs";
-import BetterSqlite3 from "better-sqlite3";
-import jwt from "jsonwebtoken";
 import { execFile as execFileCb } from "node:child_process";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import type { Stats } from "node:fs";
 import { watch, type FSWatcher, createReadStream } from "node:fs";
 import fs from "node:fs/promises";
 import http from "node:http";
@@ -12,10 +9,43 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import type { Database as SqliteDatabase, Statement as SqliteStatement } from "better-sqlite3";
+import BetterSqlite3 from "better-sqlite3";
+import jwt from "jsonwebtoken";
 import { type Dispatcher } from "undici";
 import WebSocket, { WebSocketServer } from "ws";
+import {
+  resolveEffectiveMessagesConfig,
+  resolveHumanDelayConfig,
+  resolveIdentityName,
+} from "../agents/identity.js";
+import { type AnnounceQueueItem, enqueueAnnounce } from "../agents/subagent-announce-queue.js";
+import { DEFAULT_AGENT_WORKSPACE_DIR } from "../agents/workspace.js";
+import { dispatchReplyFromConfig } from "../auto-reply/reply/dispatch-from-config.js";
+import { finalizeInboundContext } from "../auto-reply/reply/inbound-context.js";
+import { getFollowupQueueDepth, resolveQueueSettings } from "../auto-reply/reply/queue.js";
+import { createReplyDispatcherWithTyping } from "../auto-reply/reply/reply-dispatcher.js";
 import type { ResponsePrefixContext } from "../auto-reply/reply/response-prefix-template.js";
+import { extractShortModelName } from "../auto-reply/reply/response-prefix-template.js";
 import type { ReplyPayload } from "../auto-reply/types.js";
+import { recordInboundSession } from "../channels/session.js";
+import { resolveAgentIdFromSessionKey, resolveSessionTranscriptPath } from "../config/sessions.js";
+import { callGateway } from "../gateway/call.js";
+import {
+  createPinnedDispatcher,
+  resolvePinnedHostname,
+  closeDispatcher,
+  type PinnedHostname,
+} from "../infra/net/ssrf.js";
+import { peekSystemEvents } from "../infra/system-events.js";
+import { loadGatewayTlsRuntime } from "../infra/tls/gateway.js";
+import { rawDataToString } from "../infra/ws.js";
+import { mediaKindFromMime, maxBytesForKind } from "../media/constants.js";
+import { hasAlphaChannel, optimizeImageToPng } from "../media/image-ops.js";
+import { detectMime } from "../media/mime.js";
+import { DEFAULT_ACCOUNT_ID } from "../routing/resolve-route.js";
+import { optimizeImageToJpeg } from "../web/media.js";
+import { clawlineAttachmentsToImages } from "./attachments.js";
 import type { ClawlineAdapterOverrides } from "./config.js";
 import type {
   AllowlistEntry,
@@ -38,36 +68,6 @@ import type {
   StreamUpdatedServerMessage,
   StreamDeletedServerMessage,
 } from "./domain.js";
-import {
-  resolveEffectiveMessagesConfig,
-  resolveHumanDelayConfig,
-  resolveIdentityName,
-} from "../agents/identity.js";
-import { type AnnounceQueueItem, enqueueAnnounce } from "../agents/subagent-announce-queue.js";
-import { DEFAULT_AGENT_WORKSPACE_DIR } from "../agents/workspace.js";
-import { dispatchReplyFromConfig } from "../auto-reply/reply/dispatch-from-config.js";
-import { finalizeInboundContext } from "../auto-reply/reply/inbound-context.js";
-import { getFollowupQueueDepth, resolveQueueSettings } from "../auto-reply/reply/queue.js";
-import { createReplyDispatcherWithTyping } from "../auto-reply/reply/reply-dispatcher.js";
-import { extractShortModelName } from "../auto-reply/reply/response-prefix-template.js";
-import { recordInboundSession } from "../channels/session.js";
-import { resolveAgentIdFromSessionKey, resolveSessionTranscriptPath } from "../config/sessions.js";
-import { callGateway } from "../gateway/call.js";
-import {
-  createPinnedDispatcher,
-  resolvePinnedHostname,
-  closeDispatcher,
-  type PinnedHostname,
-} from "../infra/net/ssrf.js";
-import { peekSystemEvents } from "../infra/system-events.js";
-import { loadGatewayTlsRuntime } from "../infra/tls/gateway.js";
-import { rawDataToString } from "../infra/ws.js";
-import { mediaKindFromMime, maxBytesForKind } from "../media/constants.js";
-import { hasAlphaChannel, optimizeImageToPng } from "../media/image-ops.js";
-import { detectMime } from "../media/mime.js";
-import { DEFAULT_ACCOUNT_ID } from "../routing/resolve-route.js";
-import { optimizeImageToJpeg } from "../web/media.js";
-import { clawlineAttachmentsToImages } from "./attachments.js";
 import { ClientMessageError, HttpError } from "./errors.js";
 import { createAssetHandlers } from "./http-assets.js";
 import { createPerUserTaskQueue } from "./per-user-task-queue.js";
@@ -869,6 +869,30 @@ type TerminalSessionRecord = {
 };
 
 export const DEFAULT_ALERT_INSTRUCTIONS_TEXT = `After handling this alert, evaluate: would Flynn want to know what happened? If yes, report to him. Don't just process silently.`;
+
+const WILDCARD_BIND_ADDRESSES = new Set(["", "0.0.0.0", "::", "::0"]);
+
+export function resolveSurfAceCallbackHost(bindAddress: string, hostname = os.hostname()): string {
+  const normalizedBind = bindAddress.trim();
+  const baseHost = WILDCARD_BIND_ADDRESSES.has(normalizedBind) ? hostname.trim() : normalizedBind;
+  const normalizedHost = baseHost.trim();
+  const lowerHost = normalizedHost.toLowerCase();
+
+  if (!normalizedHost) {
+    return normalizedHost;
+  }
+  if (lowerHost.endsWith(".local")) {
+    return normalizedHost;
+  }
+  if (net.isIP(normalizedHost) !== 0) {
+    return normalizedHost;
+  }
+  if (normalizedHost.includes(".") || normalizedHost.includes(":")) {
+    return normalizedHost;
+  }
+
+  return `${normalizedHost}.local`;
+}
 
 const DEFAULT_CONFIG: ProviderConfig = {
   port: 18800,
@@ -6690,14 +6714,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
     return addr.port;
   };
-  const resolveSurfAceCallbackHost = (): string => {
-    const bind = config.network.bindAddress.trim();
-    if (!bind || bind === "0.0.0.0" || bind === "::" || bind === "::0") {
-      return os.hostname();
-    }
-    return bind;
-  };
-
   return {
     async start() {
       const initialized = initializeDatabaseResources();
@@ -6729,7 +6745,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       const port = readBoundPort();
       const protocol = providerTls.enabled ? "wss" : "ws";
       const surfAceProtocol = providerTls.enabled ? "https" : "http";
-      const surfAceCallbackBaseUrl = `${surfAceProtocol}://${resolveSurfAceCallbackHost()}:${port}`;
+      const surfAceCallbackBaseUrl = `${surfAceProtocol}://${resolveSurfAceCallbackHost(config.network.bindAddress)}:${port}`;
       surfAceManager.setCallbackBaseUrl(surfAceCallbackBaseUrl);
       await surfAceManager.start();
       logger.info(`Provider listening on ${protocol}://${config.network.bindAddress}:${port}`);
