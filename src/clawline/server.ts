@@ -870,30 +870,6 @@ type TerminalSessionRecord = {
 
 export const DEFAULT_ALERT_INSTRUCTIONS_TEXT = `After handling this alert, evaluate: would Flynn want to know what happened? If yes, report to him. Don't just process silently.`;
 
-const WILDCARD_BIND_ADDRESSES = new Set(["", "0.0.0.0", "::", "::0"]);
-
-export function resolveSurfAceCallbackHost(bindAddress: string, hostname = os.hostname()): string {
-  const normalizedBind = bindAddress.trim();
-  const baseHost = WILDCARD_BIND_ADDRESSES.has(normalizedBind) ? hostname.trim() : normalizedBind;
-  const normalizedHost = baseHost.trim();
-  const lowerHost = normalizedHost.toLowerCase();
-
-  if (!normalizedHost) {
-    return normalizedHost;
-  }
-  if (lowerHost.endsWith(".local")) {
-    return normalizedHost;
-  }
-  if (net.isIP(normalizedHost) !== 0) {
-    return normalizedHost;
-  }
-  if (normalizedHost.includes(".") || normalizedHost.includes(":")) {
-    return normalizedHost;
-  }
-
-  return `${normalizedHost}.local`;
-}
-
 const DEFAULT_CONFIG: ProviderConfig = {
   port: 18800,
   statePath: path.join(os.homedir(), ".openclaw", "clawline"),
@@ -2654,10 +2630,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         await handleAlertHttpRequest(req, res);
         return;
       }
-      if (req.method === "POST" && parsedUrl.pathname.startsWith("/surf-ace/events/")) {
-        await handleSurfAceEventHttpRequest(req, res, parsedUrl.pathname);
-        return;
-      }
       logHttpRequest("request_not_found", {
         method: req.method ?? "UNKNOWN",
         path: parsedUrl.pathname,
@@ -2872,45 +2844,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       throw new HttpError(400, "invalid_message", "Alert message is required");
     }
     return { raw: rawText, message, source, sessionKey, noOverlay };
-  }
-
-  async function handleSurfAceEventHttpRequest(
-    req: http.IncomingMessage,
-    res: http.ServerResponse,
-    pathname: string,
-  ) {
-    const prefix = "/surf-ace/events/";
-    const rawScreenId = pathname.slice(prefix.length).trim();
-    if (!rawScreenId || rawScreenId.includes("/")) {
-      sendHttpError(res, 404, "not_found", "Unknown Surf Ace screen");
-      return;
-    }
-
-    let payload: unknown;
-    try {
-      const raw = await readRequestBody(
-        req,
-        config.sessions.maxMessageBytes,
-        "Surf Ace event too large",
-      );
-      payload = raw.length > 0 ? (JSON.parse(raw.toString("utf8")) as unknown) : null;
-    } catch (err) {
-      if (err instanceof HttpError) {
-        sendHttpError(res, err.status, err.code, err.message);
-        return;
-      }
-      sendHttpError(res, 400, "invalid_json", "Surf Ace event must be valid JSON");
-      return;
-    }
-
-    const result = surfAceManager.handleInboundEvent({
-      screenId: rawScreenId,
-      payload,
-      remoteAddress: req.socket.remoteAddress,
-    });
-    res.setHeader("Content-Type", "application/json");
-    res.writeHead(result.statusCode);
-    res.end(JSON.stringify(result.body));
   }
 
   async function readRequestBody(
@@ -6744,9 +6677,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       started = true;
       const port = readBoundPort();
       const protocol = providerTls.enabled ? "wss" : "ws";
-      const surfAceProtocol = providerTls.enabled ? "https" : "http";
-      const surfAceCallbackBaseUrl = `${surfAceProtocol}://${resolveSurfAceCallbackHost(config.network.bindAddress)}:${port}`;
-      surfAceManager.setCallbackBaseUrl(surfAceCallbackBaseUrl);
       await surfAceManager.start();
       logger.info(`Provider listening on ${protocol}://${config.network.bindAddress}:${port}`);
     },

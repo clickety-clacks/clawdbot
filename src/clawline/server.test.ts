@@ -1,17 +1,17 @@
-import BetterSqlite3 from "better-sqlite3";
-import jwt from "jsonwebtoken";
 import { Blob } from "node:buffer";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import BetterSqlite3 from "better-sqlite3";
+import jwt from "jsonwebtoken";
 import { FormData, fetch, getGlobalDispatcher } from "undici";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import type { getReplyFromConfig } from "../auto-reply/reply.js";
 import type { OpenClawConfig } from "../config/config.js";
-import type { AllowlistEntry, Logger, ProviderServer } from "./domain.js";
 import { enqueueSystemEvent, resetSystemEventsForTest } from "../infra/system-events.js";
+import type { AllowlistEntry, Logger, ProviderServer } from "./domain.js";
 
 const gatewayCallMock = vi.fn();
 vi.mock("../gateway/call.js", () => ({
@@ -1290,7 +1290,7 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
-  it("handles Surf Ace event callback endpoint", async () => {
+  it("returns 404 for deprecated Surf Ace callback path", async () => {
     const ctx = await setupTestServer([]);
     try {
       const response = await fetch(`http://127.0.0.1:${ctx.port}/surf-ace/events/a1b2c3d4`, {
@@ -1299,8 +1299,6 @@ describe.sequential("clawline provider server", () => {
         body: JSON.stringify({ event: "text_selected", text: "oops" }),
       });
       expect(response.status).toBe(404);
-      const payload = (await response.json()) as { ok?: boolean; error?: string };
-      expect(payload).toEqual({ ok: false, error: "unknown_screen" });
     } finally {
       await ctx.cleanup();
     }

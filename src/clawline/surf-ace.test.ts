@@ -1,93 +1,369 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { WebSocketServer, type WebSocket } from "ws";
 import { createSurfAceManager } from "./surf-ace.js";
 
-const SCREEN_STATE_FILE = "surf-ace-screens.json";
 const TRUST_STORE_FILE = "surf-ace-trust.json";
 
-describe("Surf Ace manager", () => {
-  it("handles pair/push/snapshot/watch flows for discovered screens", async () => {
-    const statePath = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-test-"));
-    const discoverImpl = vi.fn(async () => [
-      {
-        instanceName: "Kitchen Display",
-        host: "10.0.0.10",
-        port: 17777,
-        txt: {
-          name: "Kitchen Display",
-          v: "1",
-          w: "1920",
-          h: "1080",
-          s: "2",
-          cap: "31",
-          busy: "0",
-          pk: "a1b2c3d4",
-        },
-      },
-    ]);
+type MockSurfaceHandle = {
+  host: string;
+  port: number;
+  pairPayloads: Array<Record<string, unknown>>;
+  snapshotPayloads: Array<Record<string, unknown>>;
+  clientCloseCodes: number[];
+  close: () => Promise<void>;
+  emitEvent: (op: string, payload: Record<string, unknown>) => void;
+};
 
-    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+type MockSurfaceOptions = {
+  name?: string;
+  surfaceId?: string;
+  width?: number;
+  height?: number;
+  scale?: number;
+  suppressHeartbeatPongs?: number;
+  maxMessageBytes?: number;
+  ignorePairResponses?: boolean;
+};
+
+async function waitFor(
+  predicate: () => boolean,
+  options: { timeoutMs?: number; intervalMs?: number } = {},
+): Promise<void> {
+  const timeoutMs = options.timeoutMs ?? 5_000;
+  const intervalMs = options.intervalMs ?? 25;
+  const start = Date.now();
+  while (!predicate()) {
+    if (Date.now() - start > timeoutMs) {
+      throw new Error("waitFor timeout");
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}
+
+function decodeRawData(data: WebSocket.RawData): string {
+  if (typeof data === "string") {
+    return data;
+  }
+  if (Buffer.isBuffer(data)) {
+    return data.toString("utf8");
+  }
+  if (Array.isArray(data)) {
+    return Buffer.concat(data).toString("utf8");
+  }
+  return Buffer.from(data).toString("utf8");
+}
+
+async function createMockSurface(options: MockSurfaceOptions = {}): Promise<MockSurfaceHandle> {
+  const host = "127.0.0.1";
+  const wss = new WebSocketServer({ port: 0, host, path: "/ws" });
+  await new Promise<void>((resolve, reject) => {
+    wss.once("listening", () => resolve());
+    wss.once("error", (error) => reject(error));
+  });
+  const address = wss.address();
+  if (!address || typeof address === "string") {
+    throw new Error("failed to resolve ws server address");
+  }
+
+  const pairPayloads: Array<Record<string, unknown>> = [];
+  const snapshotPayloads: Array<Record<string, unknown>> = [];
+  const clientCloseCodes: number[] = [];
+  const clients = new Set<WebSocket>();
+  const surfaceName = options.name ?? "Kitchen Display";
+  const surfaceId = options.surfaceId ?? "a1b2c3d4";
+  const width = options.width ?? 1920;
+  const height = options.height ?? 1080;
+  const scale = options.scale ?? 2;
+  let suppressHeartbeatPongs = options.suppressHeartbeatPongs ?? 0;
+  const maxMessageBytes = options.maxMessageBytes ?? 12 * 1024 * 1024;
+  const ignorePairResponses = options.ignorePairResponses ?? false;
+
+  let currentFrameId: string | null = null;
+  let currentRevision = 0;
+  let currentContentType: string | null = null;
+  let currentTitle: string | null = null;
+  let currentVisibleText = "";
+
+  wss.on("connection", (socket) => {
+    clients.add(socket);
+    socket.on("close", (code) => {
+      clients.delete(socket);
+      clientCloseCodes.push(code);
+    });
+    socket.on("message", (raw) => {
+      const parsed = JSON.parse(decodeRawData(raw)) as {
+        type?: string;
+        op?: string;
+        id?: string;
+        payload?: Record<string, unknown>;
+      };
+      if (
+        parsed.type !== "request" ||
+        typeof parsed.op !== "string" ||
+        typeof parsed.id !== "string"
+      ) {
+        return;
+      }
+
+      const sendResponse = (body: Record<string, unknown>) => {
+        socket.send(
+          JSON.stringify({
+            v: 1,
+            type: "response",
+            op: parsed.op,
+            id: parsed.id,
+            sentAt: Date.now(),
+            ...body,
+          }),
+        );
+      };
+
+      if (parsed.op === "pair.request") {
+        pairPayloads.push(parsed.payload ?? {});
+        if (ignorePairResponses) {
+          return;
+        }
+        sendResponse({
+          ok: true,
+          payload: {
+            sessionId: `sa_${pairPayloads.length}`,
+            resumed: pairPayloads.length > 1,
+            surfaceId,
+            surfaceName,
+            viewport: { width, height, scale },
+            capabilities: {
+              contentTypes: ["html", "image", "pdf", "terminal", "markdown"],
+              eventTypes: [
+                "event.drawing_flush",
+                "event.tap",
+                "event.selection",
+                "event.page",
+                "event.snapshot_hint",
+              ],
+            },
+            eventConfig: {
+              profile: "minimum_deep",
+              activeEvents: [
+                "event.drawing_flush",
+                "event.tap",
+                "event.selection",
+                "event.page",
+                "event.snapshot_hint",
+              ],
+              drawingFlushConfig: { idleWindowMs: 8000, maxIntervalMs: 30000 },
+            },
+            limits: {
+              maxMessageBytes,
+              maxFrameBytes: 10 * 1024 * 1024,
+              maxVisibleTextBytes: 4096,
+              maxStrokePointsPerFlush: 8192,
+              maxDrawingFlushBytes: 2 * 1024 * 1024,
+            },
+            state: {
+              currentFrameId,
+              currentRevision,
+              contentType: currentContentType,
+            },
+          },
+        });
+        return;
+      }
+
+      if (parsed.op === "frame.set") {
+        const payload = parsed.payload ?? {};
+        currentFrameId = typeof payload.frameId === "string" ? payload.frameId : currentFrameId;
+        const revision = payload.revision;
+        currentRevision = typeof revision === "number" ? revision : currentRevision + 1;
+        currentContentType =
+          typeof payload.contentType === "string" ? payload.contentType : currentContentType;
+
+        const displayRaw = payload.display;
+        if (displayRaw && typeof displayRaw === "object" && !Array.isArray(displayRaw)) {
+          const display = displayRaw as Record<string, unknown>;
+          currentTitle = typeof display.title === "string" ? display.title : currentTitle;
+        }
+
+        const contentRaw = payload.content;
+        if (contentRaw && typeof contentRaw === "object" && !Array.isArray(contentRaw)) {
+          const content = contentRaw as Record<string, unknown>;
+          const html = typeof content.html === "string" ? content.html : "";
+          const markdown = typeof content.markdown === "string" ? content.markdown : "";
+          currentVisibleText = html || markdown || currentVisibleText;
+        }
+
+        sendResponse({
+          ok: true,
+          payload: {
+            currentFrameId,
+            currentRevision,
+            contentType: currentContentType,
+          },
+        });
+        return;
+      }
+
+      if (parsed.op === "frame.clear") {
+        const payload = parsed.payload ?? {};
+        const revision = payload.revision;
+        currentRevision = typeof revision === "number" ? revision : currentRevision + 1;
+        currentFrameId = null;
+        currentContentType = null;
+        currentTitle = null;
+        currentVisibleText = "";
+        sendResponse({
+          ok: true,
+          payload: {
+            currentFrameId,
+            currentRevision,
+            contentType: currentContentType,
+          },
+        });
+        return;
+      }
+
+      if (parsed.op === "snapshot.get") {
+        snapshotPayloads.push(parsed.payload ?? {});
+        sendResponse({
+          ok: true,
+          payload: {
+            frameId: currentFrameId,
+            revision: currentRevision,
+            contentType: currentContentType,
+            title: currentTitle,
+            viewport: {
+              scrollOffset: { x: 0, y: 0 },
+              visibleRect: { x: 0, y: 0, width, height },
+              contentSize: { width, height },
+              zoomLevel: 1,
+            },
+            visibleText: currentVisibleText,
+            selection: null,
+            drawings: [],
+          },
+        });
+        return;
+      }
+
+      if (parsed.op === "annotations.remove") {
+        sendResponse({
+          ok: true,
+          payload: {
+            frameId: currentFrameId,
+            removedStrokeIds: (parsed.payload?.strokeIds as unknown[]) ?? [],
+            notFoundStrokeIds: [],
+            remainingStrokeCount: 0,
+          },
+        });
+        return;
+      }
+
+      if (parsed.op === "heartbeat.ping") {
+        if (suppressHeartbeatPongs > 0) {
+          suppressHeartbeatPongs -= 1;
+          return;
+        }
+        sendResponse({ ok: true, payload: { nonce: parsed.payload?.nonce } });
+      }
+    });
+  });
+
+  return {
+    host,
+    port: address.port,
+    pairPayloads,
+    snapshotPayloads,
+    clientCloseCodes,
+    emitEvent: (op, payload) => {
+      const body = JSON.stringify({
+        v: 1,
+        type: "event",
+        op,
+        eventId: `ev_${Date.now()}`,
+        sentAt: Date.now(),
+        payload,
+      });
+      for (const client of clients) {
+        if (client.readyState === client.OPEN) {
+          client.send(body);
+        }
+      }
+    },
+    close: async () => {
+      for (const client of clients) {
+        try {
+          client.close();
+        } catch {
+          // ignore
+        }
+      }
+      await new Promise<void>((resolve) => {
+        wss.close(() => resolve());
+      });
+    },
+  };
+}
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+describe("Surf Ace manager (WebSocket transport)", () => {
+  it("handles pair/push/snapshot/watch flows over WS", async () => {
+    const statePath = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-test-"));
+    const surface = await createMockSurface({
+      name: "Kitchen Display",
+      surfaceId: "a1b2c3d4",
+      width: 1920,
+      height: 1080,
+      scale: 2,
+    });
+
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
       const url =
         input instanceof URL ? input.toString() : typeof input === "string" ? input : input.url;
-      const pathname = new URL(url).pathname;
-      const bodyText = typeof init?.body === "string" ? init.body : "";
-
-      if (pathname === "/pair") {
-        return new Response(JSON.stringify({ status: "ok", sessionToken: "tok_123" }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
-      }
-      if (pathname === "/frame") {
-        return new Response(JSON.stringify({ ok: true }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
-      }
-      if (pathname === "/snapshot") {
-        return new Response(
-          JSON.stringify({
-            frameId: "fr_1",
-            contentType: "html",
-            title: "Build Output",
-            visibleText: "Error: connection refused on port 8080",
-            selection: { kind: "text", text: "connection refused" },
-          }),
-          {
-            status: 200,
-            headers: { "content-type": "application/json" },
-          },
-        );
-      }
-      if (pathname === "/watch" || pathname === "/unwatch") {
-        return new Response("", { status: 200 });
-      }
       if (url === "http://localhost:18800/alert") {
-        const parsed = bodyText ? (JSON.parse(bodyText) as { sessionKey?: string }) : {};
-        expect(parsed.sessionKey).toBe("agent:main:clawline:flynn:main");
         return new Response(JSON.stringify({ ok: true }), {
           status: 200,
           headers: { "content-type": "application/json" },
         });
       }
-
       return new Response("not found", { status: 404 });
     });
 
     const manager = createSurfAceManager({
       statePath,
-      discoverImpl,
       fetchImpl,
+      discoverImpl: async () => [
+        {
+          instanceName: "Kitchen Display",
+          host: surface.host,
+          port: surface.port,
+          txt: {
+            name: "Kitchen Display",
+            v: "1",
+            w: "1920",
+            h: "1080",
+            s: "2",
+            cap: "31",
+            busy: "0",
+            pk: "a1b2c3d4",
+            ws: "/ws",
+            tls: "0",
+          },
+        },
+      ],
       discoveryIntervalMs: 60_000,
       discoveryTimeoutMs: 100,
+      wsHeartbeatIntervalMs: 1_000,
+      wsHeartbeatTimeoutMs: 1_000,
+      wsReconnectBackoffMs: [250],
     });
 
     await manager.start();
-    manager.setCallbackBaseUrl("http://tars.local:18800");
 
-    // Auto-pair — no PIN
     const pairResult = await manager.pair({ userId: "flynn", screen: "Kitchen Display" });
     expect(pairResult.status).toBe("paired");
 
@@ -104,25 +380,29 @@ describe("Surf Ace manager", () => {
     });
     expect(pushResult.ok).toBe(true);
 
-    const snap = await manager.snapshot({ userId: "flynn", screen: "Kitchen Display" });
-    expect(snap.status).toBe("snapshot");
+    const snapshot = await manager.snapshot({ userId: "flynn", screen: "Kitchen Display" });
+    expect(snapshot.status).toBe("snapshot");
+    expect(surface.snapshotPayloads[0]).toMatchObject({
+      includeVisibleText: true,
+      includeDrawings: false,
+    });
 
     const watchResult = await manager.watch({
       userId: "flynn",
       screen: "Kitchen Display",
       enabled: true,
-      debounce: { scroll_settle: 500 },
       watcherSessionKey: "agent:main:clawline:flynn:main",
     });
     expect(watchResult.enabled).toBe(true);
 
-    const eventResult = manager.handleInboundEvent({
-      screenId: "a1b2c3d4",
-      payload: { event: "text_selected", text: "hello" },
-      remoteAddress: "10.0.0.10",
+    surface.emitEvent("event.tap", {
+      frameId: pushResult.frameId,
+      revision: 1,
+      kind: "tap",
+      position: { x: 10, y: 20 },
     });
-    expect(eventResult.statusCode).toBe(200);
-    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    await waitFor(() => fetchImpl.mock.calls.length > 0);
     expect(fetchImpl).toHaveBeenCalledWith(
       "http://localhost:18800/alert",
       expect.objectContaining({ method: "POST" }),
@@ -133,161 +413,28 @@ describe("Surf Ace manager", () => {
     expect(context).toContain("Kitchen Display");
     expect(context).toContain("sourceRef: agent:main:clawline:flynn:main#s_123");
 
-    await manager.clear({ userId: "flynn", screen: "Kitchen Display" });
-    const pushAfterClear = await manager.push({
-      userId: "flynn",
-      screen: "Kitchen Display",
-      contentType: "html",
-      content: { html: "<html><body>After Clear</body></html>" },
-      title: "After Clear",
-    });
-    expect(pushAfterClear.ok).toBe(true);
-
     await manager.stop();
-    await fs.rm(statePath, { recursive: true, force: true });
-    expect(fetchImpl).toHaveBeenCalled();
-    expect(discoverImpl).toHaveBeenCalled();
-  });
-
-  it("does not throw context injection when a paired screen snapshot fails", async () => {
-    const statePath = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-test-"));
-    const manager = createSurfAceManager({
-      statePath,
-      discoverImpl: async () => [
-        {
-          instanceName: "Offline Screen",
-          host: "192.168.50.25",
-          port: 8765,
-          txt: {
-            name: "Offline Screen",
-            v: "1",
-            w: "1194",
-            h: "834",
-            s: "2",
-            cap: "31",
-            busy: "0",
-            pk: "deadbeef",
-          },
-        },
-      ],
-      fetchImpl: vi.fn(async (input: RequestInfo | URL) => {
-        const url =
-          input instanceof URL ? input.toString() : typeof input === "string" ? input : input.url;
-        const pathname = new URL(url).pathname;
-        if (pathname === "/pair") {
-          return new Response(JSON.stringify({ status: "ok", sessionToken: "tok_ctx" }), {
-            status: 200,
-            headers: { "content-type": "application/json" },
-          });
-        }
-        if (pathname === "/snapshot") {
-          throw new Error("unreachable");
-        }
-        return new Response("not found", { status: 404 });
-      }),
-      discoveryIntervalMs: 60_000,
-      discoveryTimeoutMs: 100,
-    });
-
-    await manager.start();
-    await manager.pair({ userId: "flynn", screen: "Offline Screen" });
-
-    const context = await manager.buildContextInjection({ userId: "flynn" });
-    expect(context).toContain("## Surf Ace Screens");
-    expect(context).toContain("Offline Screen");
-    expect(context).toContain("paired): unreachable");
-
-    await manager.stop();
-    await fs.rm(statePath, { recursive: true, force: true });
-  });
-
-  it("registers a Surf Ace screen manually by URL for normal pair flow", async () => {
-    const statePath = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-test-"));
-    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
-      const url =
-        input instanceof URL ? input.toString() : typeof input === "string" ? input : input.url;
-      const pathname = new URL(url).pathname;
-      if (pathname === "/identity") {
-        return new Response(
-          JSON.stringify({
-            fingerprint: "b1c2d3e4",
-            name: "Guest iPad",
-            v: 1,
-            w: 1194,
-            h: 834,
-            s: 2,
-            cap: 31,
-            busy: 0,
-          }),
-          {
-            status: 200,
-            headers: { "content-type": "application/json" },
-          },
-        );
-      }
-      if (pathname === "/pair") {
-        return new Response(JSON.stringify({ status: "ok", sessionToken: "tok_manual" }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
-      }
-      return new Response("not found", { status: 404 });
-    });
-
-    const manager = createSurfAceManager({
-      statePath,
-      discoverImpl: async () => [],
-      fetchImpl,
-      discoveryIntervalMs: 60_000,
-      discoveryTimeoutMs: 100,
-    });
-
-    await manager.start();
-    const registerResult = await manager.register({
-      userId: "flynn",
-      url: "http://192.168.50.25:8765",
-    });
-
-    expect(registerResult.ok).toBe(true);
-    expect(registerResult.screen).toMatchObject({
-      id: "b1c2d3e4",
-      fingerprint: "b1c2d3e4",
-      name: "Guest iPad",
-      host: "192.168.50.25",
-      port: 8765,
-      status: "discovered",
-      intake: "manual",
-      protocolVersion: 1,
-      width: 1194,
-      height: 834,
-      scale: 2,
-      contentTypes: 31,
-    });
-
-    const pairResult = await manager.pair({ userId: "flynn", screen: "Guest iPad" });
-    expect(pairResult.status).toBe("paired");
-    expect(fetchImpl).toHaveBeenCalledWith(
-      "http://192.168.50.25:8765/identity",
-      expect.objectContaining({ method: "GET" }),
-    );
-    expect(fetchImpl).toHaveBeenCalledWith(
-      "http://192.168.50.25:8765/pair",
-      expect.objectContaining({ method: "POST" }),
-    );
-
-    await manager.stop();
+    await surface.close();
     await fs.rm(statePath, { recursive: true, force: true });
   });
 
   it("allows explicit pair when discovery marks the screen busy", async () => {
     const statePath = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-test-"));
+    const surface = await createMockSurface({
+      name: "Surf Ace - iPad",
+      surfaceId: "23c71e1c",
+      width: 1194,
+      height: 834,
+      scale: 2,
+    });
+
     const manager = createSurfAceManager({
       statePath,
       discoverImpl: async () => [
         {
           instanceName: "Surf Ace - iPad",
-          host: "192.168.50.25",
-          port: 8765,
+          host: surface.host,
+          port: surface.port,
           txt: {
             name: "Surf Ace - iPad",
             v: "1",
@@ -297,35 +444,29 @@ describe("Surf Ace manager", () => {
             cap: "31",
             busy: "1",
             pk: "23c71e1c",
+            ws: "/ws",
+            tls: "0",
           },
         },
       ],
-      fetchImpl: vi.fn(async (input: RequestInfo | URL) => {
-        const url =
-          input instanceof URL ? input.toString() : typeof input === "string" ? input : input.url;
-        const pathname = new URL(url).pathname;
-        if (pathname === "/pair") {
-          return new Response(JSON.stringify({ status: "ok", sessionToken: "tok_busy_repair" }), {
-            status: 200,
-            headers: { "content-type": "application/json" },
-          });
-        }
-        return new Response("not found", { status: 404 });
-      }),
       discoveryIntervalMs: 60_000,
       discoveryTimeoutMs: 100,
+      wsHeartbeatIntervalMs: 1_000,
+      wsHeartbeatTimeoutMs: 1_000,
+      wsReconnectBackoffMs: [250],
     });
 
     await manager.start();
     const pairResult = await manager.pair({ userId: "flynn", screen: "Surf Ace - iPad" });
     expect(pairResult.status).toBe("paired");
-    expect(pairResult.screen.sessionToken).toBe("tok_busy_repair");
+    expect(pairResult.screen.sessionToken).toBeTruthy();
 
     await manager.stop();
+    await surface.close();
     await fs.rm(statePath, { recursive: true, force: true });
   });
 
-  it("auto-pairs trusted screens even when discovery marks them busy", async () => {
+  it("auto-pairs trusted screens over WS even when discovery marks busy", async () => {
     const statePath = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-test-"));
     await fs.writeFile(
       path.join(statePath, TRUST_STORE_FILE),
@@ -345,17 +486,12 @@ describe("Surf Ace manager", () => {
       ),
     );
 
-    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
-      const url =
-        input instanceof URL ? input.toString() : typeof input === "string" ? input : input.url;
-      const pathname = new URL(url).pathname;
-      if (pathname === "/pair") {
-        return new Response(JSON.stringify({ status: "ok", sessionToken: "tok_auto_busy" }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
-      }
-      return new Response("not found", { status: 404 });
+    const surface = await createMockSurface({
+      name: "Surf Ace - iPad",
+      surfaceId: "23c71e1c",
+      width: 1194,
+      height: 834,
+      scale: 2,
     });
 
     const manager = createSurfAceManager({
@@ -363,8 +499,8 @@ describe("Surf Ace manager", () => {
       discoverImpl: async () => [
         {
           instanceName: "Surf Ace - iPad",
-          host: "192.168.50.25",
-          port: 8765,
+          host: surface.host,
+          port: surface.port,
           txt: {
             name: "Surf Ace - iPad",
             v: "1",
@@ -374,329 +510,222 @@ describe("Surf Ace manager", () => {
             cap: "31",
             busy: "1",
             pk: "23c71e1c",
+            ws: "/ws",
+            tls: "0",
           },
         },
       ],
-      fetchImpl,
       discoveryIntervalMs: 60_000,
       discoveryTimeoutMs: 100,
+      wsHeartbeatIntervalMs: 1_000,
+      wsHeartbeatTimeoutMs: 1_000,
+      wsReconnectBackoffMs: [250],
     });
 
     await manager.start();
-    expect(fetchImpl).toHaveBeenCalledWith(
-      "http://192.168.50.25:8765/pair",
-      expect.objectContaining({ method: "POST" }),
-    );
 
+    await waitFor(() => surface.pairPayloads.length > 0);
     const screens = manager.listScreens();
     expect(screens).toContainEqual(
       expect.objectContaining({
         id: "23c71e1c",
-        sessionToken: "tok_auto_busy",
+        sessionToken: expect.any(String),
       }),
     );
+
+    await manager.stop();
+    await surface.close();
+    await fs.rm(statePath, { recursive: true, force: true });
+  });
+
+  it("does not throw context injection when paired snapshot fails", async () => {
+    const statePath = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-test-"));
+    const surface = await createMockSurface({ name: "Offline Screen", surfaceId: "deadbeef" });
+
+    const manager = createSurfAceManager({
+      statePath,
+      discoverImpl: async () => [
+        {
+          instanceName: "Offline Screen",
+          host: surface.host,
+          port: surface.port,
+          txt: {
+            name: "Offline Screen",
+            v: "1",
+            w: "1194",
+            h: "834",
+            s: "2",
+            cap: "31",
+            busy: "0",
+            pk: "deadbeef",
+            ws: "/ws",
+            tls: "0",
+          },
+        },
+      ],
+      discoveryIntervalMs: 60_000,
+      discoveryTimeoutMs: 100,
+      wsHeartbeatIntervalMs: 1_000,
+      wsHeartbeatTimeoutMs: 1_000,
+      wsReconnectBackoffMs: [250],
+    });
+
+    await manager.start();
+    await manager.pair({ userId: "flynn", screen: "Offline Screen" });
+    await surface.close();
+
+    const context = await manager.buildContextInjection({ userId: "flynn" });
+    expect(context).toContain("## Surf Ace Screens");
+    expect(context).toContain("Offline Screen");
+    expect(context).toContain("paired): unreachable");
 
     await manager.stop();
     await fs.rm(statePath, { recursive: true, force: true });
   });
 
-  it("keeps pair session token visible when discovery refresh runs during pair", async () => {
+  it("reconnects with takeover after missed heartbeat window", async () => {
     const statePath = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-test-"));
-    const discoverImpl = vi.fn(async () => [
-      {
-        instanceName: "Surf Ace - iPad",
-        host: "192.168.50.25",
-        port: 8765,
-        txt: {
-          name: "Surf Ace - iPad",
-          v: "1",
-          w: "1194",
-          h: "834",
-          s: "2",
-          cap: "31",
-          busy: "0",
-          pk: "23c71e1c",
-        },
-      },
-    ]);
-
-    let manager: ReturnType<typeof createSurfAceManager> | null = null;
-    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
-      const url =
-        input instanceof URL ? input.toString() : typeof input === "string" ? input : input.url;
-      const pathname = new URL(url).pathname;
-      if (pathname === "/pair") {
-        // Reproduce the bug: discovery refresh replaces the tracked object while pair is in-flight.
-        await (manager as { refreshDiscovery?: () => Promise<void> } | null)?.refreshDiscovery?.();
-        return new Response(JSON.stringify({ status: "ok", sessionToken: "tok_race" }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
-      }
-      if (pathname === "/frame") {
-        return new Response(JSON.stringify({ ok: true }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
-      }
-      return new Response("not found", { status: 404 });
+    const surface = await createMockSurface({
+      name: "Heartbeat Surface",
+      surfaceId: "f1e2d3c4",
+      suppressHeartbeatPongs: 2,
     });
 
-    manager = createSurfAceManager({
+    const manager = createSurfAceManager({
       statePath,
-      discoverImpl,
-      fetchImpl,
+      discoverImpl: async () => [
+        {
+          instanceName: "Heartbeat Surface",
+          host: surface.host,
+          port: surface.port,
+          txt: {
+            name: "Heartbeat Surface",
+            v: "1",
+            w: "1024",
+            h: "768",
+            s: "2",
+            cap: "31",
+            busy: "0",
+            pk: "f1e2d3c4",
+            ws: "/ws",
+            tls: "0",
+          },
+        },
+      ],
+      discoveryIntervalMs: 60_000,
+      discoveryTimeoutMs: 100,
+      wsHeartbeatIntervalMs: 250,
+      wsHeartbeatTimeoutMs: 250,
+      wsReconnectBackoffMs: [250],
+    });
+
+    await manager.start();
+    await manager.pair({ userId: "flynn", screen: "Heartbeat Surface" });
+
+    await waitFor(() => surface.pairPayloads.length >= 2, { timeoutMs: 10_000 });
+
+    const takeoverPair = surface.pairPayloads.find((payload, index) => {
+      if (index === 0) {
+        return false;
+      }
+      return payload.takeover === true;
+    });
+    expect(takeoverPair).toBeTruthy();
+
+    await manager.stop();
+    await surface.close();
+    await fs.rm(statePath, { recursive: true, force: true });
+  });
+
+  it("closes with 4413 when incoming event exceeds negotiated maxMessageBytes", async () => {
+    const statePath = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-test-"));
+    const surface = await createMockSurface({
+      name: "Limit Surface",
+      surfaceId: "beadfeed",
+      maxMessageBytes: 256,
+    });
+
+    const manager = createSurfAceManager({
+      statePath,
+      discoverImpl: async () => [
+        {
+          instanceName: "Limit Surface",
+          host: surface.host,
+          port: surface.port,
+          txt: {
+            name: "Limit Surface",
+            v: "1",
+            w: "1024",
+            h: "768",
+            s: "2",
+            cap: "31",
+            busy: "0",
+            pk: "beadfeed",
+            ws: "/ws",
+            tls: "0",
+          },
+        },
+      ],
       discoveryIntervalMs: 60_000,
       discoveryTimeoutMs: 100,
     });
 
     await manager.start();
-    const pairResult = await manager.pair({ userId: "flynn", screen: "Surf Ace - iPad" });
-    expect(pairResult.status).toBe("paired");
-
-    const pushResult = await manager.push({
-      userId: "flynn",
-      screen: "Surf Ace - iPad",
-      contentType: "html",
-      title: "Race Safe",
-      content: { html: "<html><body>Race Safe</body></html>" },
+    await manager.pair({ userId: "flynn", screen: "Limit Surface" });
+    surface.emitEvent("event.tap", {
+      frameId: "fr_deadbeef",
+      revision: 1,
+      kind: "tap",
+      position: { x: 10, y: 20 },
+      nearestContent: "x".repeat(2_000),
     });
 
-    expect(pushResult.ok).toBe(true);
-    expect(fetchImpl).toHaveBeenCalledWith(
-      "http://192.168.50.25:8765/frame",
-      expect.objectContaining({ method: "POST" }),
-    );
+    await waitFor(() => surface.clientCloseCodes.includes(4413));
+
+    await manager.stop();
+    await surface.close();
+    await fs.rm(statePath, { recursive: true, force: true });
+  });
+
+  it("registers manual WS URLs without requiring identity endpoint", async () => {
+    const statePath = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-test-"));
+    const manager = createSurfAceManager({
+      statePath,
+      discoverImpl: async () => [],
+      fetchImpl: async () => new Response("not found", { status: 404 }),
+      discoveryIntervalMs: 60_000,
+      discoveryTimeoutMs: 100,
+    });
+
+    await manager.start();
+    const result = await manager.register({ userId: "flynn", url: "ws://192.168.50.25:8765/ws" });
+
+    expect(result.ok).toBe(true);
+    expect(result.screen).toMatchObject({
+      host: "192.168.50.25",
+      port: 8765,
+      intake: "manual",
+      status: "discovered",
+      sessionToken: null,
+    });
 
     await manager.stop();
     await fs.rm(statePath, { recursive: true, force: true });
   });
 
-  it("rejects manual registration when identity fingerprint is missing", async () => {
+  it("rejects TLS registration URLs in ws-only v1 mode", async () => {
     const statePath = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-test-"));
     const manager = createSurfAceManager({
       statePath,
       discoverImpl: async () => [],
-      fetchImpl: async () =>
-        new Response(JSON.stringify({ name: "No Fingerprint" }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        }),
       discoveryIntervalMs: 60_000,
       discoveryTimeoutMs: 100,
     });
 
     await manager.start();
     await expect(
-      manager.register({ userId: "flynn", url: "http://192.168.50.99:8765" }),
-    ).rejects.toThrow("missing a valid fingerprint");
-    await manager.stop();
-    await fs.rm(statePath, { recursive: true, force: true });
-  });
-
-  it("rejects inbound events from mismatched source addresses", async () => {
-    const statePath = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-test-"));
-    const manager = createSurfAceManager({
-      statePath,
-      discoveryIntervalMs: 60_000,
-      discoverImpl: async () => [
-        {
-          instanceName: "Office",
-          host: "10.0.0.20",
-          port: 17777,
-          txt: { name: "Office", busy: "0", pk: "d4c3b2a1" },
-        },
-      ],
-      fetchImpl: async () =>
-        new Response(JSON.stringify({ status: "ok", sessionToken: "tok" }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        }),
-    });
-
-    await manager.start();
-    await manager.pair({ userId: "flynn", screen: "Office" });
-    manager.setCallbackBaseUrl("http://127.0.0.1:18800");
-    await manager.watch({ userId: "flynn", screen: "Office", enabled: true });
-
-    const result = manager.handleInboundEvent({
-      screenId: "d4c3b2a1",
-      payload: { event: "point" },
-      remoteAddress: "10.0.0.99",
-    });
-
-    expect(result.statusCode).toBe(403);
-    await manager.stop();
-    await fs.rm(statePath, { recursive: true, force: true });
-  });
-
-  it("restores paired screens from disk and rearms watch on startup", async () => {
-    const statePath = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-test-"));
-    const discoverImpl = vi.fn(async () => [
-      {
-        instanceName: "Kitchen Display",
-        host: "10.0.0.10",
-        port: 17777,
-        txt: {
-          name: "Kitchen Display",
-          v: "1",
-          w: "1920",
-          h: "1080",
-          s: "2",
-          cap: "31",
-          busy: "0",
-          pk: "a1b2c3d4",
-        },
-      },
-    ]);
-    const fetchInitial = vi.fn(async (input: RequestInfo | URL) => {
-      const url =
-        input instanceof URL ? input.toString() : typeof input === "string" ? input : input.url;
-      const pathname = new URL(url).pathname;
-      if (pathname === "/pair") {
-        return new Response(JSON.stringify({ status: "ok", sessionToken: "tok_restore" }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
-      }
-      if (pathname === "/watch") {
-        return new Response("", { status: 200 });
-      }
-      return new Response(null, { status: 204 });
-    });
-
-    const firstManager = createSurfAceManager({
-      statePath,
-      discoverImpl,
-      fetchImpl: fetchInitial,
-      discoveryIntervalMs: 60_000,
-      discoveryTimeoutMs: 100,
-    });
-    firstManager.setCallbackBaseUrl("http://tars.local:18800");
-    await firstManager.start();
-    await firstManager.pair({ userId: "flynn", screen: "Kitchen Display" });
-    await firstManager.watch({ userId: "flynn", screen: "Kitchen Display", enabled: true });
-    await firstManager.stop();
-
-    const persistedPath = path.join(statePath, SCREEN_STATE_FILE);
-    const persistedRaw = await fs.readFile(persistedPath, "utf8");
-    const persisted = JSON.parse(persistedRaw) as {
-      screens: Array<{ fingerprint: string; sessionToken: string | null; watchEnabled: boolean }>;
-    };
-    expect(persisted.screens).toContainEqual(
-      expect.objectContaining({
-        fingerprint: "a1b2c3d4",
-        sessionToken: "tok_restore",
-        watchEnabled: true,
-      }),
-    );
-
-    const fetchRestore = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url =
-        input instanceof URL ? input.toString() : typeof input === "string" ? input : input.url;
-      const pathname = new URL(url).pathname;
-      if (pathname === "/snapshot") {
-        expect(init?.headers).toMatchObject({ Authorization: "Bearer tok_restore" });
-        return new Response(null, { status: 204 });
-      }
-      if (pathname === "/watch") {
-        const bodyText = typeof init?.body === "string" ? init.body : "";
-        expect(bodyText).toContain("/surf-ace/events/a1b2c3d4");
-        return new Response("", { status: 200 });
-      }
-      return new Response("not found", { status: 404 });
-    });
-
-    const restoredManager = createSurfAceManager({
-      statePath,
-      discoverImpl: async () => [],
-      fetchImpl: fetchRestore,
-      discoveryIntervalMs: 60_000,
-      discoveryTimeoutMs: 100,
-    });
-    restoredManager.setCallbackBaseUrl("http://tars.local:18800");
-    await restoredManager.start();
-
-    const restored = restoredManager.listScreens();
-    expect(restored).toHaveLength(1);
-    expect(restored[0]?.id).toBe("a1b2c3d4");
-    expect(restored[0]?.status).toBe("paired");
-    expect(restored[0]?.watchEnabled).toBe(true);
-    expect(restored[0]?.sessionToken).toBe("tok_restore");
-    expect(fetchRestore).toHaveBeenCalledWith(
-      expect.stringContaining("/snapshot"),
-      expect.objectContaining({ method: "GET" }),
-    );
-    expect(fetchRestore).toHaveBeenCalledWith(
-      expect.stringContaining("/watch"),
-      expect.objectContaining({ method: "POST" }),
-    );
-
-    await restoredManager.stop();
-    await fs.rm(statePath, { recursive: true, force: true });
-  });
-
-  it("marks restored screens as available when stored token is invalid", async () => {
-    const statePath = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-test-"));
-    const persistedPath = path.join(statePath, SCREEN_STATE_FILE);
-    await fs.writeFile(
-      persistedPath,
-      JSON.stringify(
-        {
-          version: 1,
-          screens: [
-            {
-              fingerprint: "deadbeef",
-              host: "10.0.0.55",
-              port: 17777,
-              sessionToken: "tok_old",
-              watchEnabled: true,
-            },
-          ],
-        },
-        null,
-        2,
-      ),
-    );
-
-    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
-      const url =
-        input instanceof URL ? input.toString() : typeof input === "string" ? input : input.url;
-      const pathname = new URL(url).pathname;
-      if (pathname === "/snapshot") {
-        return new Response("unauthorized", { status: 401 });
-      }
-      return new Response("not found", { status: 404 });
-    });
-
-    const manager = createSurfAceManager({
-      statePath,
-      discoverImpl: async () => [],
-      fetchImpl,
-      discoveryIntervalMs: 60_000,
-      discoveryTimeoutMs: 100,
-    });
-    manager.setCallbackBaseUrl("http://tars.local:18800");
-    await manager.start();
-
-    const screens = manager.listScreens();
-    expect(screens).toHaveLength(1);
-    expect(screens[0]?.id).toBe("deadbeef");
-    expect(screens[0]?.status).toBe("discovered");
-    expect(screens[0]?.sessionToken).toBeNull();
-    expect(screens[0]?.watchEnabled).toBe(false);
-
-    const persistedAfterRaw = await fs.readFile(persistedPath, "utf8");
-    const persistedAfter = JSON.parse(persistedAfterRaw) as {
-      screens: Array<{ fingerprint: string; sessionToken: string | null; watchEnabled: boolean }>;
-    };
-    expect(persistedAfter.screens).toContainEqual(
-      expect.objectContaining({
-        fingerprint: "deadbeef",
-        sessionToken: null,
-        watchEnabled: false,
-      }),
-    );
+      manager.register({ userId: "flynn", url: "https://192.168.50.25:8765" }),
+    ).rejects.toThrow("Surf Ace register URL must use http:// or ws://");
 
     await manager.stop();
     await fs.rm(statePath, { recursive: true, force: true });

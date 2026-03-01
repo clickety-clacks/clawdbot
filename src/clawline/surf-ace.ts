@@ -1,8 +1,7 @@
-import { randomUUID } from "node:crypto";
-import { lookup } from "node:dns/promises";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
-import net from "node:net";
 import path from "node:path";
+import WebSocket from "ws";
 import { runCommandWithTimeout } from "../process/exec.js";
 import type { Logger } from "./domain.js";
 
@@ -12,6 +11,14 @@ const SCREEN_STATE_FILE = "surf-ace-screens.json";
 const DEFAULT_DISCOVERY_INTERVAL_MS = 5_000;
 const DEFAULT_DISCOVERY_TIMEOUT_MS = 1_500;
 const DEFAULT_HTTP_TIMEOUT_MS = 10_000;
+const DEFAULT_WS_CONNECT_TIMEOUT_MS = 10_000;
+const DEFAULT_WS_REQUEST_TIMEOUT_MS = 10_000;
+const PAIR_RESPONSE_TIMEOUT_MS = 10_000;
+const DEFAULT_WS_MAX_MESSAGE_BYTES = 12 * 1024 * 1024;
+const WS_HEARTBEAT_INTERVAL_MS = 10_000;
+const WS_HEARTBEAT_TIMEOUT_MS = 3_000;
+const WS_MAX_CONSECUTIVE_MISSED_PONGS = 2;
+const WS_RECONNECT_BACKOFF_MS = [500, 1_000, 2_000, 4_000, 8_000, 16_000, 30_000] as const;
 const MAX_PROMPT_VISIBLE_TEXT_CHARS = 4_096;
 
 export type SurfAceScreenStatus = "discovered" | "pairing" | "paired" | "busy";
@@ -101,7 +108,6 @@ export type SurfAceInboundEventResult = {
 export interface SurfAceRuntime {
   start(): Promise<void>;
   stop(): Promise<void>;
-  setCallbackBaseUrl(url: string): void;
   register(params: { userId: string | null; url: string }): Promise<SurfAceRegisterResult>;
   pair(params: { userId: string | null; screen: string }): Promise<SurfAcePairResult>;
   push(params: {
@@ -125,11 +131,6 @@ export interface SurfAceRuntime {
     debounce?: SurfAceWatchDebounce;
     watcherSessionKey?: string;
   }): Promise<SurfAceWatchResult>;
-  handleInboundEvent(params: {
-    screenId: string;
-    payload: unknown;
-    remoteAddress?: string;
-  }): SurfAceInboundEventResult;
   buildContextInjection(params: { userId: string }): Promise<string | null>;
   listScreens(): SurfAceDiscoveredScreen[];
 }
@@ -150,12 +151,22 @@ type PersistedScreenStateEntry = {
   fingerprint: string;
   host: string;
   port: number;
+  name?: string;
+  intake?: "bonjour" | "manual";
+  wsPath?: string;
+  wsSecure?: boolean;
+  protocolVersion?: number;
+  width?: number;
+  height?: number;
+  scale?: number;
+  contentTypes?: number;
   sessionToken: string | null;
   watchEnabled: boolean;
 };
 
 type ScreenStateFile = {
-  version: 1;
+  version: 2;
+  providerId?: string;
   screens: PersistedScreenStateEntry[];
 };
 
@@ -171,16 +182,83 @@ type SurfAceManagerOptions = {
   logger?: Logger;
   discoveryIntervalMs?: number;
   discoveryTimeoutMs?: number;
+  wsConnectTimeoutMs?: number;
+  wsRequestTimeoutMs?: number;
+  wsHeartbeatIntervalMs?: number;
+  wsHeartbeatTimeoutMs?: number;
+  wsReconnectBackoffMs?: number[];
   fetchImpl?: typeof fetch;
   discoverImpl?: (timeoutMs: number) => Promise<DiscoveryRecord[]>;
   now?: () => number;
 };
 
 type ManagedScreen = SurfAceDiscoveredScreen & {
+  wsPath: string;
+  wsSecure: boolean;
+  maxMessageBytes: number;
+  currentRevision: number;
+  currentFrameId: string | null;
   consecutiveFailures: number;
   unreachable: boolean;
-  eventSourceAddress: string | null;
   watcherSessionKey: string | null;
+};
+
+type SurfAceRequestEnvelope = {
+  v: 1;
+  type: "request";
+  op: string;
+  id: string;
+  sentAt: number;
+  payload: Record<string, unknown>;
+};
+
+type SurfAceResponseEnvelope = {
+  v: 1;
+  type: "response";
+  op: string;
+  id: string;
+  ok: boolean;
+  sentAt: number;
+  payload?: Record<string, unknown>;
+  error?: {
+    code?: string;
+    message?: string;
+    details?: unknown;
+  };
+};
+
+type SurfAceEventEnvelope = {
+  v: 1;
+  type: "event";
+  op: string;
+  eventId?: string;
+  sentAt?: number;
+  payload?: Record<string, unknown>;
+};
+
+type PendingRequest = {
+  op: string;
+  resolve: (value: SurfAceResponseEnvelope) => void;
+  reject: (reason?: unknown) => void;
+  timeout: ReturnType<typeof setTimeout>;
+};
+
+type ScreenSocketState = {
+  ws: WebSocket | null;
+  pendingRequests: Map<string, PendingRequest>;
+  connectPromise: Promise<void> | null;
+  reconnectTimer: ReturnType<typeof setTimeout> | null;
+  reconnectAttempt: number;
+  requestSequence: number;
+  paired: boolean;
+  shouldReconnect: boolean;
+  forceTakeoverOnNextPair: boolean;
+  awaitingSnapshotAfterReconnect: boolean;
+  bufferedEvents: SurfAceEventEnvelope[];
+  seenEventIds: Set<string>;
+  seenEventOrder: string[];
+  heartbeatInterval: ReturnType<typeof setInterval> | null;
+  consecutiveMissedPongs: number;
 };
 
 function decodeDnsSdEscapes(value: string): string {
@@ -381,10 +459,6 @@ function normalizeAddressHost(value: string): string {
   return trimmed;
 }
 
-function isIpAddress(value: string): boolean {
-  return net.isIP(value) !== 0;
-}
-
 function parseScreenBaseUrl(rawUrl: string): URL {
   const candidate = rawUrl.trim();
   if (!candidate) {
@@ -396,14 +470,17 @@ function parseScreenBaseUrl(rawUrl: string): URL {
   } catch (err) {
     throw new Error(`Invalid Surf Ace URL: ${String(err)}`, { cause: err });
   }
-  if (parsed.protocol !== "http:") {
-    throw new Error("Surf Ace register URL must use http://");
+  const protocol = parsed.protocol.toLowerCase();
+  if (protocol !== "http:" && protocol !== "ws:") {
+    throw new Error("Surf Ace register URL must use http:// or ws://");
   }
   parsed.username = "";
   parsed.password = "";
   parsed.search = "";
   parsed.hash = "";
-  parsed.pathname = "/";
+  if (!parsed.pathname || parsed.pathname === "/") {
+    parsed.pathname = "/ws";
+  }
   return parsed;
 }
 
@@ -439,19 +516,6 @@ function parseOptionalBusy(value: unknown): boolean | undefined {
   return undefined;
 }
 
-async function resolveExpectedSourceAddress(host: string): Promise<string | null> {
-  const normalizedHost = normalizeAddressHost(host);
-  if (isIpAddress(normalizedHost)) {
-    return normalizedHost;
-  }
-  try {
-    const resolved = await lookup(normalizedHost);
-    return normalizeAddressHost(resolved.address);
-  } catch {
-    return null;
-  }
-}
-
 function truncatePromptText(value: string, maxBytes: number): string {
   const trimmed = value.trim();
   if (Buffer.byteLength(trimmed, "utf8") <= maxBytes) {
@@ -469,6 +533,82 @@ function buildFrameId(): string {
   return `fr_${randomUUID().replaceAll("-", "").slice(0, 8)}`;
 }
 
+function buildProviderId(): string {
+  return `pv_${randomUUID().replaceAll("-", "").slice(0, 16)}`;
+}
+
+function buildConnectionId(): string {
+  return `cn_${randomUUID().replaceAll("-", "").slice(0, 16)}`;
+}
+
+function buildRequestId(sequence: number): string {
+  return `rq_${sequence.toString(36)}_${randomUUID().replaceAll("-", "").slice(0, 8)}`;
+}
+
+function normalizeWsPath(value: string | undefined): string {
+  const raw = (value ?? "").trim();
+  if (!raw) {
+    return "/ws";
+  }
+  return raw.startsWith("/") ? raw : `/${raw}`;
+}
+
+function contentTypesMaskFromNames(value: unknown): number | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  let mask = 0;
+  for (const item of value) {
+    if (typeof item !== "string") {
+      continue;
+    }
+    switch (item.trim().toLowerCase()) {
+      case "html":
+        mask |= 1;
+        break;
+      case "image":
+        mask |= 2;
+        break;
+      case "pdf":
+        mask |= 4;
+        break;
+      case "terminal":
+        mask |= 8;
+        break;
+      case "markdown":
+        mask |= 16;
+        break;
+      default:
+        break;
+    }
+  }
+  return mask;
+}
+
+function clampSnapshotToRecord(payload: unknown): Record<string, unknown> {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return {};
+  }
+  return payload as Record<string, unknown>;
+}
+
+function rawDataByteLength(rawData: WebSocket.RawData): number {
+  if (typeof rawData === "string") {
+    return Buffer.byteLength(rawData, "utf8");
+  }
+  if (Buffer.isBuffer(rawData)) {
+    return rawData.byteLength;
+  }
+  if (Array.isArray(rawData)) {
+    return rawData.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+  }
+  return Buffer.from(rawData).byteLength;
+}
+
+function deriveScreenFingerprint(input: string): string {
+  return createHash("sha256").update(input).digest("hex").slice(0, 8);
+}
+
 class SurfAceManager implements SurfAceRuntime {
   private readonly logger: Logger;
   private readonly fetchImpl: typeof fetch;
@@ -478,12 +618,19 @@ class SurfAceManager implements SurfAceRuntime {
   private readonly screenStatePath: string;
   private readonly discoveryIntervalMs: number;
   private readonly discoveryTimeoutMs: number;
+  private readonly wsConnectTimeoutMs: number;
+  private readonly wsRequestTimeoutMs: number;
+  private readonly wsHeartbeatIntervalMs: number;
+  private readonly wsHeartbeatTimeoutMs: number;
+  private readonly wsReconnectBackoffMs: number[];
   private readonly screensById = new Map<string, ManagedScreen>();
   private readonly trustByFingerprint = new Map<string, TrustedScreen>();
-  private callbackBaseUrl: string | null = null;
+  private readonly socketsByScreenId = new Map<string, ScreenSocketState>();
   private discoveryTimer: ReturnType<typeof setInterval> | null = null;
   private discoveryInFlight = false;
   private screenStateWrite: Promise<void> = Promise.resolve();
+  private providerId = buildProviderId();
+  private stopping = false;
 
   constructor(options: SurfAceManagerOptions) {
     this.logger = options.logger ?? console;
@@ -500,9 +647,32 @@ class SurfAceManager implements SurfAceRuntime {
       options.discoveryTimeoutMs && Number.isFinite(options.discoveryTimeoutMs)
         ? Math.max(250, Math.floor(options.discoveryTimeoutMs))
         : DEFAULT_DISCOVERY_TIMEOUT_MS;
+    this.wsConnectTimeoutMs =
+      options.wsConnectTimeoutMs && Number.isFinite(options.wsConnectTimeoutMs)
+        ? Math.max(250, Math.floor(options.wsConnectTimeoutMs))
+        : DEFAULT_WS_CONNECT_TIMEOUT_MS;
+    this.wsRequestTimeoutMs =
+      options.wsRequestTimeoutMs && Number.isFinite(options.wsRequestTimeoutMs)
+        ? Math.max(250, Math.floor(options.wsRequestTimeoutMs))
+        : DEFAULT_WS_REQUEST_TIMEOUT_MS;
+    this.wsHeartbeatIntervalMs =
+      options.wsHeartbeatIntervalMs && Number.isFinite(options.wsHeartbeatIntervalMs)
+        ? Math.max(250, Math.floor(options.wsHeartbeatIntervalMs))
+        : WS_HEARTBEAT_INTERVAL_MS;
+    this.wsHeartbeatTimeoutMs =
+      options.wsHeartbeatTimeoutMs && Number.isFinite(options.wsHeartbeatTimeoutMs)
+        ? Math.max(250, Math.floor(options.wsHeartbeatTimeoutMs))
+        : WS_HEARTBEAT_TIMEOUT_MS;
+    this.wsReconnectBackoffMs =
+      Array.isArray(options.wsReconnectBackoffMs) && options.wsReconnectBackoffMs.length > 0
+        ? options.wsReconnectBackoffMs
+            .map((value) => (Number.isFinite(value) ? Math.max(250, Math.floor(value)) : 0))
+            .filter((value) => value > 0)
+        : [...WS_RECONNECT_BACKOFF_MS];
   }
 
   async start(): Promise<void> {
+    this.stopping = false;
     await this.loadTrustStore();
     await this.loadScreenState();
     await this.reconnectPersistedScreens();
@@ -515,14 +685,28 @@ class SurfAceManager implements SurfAceRuntime {
   }
 
   async stop(): Promise<void> {
+    this.stopping = true;
     if (this.discoveryTimer) {
       clearInterval(this.discoveryTimer);
       this.discoveryTimer = null;
     }
-  }
-
-  setCallbackBaseUrl(url: string): void {
-    this.callbackBaseUrl = url.trim().replace(/\/$/, "");
+    for (const [screenId, socketState] of this.socketsByScreenId.entries()) {
+      socketState.shouldReconnect = false;
+      this.stopHeartbeat(socketState);
+      if (socketState.reconnectTimer) {
+        clearTimeout(socketState.reconnectTimer);
+        socketState.reconnectTimer = null;
+      }
+      this.rejectAllPendingRequests(socketState, new Error("Surf Ace manager stopped"));
+      try {
+        socketState.ws?.close(1000, "provider_shutdown");
+      } catch {
+        // ignore
+      }
+      socketState.ws = null;
+      socketState.paired = false;
+      this.socketsByScreenId.set(screenId, socketState);
+    }
   }
 
   listScreens(): SurfAceDiscoveredScreen[] {
@@ -531,109 +715,104 @@ class SurfAceManager implements SurfAceRuntime {
 
   async register(params: { userId: string | null; url: string }): Promise<SurfAceRegisterResult> {
     const baseUrl = parseScreenBaseUrl(params.url);
-    const response = await this.fetchIdentity(baseUrl);
-    const fingerprint = normalizeFingerprint(response.fingerprint);
-    if (!fingerprint) {
-      throw new Error("Surf Ace identity response is missing a valid fingerprint.");
+    const host = normalizeAddressHost(baseUrl.hostname);
+    const defaultPort = 80;
+    const portRaw = baseUrl.port ? Number.parseInt(baseUrl.port, 10) : defaultPort;
+    const port = Number.isFinite(portRaw) && portRaw > 0 ? portRaw : defaultPort;
+    const wsPath = normalizeWsPath(baseUrl.pathname);
+
+    let identity: {
+      fingerprint: string;
+      name: string;
+      protocolVersion?: number;
+      width?: number;
+      height?: number;
+      scale?: number;
+      contentTypes?: number;
+      busy?: boolean;
+    } | null = null;
+    if (baseUrl.protocol === "http:") {
+      try {
+        identity = await this.fetchIdentity(baseUrl);
+      } catch {
+        identity = null;
+      }
     }
 
-    const host = normalizeAddressHost(baseUrl.hostname);
-    const portRaw = baseUrl.port ? Number.parseInt(baseUrl.port, 10) : 80;
-    const port = Number.isFinite(portRaw) && portRaw > 0 ? portRaw : 80;
+    const identityFingerprint = normalizeFingerprint(identity?.fingerprint);
+    const fallbackFingerprint = deriveScreenFingerprint(`${host}:${port}${wsPath}`);
+    const fingerprint = identityFingerprint || fallbackFingerprint;
     const existing = this.screensById.get(fingerprint);
     const name =
-      typeof response.name === "string" && response.name.trim().length > 0
-        ? response.name.trim()
-        : (existing?.name ?? fingerprint);
-    const busy = response.busy ?? existing?.busy ?? false;
-    const status: SurfAceScreenStatus = busy
-      ? "busy"
-      : existing?.sessionToken
-        ? "paired"
+      identity?.name?.trim() ||
+      existing?.name ||
+      (typeof identityFingerprint === "string" && identityFingerprint ? identityFingerprint : host);
+    const busy = identity?.busy ?? existing?.busy ?? false;
+    const status: SurfAceScreenStatus = existing?.sessionToken
+      ? "paired"
+      : busy
+        ? "busy"
         : "discovered";
-    const eventSourceAddress =
-      (await resolveExpectedSourceAddress(host)) ?? existing?.eventSourceAddress ?? null;
 
-    let managed = existing;
-    if (managed) {
-      managed.intake = "manual";
-      managed.instanceName = name;
-      managed.host = host;
-      managed.port = port;
-      managed.name = name;
-      managed.protocolVersion = response.protocolVersion ?? managed.protocolVersion;
-      managed.width = response.width ?? managed.width;
-      managed.height = response.height ?? managed.height;
-      managed.scale = response.scale ?? managed.scale;
-      managed.contentTypes = response.contentTypes ?? managed.contentTypes;
-      managed.busy = busy;
-      managed.status = status;
-      managed.eventSourceAddress = eventSourceAddress;
-    } else {
-      managed = {
-        id: fingerprint,
-        intake: "manual",
-        instanceName: name,
-        host,
-        port,
-        name,
-        protocolVersion: response.protocolVersion ?? 1,
-        width: response.width ?? 0,
-        height: response.height ?? 0,
-        scale: response.scale ?? 1,
-        contentTypes: response.contentTypes ?? 0,
-        busy,
-        fingerprint,
-        status,
-        sessionToken: null,
-        sourceRef: null,
-        watchEnabled: false,
-        lastSnapshot: null,
-        lastEvent: null,
-        consecutiveFailures: 0,
-        unreachable: false,
-        eventSourceAddress,
-        watcherSessionKey: null,
-      };
-      this.screensById.set(fingerprint, managed);
-    }
-    await this.persistScreenState();
-    return {
-      ok: true,
-      screen: this.toPublicScreen(managed),
+    const managed: ManagedScreen = existing ?? {
+      id: fingerprint,
+      intake: "manual",
+      instanceName: name,
+      host,
+      port,
+      name,
+      protocolVersion: identity?.protocolVersion ?? 1,
+      width: identity?.width ?? 0,
+      height: identity?.height ?? 0,
+      scale: identity?.scale ?? 1,
+      contentTypes: identity?.contentTypes ?? 0,
+      busy,
+      fingerprint,
+      status,
+      sessionToken: null,
+      sourceRef: null,
+      watchEnabled: false,
+      lastSnapshot: null,
+      lastEvent: null,
+      wsPath,
+      wsSecure: false,
+      maxMessageBytes: DEFAULT_WS_MAX_MESSAGE_BYTES,
+      currentRevision: 0,
+      currentFrameId: null,
+      consecutiveFailures: 0,
+      unreachable: false,
+      watcherSessionKey: null,
     };
+
+    managed.intake = "manual";
+    managed.instanceName = name;
+    managed.host = host;
+    managed.port = port;
+    managed.name = name;
+    managed.protocolVersion = identity?.protocolVersion ?? managed.protocolVersion;
+    managed.width = identity?.width ?? managed.width;
+    managed.height = identity?.height ?? managed.height;
+    managed.scale = identity?.scale ?? managed.scale;
+    managed.contentTypes = identity?.contentTypes ?? managed.contentTypes;
+    managed.busy = busy;
+    managed.status = status;
+    managed.wsPath = wsPath;
+    managed.wsSecure = false;
+    managed.maxMessageBytes = managed.maxMessageBytes || DEFAULT_WS_MAX_MESSAGE_BYTES;
+    this.screensById.set(fingerprint, managed);
+
+    await this.persistScreenState();
+    return { ok: true, screen: this.toPublicScreen(managed) };
   }
 
   async pair(params: { userId: string | null; screen: string }): Promise<SurfAcePairResult> {
     const screen = this.resolveUniqueScreen(params.screen);
-    const body: Record<string, unknown> = { mode: "auto" };
-
     screen.status = "pairing";
     try {
-      const response = await this.requestScreen({
-        screen,
-        pathName: "/pair",
-        method: "POST",
-        body,
+      await this.ensureScreenSocketPaired(screen, {
+        forcePairRequest: true,
+        isReconnect: false,
       });
-
-      const payload = response.json;
-      const sessionToken =
-        payload && typeof payload.token === "string"
-          ? payload.token.trim()
-          : payload && typeof payload.sessionToken === "string"
-            ? payload.sessionToken.trim()
-            : "";
-      if (!sessionToken) {
-        throw new Error(`Screen "${screen.name}" did not return a session token.`);
-      }
-
-      screen.sessionToken = sessionToken;
-      screen.status = "paired";
-      screen.busy = true;
-      screen.unreachable = false;
-      screen.consecutiveFailures = 0;
-
       this.trustByFingerprint.set(screen.fingerprint, {
         fingerprint: screen.fingerprint,
         displayName: screen.name,
@@ -641,15 +820,11 @@ class SurfAceManager implements SurfAceRuntime {
       });
       await this.persistTrustStore();
       await this.persistScreenState();
-
-      return {
-        ok: true,
-        status: "paired",
-        screen: this.toPublicScreen(screen),
-      };
+      return { ok: true, status: "paired", screen: this.toPublicScreen(screen) };
     } catch (err) {
       if (screen.status === "pairing") {
-        screen.status = screen.busy ? "busy" : "discovered";
+        const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+        screen.status = code === "busy" ? "busy" : "discovered";
       }
       throw err;
     }
@@ -665,69 +840,48 @@ class SurfAceManager implements SurfAceRuntime {
     frameId?: string;
   }): Promise<SurfAcePushResult> {
     const screen = this.resolveUniqueScreen(params.screen);
-    const token = this.requireSessionToken(screen);
+    this.requireSessionToken(screen);
+    await this.ensureScreenSocketPaired(screen, { forcePairRequest: false, isReconnect: false });
 
     const frameId = params.frameId?.trim() || buildFrameId();
-    const body: Record<string, unknown> = {
+    const nextRevision = screen.currentRevision + 1;
+    const payload: Record<string, unknown> = {
       frameId,
+      revision: nextRevision,
       contentType: params.contentType,
       content: params.content,
     };
     if (typeof params.title === "string" && params.title.trim().length > 0) {
-      body.title = params.title.trim();
+      payload.display = { title: params.title.trim() };
     }
-
-    const response = await this.requestScreen({
-      screen,
-      pathName: "/frame",
-      method: "POST",
-      body,
-      authToken: token,
-    });
-
-    if (response.status === 422) {
-      const errorMessage =
-        response.json && typeof response.json.error === "object"
-          ? (response.json.error as { message?: unknown }).message
-          : undefined;
-      const message =
-        typeof errorMessage === "string" && errorMessage.trim().length > 0
-          ? errorMessage
-          : "render_failed";
-      throw new Error(`Surf Ace push failed: ${message}`);
-    }
-
+    const response = await this.sendScreenRequest(screen, "frame.set", payload);
+    const responsePayload = clampSnapshotToRecord(response.payload);
+    const currentRevision = parseOptionalNumber(responsePayload.currentRevision);
+    screen.currentRevision = currentRevision ?? nextRevision;
+    screen.currentFrameId = frameId;
     screen.sourceRef = params.sourceRef ?? null;
     screen.lastSnapshot = null;
-
-    return {
-      ok: true,
-      screen: this.toPublicScreen(screen),
-      frameId,
-    };
+    await this.persistScreenState();
+    return { ok: true, screen: this.toPublicScreen(screen), frameId };
   }
 
   async clear(params: { userId: string | null; screen: string }): Promise<SurfAceClearResult> {
     const screen = this.resolveUniqueScreen(params.screen);
-    const token = this.requireSessionToken(screen);
+    this.requireSessionToken(screen);
+    await this.ensureScreenSocketPaired(screen, { forcePairRequest: false, isReconnect: false });
 
-    await this.requestScreen({
-      screen,
-      pathName: "/frame",
-      method: "DELETE",
-      authToken: token,
-      allowNoJson: true,
+    const nextRevision = screen.currentRevision + 1;
+    const response = await this.sendScreenRequest(screen, "frame.clear", {
+      revision: nextRevision,
     });
-
-    screen.status = screen.busy ? "busy" : "paired";
+    const payload = clampSnapshotToRecord(response.payload);
+    const currentRevision = parseOptionalNumber(payload.currentRevision);
+    screen.currentRevision = currentRevision ?? nextRevision;
+    screen.currentFrameId = null;
     screen.sourceRef = null;
     screen.lastSnapshot = null;
     await this.persistScreenState();
-
-    return {
-      ok: true,
-      screen: this.toPublicScreen(screen),
-    };
+    return { ok: true, screen: this.toPublicScreen(screen) };
   }
 
   async snapshot(params: {
@@ -738,13 +892,11 @@ class SurfAceManager implements SurfAceRuntime {
       const screen = this.resolveUniqueScreen(params.screen);
       return await this.snapshotForScreen(screen);
     }
-
-    const eligible = Array.from(this.screensById.values()).filter((screen) => {
-      return Boolean(screen.sessionToken);
-    });
-
+    const paired = Array.from(this.screensById.values()).filter((screen) =>
+      Boolean(screen.sessionToken),
+    );
     const results: SurfAceSnapshotResult[] = [];
-    for (const screen of eligible) {
+    for (const screen of paired) {
       results.push(await this.snapshotForScreen(screen));
     }
     return results;
@@ -758,74 +910,11 @@ class SurfAceManager implements SurfAceRuntime {
     watcherSessionKey?: string;
   }): Promise<SurfAceWatchResult> {
     const screen = this.resolveUniqueScreen(params.screen);
-    const token = this.requireSessionToken(screen);
-
-    if (params.enabled) {
-      if (!this.callbackBaseUrl) {
-        throw new Error("Surf Ace callback URL is not configured.");
-      }
-      const callbackUrl = `${this.callbackBaseUrl}/surf-ace/events/${encodeURIComponent(screen.id)}`;
-      const body: Record<string, unknown> = { callbackUrl };
-      if (params.debounce && Object.keys(params.debounce).length > 0) {
-        body.debounce = params.debounce;
-      }
-      await this.requestScreen({
-        screen,
-        pathName: "/watch",
-        method: "POST",
-        authToken: token,
-        body,
-      });
-      screen.watchEnabled = true;
-      const watcherSessionKey = params.watcherSessionKey?.trim();
-      screen.watcherSessionKey = watcherSessionKey ? watcherSessionKey : null;
-    } else {
-      await this.requestScreen({
-        screen,
-        pathName: "/unwatch",
-        method: "POST",
-        authToken: token,
-        allowNoJson: true,
-      });
-      screen.watchEnabled = false;
-      screen.watcherSessionKey = null;
-    }
+    screen.watchEnabled = params.enabled;
+    const watcherSessionKey = params.watcherSessionKey?.trim();
+    screen.watcherSessionKey = params.enabled && watcherSessionKey ? watcherSessionKey : null;
     await this.persistScreenState();
-
-    return {
-      ok: true,
-      screen: this.toPublicScreen(screen),
-      enabled: screen.watchEnabled,
-    };
-  }
-
-  handleInboundEvent(params: {
-    screenId: string;
-    payload: unknown;
-    remoteAddress?: string;
-  }): SurfAceInboundEventResult {
-    const screenId = decodeURIComponent(params.screenId.trim());
-    const screen = this.screensById.get(screenId);
-    if (!screen) {
-      return { statusCode: 404, body: { ok: false, error: "unknown_screen" } };
-    }
-    if (!screen.watchEnabled) {
-      return { statusCode: 409, body: { ok: false, error: "watch_not_enabled" } };
-    }
-
-    const expectedSource = screen.eventSourceAddress;
-    const actualSource = params.remoteAddress ? normalizeAddressHost(params.remoteAddress) : null;
-    if (!expectedSource || !actualSource || expectedSource !== actualSource) {
-      return { statusCode: 403, body: { ok: false, error: "source_mismatch" } };
-    }
-
-    if (!params.payload || typeof params.payload !== "object" || Array.isArray(params.payload)) {
-      return { statusCode: 400, body: { ok: false, error: "invalid_event" } };
-    }
-
-    screen.lastEvent = params.payload as Record<string, unknown>;
-    void this.postWatcherAlert(screen, screen.lastEvent);
-    return { statusCode: 200, body: { ok: true } };
+    return { ok: true, screen: this.toPublicScreen(screen), enabled: screen.watchEnabled };
   }
 
   async buildContextInjection(_params: { userId: string }): Promise<string | null> {
@@ -835,9 +924,7 @@ class SurfAceManager implements SurfAceRuntime {
     if (screens.length === 0) {
       return null;
     }
-
     const lines: string[] = ["## Surf Ace Screens"];
-
     for (const screen of screens) {
       const viewport = `${screen.width}x${screen.height}`;
       if (!screen.sessionToken) {
@@ -856,7 +943,6 @@ class SurfAceManager implements SurfAceRuntime {
         lines.push(`- "${screen.name}" (${viewport}, paired): connected, no frame`);
         continue;
       }
-
       const snapshot = snap.snapshot;
       const contentType =
         typeof snapshot.contentType === "string" && snapshot.contentType.trim()
@@ -867,12 +953,10 @@ class SurfAceManager implements SurfAceRuntime {
           ? snapshot.title.trim()
           : "Untitled";
       lines.push(`- "${screen.name}" (${viewport}, paired): showing ${contentType} "${title}"`);
-
       const visibleTextRaw = typeof snapshot.visibleText === "string" ? snapshot.visibleText : "";
       lines.push(
         `  visible: ${visibleTextRaw ? truncatePromptText(visibleTextRaw, MAX_PROMPT_VISIBLE_TEXT_CHARS) : "none"}`,
       );
-
       const selectionRaw = snapshot.selection;
       if (selectionRaw && typeof selectionRaw === "object") {
         const text =
@@ -883,43 +967,620 @@ class SurfAceManager implements SurfAceRuntime {
       } else {
         lines.push("  selection: none");
       }
-
       if (screen.sourceRef) {
         lines.push(`  sourceRef: ${screen.sourceRef.sessionKey}#${screen.sourceRef.messageId}`);
       }
     }
-
     if (lines.length <= 1) {
       return null;
     }
-
     return `${lines.join("\n")}\n`;
   }
 
-  private async snapshotForScreen(screen: ManagedScreen): Promise<SurfAceSnapshotResult> {
-    const token = this.requireSessionToken(screen);
-    const response = await this.requestScreen({
-      screen,
-      pathName: "/snapshot",
-      method: "GET",
-      authToken: token,
-    });
+  private socketStateFor(screenId: string): ScreenSocketState {
+    const existing = this.socketsByScreenId.get(screenId);
+    if (existing) {
+      return existing;
+    }
+    const created: ScreenSocketState = {
+      ws: null,
+      pendingRequests: new Map(),
+      connectPromise: null,
+      reconnectTimer: null,
+      reconnectAttempt: 0,
+      requestSequence: 0,
+      paired: false,
+      shouldReconnect: false,
+      forceTakeoverOnNextPair: false,
+      awaitingSnapshotAfterReconnect: false,
+      bufferedEvents: [],
+      seenEventIds: new Set<string>(),
+      seenEventOrder: [],
+      heartbeatInterval: null,
+      consecutiveMissedPongs: 0,
+    };
+    this.socketsByScreenId.set(screenId, created);
+    return created;
+  }
 
-    if (response.status === 204 || !response.json) {
-      screen.lastSnapshot = null;
-      return {
-        ok: true,
-        status: "no_content",
-        screen: this.toPublicScreen(screen),
-      };
+  private buildScreenWsUrl(screen: ManagedScreen): string {
+    const pathName = normalizeWsPath(screen.wsPath);
+    return `ws://${screen.host}:${screen.port}${pathName}`;
+  }
+
+  private async ensureScreenSocketPaired(
+    screen: ManagedScreen,
+    options: { forcePairRequest: boolean; isReconnect: boolean },
+  ): Promise<void> {
+    const state = this.socketStateFor(screen.id);
+    if (state.connectPromise) {
+      await state.connectPromise;
+      if (!options.forcePairRequest) {
+        return;
+      }
     }
 
-    screen.lastSnapshot = response.json;
+    const run = async () => {
+      state.shouldReconnect = true;
+      if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
+        state.ws = await this.openScreenSocket(screen);
+        this.bindScreenSocketHandlers(screen, state, state.ws);
+        state.paired = false;
+      }
+      if (state.paired && !options.forcePairRequest) {
+        return;
+      }
+      await this.sendPairRequest(screen, state, options.isReconnect);
+    };
+
+    state.connectPromise = run()
+      .catch((err) => {
+        screen.consecutiveFailures += 1;
+        if (screen.consecutiveFailures >= 3) {
+          screen.unreachable = true;
+        }
+        throw err;
+      })
+      .finally(() => {
+        state.connectPromise = null;
+      });
+    await state.connectPromise;
+  }
+
+  private async openScreenSocket(screen: ManagedScreen): Promise<WebSocket> {
+    const wsUrl = this.buildScreenWsUrl(screen);
+    const ws = new WebSocket(wsUrl, {
+      handshakeTimeout: this.wsConnectTimeoutMs,
+    });
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const timeout = setTimeout(() => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        try {
+          ws.terminate();
+        } catch {
+          // ignore
+        }
+        reject(new Error(`Surf Ace connect timeout (${wsUrl})`));
+      }, this.wsConnectTimeoutMs);
+
+      const cleanup = () => {
+        clearTimeout(timeout);
+        ws.off("open", onOpen);
+        ws.off("error", onError);
+        ws.off("close", onClose);
+      };
+
+      const onOpen = () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        cleanup();
+        resolve();
+      };
+
+      const onError = (err: Error) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        cleanup();
+        reject(err);
+      };
+
+      const onClose = () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        cleanup();
+        reject(new Error(`Surf Ace socket closed during connect (${wsUrl})`));
+      };
+
+      ws.once("open", onOpen);
+      ws.once("error", onError);
+      ws.once("close", onClose);
+    });
+    return ws;
+  }
+
+  private bindScreenSocketHandlers(
+    screen: ManagedScreen,
+    state: ScreenSocketState,
+    ws: WebSocket,
+  ): void {
+    ws.on("message", (data) => {
+      this.handleScreenSocketMessage(screen, state, data);
+    });
+    ws.on("error", (err) => {
+      this.logger.warn?.(`[clawline:surf-ace] socket_error(${screen.name}): ${String(err)}`);
+    });
+    ws.on("close", (code) => {
+      this.handleScreenSocketClose(screen, state, ws, code);
+    });
+  }
+
+  private handleScreenSocketMessage(
+    screen: ManagedScreen,
+    state: ScreenSocketState,
+    rawData: WebSocket.RawData,
+  ): void {
+    if (rawDataByteLength(rawData) > screen.maxMessageBytes) {
+      try {
+        state.ws?.close(4413, "payload_too_large");
+      } catch {
+        // ignore
+      }
+      return;
+    }
+    const text =
+      typeof rawData === "string"
+        ? rawData
+        : Buffer.isBuffer(rawData)
+          ? rawData.toString("utf8")
+          : Array.isArray(rawData)
+            ? Buffer.concat(rawData).toString("utf8")
+            : Buffer.from(rawData).toString("utf8");
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      return;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return;
+    }
+    const envelope = parsed as Record<string, unknown>;
+    const type = typeof envelope.type === "string" ? envelope.type : "";
+    if (type === "response") {
+      const response = envelope as unknown as SurfAceResponseEnvelope;
+      const requestId = typeof response.id === "string" ? response.id : "";
+      if (!requestId) {
+        return;
+      }
+      const pending = state.pendingRequests.get(requestId);
+      if (!pending) {
+        return;
+      }
+      state.pendingRequests.delete(requestId);
+      clearTimeout(pending.timeout);
+      pending.resolve(response);
+      return;
+    }
+    if (type !== "event") {
+      return;
+    }
+    const eventEnvelope = envelope as unknown as SurfAceEventEnvelope;
+    const op = typeof eventEnvelope.op === "string" ? eventEnvelope.op : "";
+    if (
+      op !== "event.drawing_flush" &&
+      op !== "event.tap" &&
+      op !== "event.selection" &&
+      op !== "event.page" &&
+      op !== "event.snapshot_hint"
+    ) {
+      return;
+    }
+    const normalizedEvent: SurfAceEventEnvelope = {
+      v: 1,
+      type: "event",
+      op,
+      eventId: typeof eventEnvelope.eventId === "string" ? eventEnvelope.eventId : undefined,
+      sentAt: typeof eventEnvelope.sentAt === "number" ? eventEnvelope.sentAt : undefined,
+      payload: clampSnapshotToRecord(eventEnvelope.payload),
+    };
+    if (state.awaitingSnapshotAfterReconnect) {
+      if (state.bufferedEvents.length >= 128) {
+        state.bufferedEvents.shift();
+        this.logger.warn?.(
+          `[clawline:surf-ace] reconnect_event_buffer_overflow(${screen.name}); dropping oldest event`,
+        );
+      }
+      state.bufferedEvents.push(normalizedEvent);
+      return;
+    }
+    this.applyEventEnvelope(screen, state, normalizedEvent);
+  }
+
+  private applyEventEnvelope(
+    screen: ManagedScreen,
+    state: ScreenSocketState,
+    eventEnvelope: SurfAceEventEnvelope,
+  ): void {
+    const eventId = typeof eventEnvelope.eventId === "string" ? eventEnvelope.eventId : "";
+    if (eventId) {
+      if (state.seenEventIds.has(eventId)) {
+        return;
+      }
+      state.seenEventIds.add(eventId);
+      state.seenEventOrder.push(eventId);
+      while (state.seenEventOrder.length > 1_024) {
+        const oldest = state.seenEventOrder.shift();
+        if (oldest) {
+          state.seenEventIds.delete(oldest);
+        }
+      }
+    }
+    const eventPayload = {
+      op: eventEnvelope.op,
+      eventId: eventEnvelope.eventId,
+      sentAt: eventEnvelope.sentAt,
+      payload: eventEnvelope.payload ?? {},
+    };
+    screen.lastEvent = clampSnapshotToRecord(eventPayload);
+    if (!screen.watchEnabled) {
+      return;
+    }
+    void this.postWatcherAlert(screen, screen.lastEvent);
+  }
+
+  private handleScreenSocketClose(
+    screen: ManagedScreen,
+    state: ScreenSocketState,
+    ws: WebSocket,
+    code: number,
+  ): void {
+    if (state.ws !== ws) {
+      return;
+    }
+    state.ws = null;
+    state.paired = false;
+    this.stopHeartbeat(state);
+    this.rejectAllPendingRequests(
+      state,
+      new Error(`Surf Ace socket closed (${screen.name}) with code ${String(code)}`),
+    );
+    if (this.stopping || !state.shouldReconnect) {
+      return;
+    }
+    screen.unreachable = true;
+    screen.status = "paired";
+    this.scheduleReconnect(screen, state);
+  }
+
+  private scheduleReconnect(screen: ManagedScreen, state: ScreenSocketState): void {
+    if (state.reconnectTimer || this.stopping) {
+      return;
+    }
+    const backoff =
+      this.wsReconnectBackoffMs.length > 0
+        ? this.wsReconnectBackoffMs
+        : [...WS_RECONNECT_BACKOFF_MS];
+    const index = Math.min(state.reconnectAttempt, backoff.length - 1);
+    const baseDelay = backoff[index] ?? backoff.at(-1) ?? 30_000;
+    const jitter = 0.8 + Math.random() * 0.4;
+    const delayMs = Math.max(250, Math.floor(baseDelay * jitter));
+    state.reconnectAttempt += 1;
+    state.reconnectTimer = setTimeout(() => {
+      state.reconnectTimer = null;
+      void this.reconnectScreen(screen, state);
+    }, delayMs);
+  }
+
+  private async reconnectScreen(screen: ManagedScreen, state: ScreenSocketState): Promise<void> {
+    if (this.stopping || !state.shouldReconnect) {
+      return;
+    }
+    try {
+      await this.ensureScreenSocketPaired(screen, {
+        forcePairRequest: true,
+        isReconnect: Boolean(screen.sessionToken),
+      });
+      await this.persistScreenState();
+    } catch (err) {
+      this.logger.warn?.(`[clawline:surf-ace] reconnect_failed(${screen.name}): ${String(err)}`);
+      this.scheduleReconnect(screen, state);
+    }
+  }
+
+  private async sendPairRequest(
+    screen: ManagedScreen,
+    state: ScreenSocketState,
+    isReconnect: boolean,
+  ): Promise<void> {
+    const payload: Record<string, unknown> = {
+      providerId: this.providerId,
+      connectionId: buildConnectionId(),
+      providerName: "clawline-provider",
+      protocolVersion: 1,
+      eventProfile: "minimum_deep",
+    };
+    if (screen.sessionToken) {
+      payload.resume = { sessionId: screen.sessionToken };
+    }
+    if (state.forceTakeoverOnNextPair) {
+      payload.takeover = true;
+    }
+    let response: SurfAceResponseEnvelope;
+    try {
+      response = await this.sendScreenRequest(
+        screen,
+        "pair.request",
+        payload,
+        PAIR_RESPONSE_TIMEOUT_MS,
+      );
+    } catch (err) {
+      const isTimeout =
+        err instanceof Error &&
+        (err.message.includes("pair.request timed out") ||
+          err.message.includes("Surf Ace pair.request timed out"));
+      if (isTimeout) {
+        try {
+          state.ws?.close(4000, "pair_timeout");
+        } catch {
+          // ignore
+        }
+        this.scheduleReconnect(screen, state);
+      }
+      throw err;
+    }
+    const pairPayload = clampSnapshotToRecord(response.payload);
+    const sessionId =
+      typeof pairPayload.sessionId === "string" && pairPayload.sessionId.trim().length > 0
+        ? pairPayload.sessionId.trim()
+        : "";
+    if (!sessionId) {
+      throw new Error(`Screen "${screen.name}" did not return sessionId.`);
+    }
+    const surfaceName =
+      typeof pairPayload.surfaceName === "string" && pairPayload.surfaceName.trim().length > 0
+        ? pairPayload.surfaceName.trim()
+        : null;
+    if (surfaceName) {
+      screen.name = surfaceName;
+      screen.instanceName = surfaceName;
+    }
+    const viewport =
+      pairPayload.viewport &&
+      typeof pairPayload.viewport === "object" &&
+      !Array.isArray(pairPayload.viewport)
+        ? (pairPayload.viewport as Record<string, unknown>)
+        : null;
+    if (viewport) {
+      screen.width = parseOptionalNumber(viewport.width) ?? screen.width;
+      screen.height = parseOptionalNumber(viewport.height) ?? screen.height;
+      screen.scale = parseOptionalNumber(viewport.scale) ?? screen.scale;
+    }
+    const capabilities =
+      pairPayload.capabilities &&
+      typeof pairPayload.capabilities === "object" &&
+      !Array.isArray(pairPayload.capabilities)
+        ? (pairPayload.capabilities as Record<string, unknown>)
+        : null;
+    if (capabilities) {
+      const mask = contentTypesMaskFromNames(capabilities.contentTypes);
+      if (mask !== null) {
+        screen.contentTypes = mask;
+      }
+    }
+    const limits =
+      pairPayload.limits &&
+      typeof pairPayload.limits === "object" &&
+      !Array.isArray(pairPayload.limits)
+        ? (pairPayload.limits as Record<string, unknown>)
+        : null;
+    if (limits) {
+      const maxMessageBytes = parseOptionalNumber(limits.maxMessageBytes);
+      if (maxMessageBytes && maxMessageBytes > 0) {
+        screen.maxMessageBytes = maxMessageBytes;
+      }
+    }
+    const statePayload =
+      pairPayload.state &&
+      typeof pairPayload.state === "object" &&
+      !Array.isArray(pairPayload.state)
+        ? (pairPayload.state as Record<string, unknown>)
+        : null;
+    if (statePayload) {
+      const currentRevision = parseOptionalNumber(statePayload.currentRevision);
+      const currentFrameId =
+        typeof statePayload.currentFrameId === "string" ? statePayload.currentFrameId : null;
+      screen.currentRevision = currentRevision ?? screen.currentRevision;
+      screen.currentFrameId = currentFrameId;
+    } else {
+      screen.currentRevision = 0;
+      screen.currentFrameId = null;
+    }
+    screen.sessionToken = sessionId;
+    screen.status = "paired";
+    screen.busy = true;
+    screen.unreachable = false;
+    screen.consecutiveFailures = 0;
+    state.paired = true;
+    state.reconnectAttempt = 0;
+    state.forceTakeoverOnNextPair = false;
+    state.awaitingSnapshotAfterReconnect = false;
+    state.bufferedEvents = [];
+    this.startHeartbeat(screen, state);
+    if (isReconnect) {
+      try {
+        state.awaitingSnapshotAfterReconnect = true;
+        await this.snapshotForScreen(screen);
+      } catch (err) {
+        state.awaitingSnapshotAfterReconnect = false;
+        state.bufferedEvents = [];
+        try {
+          state.ws?.close(4000, "snapshot_resync_failed");
+        } catch {
+          // ignore
+        }
+        throw err;
+      } finally {
+        state.awaitingSnapshotAfterReconnect = false;
+      }
+      const bufferedEvents = [...state.bufferedEvents];
+      state.bufferedEvents = [];
+      for (const bufferedEvent of bufferedEvents) {
+        this.applyEventEnvelope(screen, state, bufferedEvent);
+      }
+    }
+  }
+
+  private startHeartbeat(screen: ManagedScreen, state: ScreenSocketState): void {
+    this.stopHeartbeat(state);
+    state.consecutiveMissedPongs = 0;
+    state.heartbeatInterval = setInterval(() => {
+      void this.sendHeartbeatPing(screen, state);
+    }, this.wsHeartbeatIntervalMs);
+  }
+
+  private stopHeartbeat(state: ScreenSocketState): void {
+    if (state.heartbeatInterval) {
+      clearInterval(state.heartbeatInterval);
+      state.heartbeatInterval = null;
+    }
+  }
+
+  private async sendHeartbeatPing(screen: ManagedScreen, state: ScreenSocketState): Promise<void> {
+    if (!state.ws || state.ws.readyState !== WebSocket.OPEN || !state.paired) {
+      return;
+    }
+    const nonce = randomUUID();
+    try {
+      const response = await this.sendScreenRequest(
+        screen,
+        "heartbeat.ping",
+        { nonce },
+        this.wsHeartbeatTimeoutMs,
+      );
+      const payload = clampSnapshotToRecord(response.payload);
+      if (typeof payload.nonce !== "string" || payload.nonce !== nonce) {
+        throw new Error("invalid heartbeat response nonce");
+      }
+      state.consecutiveMissedPongs = 0;
+    } catch {
+      state.consecutiveMissedPongs += 1;
+      if (state.consecutiveMissedPongs >= WS_MAX_CONSECUTIVE_MISSED_PONGS) {
+        state.forceTakeoverOnNextPair = true;
+        try {
+          state.ws?.close(4000, "heartbeat_timeout");
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }
+
+  private async sendScreenRequest(
+    screen: ManagedScreen,
+    op: string,
+    payload: Record<string, unknown>,
+    timeoutMs = this.wsRequestTimeoutMs,
+  ): Promise<SurfAceResponseEnvelope> {
+    const state = this.socketStateFor(screen.id);
+    const ws = state.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      throw new Error(`Surf Ace screen "${screen.name}" is disconnected.`);
+    }
+    const requestId = buildRequestId(++state.requestSequence);
+    const request: SurfAceRequestEnvelope = {
+      v: 1,
+      type: "request",
+      op,
+      id: requestId,
+      sentAt: this.now(),
+      payload,
+    };
+
+    const response = await new Promise<SurfAceResponseEnvelope>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        state.pendingRequests.delete(requestId);
+        const err = new Error(`Surf Ace ${op} timed out.`);
+        reject(err);
+      }, timeoutMs);
+      state.pendingRequests.set(requestId, {
+        op,
+        resolve,
+        reject,
+        timeout,
+      });
+      ws.send(JSON.stringify(request), (err) => {
+        if (!err) {
+          return;
+        }
+        const pending = state.pendingRequests.get(requestId);
+        if (!pending) {
+          return;
+        }
+        state.pendingRequests.delete(requestId);
+        clearTimeout(pending.timeout);
+        reject(err);
+      });
+    });
+
+    if (response.op !== op) {
+      throw new Error(`Surf Ace response op mismatch: expected ${op}, got ${response.op}`);
+    }
+    if (!response.ok) {
+      const code =
+        response.error && typeof response.error.code === "string" ? response.error.code : "unknown";
+      const message =
+        response.error && typeof response.error.message === "string"
+          ? response.error.message
+          : `Surf Ace ${op} failed`;
+      const err = new Error(`${message} (${code})`) as Error & { code?: string };
+      err.code = code;
+      throw err;
+    }
+    return response;
+  }
+
+  private rejectAllPendingRequests(state: ScreenSocketState, error: Error): void {
+    for (const [id, pending] of state.pendingRequests.entries()) {
+      state.pendingRequests.delete(id);
+      clearTimeout(pending.timeout);
+      pending.reject(error);
+    }
+  }
+
+  private async snapshotForScreen(screen: ManagedScreen): Promise<SurfAceSnapshotResult> {
+    this.requireSessionToken(screen);
+    await this.ensureScreenSocketPaired(screen, { forcePairRequest: false, isReconnect: false });
+    const response = await this.sendScreenRequest(screen, "snapshot.get", {
+      includeVisibleText: true,
+      includeDrawings: false,
+    });
+    const payload = clampSnapshotToRecord(response.payload);
+    const frameId = typeof payload.frameId === "string" ? payload.frameId : null;
+    const revision = parseOptionalNumber(payload.revision);
+    if (revision !== undefined) {
+      screen.currentRevision = revision;
+    }
+    screen.currentFrameId = frameId;
+    if (!frameId) {
+      screen.lastSnapshot = null;
+      return { ok: true, status: "no_content", screen: this.toPublicScreen(screen) };
+    }
+    screen.lastSnapshot = payload;
     return {
       ok: true,
       status: "snapshot",
       screen: this.toPublicScreen(screen),
-      snapshot: response.json,
+      snapshot: payload,
     };
   }
 
@@ -930,7 +1591,6 @@ class SurfAceManager implements SurfAceRuntime {
     this.discoveryInFlight = true;
     try {
       const discovered = await this.discoverImpl(this.discoveryTimeoutMs);
-
       for (const record of discovered) {
         const fingerprint = normalizeFingerprint(record.txt.pk);
         if (!fingerprint) {
@@ -938,10 +1598,8 @@ class SurfAceManager implements SurfAceRuntime {
         }
         const existing = this.screensById.get(fingerprint);
         const name = normalizeScreenName(record);
-        const resolvedSourceAddress =
-          (await resolveExpectedSourceAddress(record.host)) ?? existing?.eventSourceAddress ?? null;
         const busy = record.txt.busy === "1";
-
+        const wsPath = normalizeWsPath(record.txt.ws);
         if (existing) {
           existing.intake = "bonjour";
           existing.instanceName = record.instanceName;
@@ -953,13 +1611,14 @@ class SurfAceManager implements SurfAceRuntime {
           existing.height = parseIntSafe(record.txt.h, 0);
           existing.scale = parseIntSafe(record.txt.s, 1);
           existing.contentTypes = parseIntSafe(record.txt.cap, 0);
-          existing.busy = busy;
-          existing.status = busy ? "busy" : existing.sessionToken ? "paired" : "discovered";
+          existing.wsPath = wsPath;
+          existing.wsSecure = false;
+          existing.maxMessageBytes = existing.maxMessageBytes || DEFAULT_WS_MAX_MESSAGE_BYTES;
+          existing.busy = busy || Boolean(existing.sessionToken);
+          existing.status = existing.sessionToken ? "paired" : busy ? "busy" : "discovered";
           existing.unreachable = false;
-          existing.eventSourceAddress = resolvedSourceAddress;
           continue;
         }
-
         const managed: ManagedScreen = {
           id: fingerprint,
           intake: "bonjour",
@@ -980,15 +1639,17 @@ class SurfAceManager implements SurfAceRuntime {
           watchEnabled: false,
           lastSnapshot: null,
           lastEvent: null,
+          wsPath,
+          wsSecure: false,
+          maxMessageBytes: DEFAULT_WS_MAX_MESSAGE_BYTES,
+          currentRevision: 0,
+          currentFrameId: null,
           consecutiveFailures: 0,
           unreachable: false,
-          eventSourceAddress: resolvedSourceAddress,
           watcherSessionKey: null,
         };
-
         this.screensById.set(fingerprint, managed);
       }
-
       await this.tryAutoPairTrustedScreens();
       await this.persistScreenState();
     } catch (err) {
@@ -1009,7 +1670,7 @@ class SurfAceManager implements SurfAceRuntime {
       try {
         await this.pair({ userId: null, screen: screen.id });
       } catch {
-        // Best effort: stay in discovered state.
+        // Best effort.
       }
     }
   }
@@ -1019,7 +1680,6 @@ class SurfAceManager implements SurfAceRuntime {
     if (!target) {
       throw new Error("screen is required");
     }
-
     const lower = target.toLowerCase();
     const matches = Array.from(this.screensById.values()).filter((screen) => {
       return (
@@ -1029,7 +1689,6 @@ class SurfAceManager implements SurfAceRuntime {
         screen.instanceName.toLowerCase() === lower
       );
     });
-
     if (matches.length === 0) {
       throw new Error(`Surf Ace screen not found: ${target}`);
     }
@@ -1048,65 +1707,6 @@ class SurfAceManager implements SurfAceRuntime {
       throw new Error(`Surf Ace screen "${screen.name}" is not paired. Call surf_ace_pair first.`);
     }
     return token;
-  }
-
-  private async requestScreen(params: {
-    screen: ManagedScreen;
-    pathName: string;
-    method: "GET" | "POST" | "DELETE";
-    body?: Record<string, unknown>;
-    authToken?: string;
-    allowNoJson?: boolean;
-    allowedStatuses?: number[];
-  }): Promise<{ status: number; json: Record<string, unknown> | null }> {
-    const url = `http://${params.screen.host}:${params.screen.port}${params.pathName}`;
-    const headers: Record<string, string> = {};
-    if (params.authToken) {
-      headers.Authorization = `Bearer ${params.authToken}`;
-    }
-    if (params.body) {
-      headers["content-type"] = "application/json";
-    }
-
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), DEFAULT_HTTP_TIMEOUT_MS);
-    try {
-      const response = await this.fetchImpl(url, {
-        method: params.method,
-        headers,
-        body: params.body ? JSON.stringify(params.body) : undefined,
-        signal: controller.signal,
-      });
-
-      const allowedStatuses = new Set([204, 409, 422, ...(params.allowedStatuses ?? [])]);
-      if (!response.ok && !allowedStatuses.has(response.status)) {
-        const bodyText = await response.text().catch(() => "");
-        throw new Error(`Surf Ace HTTP ${response.status} at ${params.pathName}: ${bodyText}`);
-      }
-
-      let json: Record<string, unknown> | null = null;
-      if (response.status !== 204 && !params.allowNoJson) {
-        const text = await response.text();
-        if (text.trim().length > 0) {
-          json = JSON.parse(text) as Record<string, unknown>;
-        }
-      }
-
-      params.screen.consecutiveFailures = 0;
-      params.screen.unreachable = false;
-      return {
-        status: response.status,
-        json,
-      };
-    } catch (err) {
-      params.screen.consecutiveFailures += 1;
-      if (params.screen.consecutiveFailures >= 3) {
-        params.screen.unreachable = true;
-      }
-      throw err;
-    } finally {
-      clearTimeout(timeout);
-    }
   }
 
   private async fetchIdentity(baseUrl: URL): Promise<{
@@ -1130,12 +1730,10 @@ class SurfAceManager implements SurfAceRuntime {
       if (!response.ok) {
         throw new Error(`Surf Ace HTTP ${response.status} at /identity`);
       }
-
       const text = await response.text();
       if (!text.trim()) {
         throw new Error("Surf Ace identity response was empty.");
       }
-
       const parsed = JSON.parse(text) as unknown;
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
         throw new Error("Surf Ace identity response must be an object.");
@@ -1156,7 +1754,6 @@ class SurfAceManager implements SurfAceRuntime {
         }
         return undefined;
       };
-
       const fingerprintRaw = readField("fingerprint", "pk");
       const fingerprint = typeof fingerprintRaw === "string" ? fingerprintRaw.trim() : "";
       const nameRaw = readField("name", "displayName", "screenName", "instanceName");
@@ -1164,7 +1761,6 @@ class SurfAceManager implements SurfAceRuntime {
         typeof nameRaw === "string" && nameRaw.trim().length > 0
           ? nameRaw.trim()
           : fingerprint || "Surf Ace";
-
       return {
         fingerprint,
         name,
@@ -1175,11 +1771,6 @@ class SurfAceManager implements SurfAceRuntime {
         contentTypes: parseOptionalNumber(readField("contentTypes", "cap")),
         busy: parseOptionalBusy(readField("busy")),
       };
-    } catch (err) {
-      throw new Error(
-        `Failed to fetch Surf Ace identity from ${baseUrl.toString()}: ${String(err)}`,
-        { cause: err },
-      );
     } finally {
       clearTimeout(timeout);
     }
@@ -1210,38 +1801,36 @@ class SurfAceManager implements SurfAceRuntime {
         body,
       });
     } catch {
-      // Silently fall back when alert forwarding is unavailable.
+      // best effort
     }
   }
 
   private invalidateScreenSession(screen: ManagedScreen): void {
+    const state = this.socketStateFor(screen.id);
+    state.shouldReconnect = false;
+    this.stopHeartbeat(state);
+    if (state.reconnectTimer) {
+      clearTimeout(state.reconnectTimer);
+      state.reconnectTimer = null;
+    }
+    this.rejectAllPendingRequests(state, new Error("Surf Ace session invalidated"));
+    try {
+      state.ws?.close(1000, "provider_shutdown");
+    } catch {
+      // ignore
+    }
+    state.ws = null;
+    state.paired = false;
     screen.sessionToken = null;
     screen.watchEnabled = false;
     screen.status = "discovered";
     screen.busy = false;
     screen.sourceRef = null;
     screen.lastSnapshot = null;
+    screen.lastEvent = null;
+    screen.currentRevision = 0;
+    screen.currentFrameId = null;
     screen.watcherSessionKey = null;
-  }
-
-  private async rearmWatch(screen: ManagedScreen, authToken: string): Promise<boolean> {
-    if (!this.callbackBaseUrl) {
-      return false;
-    }
-    const callbackUrl = `${this.callbackBaseUrl}/surf-ace/events/${encodeURIComponent(screen.id)}`;
-    const response = await this.requestScreen({
-      screen,
-      pathName: "/watch",
-      method: "POST",
-      authToken,
-      body: { callbackUrl },
-      allowedStatuses: [401, 403],
-    });
-    if (response.status === 401 || response.status === 403) {
-      this.invalidateScreenSession(screen);
-      return false;
-    }
-    return true;
   }
 
   private async reconnectPersistedScreens(): Promise<void> {
@@ -1253,34 +1842,18 @@ class SurfAceManager implements SurfAceRuntime {
     }
     await Promise.all(
       pairedScreens.map(async (screen) => {
-        const token = screen.sessionToken?.trim();
-        if (!token) {
-          this.invalidateScreenSession(screen);
-          return;
-        }
         try {
-          const response = await this.requestScreen({
-            screen,
-            pathName: "/snapshot",
-            method: "GET",
-            authToken: token,
-            allowNoJson: true,
-            allowedStatuses: [401, 403],
+          await this.ensureScreenSocketPaired(screen, {
+            forcePairRequest: true,
+            isReconnect: true,
           });
-          if (response.status === 401 || response.status === 403) {
-            this.invalidateScreenSession(screen);
-            return;
-          }
-          screen.status = "paired";
-          screen.busy = true;
-          if (screen.watchEnabled) {
-            const rearmed = await this.rearmWatch(screen, token);
-            screen.watchEnabled = rearmed;
-          }
         } catch (err) {
           this.logger.warn?.(
             `[clawline:surf-ace] reconnect_failed(${screen.name}): ${String(err)}`,
           );
+          const state = this.socketStateFor(screen.id);
+          state.shouldReconnect = true;
+          this.scheduleReconnect(screen, state);
         }
       }),
     );
@@ -1295,45 +1868,55 @@ class SurfAceManager implements SurfAceRuntime {
     } catch {
       return;
     }
-
-    let parsed: ScreenStateFile;
+    let parsed: unknown;
     try {
-      parsed = JSON.parse(raw) as ScreenStateFile;
+      parsed = JSON.parse(raw);
     } catch (err) {
       this.logger.warn?.(`[clawline:surf-ace] screen_state_parse_failed: ${String(err)}`);
       return;
     }
-
-    if (parsed.version !== 1 || !Array.isArray(parsed.screens)) {
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       return;
     }
-
-    for (const entry of parsed.screens) {
-      const fingerprint = normalizeFingerprint(entry?.fingerprint);
-      const host = typeof entry?.host === "string" ? entry.host.trim() : "";
-      const rawPort = Number(entry?.port);
+    const file = parsed as { version?: unknown; providerId?: unknown; screens?: unknown };
+    const screensRaw = Array.isArray(file.screens) ? file.screens : [];
+    if (typeof file.providerId === "string" && file.providerId.trim().length > 0) {
+      this.providerId = file.providerId.trim();
+    }
+    for (const entryRaw of screensRaw) {
+      if (!entryRaw || typeof entryRaw !== "object" || Array.isArray(entryRaw)) {
+        continue;
+      }
+      const entry = entryRaw as PersistedScreenStateEntry;
+      const fingerprint = normalizeFingerprint(entry.fingerprint);
+      const host = typeof entry.host === "string" ? normalizeAddressHost(entry.host) : "";
+      const rawPort = Number(entry.port);
       const port = Number.isFinite(rawPort) ? Math.floor(rawPort) : 0;
       if (!fingerprint || !host || port <= 0) {
         continue;
       }
-
       const tokenRaw = typeof entry.sessionToken === "string" ? entry.sessionToken.trim() : "";
       const sessionToken = tokenRaw.length > 0 ? tokenRaw : null;
-      const name = fingerprint;
-      const instanceName = fingerprint;
-      const eventSourceAddress = await resolveExpectedSourceAddress(host);
+      const name =
+        typeof entry.name === "string" && entry.name.trim().length > 0 ? entry.name : fingerprint;
       const managed: ManagedScreen = {
         id: fingerprint,
-        intake: "bonjour",
-        instanceName,
+        intake: entry.intake === "manual" ? "manual" : "bonjour",
+        instanceName: name,
         host,
         port,
         name,
-        protocolVersion: 1,
-        width: 0,
-        height: 0,
-        scale: 1,
-        contentTypes: 0,
+        protocolVersion:
+          entry.protocolVersion && Number.isFinite(entry.protocolVersion)
+            ? Math.floor(entry.protocolVersion)
+            : 1,
+        width: entry.width && Number.isFinite(entry.width) ? Math.floor(entry.width) : 0,
+        height: entry.height && Number.isFinite(entry.height) ? Math.floor(entry.height) : 0,
+        scale: entry.scale && Number.isFinite(entry.scale) ? Math.floor(entry.scale) : 1,
+        contentTypes:
+          entry.contentTypes && Number.isFinite(entry.contentTypes)
+            ? Math.floor(entry.contentTypes)
+            : 0,
         busy: Boolean(sessionToken),
         fingerprint,
         status: sessionToken ? "paired" : "discovered",
@@ -1342,18 +1925,25 @@ class SurfAceManager implements SurfAceRuntime {
         watchEnabled: Boolean(entry.watchEnabled && sessionToken),
         lastSnapshot: null,
         lastEvent: null,
+        wsPath: normalizeWsPath(entry.wsPath),
+        wsSecure: false,
+        maxMessageBytes: DEFAULT_WS_MAX_MESSAGE_BYTES,
+        currentRevision: 0,
+        currentFrameId: null,
         consecutiveFailures: 0,
         unreachable: false,
-        eventSourceAddress,
         watcherSessionKey: null,
       };
       this.screensById.set(fingerprint, managed);
+      const state = this.socketStateFor(fingerprint);
+      state.shouldReconnect = Boolean(sessionToken);
     }
   }
 
   private async persistScreenState(): Promise<void> {
     const payload: ScreenStateFile = {
-      version: 1,
+      version: 2,
+      providerId: this.providerId,
       screens: Array.from(this.screensById.values())
         .toSorted((a, b) =>
           a.fingerprint.localeCompare(b.fingerprint, "en", { sensitivity: "base" }),
@@ -1362,6 +1952,15 @@ class SurfAceManager implements SurfAceRuntime {
           fingerprint: screen.fingerprint,
           host: screen.host,
           port: screen.port,
+          name: screen.name,
+          intake: screen.intake,
+          wsPath: screen.wsPath,
+          wsSecure: screen.wsSecure,
+          protocolVersion: screen.protocolVersion,
+          width: screen.width,
+          height: screen.height,
+          scale: screen.scale,
+          contentTypes: screen.contentTypes,
           sessionToken: screen.sessionToken,
           watchEnabled: screen.watchEnabled,
         })),
