@@ -6,6 +6,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { createSurfAceManager } from "./surf-ace.js";
 
 const TRUST_STORE_FILE = "surf-ace-trust.json";
+const SCREEN_STATE_FILE = "surf-ace-screens.json";
 
 type MockSurfaceHandle = {
   host: string;
@@ -728,6 +729,73 @@ describe("Surf Ace manager (WebSocket transport)", () => {
     ).rejects.toThrow("Surf Ace register URL must use http:// or ws://");
 
     await manager.stop();
+    await fs.rm(statePath, { recursive: true, force: true });
+  });
+
+  it("clears legacy stored session IDs and omits resume on pair", async () => {
+    const statePath = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-test-"));
+    const surface = await createMockSurface({
+      name: "Surf Ace - iPad",
+      surfaceId: "23c71e1c",
+      width: 1194,
+      height: 834,
+      scale: 2,
+    });
+
+    await fs.writeFile(
+      path.join(statePath, SCREEN_STATE_FILE),
+      JSON.stringify(
+        {
+          version: 2,
+          providerId: "pv_testprovider",
+          screens: [
+            {
+              fingerprint: "23c71e1c",
+              host: surface.host,
+              port: surface.port,
+              name: "Surf Ace - iPad",
+              intake: "manual",
+              wsPath: "/ws",
+              wsSecure: false,
+              protocolVersion: 1,
+              width: 1194,
+              height: 834,
+              scale: 2,
+              contentTypes: 31,
+              sessionToken: "legacy_rest_token",
+              watchEnabled: false,
+            },
+          ],
+        },
+        null,
+        2,
+      ),
+    );
+
+    const manager = createSurfAceManager({
+      statePath,
+      discoverImpl: async () => [],
+      discoveryIntervalMs: 60_000,
+      discoveryTimeoutMs: 100,
+    });
+
+    await manager.start();
+
+    const persistedAfterStart = JSON.parse(
+      await fs.readFile(path.join(statePath, SCREEN_STATE_FILE), "utf8"),
+    ) as {
+      screens?: Array<{ fingerprint?: string; sessionToken?: unknown }>;
+    };
+    const persistedScreen = persistedAfterStart.screens?.find(
+      (entry) => entry.fingerprint === "23c71e1c",
+    );
+    expect(persistedScreen?.sessionToken ?? null).toBeNull();
+
+    await manager.pair({ userId: "flynn", screen: "23c71e1c" });
+    expect(surface.pairPayloads[0]).not.toHaveProperty("resume");
+
+    await manager.stop();
+    await surface.close();
     await fs.rm(statePath, { recursive: true, force: true });
   });
 });

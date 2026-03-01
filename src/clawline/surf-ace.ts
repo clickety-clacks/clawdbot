@@ -15,6 +15,7 @@ const DEFAULT_WS_CONNECT_TIMEOUT_MS = 10_000;
 const DEFAULT_WS_REQUEST_TIMEOUT_MS = 10_000;
 const PAIR_RESPONSE_TIMEOUT_MS = 10_000;
 const DEFAULT_WS_MAX_MESSAGE_BYTES = 12 * 1024 * 1024;
+const SURF_ACE_SESSION_ID_PATTERN = /^sa_[A-Za-z0-9._:-]{8,128}$/;
 const WS_HEARTBEAT_INTERVAL_MS = 10_000;
 const WS_HEARTBEAT_TIMEOUT_MS = 3_000;
 const WS_MAX_CONSECUTIVE_MISSED_PONGS = 2;
@@ -607,6 +608,14 @@ function rawDataByteLength(rawData: WebSocket.RawData): number {
 
 function deriveScreenFingerprint(input: string): string {
   return createHash("sha256").update(input).digest("hex").slice(0, 8);
+}
+
+function normalizeValidSessionId(value: string | null | undefined): string | null {
+  const token = value?.trim() ?? "";
+  if (!token) {
+    return null;
+  }
+  return SURF_ACE_SESSION_ID_PATTERN.test(token) ? token : null;
 }
 
 class SurfAceManager implements SurfAceRuntime {
@@ -1310,7 +1319,12 @@ class SurfAceManager implements SurfAceRuntime {
       eventProfile: "minimum_deep",
     };
     if (screen.sessionToken) {
-      payload.resume = { sessionId: screen.sessionToken };
+      const validSessionId = normalizeValidSessionId(screen.sessionToken);
+      if (validSessionId) {
+        payload.resume = { sessionId: validSessionId };
+      } else {
+        screen.sessionToken = null;
+      }
     }
     if (state.forceTakeoverOnNextPair) {
       payload.takeover = true;
@@ -1862,6 +1876,7 @@ class SurfAceManager implements SurfAceRuntime {
 
   private async loadScreenState(): Promise<void> {
     this.screensById.clear();
+    let clearedLegacySessionToken = false;
     let raw: string;
     try {
       raw = await fs.readFile(this.screenStatePath, "utf8");
@@ -1896,7 +1911,10 @@ class SurfAceManager implements SurfAceRuntime {
         continue;
       }
       const tokenRaw = typeof entry.sessionToken === "string" ? entry.sessionToken.trim() : "";
-      const sessionToken = tokenRaw.length > 0 ? tokenRaw : null;
+      const sessionToken = normalizeValidSessionId(tokenRaw);
+      if (tokenRaw && sessionToken === null) {
+        clearedLegacySessionToken = true;
+      }
       const name =
         typeof entry.name === "string" && entry.name.trim().length > 0 ? entry.name : fingerprint;
       const managed: ManagedScreen = {
@@ -1937,6 +1955,9 @@ class SurfAceManager implements SurfAceRuntime {
       this.screensById.set(fingerprint, managed);
       const state = this.socketStateFor(fingerprint);
       state.shouldReconnect = Boolean(sessionToken);
+    }
+    if (clearedLegacySessionToken) {
+      await this.persistScreenState();
     }
   }
 
