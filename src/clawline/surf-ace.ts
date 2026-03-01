@@ -845,7 +845,13 @@ class SurfAceManager implements SurfAceRuntime {
         lines.push(`- "${screen.name}" (${viewport}, ${status})`);
         continue;
       }
-      const snap = await this.snapshotForScreen(screen);
+      let snap: SurfAceSnapshotResult;
+      try {
+        snap = await this.snapshotForScreen(screen);
+      } catch {
+        lines.push(`- "${screen.name}" (${viewport}, paired): unreachable`);
+        continue;
+      }
       if (snap.status === "no_content") {
         lines.push(`- "${screen.name}" (${viewport}, paired): connected, no frame`);
         continue;

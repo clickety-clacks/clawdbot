@@ -149,6 +149,58 @@ describe("Surf Ace manager", () => {
     expect(discoverImpl).toHaveBeenCalled();
   });
 
+  it("does not throw context injection when a paired screen snapshot fails", async () => {
+    const statePath = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-test-"));
+    const manager = createSurfAceManager({
+      statePath,
+      discoverImpl: async () => [
+        {
+          instanceName: "Offline Screen",
+          host: "192.168.50.25",
+          port: 8765,
+          txt: {
+            name: "Offline Screen",
+            v: "1",
+            w: "1194",
+            h: "834",
+            s: "2",
+            cap: "31",
+            busy: "0",
+            pk: "deadbeef",
+          },
+        },
+      ],
+      fetchImpl: vi.fn(async (input: RequestInfo | URL) => {
+        const url =
+          input instanceof URL ? input.toString() : typeof input === "string" ? input : input.url;
+        const pathname = new URL(url).pathname;
+        if (pathname === "/pair") {
+          return new Response(JSON.stringify({ status: "ok", sessionToken: "tok_ctx" }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (pathname === "/snapshot") {
+          throw new Error("unreachable");
+        }
+        return new Response("not found", { status: 404 });
+      }),
+      discoveryIntervalMs: 60_000,
+      discoveryTimeoutMs: 100,
+    });
+
+    await manager.start();
+    await manager.pair({ userId: "flynn", screen: "Offline Screen" });
+
+    const context = await manager.buildContextInjection({ userId: "flynn" });
+    expect(context).toContain("## Surf Ace Screens");
+    expect(context).toContain("Offline Screen");
+    expect(context).toContain("paired): unreachable");
+
+    await manager.stop();
+    await fs.rm(statePath, { recursive: true, force: true });
+  });
+
   it("registers a Surf Ace screen manually by URL for normal pair flow", async () => {
     const statePath = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-test-"));
     const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
