@@ -4961,13 +4961,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           const peerId = session.peerId;
 
           const deliveryTarget = ClawlineDeliveryTarget.fromParts(session.userId, streamSuffix);
-          const surfAceContext = await surfAceManager.buildContextInjection({
-            userId: session.userId,
-          });
-          const systemPromptParts = [
-            adapterOverrides.systemPrompt?.trim() || null,
-            surfAceContext,
-          ].filter((entry): entry is string => Boolean(entry));
+          const systemPromptParts = [adapterOverrides.systemPrompt?.trim() || null].filter(
+            (entry): entry is string => Boolean(entry),
+          );
           const groupSystemPrompt =
             systemPromptParts.length > 0 ? systemPromptParts.join("\n\n") : undefined;
           const ctxPayload = finalizeInboundContext({
@@ -5362,13 +5358,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           const peerId = session.peerId;
 
           const deliveryTarget = ClawlineDeliveryTarget.fromParts(session.userId, streamSuffix);
-          const surfAceContext = await surfAceManager.buildContextInjection({
-            userId: session.userId,
-          });
-          const systemPromptParts = [
-            adapterOverrides.systemPrompt?.trim() || null,
-            surfAceContext,
-          ].filter((entry): entry is string => Boolean(entry));
+          const systemPromptParts = [adapterOverrides.systemPrompt?.trim() || null].filter(
+            (entry): entry is string => Boolean(entry),
+          );
           const groupSystemPrompt =
             systemPromptParts.length > 0 ? systemPromptParts.join("\n\n") : undefined;
           const ctxPayload = finalizeInboundContext({

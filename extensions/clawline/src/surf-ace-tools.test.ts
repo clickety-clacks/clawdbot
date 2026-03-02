@@ -1,12 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const runtime = {
-  register: vi.fn(),
-  pair: vi.fn(),
+  list: vi.fn(),
   push: vi.fn(),
-  watch: vi.fn(),
   clear: vi.fn(),
-  snapshot: vi.fn(),
+  read: vi.fn(),
+  annotationsRemove: vi.fn(),
 };
 
 vi.mock("./surf-ace-runtime.js", () => ({
@@ -17,12 +16,11 @@ import { createSurfAceTools } from "./surf-ace-tools.js";
 
 describe("createSurfAceTools", () => {
   beforeEach(() => {
-    runtime.register.mockReset();
-    runtime.pair.mockReset();
+    runtime.list.mockReset();
     runtime.push.mockReset();
-    runtime.watch.mockReset();
     runtime.clear.mockReset();
-    runtime.snapshot.mockReset();
+    runtime.read.mockReset();
+    runtime.annotationsRemove.mockReset();
   });
 
   it("creates the expected tool set for clawline context", () => {
@@ -33,12 +31,11 @@ describe("createSurfAceTools", () => {
     });
 
     expect(tools.map((tool) => tool.name).toSorted()).toEqual([
+      "surf_ace_annotations_remove",
       "surf_ace_clear",
-      "surf_ace_pair",
+      "surf_ace_list",
       "surf_ace_push",
-      "surf_ace_register",
-      "surf_ace_snapshot",
-      "surf_ace_watch",
+      "surf_ace_read",
     ]);
   });
 
@@ -54,12 +51,16 @@ describe("createSurfAceTools", () => {
   });
 
   it("passes clawline user context to runtime calls", async () => {
-    runtime.register.mockResolvedValue({ ok: true, screen: { id: "a1b2c3d4" } });
-    runtime.pair.mockResolvedValue({ ok: true, status: "paired" });
-    runtime.push.mockResolvedValue({ ok: true, frameId: "fr_1" });
-    runtime.watch.mockResolvedValue({ ok: true, enabled: true });
-    runtime.clear.mockResolvedValue({ ok: true });
-    runtime.snapshot.mockResolvedValue({ ok: true, status: "no_content" });
+    runtime.list.mockResolvedValue([]);
+    runtime.push.mockResolvedValue({ fingerprint: "a1b2c3d4", contentId: "ct_123", revision: 1 });
+    runtime.clear.mockResolvedValue({ fingerprint: "a1b2c3d4", revision: 2 });
+    runtime.read.mockResolvedValue({ fingerprint: "a1b2c3d4" });
+    runtime.annotationsRemove.mockResolvedValue({
+      fingerprint: "a1b2c3d4",
+      removedStrokeIds: ["stroke_1"],
+      notFoundStrokeIds: [],
+      remainingStrokeCount: 0,
+    });
 
     const tools = createSurfAceTools({
       context: {
@@ -67,57 +68,48 @@ describe("createSurfAceTools", () => {
       },
     });
 
-    const register = tools.find((tool) => tool.name === "surf_ace_register");
-    const pair = tools.find((tool) => tool.name === "surf_ace_pair");
+    const list = tools.find((tool) => tool.name === "surf_ace_list");
     const push = tools.find((tool) => tool.name === "surf_ace_push");
-    const watch = tools.find((tool) => tool.name === "surf_ace_watch");
     const clear = tools.find((tool) => tool.name === "surf_ace_clear");
-    const snapshot = tools.find((tool) => tool.name === "surf_ace_snapshot");
+    const read = tools.find((tool) => tool.name === "surf_ace_read");
+    const remove = tools.find((tool) => tool.name === "surf_ace_annotations_remove");
 
-    await register?.execute?.("call-0", { url: "http://192.168.50.25:8765" }, undefined);
-    await pair?.execute?.("call-1", { screen: "Kitchen" }, undefined);
+    await list?.execute?.("call-0", {}, undefined);
     await push?.execute?.(
-      "call-2",
+      "call-1",
       {
-        screen: "Kitchen",
+        fingerprint: "a1b2c3d4",
         contentType: "html",
-        content: { html: "<html/>" },
-        sourceRefSessionKey: "agent:main:clawline:flynn:main",
-        sourceRefMessageId: "s_123",
+        content: "<html/>",
       },
       undefined,
     );
-    await watch?.execute?.("call-3", { screen: "Kitchen", enabled: true }, undefined);
-    await clear?.execute?.("call-4", { screen: "Kitchen" }, undefined);
-    await snapshot?.execute?.("call-5", { screen: "Kitchen" }, undefined);
+    await clear?.execute?.("call-2", { fingerprint: "a1b2c3d4" }, undefined);
+    await read?.execute?.("call-3", { fingerprint: "a1b2c3d4" }, undefined);
+    await remove?.execute?.(
+      "call-4",
+      {
+        fingerprint: "a1b2c3d4",
+        contentId: "ct_123",
+        strokeIds: ["stroke_1"],
+      },
+      undefined,
+    );
 
-    expect(runtime.register).toHaveBeenCalledWith({
+    expect(runtime.list).toHaveBeenCalledWith({ userId: "flynn" });
+    expect(runtime.push).toHaveBeenCalledWith({
       userId: "flynn",
-      url: "http://192.168.50.25:8765",
+      fingerprint: "a1b2c3d4",
+      contentType: "html",
+      content: "<html/>",
     });
-    expect(runtime.pair).toHaveBeenCalledWith({
+    expect(runtime.clear).toHaveBeenCalledWith({ userId: "flynn", fingerprint: "a1b2c3d4" });
+    expect(runtime.read).toHaveBeenCalledWith({ userId: "flynn", fingerprint: "a1b2c3d4" });
+    expect(runtime.annotationsRemove).toHaveBeenCalledWith({
       userId: "flynn",
-      screen: "Kitchen",
+      fingerprint: "a1b2c3d4",
+      contentId: "ct_123",
+      strokeIds: ["stroke_1"],
     });
-    expect(runtime.push).toHaveBeenCalledWith(
-      expect.objectContaining({
-        userId: "flynn",
-        screen: "Kitchen",
-        sourceRef: {
-          sessionKey: "agent:main:clawline:flynn:main",
-          messageId: "s_123",
-        },
-      }),
-    );
-    expect(runtime.watch).toHaveBeenCalledWith(
-      expect.objectContaining({
-        userId: "flynn",
-        screen: "Kitchen",
-        enabled: true,
-        watcherSessionKey: "agent:main:clawline:flynn:main",
-      }),
-    );
-    expect(runtime.clear).toHaveBeenCalledWith({ userId: "flynn", screen: "Kitchen" });
-    expect(runtime.snapshot).toHaveBeenCalledWith({ userId: "flynn", screen: "Kitchen" });
   });
 });

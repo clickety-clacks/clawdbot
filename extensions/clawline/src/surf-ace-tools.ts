@@ -1,6 +1,5 @@
 import { Type } from "@sinclair/typebox";
 import type { AnyAgentTool } from "openclaw/plugin-sdk";
-import type { SurfAceSourceRef, SurfAceWatchDebounce } from "./surf-ace-runtime.js";
 import { requireClawlineSurfAceRuntime } from "./surf-ace-runtime.js";
 
 type SurfAceToolContext = {
@@ -8,59 +7,32 @@ type SurfAceToolContext = {
   messageChannel?: string;
 };
 
-const SurfAceContentTypeSchema = Type.Union([
-  Type.Literal("html"),
-  Type.Literal("image"),
-  Type.Literal("pdf"),
-  Type.Literal("terminal"),
-  Type.Literal("markdown"),
-]);
+const SurfAceListSchema = Type.Object({});
 
-const SurfAcePairSchema = Type.Object({
-  screen: Type.String({ description: "Surf Ace screen name or fingerprint." }),
-});
-
-const SurfAceRegisterSchema = Type.Object({
-  url: Type.String({
-    description: "Surf Ace base URL, for example http://192.168.50.25:8765",
+const SurfAcePushSchema = Type.Object({
+  fingerprint: Type.String({ description: "Surf Ace screen fingerprint (pk prefix)." }),
+  contentType: Type.String({
+    description: "Content type.",
+    enum: ["html", "image", "pdf", "terminal", "markdown", "video", "canvas"],
+  }),
+  content: Type.String({
+    description:
+      "Content payload string. html/terminal/markdown use UTF-8 text; image/pdf use base64; video uses URL; canvas uses JSON background spec or empty string.",
   }),
 });
 
-const SurfAcePushSchema = Type.Object({
-  screen: Type.String({ description: "Surf Ace screen name or fingerprint." }),
-  contentType: SurfAceContentTypeSchema,
-  title: Type.Optional(Type.String()),
-  frameId: Type.Optional(Type.String()),
-  content: Type.Object({}, { additionalProperties: true }),
-  sourceRefSessionKey: Type.Optional(Type.String()),
-  sourceRefMessageId: Type.Optional(Type.String()),
-});
-
-const SurfAceWatchDebounceSchema = Type.Object({
-  scroll_settle: Type.Optional(Type.Number()),
-  zoom_settle: Type.Optional(Type.Number()),
-  text_selected: Type.Optional(Type.Number()),
-  point: Type.Optional(Type.Number()),
-  region: Type.Optional(Type.Number()),
-  page_change: Type.Optional(Type.Number()),
-});
-
-const SurfAceWatchSchema = Type.Object({
-  screen: Type.String({ description: "Surf Ace screen name or fingerprint." }),
-  enabled: Type.Boolean(),
-  debounce: Type.Optional(SurfAceWatchDebounceSchema),
-});
-
 const SurfAceClearSchema = Type.Object({
-  screen: Type.String({ description: "Surf Ace screen name or fingerprint." }),
+  fingerprint: Type.String({ description: "Surf Ace screen fingerprint (pk prefix)." }),
 });
 
-const SurfAceSnapshotSchema = Type.Object({
-  screen: Type.Optional(
-    Type.String({
-      description: "Optional screen name/fingerprint. Omit to snapshot all paired screens.",
-    }),
-  ),
+const SurfAceReadSchema = Type.Object({
+  fingerprint: Type.String({ description: "Surf Ace screen fingerprint (pk prefix)." }),
+});
+
+const SurfAceAnnotationsRemoveSchema = Type.Object({
+  fingerprint: Type.String({ description: "Surf Ace screen fingerprint (pk prefix)." }),
+  contentId: Type.String({ description: "Active contentId on the target screen." }),
+  strokeIds: Type.Array(Type.String(), { minItems: 1 }),
 });
 
 function readStringParam(
@@ -119,39 +91,6 @@ function resolveClawlineUserId(sessionKey: string | undefined): string | null {
   return userId ? userId : null;
 }
 
-function sourceRefFromArgs(args: Record<string, unknown>): SurfAceSourceRef | undefined {
-  const sessionKey =
-    typeof args.sourceRefSessionKey === "string" ? args.sourceRefSessionKey.trim() : "";
-  const messageId =
-    typeof args.sourceRefMessageId === "string" ? args.sourceRefMessageId.trim() : "";
-  if (!sessionKey || !messageId) {
-    return undefined;
-  }
-  return { sessionKey, messageId };
-}
-
-function debounceFromArgs(args: Record<string, unknown>): SurfAceWatchDebounce | undefined {
-  if (!args.debounce || typeof args.debounce !== "object" || Array.isArray(args.debounce)) {
-    return undefined;
-  }
-  const raw = args.debounce as Record<string, unknown>;
-  const debounce: SurfAceWatchDebounce = {};
-  for (const key of [
-    "scroll_settle",
-    "zoom_settle",
-    "text_selected",
-    "point",
-    "region",
-    "page_change",
-  ] as const) {
-    const value = raw[key];
-    if (typeof value === "number" && Number.isFinite(value)) {
-      debounce[key] = value;
-    }
-  }
-  return Object.keys(debounce).length > 0 ? debounce : undefined;
-}
-
 export function createSurfAceTools(params: { context: SurfAceToolContext }): AnyAgentTool[] {
   const { context } = params;
   if (!isClawlineToolContext(context)) {
@@ -162,75 +101,32 @@ export function createSurfAceTools(params: { context: SurfAceToolContext }): Any
 
   return [
     {
-      label: "Surf Ace Pair",
-      name: "surf_ace_pair",
-      description: "Pair with a discovered Surf Ace screen (auto-pairs immediately, no PIN).",
-      parameters: SurfAcePairSchema,
-      execute: async (_toolCallId, rawArgs) => {
-        const args = rawArgs as Record<string, unknown>;
+      label: "Surf Ace List",
+      name: "surf_ace_list",
+      description: "List known Surf Ace screens and local cached state.",
+      parameters: SurfAceListSchema,
+      execute: async () => {
         const runtime = requireClawlineSurfAceRuntime();
-        const screen = readStringParam(args, "screen", { required: true });
-        const result = await runtime.pair({ userId, screen: screen as string });
-        return jsonResult(result);
-      },
-    },
-    {
-      label: "Surf Ace Register",
-      name: "surf_ace_register",
-      description: "Register a Surf Ace screen manually by URL when mDNS discovery is unavailable.",
-      parameters: SurfAceRegisterSchema,
-      execute: async (_toolCallId, rawArgs) => {
-        const args = rawArgs as Record<string, unknown>;
-        const runtime = requireClawlineSurfAceRuntime();
-        const url = readStringParam(args, "url", { required: true });
-        const result = await runtime.register({ userId, url: url as string });
+        const result = await runtime.list({ userId });
         return jsonResult(result);
       },
     },
     {
       label: "Surf Ace Push",
       name: "surf_ace_push",
-      description: "Push a frame to a paired Surf Ace screen.",
+      description: "Push content to a Surf Ace screen.",
       parameters: SurfAcePushSchema,
       execute: async (_toolCallId, rawArgs) => {
         const args = rawArgs as Record<string, unknown>;
         const runtime = requireClawlineSurfAceRuntime();
-        const screen = readStringParam(args, "screen", { required: true });
+        const fingerprint = readStringParam(args, "fingerprint", { required: true });
         const contentType = readStringParam(args, "contentType", { required: true });
-        const title = readStringParam(args, "title");
-        const frameId = readStringParam(args, "frameId");
-        const content =
-          args.content && typeof args.content === "object" && !Array.isArray(args.content)
-            ? (args.content as Record<string, unknown>)
-            : {};
+        const content = readStringParam(args, "content", { required: true });
         const result = await runtime.push({
           userId,
-          screen: screen as string,
+          fingerprint: fingerprint as string,
           contentType: contentType as string,
-          content,
-          title,
-          frameId,
-          sourceRef: sourceRefFromArgs(args),
-        });
-        return jsonResult(result);
-      },
-    },
-    {
-      label: "Surf Ace Watch",
-      name: "surf_ace_watch",
-      description: "Start or stop watch mode for a Surf Ace screen.",
-      parameters: SurfAceWatchSchema,
-      execute: async (_toolCallId, rawArgs) => {
-        const args = rawArgs as Record<string, unknown>;
-        const runtime = requireClawlineSurfAceRuntime();
-        const screen = readStringParam(args, "screen", { required: true });
-        const enabled = typeof args.enabled === "boolean" ? args.enabled : false;
-        const result = await runtime.watch({
-          userId,
-          screen: screen as string,
-          enabled,
-          debounce: debounceFromArgs(args),
-          watcherSessionKey: context.sessionKey,
+          content: content as string,
         });
         return jsonResult(result);
       },
@@ -238,26 +134,54 @@ export function createSurfAceTools(params: { context: SurfAceToolContext }): Any
     {
       label: "Surf Ace Clear",
       name: "surf_ace_clear",
-      description: "Clear a Surf Ace screen and terminate its active session.",
+      description: "Clear active content on a Surf Ace screen.",
       parameters: SurfAceClearSchema,
       execute: async (_toolCallId, rawArgs) => {
         const args = rawArgs as Record<string, unknown>;
         const runtime = requireClawlineSurfAceRuntime();
-        const screen = readStringParam(args, "screen", { required: true });
-        const result = await runtime.clear({ userId, screen: screen as string });
+        const fingerprint = readStringParam(args, "fingerprint", { required: true });
+        const result = await runtime.clear({ userId, fingerprint: fingerprint as string });
         return jsonResult(result);
       },
     },
     {
-      label: "Surf Ace Snapshot",
-      name: "surf_ace_snapshot",
-      description: "Fetch the current viewport snapshot from one or all paired Surf Ace screens.",
-      parameters: SurfAceSnapshotSchema,
+      label: "Surf Ace Read",
+      name: "surf_ace_read",
+      description: "Read Surf Ace local event buffer for a screen (local only).",
+      parameters: SurfAceReadSchema,
       execute: async (_toolCallId, rawArgs) => {
         const args = rawArgs as Record<string, unknown>;
         const runtime = requireClawlineSurfAceRuntime();
-        const screen = readStringParam(args, "screen");
-        const result = await runtime.snapshot({ userId, screen });
+        const fingerprint = readStringParam(args, "fingerprint", { required: true });
+        const result = await runtime.read({ userId, fingerprint: fingerprint as string });
+        return jsonResult(result);
+      },
+    },
+    {
+      label: "Surf Ace Annotations Remove",
+      name: "surf_ace_annotations_remove",
+      description: "Remove specific Surf Ace annotation strokes by strokeId.",
+      parameters: SurfAceAnnotationsRemoveSchema,
+      execute: async (_toolCallId, rawArgs) => {
+        const args = rawArgs as Record<string, unknown>;
+        const runtime = requireClawlineSurfAceRuntime();
+        const fingerprint = readStringParam(args, "fingerprint", { required: true });
+        const contentId = readStringParam(args, "contentId", { required: true });
+        const strokeIds = Array.isArray(args.strokeIds)
+          ? args.strokeIds
+              .filter((entry): entry is string => typeof entry === "string")
+              .map((entry) => entry.trim())
+              .filter((entry) => entry.length > 0)
+          : [];
+        if (strokeIds.length === 0) {
+          throw new Error("strokeIds required");
+        }
+        const result = await runtime.annotationsRemove({
+          userId,
+          fingerprint: fingerprint as string,
+          contentId: contentId as string,
+          strokeIds,
+        });
         return jsonResult(result);
       },
     },

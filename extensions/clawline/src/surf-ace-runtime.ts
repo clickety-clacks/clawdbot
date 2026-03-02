@@ -1,38 +1,19 @@
-export type SurfAceSourceRef = {
-  sessionKey: string;
-  messageId: string;
-};
-
-export type SurfAceWatchDebounce = Partial<{
-  scroll_settle: number;
-  zoom_settle: number;
-  text_selected: number;
-  point: number;
-  region: number;
-  page_change: number;
-}>;
-
 export type SurfAceRuntime = {
-  register(params: { userId: string | null; url: string }): Promise<unknown>;
-  pair(params: { userId: string | null; screen: string }): Promise<unknown>;
+  list(params: { userId: string | null }): Promise<unknown>;
   push(params: {
     userId: string | null;
-    screen: string;
+    fingerprint: string;
     contentType: string;
-    content: Record<string, unknown>;
-    title?: string;
-    sourceRef?: SurfAceSourceRef;
-    frameId?: string;
+    content: string;
   }): Promise<unknown>;
-  watch(params: {
+  clear(params: { userId: string | null; fingerprint: string }): Promise<unknown>;
+  read(params: { userId: string | null; fingerprint: string }): Promise<unknown>;
+  annotationsRemove(params: {
     userId: string | null;
-    screen: string;
-    enabled: boolean;
-    debounce?: SurfAceWatchDebounce;
-    watcherSessionKey?: string;
+    fingerprint: string;
+    contentId: string;
+    strokeIds: string[];
   }): Promise<unknown>;
-  clear(params: { userId: string | null; screen: string }): Promise<unknown>;
-  snapshot(params: { userId: string | null; screen?: string }): Promise<unknown>;
 };
 
 let surfAceRuntime: SurfAceRuntime | null = null;

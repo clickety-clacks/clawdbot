@@ -5,7 +5,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocketServer, type WebSocket } from "ws";
 import { createSurfAceManager } from "./surf-ace.js";
 
-const TRUST_STORE_FILE = "surf-ace-trust.json";
 const SCREEN_STATE_FILE = "surf-ace-screens.json";
 
 type MockSurfaceHandle = {
@@ -13,6 +12,7 @@ type MockSurfaceHandle = {
   port: number;
   pairPayloads: Array<Record<string, unknown>>;
   snapshotPayloads: Array<Record<string, unknown>>;
+  receivedOps: string[];
   clientCloseCodes: number[];
   close: () => Promise<void>;
   emitEvent: (op: string, payload: Record<string, unknown>) => void;
@@ -26,7 +26,6 @@ type MockSurfaceOptions = {
   scale?: number;
   suppressHeartbeatPongs?: number;
   maxMessageBytes?: number;
-  ignorePairResponses?: boolean;
 };
 
 async function waitFor(
@@ -71,6 +70,7 @@ async function createMockSurface(options: MockSurfaceOptions = {}): Promise<Mock
 
   const pairPayloads: Array<Record<string, unknown>> = [];
   const snapshotPayloads: Array<Record<string, unknown>> = [];
+  const receivedOps: string[] = [];
   const clientCloseCodes: number[] = [];
   const clients = new Set<WebSocket>();
   const surfaceName = options.name ?? "Kitchen Display";
@@ -80,13 +80,13 @@ async function createMockSurface(options: MockSurfaceOptions = {}): Promise<Mock
   const scale = options.scale ?? 2;
   let suppressHeartbeatPongs = options.suppressHeartbeatPongs ?? 0;
   const maxMessageBytes = options.maxMessageBytes ?? 12 * 1024 * 1024;
-  const ignorePairResponses = options.ignorePairResponses ?? false;
 
-  let currentFrameId: string | null = null;
+  let currentContentId: string | null = null;
   let currentRevision = 0;
   let currentContentType: string | null = null;
-  let currentTitle: string | null = null;
   let currentVisibleText = "";
+  let annotations: Array<Record<string, unknown>> = [];
+  let eventSeq = 0;
 
   wss.on("connection", (socket) => {
     clients.add(socket);
@@ -109,6 +109,8 @@ async function createMockSurface(options: MockSurfaceOptions = {}): Promise<Mock
         return;
       }
 
+      receivedOps.push(parsed.op);
+
       const sendResponse = (body: Record<string, unknown>) => {
         socket.send(
           JSON.stringify({
@@ -124,9 +126,6 @@ async function createMockSurface(options: MockSurfaceOptions = {}): Promise<Mock
 
       if (parsed.op === "pair.request") {
         pairPayloads.push(parsed.payload ?? {});
-        if (ignorePairResponses) {
-          return;
-        }
         sendResponse({
           ok: true,
           payload: {
@@ -136,13 +135,14 @@ async function createMockSurface(options: MockSurfaceOptions = {}): Promise<Mock
             surfaceName,
             viewport: { width, height, scale },
             capabilities: {
-              contentTypes: ["html", "image", "pdf", "terminal", "markdown"],
+              contentTypes: ["html", "image", "pdf", "terminal", "markdown", "video", "canvas"],
               eventTypes: [
                 "event.drawing_flush",
                 "event.tap",
                 "event.selection",
                 "event.page",
                 "event.snapshot_hint",
+                "event.scroll",
               ],
             },
             eventConfig: {
@@ -164,7 +164,7 @@ async function createMockSurface(options: MockSurfaceOptions = {}): Promise<Mock
               maxDrawingFlushBytes: 2 * 1024 * 1024,
             },
             state: {
-              currentFrameId,
+              currentContentId,
               currentRevision,
               contentType: currentContentType,
             },
@@ -173,32 +173,30 @@ async function createMockSurface(options: MockSurfaceOptions = {}): Promise<Mock
         return;
       }
 
-      if (parsed.op === "frame.set") {
+      if (parsed.op === "content.set") {
         const payload = parsed.payload ?? {};
-        currentFrameId = typeof payload.frameId === "string" ? payload.frameId : currentFrameId;
+        currentContentId =
+          typeof payload.contentId === "string" ? payload.contentId : currentContentId;
         const revision = payload.revision;
         currentRevision = typeof revision === "number" ? revision : currentRevision + 1;
         currentContentType =
           typeof payload.contentType === "string" ? payload.contentType : currentContentType;
-
-        const displayRaw = payload.display;
-        if (displayRaw && typeof displayRaw === "object" && !Array.isArray(displayRaw)) {
-          const display = displayRaw as Record<string, unknown>;
-          currentTitle = typeof display.title === "string" ? display.title : currentTitle;
-        }
+        annotations = [];
 
         const contentRaw = payload.content;
         if (contentRaw && typeof contentRaw === "object" && !Array.isArray(contentRaw)) {
           const content = contentRaw as Record<string, unknown>;
-          const html = typeof content.html === "string" ? content.html : "";
-          const markdown = typeof content.markdown === "string" ? content.markdown : "";
-          currentVisibleText = html || markdown || currentVisibleText;
+          if (typeof content.html === "string") {
+            currentVisibleText = content.html;
+          } else if (typeof content.markdown === "string") {
+            currentVisibleText = content.markdown;
+          }
         }
 
         sendResponse({
           ok: true,
           payload: {
-            currentFrameId,
+            currentContentId,
             currentRevision,
             contentType: currentContentType,
           },
@@ -206,18 +204,18 @@ async function createMockSurface(options: MockSurfaceOptions = {}): Promise<Mock
         return;
       }
 
-      if (parsed.op === "frame.clear") {
+      if (parsed.op === "content.clear") {
         const payload = parsed.payload ?? {};
         const revision = payload.revision;
         currentRevision = typeof revision === "number" ? revision : currentRevision + 1;
-        currentFrameId = null;
+        currentContentId = null;
         currentContentType = null;
-        currentTitle = null;
         currentVisibleText = "";
+        annotations = [];
         sendResponse({
           ok: true,
           payload: {
-            currentFrameId,
+            currentContentId,
             currentRevision,
             contentType: currentContentType,
           },
@@ -227,13 +225,13 @@ async function createMockSurface(options: MockSurfaceOptions = {}): Promise<Mock
 
       if (parsed.op === "snapshot.get") {
         snapshotPayloads.push(parsed.payload ?? {});
+        const includeDrawings = parsed.payload?.includeDrawings === true;
         sendResponse({
           ok: true,
           payload: {
-            frameId: currentFrameId,
+            contentId: currentContentId,
             revision: currentRevision,
             contentType: currentContentType,
-            title: currentTitle,
             viewport: {
               scrollOffset: { x: 0, y: 0 },
               visibleRect: { x: 0, y: 0, width, height },
@@ -242,20 +240,51 @@ async function createMockSurface(options: MockSurfaceOptions = {}): Promise<Mock
             },
             visibleText: currentVisibleText,
             selection: null,
-            drawings: [],
+            drawings: includeDrawings ? annotations : undefined,
           },
         });
         return;
       }
 
       if (parsed.op === "annotations.remove") {
+        const contentId =
+          typeof parsed.payload?.contentId === "string" ? parsed.payload.contentId : "";
+        if (!currentContentId || contentId !== currentContentId) {
+          sendResponse({
+            ok: false,
+            error: {
+              code: "stale_content",
+              message: "content mismatch",
+            },
+          });
+          return;
+        }
+        const strokeIds = Array.isArray(parsed.payload?.strokeIds)
+          ? parsed.payload.strokeIds.filter((entry): entry is string => typeof entry === "string")
+          : [];
+        const currentById = new Map(
+          annotations
+            .filter((entry) => typeof entry.strokeId === "string")
+            .map((entry) => [entry.strokeId as string, entry]),
+        );
+        const removedStrokeIds: string[] = [];
+        const notFoundStrokeIds: string[] = [];
+        for (const strokeId of strokeIds) {
+          if (currentById.has(strokeId)) {
+            currentById.delete(strokeId);
+            removedStrokeIds.push(strokeId);
+          } else {
+            notFoundStrokeIds.push(strokeId);
+          }
+        }
+        annotations = Array.from(currentById.values());
         sendResponse({
           ok: true,
           payload: {
-            frameId: currentFrameId,
-            removedStrokeIds: (parsed.payload?.strokeIds as unknown[]) ?? [],
-            notFoundStrokeIds: [],
-            remainingStrokeCount: 0,
+            contentId: currentContentId,
+            removedStrokeIds,
+            notFoundStrokeIds,
+            remainingStrokeCount: annotations.length,
           },
         });
         return;
@@ -276,13 +305,31 @@ async function createMockSurface(options: MockSurfaceOptions = {}): Promise<Mock
     port: address.port,
     pairPayloads,
     snapshotPayloads,
+    receivedOps,
     clientCloseCodes,
     emitEvent: (op, payload) => {
+      if (op === "event.drawing_flush") {
+        const strokes = Array.isArray(payload.strokes)
+          ? payload.strokes.filter(
+              (entry): entry is Record<string, unknown> =>
+                Boolean(entry) && typeof entry === "object" && !Array.isArray(entry),
+            )
+          : [];
+        for (const stroke of strokes) {
+          const strokeId = typeof stroke.strokeId === "string" ? stroke.strokeId : "";
+          if (!strokeId) {
+            continue;
+          }
+          const withoutExisting = annotations.filter((item) => item.strokeId !== strokeId);
+          annotations = [...withoutExisting, stroke];
+        }
+      }
+
       const body = JSON.stringify({
         v: 1,
         type: "event",
         op,
-        eventId: `ev_${Date.now()}`,
+        eventId: `ev_${Date.now()}_${eventSeq++}`,
         sentAt: Date.now(),
         payload,
       });
@@ -311,16 +358,112 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("Surf Ace manager (WebSocket transport)", () => {
-  it("handles pair/push/snapshot/watch flows over WS", async () => {
+describe("Surf Ace manager (connection daemon + local buffer)", () => {
+  it("auto-connects discovered screens and reports list state", async () => {
     const statePath = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-test-"));
-    const surface = await createMockSurface({
-      name: "Kitchen Display",
-      surfaceId: "a1b2c3d4",
-      width: 1920,
-      height: 1080,
-      scale: 2,
+    const surface = await createMockSurface({ name: "Kitchen Display", surfaceId: "a1b2c3d4" });
+
+    const manager = createSurfAceManager({
+      statePath,
+      discoverImpl: async () => [
+        {
+          instanceName: "Kitchen Display",
+          host: surface.host,
+          port: surface.port,
+          txt: {
+            name: "Kitchen Display",
+            v: "1",
+            w: "1920",
+            h: "1080",
+            s: "2",
+            cap: "127",
+            busy: "0",
+            pk: "a1b2c3d4",
+            ws: "/ws",
+            tls: "0",
+          },
+        },
+      ],
+      discoveryIntervalMs: 60_000,
+      discoveryTimeoutMs: 100,
     });
+
+    await manager.start();
+    await waitFor(() => surface.pairPayloads.length > 0);
+
+    const list = await manager.list({ userId: "flynn" });
+    expect(list).toContainEqual(
+      expect.objectContaining({
+        fingerprint: "a1b2c3d4",
+        name: "Kitchen Display",
+        connectionState: "connected",
+        viewport: expect.objectContaining({ width: 1920, height: 1080, scale: 2 }),
+        activeContent: null,
+        pendingEvents: 0,
+      }),
+    );
+
+    await manager.stop();
+    await surface.close();
+    await fs.rm(statePath, { recursive: true, force: true });
+  });
+
+  it("pushes and clears using content operations", async () => {
+    const statePath = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-test-"));
+    const surface = await createMockSurface({ name: "Kitchen Display", surfaceId: "a1b2c3d4" });
+
+    const manager = createSurfAceManager({
+      statePath,
+      discoverImpl: async () => [
+        {
+          instanceName: "Kitchen Display",
+          host: surface.host,
+          port: surface.port,
+          txt: {
+            name: "Kitchen Display",
+            v: "1",
+            w: "1920",
+            h: "1080",
+            s: "2",
+            cap: "127",
+            busy: "0",
+            pk: "a1b2c3d4",
+            ws: "/ws",
+            tls: "0",
+          },
+        },
+      ],
+      discoveryIntervalMs: 60_000,
+      discoveryTimeoutMs: 100,
+    });
+
+    await manager.start();
+    await waitFor(() => surface.pairPayloads.length > 0);
+
+    const push = await manager.push({
+      userId: "flynn",
+      fingerprint: "a1b2c3d4",
+      contentType: "html",
+      content: "<html><body>Build Output</body></html>",
+    });
+    expect(push.contentId).toMatch(/^ct_/);
+    expect(push.revision).toBe(1);
+
+    await manager.clear({ userId: "flynn", fingerprint: "a1b2c3d4" });
+
+    expect(surface.receivedOps).toContain("content.set");
+    expect(surface.receivedOps).toContain("content.clear");
+    expect(surface.receivedOps).not.toContain("frame.set");
+    expect(surface.receivedOps).not.toContain("frame.clear");
+
+    await manager.stop();
+    await surface.close();
+    await fs.rm(statePath, { recursive: true, force: true });
+  });
+
+  it("reads local register buffer and fires one alert per dirty cycle", async () => {
+    const statePath = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-test-"));
+    const surface = await createMockSurface({ name: "Kitchen Display", surfaceId: "a1b2c3d4" });
 
     const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
       const url =
@@ -348,7 +491,7 @@ describe("Surf Ace manager (WebSocket transport)", () => {
             w: "1920",
             h: "1080",
             s: "2",
-            cap: "31",
+            cap: "127",
             busy: "0",
             pk: "a1b2c3d4",
             ws: "/ws",
@@ -358,93 +501,76 @@ describe("Surf Ace manager (WebSocket transport)", () => {
       ],
       discoveryIntervalMs: 60_000,
       discoveryTimeoutMs: 100,
-      wsHeartbeatIntervalMs: 1_000,
-      wsHeartbeatTimeoutMs: 1_000,
-      wsReconnectBackoffMs: [250],
     });
 
     await manager.start();
-
-    const pairResult = await manager.pair({ userId: "flynn", screen: "Kitchen Display" });
-    expect(pairResult.status).toBe("paired");
-
-    const pushResult = await manager.push({
-      userId: "flynn",
-      screen: "Kitchen Display",
-      contentType: "html",
-      title: "Build Output",
-      content: { html: "<html><body>Build Output</body></html>" },
-      sourceRef: {
-        sessionKey: "agent:main:clawline:flynn:main",
-        messageId: "s_123",
-      },
-    });
-    expect(pushResult.ok).toBe(true);
-
-    const snapshot = await manager.snapshot({ userId: "flynn", screen: "Kitchen Display" });
-    expect(snapshot.status).toBe("snapshot");
-    expect(surface.snapshotPayloads[0]).toMatchObject({
-      includeVisibleText: true,
-      includeDrawings: false,
-    });
-
-    const watchResult = await manager.watch({
-      userId: "flynn",
-      screen: "Kitchen Display",
-      enabled: true,
-      watcherSessionKey: "agent:main:clawline:flynn:main",
-    });
-    expect(watchResult.enabled).toBe(true);
+    await waitFor(() => surface.pairPayloads.length > 0);
 
     surface.emitEvent("event.tap", {
-      frameId: pushResult.frameId,
+      contentId: "ct_1",
       revision: 1,
       kind: "tap",
       position: { x: 10, y: 20 },
+      nearestContent: "Tap Text",
+    });
+    surface.emitEvent("event.page", {
+      contentId: "ct_1",
+      revision: 1,
+      page: 3,
+      totalPages: 10,
+      pageText: "3/10",
     });
 
-    await waitFor(() => fetchImpl.mock.calls.length > 0);
-    expect(fetchImpl).toHaveBeenCalledWith(
-      "http://localhost:18800/alert",
-      expect.objectContaining({ method: "POST" }),
+    await waitFor(() => fetchImpl.mock.calls.length >= 1);
+    expect(fetchImpl.mock.calls.length).toBe(1);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const firstRead = await manager.read({ userId: "flynn", fingerprint: "a1b2c3d4" });
+    expect(firstRead.taps).toHaveLength(1);
+    expect(firstRead.page).toEqual(
+      expect.objectContaining({ pageNumber: 3, pageCount: 10, pageLabel: "3/10" }),
     );
 
-    const context = await manager.buildContextInjection({ userId: "flynn" });
-    expect(context).toContain("## Surf Ace Screens");
-    expect(context).toContain("Kitchen Display");
-    expect(context).toContain("sourceRef: agent:main:clawline:flynn:main#s_123");
+    const secondRead = await manager.read({ userId: "flynn", fingerprint: "a1b2c3d4" });
+    expect(secondRead.taps).toHaveLength(0);
+    expect(secondRead.page).toBeNull();
+
+    surface.emitEvent("event.tap", {
+      contentId: "ct_1",
+      revision: 2,
+      kind: "tap",
+      position: { x: 1, y: 2 },
+      nearestContent: "Again",
+    });
+
+    await waitFor(() => fetchImpl.mock.calls.length >= 2);
+    expect(fetchImpl.mock.calls.length).toBe(2);
 
     await manager.stop();
     await surface.close();
     await fs.rm(statePath, { recursive: true, force: true });
   });
 
-  it("strips WKWebView CSS noise prefix from snapshot visibleText", async () => {
+  it("maintains persistent annotations and supports annotations.remove", async () => {
     const statePath = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-test-"));
-    const surface = await createMockSurface({
-      name: "Noise Surface",
-      surfaceId: "aa11bb22",
-      width: 1024,
-      height: 768,
-      scale: 2,
-    });
+    const surface = await createMockSurface({ name: "Kitchen Display", surfaceId: "a1b2c3d4" });
 
     const manager = createSurfAceManager({
       statePath,
       discoverImpl: async () => [
         {
-          instanceName: "Noise Surface",
+          instanceName: "Kitchen Display",
           host: surface.host,
           port: surface.port,
           txt: {
-            name: "Noise Surface",
+            name: "Kitchen Display",
             v: "1",
-            w: "1024",
-            h: "768",
+            w: "1920",
+            h: "1080",
             s: "2",
-            cap: "31",
+            cap: "127",
             busy: "0",
-            pk: "aa11bb22",
+            pk: "a1b2c3d4",
             ws: "/ws",
             tls: "0",
           },
@@ -454,244 +580,65 @@ describe("Surf Ace manager (WebSocket transport)", () => {
       discoveryTimeoutMs: 100,
     });
 
-    const noisyText =
-      "p.p1 {margin: 0.0px 0.0px 0.0px 0.0px} span.s1 {font-family: 'Helvetica'} ACTUAL_CONTENT_HERE";
-
     await manager.start();
-    await manager.pair({ userId: "flynn", screen: "Noise Surface" });
-    await manager.push({
-      userId: "flynn",
-      screen: "Noise Surface",
-      contentType: "html",
-      content: { html: noisyText },
-      title: "Noisy",
-    });
-
-    const snapshot = await manager.snapshot({ userId: "flynn", screen: "Noise Surface" });
-    expect(snapshot.status).toBe("snapshot");
-    if (snapshot.status !== "snapshot") {
-      throw new Error("snapshot expected");
-    }
-    expect(snapshot.snapshot.visibleText).toBe("ACTUAL_CONTENT_HERE");
-
-    await manager.stop();
-    await surface.close();
-    await fs.rm(statePath, { recursive: true, force: true });
-  });
-
-  it("allows explicit pair when discovery marks the screen busy", async () => {
-    const statePath = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-test-"));
-    const surface = await createMockSurface({
-      name: "Surf Ace - iPad",
-      surfaceId: "23c71e1c",
-      width: 1194,
-      height: 834,
-      scale: 2,
-    });
-
-    const manager = createSurfAceManager({
-      statePath,
-      discoverImpl: async () => [
-        {
-          instanceName: "Surf Ace - iPad",
-          host: surface.host,
-          port: surface.port,
-          txt: {
-            name: "Surf Ace - iPad",
-            v: "1",
-            w: "1194",
-            h: "834",
-            s: "2",
-            cap: "31",
-            busy: "1",
-            pk: "23c71e1c",
-            ws: "/ws",
-            tls: "0",
-          },
-        },
-      ],
-      discoveryIntervalMs: 60_000,
-      discoveryTimeoutMs: 100,
-      wsHeartbeatIntervalMs: 1_000,
-      wsHeartbeatTimeoutMs: 1_000,
-      wsReconnectBackoffMs: [250],
-    });
-
-    await manager.start();
-    const pairResult = await manager.pair({ userId: "flynn", screen: "Surf Ace - iPad" });
-    expect(pairResult.status).toBe("paired");
-    expect(pairResult.screen.sessionToken).toBeTruthy();
-
-    await manager.stop();
-    await surface.close();
-    await fs.rm(statePath, { recursive: true, force: true });
-  });
-
-  it("auto-pairs trusted screens over WS even when discovery marks busy", async () => {
-    const statePath = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-test-"));
-    await fs.writeFile(
-      path.join(statePath, TRUST_STORE_FILE),
-      JSON.stringify(
-        {
-          version: 1,
-          entries: [
-            {
-              fingerprint: "23c71e1c",
-              displayName: "Surf Ace - iPad",
-              trustedAt: 1,
-            },
-          ],
-        },
-        null,
-        2,
-      ),
-    );
-
-    const surface = await createMockSurface({
-      name: "Surf Ace - iPad",
-      surfaceId: "23c71e1c",
-      width: 1194,
-      height: 834,
-      scale: 2,
-    });
-
-    const manager = createSurfAceManager({
-      statePath,
-      discoverImpl: async () => [
-        {
-          instanceName: "Surf Ace - iPad",
-          host: surface.host,
-          port: surface.port,
-          txt: {
-            name: "Surf Ace - iPad",
-            v: "1",
-            w: "1194",
-            h: "834",
-            s: "2",
-            cap: "31",
-            busy: "1",
-            pk: "23c71e1c",
-            ws: "/ws",
-            tls: "0",
-          },
-        },
-      ],
-      discoveryIntervalMs: 60_000,
-      discoveryTimeoutMs: 100,
-      wsHeartbeatIntervalMs: 1_000,
-      wsHeartbeatTimeoutMs: 1_000,
-      wsReconnectBackoffMs: [250],
-    });
-
-    await manager.start();
-
     await waitFor(() => surface.pairPayloads.length > 0);
-    const screens = manager.listScreens();
-    expect(screens).toContainEqual(
-      expect.objectContaining({
-        id: "23c71e1c",
-        sessionToken: expect.any(String),
+
+    const push = await manager.push({
+      userId: "flynn",
+      fingerprint: "a1b2c3d4",
+      contentType: "html",
+      content: "<html>test</html>",
+    });
+
+    surface.emitEvent("event.drawing_flush", {
+      contentId: push.contentId,
+      revision: push.revision,
+      flushId: "flush_1",
+      flushReason: "idle_window",
+      idleWindowMs: 8000,
+      maxIntervalMs: 30000,
+      strokes: [
+        {
+          strokeId: "stroke_1",
+          tool: "pencil",
+          points: [{ x: 1, y: 2, pressure: 0.5, timestamp: Date.now() }],
+        },
+        {
+          strokeId: "stroke_2",
+          tool: "pencil",
+          points: [{ x: 3, y: 4, pressure: 0.5, timestamp: Date.now() }],
+        },
+      ],
+      strokeCount: 2,
+      pointsCount: 2,
+      firstStrokeAt: Date.now(),
+      lastStrokeAt: Date.now(),
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const beforeRemove = await manager.read({ userId: "flynn", fingerprint: "a1b2c3d4" });
+    expect(beforeRemove.annotations).toHaveLength(2);
+
+    const removed = await manager.annotationsRemove({
+      userId: "flynn",
+      fingerprint: "a1b2c3d4",
+      contentId: push.contentId,
+      strokeIds: ["stroke_1"],
+    });
+    expect(removed.removedStrokeIds).toEqual(["stroke_1"]);
+
+    const afterRemove = await manager.read({ userId: "flynn", fingerprint: "a1b2c3d4" });
+    expect(afterRemove.annotations).toHaveLength(1);
+    expect(afterRemove.annotations[0]?.strokeId).toBe("stroke_2");
+
+    await expect(
+      manager.annotationsRemove({
+        userId: "flynn",
+        fingerprint: "a1b2c3d4",
+        contentId: "ct_wrong",
+        strokeIds: ["stroke_2"],
       }),
-    );
-
-    await manager.stop();
-    await surface.close();
-    await fs.rm(statePath, { recursive: true, force: true });
-  });
-
-  it("does not throw context injection when paired snapshot fails", async () => {
-    const statePath = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-test-"));
-    const surface = await createMockSurface({ name: "Offline Screen", surfaceId: "deadbeef" });
-
-    const manager = createSurfAceManager({
-      statePath,
-      discoverImpl: async () => [
-        {
-          instanceName: "Offline Screen",
-          host: surface.host,
-          port: surface.port,
-          txt: {
-            name: "Offline Screen",
-            v: "1",
-            w: "1194",
-            h: "834",
-            s: "2",
-            cap: "31",
-            busy: "0",
-            pk: "deadbeef",
-            ws: "/ws",
-            tls: "0",
-          },
-        },
-      ],
-      discoveryIntervalMs: 60_000,
-      discoveryTimeoutMs: 100,
-      wsHeartbeatIntervalMs: 1_000,
-      wsHeartbeatTimeoutMs: 1_000,
-      wsReconnectBackoffMs: [250],
-    });
-
-    await manager.start();
-    await manager.pair({ userId: "flynn", screen: "Offline Screen" });
-    await surface.close();
-
-    const context = await manager.buildContextInjection({ userId: "flynn" });
-    expect(context).toContain("## Surf Ace Screens");
-    expect(context).toContain("Offline Screen");
-    expect(context).toContain("paired): unreachable");
-
-    await manager.stop();
-    await fs.rm(statePath, { recursive: true, force: true });
-  });
-
-  it("reconnects with takeover after missed heartbeat window", async () => {
-    const statePath = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-test-"));
-    const surface = await createMockSurface({
-      name: "Heartbeat Surface",
-      surfaceId: "f1e2d3c4",
-      suppressHeartbeatPongs: 2,
-    });
-
-    const manager = createSurfAceManager({
-      statePath,
-      discoverImpl: async () => [
-        {
-          instanceName: "Heartbeat Surface",
-          host: surface.host,
-          port: surface.port,
-          txt: {
-            name: "Heartbeat Surface",
-            v: "1",
-            w: "1024",
-            h: "768",
-            s: "2",
-            cap: "31",
-            busy: "0",
-            pk: "f1e2d3c4",
-            ws: "/ws",
-            tls: "0",
-          },
-        },
-      ],
-      discoveryIntervalMs: 60_000,
-      discoveryTimeoutMs: 100,
-      wsHeartbeatIntervalMs: 250,
-      wsHeartbeatTimeoutMs: 250,
-      wsReconnectBackoffMs: [250],
-    });
-
-    await manager.start();
-    await manager.pair({ userId: "flynn", screen: "Heartbeat Surface" });
-
-    await waitFor(() => surface.pairPayloads.length >= 2, { timeoutMs: 10_000 });
-
-    const takeoverPair = surface.pairPayloads.find((payload, index) => {
-      if (index === 0) {
-        return false;
-      }
-      return payload.takeover === true;
-    });
-    expect(takeoverPair).toBeTruthy();
+    ).rejects.toThrow("stale_content");
 
     await manager.stop();
     await surface.close();
@@ -719,7 +666,7 @@ describe("Surf Ace manager (WebSocket transport)", () => {
             w: "1024",
             h: "768",
             s: "2",
-            cap: "31",
+            cap: "127",
             busy: "0",
             pk: "beadfeed",
             ws: "/ws",
@@ -732,9 +679,10 @@ describe("Surf Ace manager (WebSocket transport)", () => {
     });
 
     await manager.start();
-    await manager.pair({ userId: "flynn", screen: "Limit Surface" });
+    await waitFor(() => surface.pairPayloads.length > 0);
+
     surface.emitEvent("event.tap", {
-      frameId: "fr_deadbeef",
+      contentId: "ct_deadbeef",
       revision: 1,
       kind: "tap",
       position: { x: 10, y: 20 },
@@ -745,50 +693,6 @@ describe("Surf Ace manager (WebSocket transport)", () => {
 
     await manager.stop();
     await surface.close();
-    await fs.rm(statePath, { recursive: true, force: true });
-  });
-
-  it("registers manual WS URLs without requiring identity endpoint", async () => {
-    const statePath = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-test-"));
-    const manager = createSurfAceManager({
-      statePath,
-      discoverImpl: async () => [],
-      fetchImpl: async () => new Response("not found", { status: 404 }),
-      discoveryIntervalMs: 60_000,
-      discoveryTimeoutMs: 100,
-    });
-
-    await manager.start();
-    const result = await manager.register({ userId: "flynn", url: "ws://192.168.50.25:8765/ws" });
-
-    expect(result.ok).toBe(true);
-    expect(result.screen).toMatchObject({
-      host: "192.168.50.25",
-      port: 8765,
-      intake: "manual",
-      status: "discovered",
-      sessionToken: null,
-    });
-
-    await manager.stop();
-    await fs.rm(statePath, { recursive: true, force: true });
-  });
-
-  it("rejects TLS registration URLs in ws-only v1 mode", async () => {
-    const statePath = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-test-"));
-    const manager = createSurfAceManager({
-      statePath,
-      discoverImpl: async () => [],
-      discoveryIntervalMs: 60_000,
-      discoveryTimeoutMs: 100,
-    });
-
-    await manager.start();
-    await expect(
-      manager.register({ userId: "flynn", url: "https://192.168.50.25:8765" }),
-    ).rejects.toThrow("Surf Ace register URL must use http:// or ws://");
-
-    await manager.stop();
     await fs.rm(statePath, { recursive: true, force: true });
   });
 
@@ -814,16 +718,18 @@ describe("Surf Ace manager (WebSocket transport)", () => {
               host: surface.host,
               port: surface.port,
               name: "Surf Ace - iPad",
-              intake: "manual",
+              intake: "bonjour",
               wsPath: "/ws",
               wsSecure: false,
               protocolVersion: 1,
               width: 1194,
               height: 834,
               scale: 2,
-              contentTypes: 31,
+              contentTypes: 127,
               sessionToken: "legacy_rest_token",
-              watchEnabled: false,
+              currentContentId: null,
+              currentRevision: 0,
+              currentContentType: null,
             },
           ],
         },
@@ -834,24 +740,31 @@ describe("Surf Ace manager (WebSocket transport)", () => {
 
     const manager = createSurfAceManager({
       statePath,
-      discoverImpl: async () => [],
+      discoverImpl: async () => [
+        {
+          instanceName: "Surf Ace - iPad",
+          host: surface.host,
+          port: surface.port,
+          txt: {
+            name: "Surf Ace - iPad",
+            v: "1",
+            w: "1194",
+            h: "834",
+            s: "2",
+            cap: "127",
+            busy: "0",
+            pk: "23c71e1c",
+            ws: "/ws",
+            tls: "0",
+          },
+        },
+      ],
       discoveryIntervalMs: 60_000,
       discoveryTimeoutMs: 100,
     });
 
     await manager.start();
-
-    const persistedAfterStart = JSON.parse(
-      await fs.readFile(path.join(statePath, SCREEN_STATE_FILE), "utf8"),
-    ) as {
-      screens?: Array<{ fingerprint?: string; sessionToken?: unknown }>;
-    };
-    const persistedScreen = persistedAfterStart.screens?.find(
-      (entry) => entry.fingerprint === "23c71e1c",
-    );
-    expect(persistedScreen?.sessionToken ?? null).toBeNull();
-
-    await manager.pair({ userId: "flynn", screen: "23c71e1c" });
+    await waitFor(() => surface.pairPayloads.length > 0);
     expect(surface.pairPayloads[0]).not.toHaveProperty("resume");
 
     await manager.stop();
