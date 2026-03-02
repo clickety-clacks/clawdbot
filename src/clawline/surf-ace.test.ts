@@ -12,6 +12,7 @@ type MockSurfaceHandle = {
   port: number;
   pairPayloads: Array<Record<string, unknown>>;
   snapshotPayloads: Array<Record<string, unknown>>;
+  annotationsRemovePayloads: Array<Record<string, unknown>>;
   receivedOps: string[];
   clientCloseCodes: number[];
   close: () => Promise<void>;
@@ -71,6 +72,7 @@ async function createMockSurface(options: MockSurfaceOptions = {}): Promise<Mock
 
   const pairPayloads: Array<Record<string, unknown>> = [];
   const snapshotPayloads: Array<Record<string, unknown>> = [];
+  const annotationsRemovePayloads: Array<Record<string, unknown>> = [];
   const receivedOps: string[] = [];
   const clientCloseCodes: number[] = [];
   const clients = new Set<WebSocket>();
@@ -302,6 +304,7 @@ async function createMockSurface(options: MockSurfaceOptions = {}): Promise<Mock
       }
 
       if (parsed.op === "annotations.remove") {
+        annotationsRemovePayloads.push(parsed.payload ?? {});
         const contentId =
           wireMode === "frame"
             ? typeof parsed.payload?.frameId === "string"
@@ -386,6 +389,7 @@ async function createMockSurface(options: MockSurfaceOptions = {}): Promise<Mock
     port: address.port,
     pairPayloads,
     snapshotPayloads,
+    annotationsRemovePayloads,
     receivedOps,
     clientCloseCodes,
     emitEvent: (op, payload) => {
@@ -584,8 +588,9 @@ describe("Surf Ace manager (connection daemon + local buffer)", () => {
       contentType: "html",
       content: "<html><body>Legacy push</body></html>",
     });
-    expect(push.contentId).toMatch(/^fr_/);
+    expect(push.contentId).toMatch(/^ct_/);
     expect(push.revision).toBe(1);
+    const legacyFrameId = `fr_${push.contentId.slice(3)}`;
 
     const listAfterPush = await manager.list({ userId: "flynn" });
     expect(listAfterPush).toContainEqual(
@@ -599,11 +604,63 @@ describe("Surf Ace manager (connection daemon + local buffer)", () => {
       }),
     );
 
+    surface.emitEvent("event.drawing_flush", {
+      contentId: push.contentId,
+      revision: push.revision,
+      flushId: "flush_legacy_1",
+      flushReason: "idle_window",
+      idleWindowMs: 8000,
+      maxIntervalMs: 30000,
+      strokes: [{ strokeId: "stroke_legacy_1", tool: "pencil", points: [] }],
+      strokeCount: 1,
+      pointsCount: 0,
+      firstStrokeAt: Date.now(),
+      lastStrokeAt: Date.now(),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    await manager.annotationsRemove({
+      userId: "flynn",
+      fingerprint: "6364d5a2",
+      contentId: push.contentId,
+      strokeIds: ["stroke_legacy_1"],
+    });
+
+    surface.emitEvent("event.drawing_flush", {
+      contentId: push.contentId,
+      revision: push.revision,
+      flushId: "flush_legacy_2",
+      flushReason: "idle_window",
+      idleWindowMs: 8000,
+      maxIntervalMs: 30000,
+      strokes: [{ strokeId: "stroke_legacy_2", tool: "pencil", points: [] }],
+      strokeCount: 1,
+      pointsCount: 0,
+      firstStrokeAt: Date.now(),
+      lastStrokeAt: Date.now(),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    await manager.annotationsRemove({
+      userId: "flynn",
+      fingerprint: "6364d5a2",
+      contentId: legacyFrameId,
+      strokeIds: ["stroke_legacy_2"],
+    });
+
     await manager.clear({ userId: "flynn", fingerprint: "6364d5a2" });
 
     expect(surface.receivedOps).toContain("frame.set");
     expect(surface.receivedOps).toContain("frame.clear");
     expect(surface.receivedOps).not.toContain("content.set");
+    expect(surface.annotationsRemovePayloads).toContainEqual({
+      frameId: legacyFrameId,
+      strokeIds: ["stroke_legacy_1"],
+    });
+    expect(surface.annotationsRemovePayloads).toContainEqual({
+      frameId: legacyFrameId,
+      strokeIds: ["stroke_legacy_2"],
+    });
 
     await manager.stop();
     await surface.close();

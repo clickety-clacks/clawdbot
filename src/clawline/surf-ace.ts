@@ -122,6 +122,7 @@ type PersistedScreenStateEntry = {
   contentTypes?: number;
   sessionToken: string | null;
   currentContentId?: string | null;
+  currentWireContentId?: string | null;
   currentRevision?: number;
   currentContentType?: string | null;
   lastSeenAt?: number;
@@ -174,6 +175,7 @@ type ManagedScreen = {
   maxMessageBytes: number;
   currentRevision: number;
   currentContentId: string | null;
+  currentWireContentId: string | null;
   currentContentType: string | null;
   consecutiveFailures: number;
   unreachable: boolean;
@@ -511,8 +513,37 @@ function buildFrameId(): string {
   return `fr_${randomUUID().replaceAll("-", "").slice(0, 8)}`;
 }
 
-function buildWireContentId(mode: SurfAceWireMode): string {
-  return mode === "frame" ? buildFrameId() : buildContentId();
+function normalizeCanonicalContentId(value: string | null | undefined): string | null {
+  const contentId = firstNonEmptyString(value);
+  if (!contentId) {
+    return null;
+  }
+  if (contentId.startsWith("ct_")) {
+    return contentId;
+  }
+  if (contentId.startsWith("fr_")) {
+    return `ct_${contentId.slice(3)}`;
+  }
+  return contentId;
+}
+
+function wireContentIdFromCanonical(canonicalContentId: string, wireMode: SurfAceWireMode): string {
+  if (wireMode === "frame") {
+    if (canonicalContentId.startsWith("fr_")) {
+      return canonicalContentId;
+    }
+    if (canonicalContentId.startsWith("ct_")) {
+      return `fr_${canonicalContentId.slice(3)}`;
+    }
+    return buildFrameId();
+  }
+  if (canonicalContentId.startsWith("ct_")) {
+    return canonicalContentId;
+  }
+  if (canonicalContentId.startsWith("fr_")) {
+    return `ct_${canonicalContentId.slice(3)}`;
+  }
+  return buildContentId();
 }
 
 function buildProviderId(): string {
@@ -805,24 +836,27 @@ class SurfAceManager implements SurfAceRuntime {
     }
 
     const wireMode = screen.wireMode;
-    const contentId = buildWireContentId(wireMode);
+    const canonicalContentId = buildContentId();
+    const initialWireContentId = wireContentIdFromCanonical(canonicalContentId, wireMode);
     const nextRevision = screen.currentRevision + 1;
     const encodedContent = this.encodeContentPayload(contentType, params.content);
     const payload: Record<string, unknown> =
       wireMode === "frame"
         ? {
-            frameId: contentId,
+            frameId: initialWireContentId,
             revision: nextRevision,
             contentType,
             content: encodedContent,
           }
         : {
-            contentId,
+            contentId: initialWireContentId,
             revision: nextRevision,
             contentType,
             content: encodedContent,
           };
     let response: SurfAceResponseEnvelope;
+    let responseWireMode = wireMode;
+    let fallbackWireContentId = initialWireContentId;
 
     try {
       response = await this.sendScreenRequest(
@@ -833,9 +867,10 @@ class SurfAceManager implements SurfAceRuntime {
     } catch (err) {
       if (wireMode === "content" && isUnknownOperationPayloadError(err)) {
         screen.wireMode = "frame";
-        const frameId = buildWireContentId("frame");
+        responseWireMode = "frame";
+        fallbackWireContentId = wireContentIdFromCanonical(canonicalContentId, "frame");
         response = await this.sendScreenRequest(screen, "frame.set", {
-          frameId,
+          frameId: fallbackWireContentId,
           revision: nextRevision,
           contentType,
           content: encodedContent,
@@ -848,15 +883,21 @@ class SurfAceManager implements SurfAceRuntime {
     try {
       const responsePayload = clampSnapshotToRecord(response.payload);
       const currentRevision = parseOptionalNumber(responsePayload.currentRevision);
-      const currentContentId = firstNonEmptyString(
-        responsePayload.currentContentId,
-        responsePayload.currentFrameId,
-        responsePayload.frameId,
-      );
+      const currentContentId = this.resolveCanonicalContentId(responsePayload, {
+        fallbackWireContentId,
+      });
+      const currentWireContentId = this.resolveWireContentId(responsePayload, {
+        wireMode: responseWireMode,
+        fallbackWireContentId,
+        fallbackCanonicalContentId: currentContentId ?? canonicalContentId,
+      });
       const currentContentType =
         typeof responsePayload.contentType === "string" ? responsePayload.contentType : null;
       screen.currentRevision = currentRevision ?? nextRevision;
-      screen.currentContentId = currentContentId ?? contentId;
+      screen.currentContentId = currentContentId ?? canonicalContentId;
+      screen.currentWireContentId =
+        currentWireContentId ??
+        wireContentIdFromCanonical(screen.currentContentId, screen.wireMode);
       screen.currentContentType = currentContentType ?? contentType;
       screen.eventBuffer.annotations = [];
       await this.persistScreenState();
@@ -899,6 +940,7 @@ class SurfAceManager implements SurfAceRuntime {
       const currentRevision = parseOptionalNumber(payload.currentRevision);
       screen.currentRevision = currentRevision ?? nextRevision;
       screen.currentContentId = null;
+      screen.currentWireContentId = null;
       screen.currentContentType = null;
       screen.eventBuffer.annotations = [];
       await this.persistScreenState();
@@ -955,12 +997,25 @@ class SurfAceManager implements SurfAceRuntime {
     const screen = this.resolveScreenByFingerprint(params.fingerprint);
     this.requireConnected(screen);
 
-    if (!screen.currentContentId || screen.currentContentId !== params.contentId) {
+    const requestedCanonicalContentId = normalizeCanonicalContentId(params.contentId);
+    if (!screen.currentContentId || !requestedCanonicalContentId) {
       throw buildToolError(
         "stale_content",
         "surf_ace_annotations_remove failed (stale_content): contentId does not match",
       );
     }
+    if (screen.currentContentId !== requestedCanonicalContentId) {
+      throw buildToolError(
+        "stale_content",
+        "surf_ace_annotations_remove failed (stale_content): contentId does not match",
+      );
+    }
+
+    const wireContentId =
+      screen.wireMode === "frame"
+        ? (screen.currentWireContentId ??
+          wireContentIdFromCanonical(screen.currentContentId, "frame"))
+        : (screen.currentWireContentId ?? screen.currentContentId);
 
     const strokeIds = params.strokeIds
       .map((entry) => entry.trim())
@@ -981,11 +1036,11 @@ class SurfAceManager implements SurfAceRuntime {
         "annotations.remove",
         screen.wireMode === "frame"
           ? {
-              frameId: params.contentId,
+              frameId: wireContentId,
               strokeIds,
             }
           : {
-              contentId: params.contentId,
+              contentId: wireContentId,
               strokeIds,
             },
       );
@@ -1675,8 +1730,25 @@ class SurfAceManager implements SurfAceRuntime {
       );
       const currentContentType =
         typeof statePayload.contentType === "string" ? statePayload.contentType : null;
+      const canonicalContentId = normalizeCanonicalContentId(currentContentId);
       screen.currentRevision = currentRevision ?? screen.currentRevision;
-      screen.currentContentId = currentContentId;
+      screen.currentContentId = canonicalContentId;
+      screen.currentWireContentId =
+        currentContentId && canonicalContentId
+          ? screen.wireMode === "frame"
+            ? firstNonEmptyString(
+                typeof statePayload.currentFrameId === "string"
+                  ? statePayload.currentFrameId
+                  : null,
+                wireContentIdFromCanonical(canonicalContentId, "frame"),
+              )
+            : firstNonEmptyString(
+                typeof statePayload.currentContentId === "string"
+                  ? statePayload.currentContentId
+                  : null,
+                canonicalContentId,
+              )
+          : null;
       screen.currentContentType = currentContentType;
     }
 
@@ -1862,11 +1934,19 @@ class SurfAceManager implements SurfAceRuntime {
     });
 
     const payload = clampSnapshotToRecord(response.payload);
-    const contentId = firstNonEmptyString(payload.contentId, payload.frameId);
+    const contentId = this.resolveCanonicalContentId(payload, {
+      fallbackWireContentId: screen.currentWireContentId,
+    });
+    const wireContentId = this.resolveWireContentId(payload, {
+      wireMode: screen.wireMode,
+      fallbackWireContentId: screen.currentWireContentId,
+      fallbackCanonicalContentId: contentId ?? screen.currentContentId,
+    });
     const revision = parseOptionalNumber(payload.revision);
     const contentType = typeof payload.contentType === "string" ? payload.contentType : null;
 
     screen.currentContentId = contentId;
+    screen.currentWireContentId = wireContentId;
     screen.currentContentType = contentType;
     if (revision !== undefined) {
       screen.currentRevision = revision;
@@ -1940,6 +2020,7 @@ class SurfAceManager implements SurfAceRuntime {
           maxMessageBytes: DEFAULT_WS_MAX_MESSAGE_BYTES,
           currentRevision: 0,
           currentContentId: null,
+          currentWireContentId: null,
           currentContentType: null,
           consecutiveFailures: 0,
           unreachable: false,
@@ -2043,6 +2124,41 @@ class SurfAceManager implements SurfAceRuntime {
     }
   }
 
+  private resolveCanonicalContentId(
+    payload: Record<string, unknown>,
+    options: { fallbackWireContentId?: string | null } = {},
+  ): string | null {
+    const rawContentId = firstNonEmptyString(payload.currentContentId, payload.contentId);
+    const rawFrameId = firstNonEmptyString(payload.currentFrameId, payload.frameId);
+    return normalizeCanonicalContentId(
+      firstNonEmptyString(rawContentId, rawFrameId, options.fallbackWireContentId),
+    );
+  }
+
+  private resolveWireContentId(
+    payload: Record<string, unknown>,
+    options: {
+      wireMode: SurfAceWireMode;
+      fallbackWireContentId?: string | null;
+      fallbackCanonicalContentId?: string | null;
+    },
+  ): string | null {
+    const rawContentId = firstNonEmptyString(payload.currentContentId, payload.contentId);
+    const rawFrameId = firstNonEmptyString(payload.currentFrameId, payload.frameId);
+    const preferred =
+      options.wireMode === "frame"
+        ? firstNonEmptyString(rawFrameId, rawContentId, options.fallbackWireContentId)
+        : firstNonEmptyString(rawContentId, rawFrameId, options.fallbackWireContentId);
+    if (preferred) {
+      return preferred;
+    }
+    const canonical = normalizeCanonicalContentId(options.fallbackCanonicalContentId);
+    if (!canonical) {
+      return null;
+    }
+    return wireContentIdFromCanonical(canonical, options.wireMode);
+  }
+
   private normalizeToolError(
     err: unknown,
     fallbackCode: SurfAceToolErrorCode,
@@ -2107,6 +2223,16 @@ class SurfAceManager implements SurfAceRuntime {
       const name =
         typeof entry.name === "string" && entry.name.trim().length > 0 ? entry.name : fingerprint;
 
+      const persistedCanonicalContentId = normalizeCanonicalContentId(entry.currentContentId);
+      const persistedWireContentId =
+        typeof entry.currentWireContentId === "string"
+          ? firstNonEmptyString(entry.currentWireContentId)
+          : firstNonEmptyString(entry.currentContentId);
+      const persistedWireMode: SurfAceWireMode =
+        typeof persistedWireContentId === "string" && persistedWireContentId.startsWith("fr_")
+          ? "frame"
+          : "content";
+
       const managed: ManagedScreen = {
         id: fingerprint,
         intake: entry.intake === "manual" ? "manual" : "bonjour",
@@ -2137,15 +2263,23 @@ class SurfAceManager implements SurfAceRuntime {
           typeof entry.currentRevision === "number" && Number.isFinite(entry.currentRevision)
             ? Math.floor(entry.currentRevision)
             : 0,
-        currentContentId:
-          typeof entry.currentContentId === "string" ? entry.currentContentId : null,
+        currentContentId: persistedCanonicalContentId,
+        currentWireContentId:
+          persistedCanonicalContentId && persistedWireContentId
+            ? persistedWireMode === "frame"
+              ? firstNonEmptyString(
+                  persistedWireContentId,
+                  wireContentIdFromCanonical(persistedCanonicalContentId, "frame"),
+                )
+              : firstNonEmptyString(persistedWireContentId, persistedCanonicalContentId)
+            : null,
         currentContentType:
           typeof entry.currentContentType === "string" ? entry.currentContentType : null,
         consecutiveFailures: 0,
         unreachable: true,
         sessionToken,
         eventBuffer: createEventBuffer(),
-        wireMode: "content",
+        wireMode: persistedWireMode,
       };
 
       this.screensById.set(fingerprint, managed);
@@ -2179,6 +2313,7 @@ class SurfAceManager implements SurfAceRuntime {
           contentTypes: screen.contentTypes,
           sessionToken: screen.sessionToken,
           currentContentId: screen.currentContentId,
+          currentWireContentId: screen.currentWireContentId,
           currentRevision: screen.currentRevision,
           currentContentType: screen.currentContentType,
           lastSeenAt: screen.lastSeenAt,
