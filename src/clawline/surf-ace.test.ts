@@ -24,6 +24,7 @@ type MockSurfaceOptions = {
   width?: number;
   height?: number;
   scale?: number;
+  wireMode?: "content" | "frame";
   suppressHeartbeatPongs?: number;
   maxMessageBytes?: number;
 };
@@ -78,6 +79,7 @@ async function createMockSurface(options: MockSurfaceOptions = {}): Promise<Mock
   const width = options.width ?? 1920;
   const height = options.height ?? 1080;
   const scale = options.scale ?? 2;
+  const wireMode = options.wireMode ?? "content";
   let suppressHeartbeatPongs = options.suppressHeartbeatPongs ?? 0;
   const maxMessageBytes = options.maxMessageBytes ?? 12 * 1024 * 1024;
 
@@ -164,7 +166,9 @@ async function createMockSurface(options: MockSurfaceOptions = {}): Promise<Mock
               maxDrawingFlushBytes: 2 * 1024 * 1024,
             },
             state: {
-              currentContentId,
+              ...(wireMode === "frame"
+                ? { currentFrameId: currentContentId }
+                : { currentContentId }),
               currentRevision,
               contentType: currentContentType,
             },
@@ -173,7 +177,7 @@ async function createMockSurface(options: MockSurfaceOptions = {}): Promise<Mock
         return;
       }
 
-      if (parsed.op === "content.set") {
+      if (parsed.op === "content.set" && wireMode === "content") {
         const payload = parsed.payload ?? {};
         currentContentId =
           typeof payload.contentId === "string" ? payload.contentId : currentContentId;
@@ -204,7 +208,7 @@ async function createMockSurface(options: MockSurfaceOptions = {}): Promise<Mock
         return;
       }
 
-      if (parsed.op === "content.clear") {
+      if (parsed.op === "content.clear" && wireMode === "content") {
         const payload = parsed.payload ?? {};
         const revision = payload.revision;
         currentRevision = typeof revision === "number" ? revision : currentRevision + 1;
@@ -223,13 +227,64 @@ async function createMockSurface(options: MockSurfaceOptions = {}): Promise<Mock
         return;
       }
 
+      if (parsed.op === "frame.set" && wireMode === "frame") {
+        const payload = parsed.payload ?? {};
+        currentContentId = typeof payload.frameId === "string" ? payload.frameId : currentContentId;
+        const revision = payload.revision;
+        currentRevision = typeof revision === "number" ? revision : currentRevision + 1;
+        currentContentType =
+          typeof payload.contentType === "string" ? payload.contentType : currentContentType;
+        annotations = [];
+
+        const contentRaw = payload.content;
+        if (contentRaw && typeof contentRaw === "object" && !Array.isArray(contentRaw)) {
+          const content = contentRaw as Record<string, unknown>;
+          if (typeof content.html === "string") {
+            currentVisibleText = content.html;
+          } else if (typeof content.markdown === "string") {
+            currentVisibleText = content.markdown;
+          }
+        }
+
+        sendResponse({
+          ok: true,
+          payload: {
+            currentFrameId: currentContentId,
+            currentRevision,
+            contentType: currentContentType,
+          },
+        });
+        return;
+      }
+
+      if (parsed.op === "frame.clear" && wireMode === "frame") {
+        const payload = parsed.payload ?? {};
+        const revision = payload.revision;
+        currentRevision = typeof revision === "number" ? revision : currentRevision + 1;
+        currentContentId = null;
+        currentContentType = null;
+        currentVisibleText = "";
+        annotations = [];
+        sendResponse({
+          ok: true,
+          payload: {
+            currentFrameId: currentContentId,
+            currentRevision,
+            contentType: currentContentType,
+          },
+        });
+        return;
+      }
+
       if (parsed.op === "snapshot.get") {
         snapshotPayloads.push(parsed.payload ?? {});
         const includeDrawings = parsed.payload?.includeDrawings === true;
         sendResponse({
           ok: true,
           payload: {
-            contentId: currentContentId,
+            ...(wireMode === "frame"
+              ? { frameId: currentContentId }
+              : { contentId: currentContentId }),
             revision: currentRevision,
             contentType: currentContentType,
             viewport: {
@@ -248,7 +303,13 @@ async function createMockSurface(options: MockSurfaceOptions = {}): Promise<Mock
 
       if (parsed.op === "annotations.remove") {
         const contentId =
-          typeof parsed.payload?.contentId === "string" ? parsed.payload.contentId : "";
+          wireMode === "frame"
+            ? typeof parsed.payload?.frameId === "string"
+              ? parsed.payload.frameId
+              : ""
+            : typeof parsed.payload?.contentId === "string"
+              ? parsed.payload.contentId
+              : "";
         if (!currentContentId || contentId !== currentContentId) {
           sendResponse({
             ok: false,
@@ -281,10 +342,30 @@ async function createMockSurface(options: MockSurfaceOptions = {}): Promise<Mock
         sendResponse({
           ok: true,
           payload: {
-            contentId: currentContentId,
+            ...(wireMode === "frame"
+              ? { frameId: currentContentId }
+              : { contentId: currentContentId }),
             removedStrokeIds,
             notFoundStrokeIds,
             remainingStrokeCount: annotations.length,
+          },
+        });
+        return;
+      }
+
+      if (
+        (parsed.op === "content.set" ||
+          parsed.op === "content.clear" ||
+          parsed.op === "frame.set" ||
+          parsed.op === "frame.clear") &&
+        ((wireMode === "frame" && parsed.op.startsWith("content.")) ||
+          (wireMode === "content" && parsed.op.startsWith("frame.")))
+      ) {
+        sendResponse({
+          ok: false,
+          error: {
+            code: "invalid_payload",
+            message: "Unknown operation.",
           },
         });
         return;
@@ -455,6 +536,74 @@ describe("Surf Ace manager (connection daemon + local buffer)", () => {
     expect(surface.receivedOps).toContain("content.clear");
     expect(surface.receivedOps).not.toContain("frame.set");
     expect(surface.receivedOps).not.toContain("frame.clear");
+
+    await manager.stop();
+    await surface.close();
+    await fs.rm(statePath, { recursive: true, force: true });
+  });
+
+  it("bridges content push to legacy frame operations", async () => {
+    const statePath = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-test-"));
+    const surface = await createMockSurface({
+      name: "Legacy Surface",
+      surfaceId: "6364d5a2",
+      wireMode: "frame",
+    });
+
+    const manager = createSurfAceManager({
+      statePath,
+      discoverImpl: async () => [
+        {
+          instanceName: "Legacy Surface",
+          host: surface.host,
+          port: surface.port,
+          txt: {
+            name: "Legacy Surface",
+            v: "1",
+            w: "1920",
+            h: "1080",
+            s: "2",
+            cap: "31",
+            busy: "0",
+            pk: "6364d5a2",
+            ws: "/ws",
+            tls: "0",
+          },
+        },
+      ],
+      discoveryIntervalMs: 60_000,
+      discoveryTimeoutMs: 100,
+    });
+
+    await manager.start();
+    await waitFor(() => surface.pairPayloads.length > 0);
+
+    const push = await manager.push({
+      userId: "flynn",
+      fingerprint: "6364d5a2",
+      contentType: "html",
+      content: "<html><body>Legacy push</body></html>",
+    });
+    expect(push.contentId).toMatch(/^fr_/);
+    expect(push.revision).toBe(1);
+
+    const listAfterPush = await manager.list({ userId: "flynn" });
+    expect(listAfterPush).toContainEqual(
+      expect.objectContaining({
+        fingerprint: "6364d5a2",
+        activeContent: expect.objectContaining({
+          contentId: push.contentId,
+          contentType: "html",
+          revision: 1,
+        }),
+      }),
+    );
+
+    await manager.clear({ userId: "flynn", fingerprint: "6364d5a2" });
+
+    expect(surface.receivedOps).toContain("frame.set");
+    expect(surface.receivedOps).toContain("frame.clear");
+    expect(surface.receivedOps).not.toContain("content.set");
 
     await manager.stop();
     await surface.close();

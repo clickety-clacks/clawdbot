@@ -21,6 +21,8 @@ const WS_RECONNECT_BACKOFF_MS = [500, 1_000, 2_000, 4_000, 8_000, 16_000, 30_000
 const SURF_ACE_ALERT_SESSION_KEY = "agent:main:main";
 const SURF_ACE_APPEND_REGISTER_CAP = 512;
 
+type SurfAceWireMode = "content" | "frame";
+
 type SurfAceToolErrorCode =
   | "screen_not_found"
   | "not_connected"
@@ -177,6 +179,7 @@ type ManagedScreen = {
   unreachable: boolean;
   sessionToken: string | null;
   eventBuffer: SurfAceEventBuffer;
+  wireMode: SurfAceWireMode;
 };
 
 type SurfAceEventBuffer = {
@@ -504,6 +507,14 @@ function buildContentId(): string {
   return `ct_${randomUUID().replaceAll("-", "").slice(0, 8)}`;
 }
 
+function buildFrameId(): string {
+  return `fr_${randomUUID().replaceAll("-", "").slice(0, 8)}`;
+}
+
+function buildWireContentId(mode: SurfAceWireMode): string {
+  return mode === "frame" ? buildFrameId() : buildContentId();
+}
+
 function buildProviderId(): string {
   return `pv_${randomUUID().replaceAll("-", "").slice(0, 16)}`;
 }
@@ -631,6 +642,19 @@ function asStringArray(value: unknown): string[] {
   return value.filter((entry): entry is string => typeof entry === "string");
 }
 
+function firstNonEmptyString(...values: unknown[]): string | null {
+  for (const value of values) {
+    if (typeof value !== "string") {
+      continue;
+    }
+    const trimmed = value.trim();
+    if (trimmed.length > 0) {
+      return trimmed;
+    }
+  }
+  return null;
+}
+
 function eventActivityLabel(op: string): string {
   switch (op) {
     case "event.drawing_flush":
@@ -652,6 +676,14 @@ function eventActivityLabel(op: string): string {
 
 function normalizeContentType(value: string): string {
   return value.trim().toLowerCase();
+}
+
+function isUnknownOperationPayloadError(err: unknown): boolean {
+  if (!(err instanceof Error)) {
+    return false;
+  }
+  const message = err.message.toLowerCase();
+  return message.includes("(invalid_payload)") && message.includes("unknown operation");
 }
 
 class SurfAceManager implements SurfAceRuntime {
@@ -772,23 +804,55 @@ class SurfAceManager implements SurfAceRuntime {
       );
     }
 
-    const contentId = buildContentId();
+    const wireMode = screen.wireMode;
+    const contentId = buildWireContentId(wireMode);
     const nextRevision = screen.currentRevision + 1;
-    const payload: Record<string, unknown> = {
-      contentId,
-      revision: nextRevision,
-      contentType,
-      content: this.encodeContentPayload(contentType, params.content),
-    };
+    const encodedContent = this.encodeContentPayload(contentType, params.content);
+    const payload: Record<string, unknown> =
+      wireMode === "frame"
+        ? {
+            frameId: contentId,
+            revision: nextRevision,
+            contentType,
+            content: encodedContent,
+          }
+        : {
+            contentId,
+            revision: nextRevision,
+            contentType,
+            content: encodedContent,
+          };
+    let response: SurfAceResponseEnvelope;
 
     try {
-      const response = await this.sendScreenRequest(screen, "content.set", payload);
+      response = await this.sendScreenRequest(
+        screen,
+        wireMode === "frame" ? "frame.set" : "content.set",
+        payload,
+      );
+    } catch (err) {
+      if (wireMode === "content" && isUnknownOperationPayloadError(err)) {
+        screen.wireMode = "frame";
+        const frameId = buildWireContentId("frame");
+        response = await this.sendScreenRequest(screen, "frame.set", {
+          frameId,
+          revision: nextRevision,
+          contentType,
+          content: encodedContent,
+        });
+      } else {
+        throw this.normalizeToolError(err, "internal_error", "surf_ace_push failed");
+      }
+    }
+
+    try {
       const responsePayload = clampSnapshotToRecord(response.payload);
       const currentRevision = parseOptionalNumber(responsePayload.currentRevision);
-      const currentContentId =
-        typeof responsePayload.currentContentId === "string"
-          ? responsePayload.currentContentId
-          : null;
+      const currentContentId = firstNonEmptyString(
+        responsePayload.currentContentId,
+        responsePayload.currentFrameId,
+        responsePayload.frameId,
+      );
       const currentContentType =
         typeof responsePayload.contentType === "string" ? responsePayload.contentType : null;
       screen.currentRevision = currentRevision ?? nextRevision;
@@ -812,9 +876,25 @@ class SurfAceManager implements SurfAceRuntime {
 
     const nextRevision = screen.currentRevision + 1;
     try {
-      const response = await this.sendScreenRequest(screen, "content.clear", {
-        revision: nextRevision,
-      });
+      let response: SurfAceResponseEnvelope;
+      try {
+        response = await this.sendScreenRequest(
+          screen,
+          screen.wireMode === "frame" ? "frame.clear" : "content.clear",
+          {
+            revision: nextRevision,
+          },
+        );
+      } catch (err) {
+        if (screen.wireMode === "content" && isUnknownOperationPayloadError(err)) {
+          screen.wireMode = "frame";
+          response = await this.sendScreenRequest(screen, "frame.clear", {
+            revision: nextRevision,
+          });
+        } else {
+          throw err;
+        }
+      }
       const payload = clampSnapshotToRecord(response.payload);
       const currentRevision = parseOptionalNumber(payload.currentRevision);
       screen.currentRevision = currentRevision ?? nextRevision;
@@ -896,10 +976,19 @@ class SurfAceManager implements SurfAceRuntime {
     }
 
     try {
-      const response = await this.sendScreenRequest(screen, "annotations.remove", {
-        contentId: params.contentId,
-        strokeIds,
-      });
+      const response = await this.sendScreenRequest(
+        screen,
+        "annotations.remove",
+        screen.wireMode === "frame"
+          ? {
+              frameId: params.contentId,
+              strokeIds,
+            }
+          : {
+              contentId: params.contentId,
+              strokeIds,
+            },
+      );
       const payload = clampSnapshotToRecord(response.payload);
       const removedStrokeIds = asStringArray(payload.removedStrokeIds);
       const notFoundStrokeIds = asStringArray(payload.notFoundStrokeIds);
@@ -1573,8 +1662,17 @@ class SurfAceManager implements SurfAceRuntime {
         : null;
     if (statePayload) {
       const currentRevision = parseOptionalNumber(statePayload.currentRevision);
-      const currentContentId =
-        typeof statePayload.currentContentId === "string" ? statePayload.currentContentId : null;
+      const hasCurrentFrameId = Object.hasOwn(statePayload, "currentFrameId");
+      const hasCurrentContentId = Object.hasOwn(statePayload, "currentContentId");
+      if (hasCurrentFrameId && !hasCurrentContentId) {
+        screen.wireMode = "frame";
+      } else if (hasCurrentContentId) {
+        screen.wireMode = "content";
+      }
+      const currentContentId = firstNonEmptyString(
+        statePayload.currentContentId,
+        statePayload.currentFrameId,
+      );
       const currentContentType =
         typeof statePayload.contentType === "string" ? statePayload.contentType : null;
       screen.currentRevision = currentRevision ?? screen.currentRevision;
@@ -1764,7 +1862,7 @@ class SurfAceManager implements SurfAceRuntime {
     });
 
     const payload = clampSnapshotToRecord(response.payload);
-    const contentId = typeof payload.contentId === "string" ? payload.contentId : null;
+    const contentId = firstNonEmptyString(payload.contentId, payload.frameId);
     const revision = parseOptionalNumber(payload.revision);
     const contentType = typeof payload.contentType === "string" ? payload.contentType : null;
 
@@ -1847,6 +1945,7 @@ class SurfAceManager implements SurfAceRuntime {
           unreachable: false,
           sessionToken: null,
           eventBuffer: createEventBuffer(),
+          wireMode: "content",
         };
         this.screensById.set(fingerprint, managed);
         this.ensureConnectionJob(managed);
@@ -2046,6 +2145,7 @@ class SurfAceManager implements SurfAceRuntime {
         unreachable: true,
         sessionToken,
         eventBuffer: createEventBuffer(),
+        wireMode: "content",
       };
 
       this.screensById.set(fingerprint, managed);
