@@ -656,6 +656,37 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("rejects outbound terminal descriptors missing terminalSessionId", async () => {
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry]);
+    try {
+      const descriptor = {
+        version: 1,
+        title: "Term",
+      };
+      const base64 = Buffer.from(JSON.stringify(descriptor), "utf8").toString("base64");
+
+      await expect(
+        ctx.server.sendMessage({
+          target: entry.userId,
+          text: "",
+          attachments: [
+            {
+              data: base64,
+              mimeType: "application/vnd.clawline.terminal-session+json",
+            },
+          ],
+        }),
+      ).rejects.toThrow("terminal session descriptor is invalid");
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("accepts data URI terminal descriptors without blocking on tmux startup", async () => {
     const entry = createAllowlistEntry({
       deviceId: randomUUID(),
@@ -1147,7 +1178,7 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
-  it("filters terminal attachments unless top-level clientFeatures advertises terminal_bubbles_v1", async () => {
+  it("surfaces a reason when terminal attachments are filtered for clients without terminal_bubbles_v1", async () => {
     const noFeatureDeviceId = randomUUID();
     const withFeatureDeviceId = randomUUID();
     const baseEntry = {
@@ -1236,6 +1267,8 @@ describe.sequential("clawline provider server", () => {
             attachment?.mimeType === "application/vnd.clawline.terminal-session+json",
         ),
       ).toBe(false);
+      expect(noFeatureEvent.content).toContain("Terminal session hidden:");
+      expect(withFeatureEvent.content).toBe("");
 
       noFeatureWs.terminate();
       withFeatureWs.terminate();
