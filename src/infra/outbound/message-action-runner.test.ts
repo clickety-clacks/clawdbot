@@ -666,7 +666,7 @@ describe("runMessageAction sendAttachment hydration", () => {
     });
   });
 
-  it("allows localhost media fetches for sendAttachment", async () => {
+  it("blocks loopback URLs for sendAttachment media", async () => {
     const cfg = {
       channels: {
         bluebubbles: {
@@ -677,20 +677,24 @@ describe("runMessageAction sendAttachment hydration", () => {
       },
     } as OpenClawConfig;
 
-    await runMessageAction({
-      cfg,
-      action: "sendAttachment",
-      params: {
-        channel: "bluebubbles",
-        target: "+15551234567",
-        media: "http://127.0.0.1:18999/terminal.json",
-        message: "caption",
-      },
-    });
+    await restoreRealMediaLoader();
+
+    await expect(
+      runMessageAction({
+        cfg,
+        action: "sendAttachment",
+        params: {
+          channel: "bluebubbles",
+          target: "+15551234567",
+          media: "http://127.0.0.1:18800/api/sessions",
+          message: "caption",
+        },
+      }),
+    ).rejects.toThrow(/Blocked hostname|private\/internal\/special-use IP address/i);
 
     const call = vi.mocked(loadWebMedia).mock.calls[0];
-    expect(call?.[0]).toBe("http://127.0.0.1:18999/terminal.json");
-    expect(call?.[2]).toEqual({ ssrfPolicy: { allowedHostnames: ["127.0.0.1"] } });
+    expect(call?.[0]).toBe("http://127.0.0.1:18800/api/sessions");
+    expect(call?.[2]).toBeUndefined();
   });
 });
 

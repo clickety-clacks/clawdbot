@@ -172,24 +172,6 @@ function normalizeAttachmentBufferArg(args: Record<string, unknown>): void {
   }
 }
 
-function resolveLoopbackSsrfPolicy(
-  mediaSource: string,
-): { allowedHostnames: string[] } | undefined {
-  try {
-    const parsed = new URL(mediaSource);
-    if (!/^https?:$/i.test(parsed.protocol)) {
-      return undefined;
-    }
-    const host = parsed.hostname.toLowerCase();
-    if (host === "localhost" || host === "127.0.0.1" || host === "::1") {
-      return { allowedHostnames: [parsed.hostname] };
-    }
-    return undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 export type AttachmentMediaPolicy =
   | {
       mode: "sandbox";
@@ -280,11 +262,9 @@ async function hydrateAttachmentPayload(params: {
       channel: params.channel,
       accountId: params.accountId,
     });
-    const ssrfPolicy = resolveLoopbackSsrfPolicy(mediaSource);
     const media = await loadWebMedia(
       mediaSource,
       buildAttachmentMediaLoadOptions({ policy: params.mediaPolicy, maxBytes }),
-      ssrfPolicy ? { ssrfPolicy } : undefined,
     );
     params.args.buffer = media.buffer.toString("base64");
     if (!contentTypeParam && media.contentType) {
