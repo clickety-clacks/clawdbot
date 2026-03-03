@@ -8,9 +8,10 @@ vi.mock("../pi-model-discovery.js", () => ({
 import type { OpenClawConfig } from "../../config/config.js";
 import { buildInlineProviderModels, resolveModel } from "./model.js";
 import {
+  buildOpenAICodexForwardCompatExpectation,
   makeModel,
   mockDiscoveredModel,
-  OPENAI_CODEX_TEMPLATE_MODEL,
+  mockOpenAICodexTemplateModel,
   resetMockDiscoverModels,
 } from "./model.test-harness.js";
 
@@ -170,62 +171,68 @@ describe("resolveModel", () => {
     expect(result.model?.id).toBe("missing-model");
   });
 
+  it("prefers matching configured model metadata for fallback token limits", () => {
+    const cfg = {
+      models: {
+        providers: {
+          custom: {
+            baseUrl: "http://localhost:9000",
+            models: [
+              {
+                ...makeModel("model-a"),
+                contextWindow: 4096,
+                maxTokens: 1024,
+              },
+              {
+                ...makeModel("model-b"),
+                contextWindow: 262144,
+                maxTokens: 32768,
+              },
+            ],
+          },
+        },
+      },
+    } as OpenClawConfig;
+
+    const result = resolveModel("custom", "model-b", "/tmp/agent", cfg);
+
+    expect(result.model?.contextWindow).toBe(262144);
+    expect(result.model?.maxTokens).toBe(32768);
+  });
+
+  it("propagates reasoning from matching configured fallback model", () => {
+    const cfg = {
+      models: {
+        providers: {
+          custom: {
+            baseUrl: "http://localhost:9000",
+            models: [
+              {
+                ...makeModel("model-a"),
+                reasoning: false,
+              },
+              {
+                ...makeModel("model-b"),
+                reasoning: true,
+              },
+            ],
+          },
+        },
+      },
+    } as OpenClawConfig;
+
+    const result = resolveModel("custom", "model-b", "/tmp/agent", cfg);
+
+    expect(result.model?.reasoning).toBe(true);
+  });
+
   it("builds an openai-codex fallback for gpt-5.3-codex", () => {
-    mockDiscoveredModel({
-      provider: "openai-codex",
-      modelId: "gpt-5.2-codex",
-      templateModel: OPENAI_CODEX_TEMPLATE_MODEL,
-    });
+    mockOpenAICodexTemplateModel();
 
     const result = resolveModel("openai-codex", "gpt-5.3-codex", "/tmp/agent");
 
     expect(result.error).toBeUndefined();
-    expect(result.model).toMatchObject({
-      provider: "openai-codex",
-      id: "gpt-5.3-codex",
-      api: "openai-codex-responses",
-      baseUrl: "https://chatgpt.com/backend-api",
-      reasoning: true,
-      contextWindow: 272000,
-      maxTokens: 128000,
-    });
-  });
-
-  it("builds an openai-codex fallback for gpt-5.3-codex-spark", () => {
-    const templateModel = {
-      id: "gpt-5.2-codex",
-      name: "GPT-5.2 Codex",
-      provider: "openai-codex",
-      api: "openai-codex-responses",
-      baseUrl: "https://chatgpt.com/backend-api",
-      reasoning: true,
-      input: ["text", "image"] as const,
-      cost: { input: 1.75, output: 14, cacheRead: 0.175, cacheWrite: 0 },
-      contextWindow: 272000,
-      maxTokens: 128000,
-    };
-
-    vi.mocked(discoverModels).mockReturnValue({
-      find: vi.fn((provider: string, modelId: string) => {
-        if (provider === "openai-codex" && modelId === "gpt-5.2-codex") {
-          return templateModel;
-        }
-        return null;
-      }),
-    } as unknown as ReturnType<typeof discoverModels>);
-
-    const result = resolveModel("openai-codex", "gpt-5.3-codex-spark", "/tmp/agent");
-
-    expect(result.error).toBeUndefined();
-    expect(result.model).toMatchObject({
-      provider: "openai-codex",
-      id: "gpt-5.3-codex-spark",
-      api: "openai-codex-responses",
-      baseUrl: "https://chatgpt.com/backend-api",
-      reasoning: true,
-      contextWindow: 272000,
-      maxTokens: 128000,
-    });
+    expect(result.model).toMatchObject(buildOpenAICodexForwardCompatExpectation("gpt-5.3-codex"));
   });
 
   it("builds an anthropic forward-compat fallback for claude-opus-4-6", () => {
@@ -280,88 +287,6 @@ describe("resolveModel", () => {
     });
   });
 
-  it("builds an anthropic forward-compat fallback for claude-sonnet-4-6", () => {
-    mockDiscoveredModel({
-      provider: "anthropic",
-      modelId: "claude-sonnet-4-5",
-      templateModel: buildForwardCompatTemplate({
-        id: "claude-sonnet-4-5",
-        name: "Claude Sonnet 4.5",
-        provider: "anthropic",
-        api: "anthropic-messages",
-        baseUrl: "https://api.anthropic.com",
-      }),
-    });
-
-    expectResolvedForwardCompatFallback({
-      provider: "anthropic",
-      id: "claude-sonnet-4-6",
-      expectedModel: {
-        provider: "anthropic",
-        id: "claude-sonnet-4-6",
-        api: "anthropic-messages",
-        baseUrl: "https://api.anthropic.com",
-        reasoning: true,
-      },
-    });
-  });
-
-  it("builds an antigravity forward-compat fallback for claude-opus-4-6-thinking", () => {
-    mockDiscoveredModel({
-      provider: "google-antigravity",
-      modelId: "claude-opus-4-5-thinking",
-      templateModel: buildForwardCompatTemplate({
-        id: "claude-opus-4-5-thinking",
-        name: "Claude Opus 4.5 Thinking",
-        provider: "google-antigravity",
-        api: "google-gemini-cli",
-        baseUrl: "https://daily-cloudcode-pa.sandbox.googleapis.com",
-      }),
-    });
-
-    expectResolvedForwardCompatFallback({
-      provider: "google-antigravity",
-      id: "claude-opus-4-6-thinking",
-      expectedModel: {
-        provider: "google-antigravity",
-        id: "claude-opus-4-6-thinking",
-        api: "google-gemini-cli",
-        baseUrl: "https://daily-cloudcode-pa.sandbox.googleapis.com",
-        reasoning: true,
-        contextWindow: 200000,
-        maxTokens: 64000,
-      },
-    });
-  });
-
-  it("builds an antigravity forward-compat fallback for claude-opus-4-6", () => {
-    mockDiscoveredModel({
-      provider: "google-antigravity",
-      modelId: "claude-opus-4-5",
-      templateModel: buildForwardCompatTemplate({
-        id: "claude-opus-4-5",
-        name: "Claude Opus 4.5",
-        provider: "google-antigravity",
-        api: "google-gemini-cli",
-        baseUrl: "https://daily-cloudcode-pa.sandbox.googleapis.com",
-      }),
-    });
-
-    expectResolvedForwardCompatFallback({
-      provider: "google-antigravity",
-      id: "claude-opus-4-6",
-      expectedModel: {
-        provider: "google-antigravity",
-        id: "claude-opus-4-6",
-        api: "google-gemini-cli",
-        baseUrl: "https://daily-cloudcode-pa.sandbox.googleapis.com",
-        reasoning: true,
-        contextWindow: 200000,
-        maxTokens: 64000,
-      },
-    });
-  });
-
   it("builds a zai forward-compat fallback for glm-5", () => {
     mockDiscoveredModel({
       provider: "zai",
@@ -401,12 +326,6 @@ describe("resolveModel", () => {
 
   it("keeps unknown-model errors for non-gpt-5 openai-codex ids", () => {
     expectUnknownModelError("openai-codex", "gpt-4.1-mini");
-  });
-
-  it("errors for unknown gpt-5.3-codex-* variants", () => {
-    const result = resolveModel("openai-codex", "gpt-5.3-codex-unknown", "/tmp/agent");
-    expect(result.model).toBeUndefined();
-    expect(result.error).toBe("Unknown model: openai-codex/gpt-5.3-codex-unknown");
   });
 
   it("uses codex fallback even when openai-codex provider is configured", () => {

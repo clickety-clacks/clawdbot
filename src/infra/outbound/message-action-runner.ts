@@ -1,8 +1,5 @@
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import { resolveSessionAgentId } from "../../agents/agent-scope.js";
-import { assertMediaNotDataUrl, resolveSandboxedMediaSource } from "../../agents/sandbox-paths.js";
 import {
   readNumberParam,
   readStringArrayParam,
@@ -16,25 +13,29 @@ import type {
   ChannelThreadingToolContext,
 } from "../../channels/plugins/types.js";
 import type { OpenClawConfig } from "../../config/config.js";
-import { extensionForMime } from "../../media/mime.js";
-import { parseSlackTarget } from "../../slack/targets.js";
-import { parseTelegramTarget } from "../../telegram/targets.js";
-import {
-  isDeliverableMessageChannel,
-  normalizeMessageChannel,
-  type GatewayClientMode,
-  type GatewayClientName,
-} from "../../utils/message-channel.js";
-import { loadWebMedia } from "../../web/media.js";
-import type { SsrFPolicy } from "../net/ssrf.js";
+import { getAgentScopedMediaLocalRoots } from "../../media/local-roots.js";
+import { buildChannelAccountBindings } from "../../routing/bindings.js";
+import { normalizeAgentId } from "../../routing/session-key.js";
+import { type GatewayClientMode, type GatewayClientName } from "../../utils/message-channel.js";
+import { throwIfAborted } from "./abort.js";
 import {
   listConfiguredMessageChannels,
   resolveMessageChannelSelection,
 } from "./channel-selection.js";
-import { applyTargetToParams } from "./channel-target.js";
 import type { OutboundSendDeps } from "./deliver.js";
-import { parseComponentsParam } from "./message-action-params.js";
-import { actionHasTarget, actionRequiresTarget } from "./message-action-spec.js";
+import { normalizeMessageActionInput } from "./message-action-normalization.js";
+import {
+  hydrateAttachmentParamsForAction,
+  normalizeSandboxMediaList,
+  normalizeSandboxMediaParams,
+  parseButtonsParam,
+  parseCardParam,
+  parseComponentsParam,
+  readBooleanParam,
+  resolveAttachmentMediaPolicy,
+  resolveSlackAutoThreadId,
+  resolveTelegramAutoThreadId,
+} from "./message-action-params.js";
 import type { MessagePollResult, MessageSendResult } from "./message.js";
 import {
   applyCrossContextDecoration,
@@ -56,6 +57,33 @@ export type MessageActionRunnerGateway = {
   clientDisplayName?: string;
   mode: GatewayClientMode;
 };
+
+function resolveAndApplyOutboundThreadId(
+  params: Record<string, unknown>,
+  ctx: {
+    channel: ChannelId;
+    to: string;
+    toolContext?: ChannelThreadingToolContext;
+    allowSlackAutoThread: boolean;
+  },
+): string | undefined {
+  const threadId = readStringParam(params, "threadId");
+  const slackAutoThreadId =
+    ctx.allowSlackAutoThread && ctx.channel === "slack" && !threadId
+      ? resolveSlackAutoThreadId({ to: ctx.to, toolContext: ctx.toolContext })
+      : undefined;
+  const telegramAutoThreadId =
+    ctx.channel === "telegram" && !threadId
+      ? resolveTelegramAutoThreadId({ to: ctx.to, toolContext: ctx.toolContext })
+      : undefined;
+  const resolved = threadId ?? slackAutoThreadId ?? telegramAutoThreadId;
+  // Write auto-resolved threadId back into params so downstream dispatch
+  // (plugin `readStringParam(params, "threadId")`) picks it up.
+  if (resolved && !params.threadId) {
+    params.threadId = resolved;
+  }
+  return resolved ?? undefined;
+}
 
 export type RunMessageActionParams = {
   cfg: OpenClawConfig;
@@ -183,431 +211,19 @@ async function maybeApplyCrossContextMarker(params: {
   });
 }
 
-function readBooleanParam(params: Record<string, unknown>, key: string): boolean | undefined {
-  const raw = params[key];
-  if (typeof raw === "boolean") {
-    return raw;
-  }
-  if (typeof raw === "string") {
-    const trimmed = raw.trim().toLowerCase();
-    if (trimmed === "true") {
-      return true;
-    }
-    if (trimmed === "false") {
-      return false;
-    }
-  }
-  return undefined;
-}
-
-function resolveSlackAutoThreadId(params: {
-  to: string;
-  toolContext?: ChannelThreadingToolContext;
-}): string | undefined {
-  const context = params.toolContext;
-  if (!context?.currentThreadTs || !context.currentChannelId) {
-    return undefined;
-  }
-  // Only mirror auto-threading when Slack would reply in the active thread for this channel.
-  if (context.replyToMode !== "all" && context.replyToMode !== "first") {
-    return undefined;
-  }
-  const parsedTarget = parseSlackTarget(params.to, { defaultKind: "channel" });
-  if (!parsedTarget || parsedTarget.kind !== "channel") {
-    return undefined;
-  }
-  if (parsedTarget.id.toLowerCase() !== context.currentChannelId.toLowerCase()) {
-    return undefined;
-  }
-  if (context.replyToMode === "first" && context.hasRepliedRef?.value) {
-    return undefined;
-  }
-  return context.currentThreadTs;
-}
-
-/**
- * Auto-inject Telegram forum topic thread ID when the message tool targets
- * the same chat the session originated from.  Mirrors the Slack auto-threading
- * pattern so media, buttons, and other tool-sent messages land in the correct
- * topic instead of the General Topic.
- *
- * Unlike Slack, we do not gate on `replyToMode` here: Telegram forum topics
- * are persistent sub-channels (not ephemeral reply threads), so auto-injection
- * should always apply when the target chat matches.
- */
-function resolveTelegramAutoThreadId(params: {
-  to: string;
-  toolContext?: ChannelThreadingToolContext;
-}): string | undefined {
-  const context = params.toolContext;
-  if (!context?.currentThreadTs || !context.currentChannelId) {
-    return undefined;
-  }
-  // Use parseTelegramTarget to extract canonical chatId from both sides,
-  // mirroring how Slack uses parseSlackTarget. This handles format variations
-  // like `telegram:group:123:topic:456` vs `telegram:123`.
-  const parsedTo = parseTelegramTarget(params.to);
-  const parsedChannel = parseTelegramTarget(context.currentChannelId);
-  if (parsedTo.chatId.toLowerCase() !== parsedChannel.chatId.toLowerCase()) {
-    return undefined;
-  }
-  return context.currentThreadTs;
-}
-
-function resolveAttachmentMaxBytes(params: {
-  cfg: OpenClawConfig;
-  channel: ChannelId;
-  accountId?: string | null;
-}): number | undefined {
-  const accountId = typeof params.accountId === "string" ? params.accountId.trim() : "";
-  const channelCfg = params.cfg.channels?.[params.channel];
-  const channelObj =
-    channelCfg && typeof channelCfg === "object"
-      ? (channelCfg as Record<string, unknown>)
-      : undefined;
-  const channelMediaMax =
-    typeof channelObj?.mediaMaxMb === "number" ? channelObj.mediaMaxMb : undefined;
-  const accountsObj =
-    channelObj?.accounts && typeof channelObj.accounts === "object"
-      ? (channelObj.accounts as Record<string, unknown>)
-      : undefined;
-  const accountCfg = accountId && accountsObj ? accountsObj[accountId] : undefined;
-  const accountMediaMax =
-    accountCfg && typeof accountCfg === "object"
-      ? (accountCfg as Record<string, unknown>).mediaMaxMb
-      : undefined;
-  // Priority: account-specific > channel-level > global default
-  const limitMb =
-    (typeof accountMediaMax === "number" ? accountMediaMax : undefined) ??
-    channelMediaMax ??
-    params.cfg.agents?.defaults?.mediaMaxMb;
-  return typeof limitMb === "number" ? limitMb * 1024 * 1024 : undefined;
-}
-
-function inferAttachmentFilename(params: {
-  mediaHint?: string;
-  contentType?: string;
-}): string | undefined {
-  const mediaHint = params.mediaHint?.trim();
-  if (mediaHint) {
-    try {
-      if (mediaHint.startsWith("file://")) {
-        const filePath = fileURLToPath(mediaHint);
-        const base = path.basename(filePath);
-        if (base) {
-          return base;
-        }
-      } else if (/^https?:\/\//i.test(mediaHint)) {
-        const url = new URL(mediaHint);
-        const base = path.basename(url.pathname);
-        if (base) {
-          return base;
-        }
-      } else {
-        const base = path.basename(mediaHint);
-        if (base) {
-          return base;
-        }
-      }
-    } catch {
-      // fall through to content-type based default
-    }
-  }
-  const ext = params.contentType ? extensionForMime(params.contentType) : undefined;
-  return ext ? `attachment${ext}` : "attachment";
-}
-
-function normalizeBase64Payload(params: { base64?: string; contentType?: string }): {
-  base64?: string;
-  contentType?: string;
-} {
-  if (!params.base64) {
-    return { base64: params.base64, contentType: params.contentType };
-  }
-  const match = /^data:([^;]+);base64,(.*)$/i.exec(params.base64.trim());
-  if (!match) {
-    return { base64: params.base64, contentType: params.contentType };
-  }
-  const [, mime, payload] = match;
-  return {
-    base64: payload,
-    contentType: params.contentType ?? mime,
-  };
-}
-
-function readBase64BufferParam(
-  args: Record<string, unknown>,
-  key: string,
-): { raw?: string; normalized?: string } {
-  const value = args[key];
-  if (typeof value === "string") {
-    return { raw: value };
-  }
-  if (value instanceof ArrayBuffer) {
-    return { normalized: Buffer.from(value).toString("base64") };
-  }
-  if (ArrayBuffer.isView(value)) {
-    return {
-      normalized: Buffer.from(value.buffer, value.byteOffset, value.byteLength).toString("base64"),
-    };
-  }
-  if (value && typeof value === "object") {
-    const rec = value as { type?: unknown; data?: unknown };
-    if (rec.type === "Buffer" && Array.isArray(rec.data)) {
-      return { normalized: Buffer.from(rec.data).toString("base64") };
-    }
-  }
-  return {};
-}
-
-function resolveLocalMediaSsrPolicy(mediaSource?: string | null): SsrFPolicy | undefined {
-  if (!mediaSource) {
-    return undefined;
-  }
-  const trimmed = mediaSource.trim();
-  if (!trimmed || !/^https?:\/\//i.test(trimmed)) {
-    return undefined;
-  }
-  try {
-    const url = new URL(trimmed);
-    const hostname = url.hostname.toLowerCase();
-    if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1") {
-      return { allowedHostnames: [hostname] };
-    }
-  } catch {
-    return undefined;
-  }
-  return undefined;
-}
-
-async function normalizeSandboxMediaParams(params: {
-  args: Record<string, unknown>;
-  sandboxRoot?: string;
-}): Promise<void> {
-  const sandboxRoot = params.sandboxRoot?.trim();
-  const mediaKeys: Array<"media" | "path" | "filePath"> = ["media", "path", "filePath"];
-  for (const key of mediaKeys) {
-    const raw = readStringParam(params.args, key, { trim: false });
-    if (!raw) {
-      continue;
-    }
-    assertMediaNotDataUrl(raw);
-    if (!sandboxRoot) {
-      continue;
-    }
-    const normalized = await resolveSandboxedMediaSource({ media: raw, sandboxRoot });
-    if (normalized !== raw) {
-      params.args[key] = normalized;
-    }
-  }
-}
-
-async function normalizeSandboxMediaList(params: {
-  values: string[];
-  sandboxRoot?: string;
-}): Promise<string[]> {
-  const sandboxRoot = params.sandboxRoot?.trim();
-  const normalized: string[] = [];
-  const seen = new Set<string>();
-  for (const value of params.values) {
-    const raw = value?.trim();
-    if (!raw) {
-      continue;
-    }
-    assertMediaNotDataUrl(raw);
-    const resolved = sandboxRoot
-      ? await resolveSandboxedMediaSource({ media: raw, sandboxRoot })
-      : raw;
-    if (seen.has(resolved)) {
-      continue;
-    }
-    seen.add(resolved);
-    normalized.push(resolved);
-  }
-  return normalized;
-}
-
-async function hydrateSetGroupIconParams(params: {
-  cfg: OpenClawConfig;
-  channel: ChannelId;
-  accountId?: string | null;
-  args: Record<string, unknown>;
-  action: ChannelMessageActionName;
-  dryRun?: boolean;
-}): Promise<void> {
-  if (params.action !== "setGroupIcon") {
-    return;
-  }
-
-  const mediaHint = readStringParam(params.args, "media", { trim: false });
-  const fileHint =
-    readStringParam(params.args, "path", { trim: false }) ??
-    readStringParam(params.args, "filePath", { trim: false });
-  const contentTypeParam =
-    readStringParam(params.args, "contentType") ?? readStringParam(params.args, "mimeType");
-
-  const { raw: rawBuffer, normalized: normalizedBuffer } = readBase64BufferParam(
-    params.args,
-    "buffer",
-  );
-  const rawBufferValue = rawBuffer ?? normalizedBuffer;
-  if (!rawBuffer && normalizedBuffer) {
-    params.args.buffer = normalizedBuffer;
-  }
-  const normalized = normalizeBase64Payload({
-    base64: rawBufferValue,
-    contentType: contentTypeParam ?? undefined,
-  });
-  if (normalized.base64 !== rawBufferValue && normalized.base64) {
-    params.args.buffer = normalized.base64;
-    if (normalized.contentType && !contentTypeParam) {
-      params.args.contentType = normalized.contentType;
-    }
-  }
-
-  const filename = readStringParam(params.args, "filename");
-  const mediaSource = mediaHint ?? fileHint;
-
-  if (!params.dryRun && !rawBufferValue && mediaSource) {
-    const maxBytes = resolveAttachmentMaxBytes({
-      cfg: params.cfg,
-      channel: params.channel,
-      accountId: params.accountId,
-    });
-    const media = await loadWebMedia(mediaSource, maxBytes, {
-      ssrfPolicy: resolveLocalMediaSsrPolicy(mediaSource),
-    });
-    params.args.buffer = media.buffer.toString("base64");
-    if (!contentTypeParam && media.contentType) {
-      params.args.contentType = media.contentType;
-    }
-    if (!filename) {
-      params.args.filename = inferAttachmentFilename({
-        mediaHint: media.fileName ?? mediaSource,
-        contentType: media.contentType ?? contentTypeParam ?? undefined,
-      });
-    }
-  } else if (!filename) {
-    params.args.filename = inferAttachmentFilename({
-      mediaHint: mediaSource,
-      contentType: contentTypeParam ?? undefined,
-    });
-  }
-}
-
-async function hydrateSendAttachmentParams(params: {
-  cfg: OpenClawConfig;
-  channel: ChannelId;
-  accountId?: string | null;
-  args: Record<string, unknown>;
-  action: ChannelMessageActionName;
-  dryRun?: boolean;
-}): Promise<void> {
-  if (params.action !== "sendAttachment") {
-    return;
-  }
-
-  const mediaHint = readStringParam(params.args, "media", { trim: false });
-  const fileHint =
-    readStringParam(params.args, "path", { trim: false }) ??
-    readStringParam(params.args, "filePath", { trim: false });
-  const contentTypeParam =
-    readStringParam(params.args, "contentType") ?? readStringParam(params.args, "mimeType");
-  const caption = readStringParam(params.args, "caption", { allowEmpty: true })?.trim();
-  const message = readStringParam(params.args, "message", { allowEmpty: true })?.trim();
-  if (!caption && message) {
-    params.args.caption = message;
-  }
-
-  const { raw: rawBuffer, normalized: normalizedBuffer } = readBase64BufferParam(
-    params.args,
-    "buffer",
-  );
-  const rawBufferValue = rawBuffer ?? normalizedBuffer;
-  if (!rawBuffer && normalizedBuffer) {
-    params.args.buffer = normalizedBuffer;
-  }
-  const normalized = normalizeBase64Payload({
-    base64: rawBufferValue,
-    contentType: contentTypeParam ?? undefined,
-  });
-  if (normalized.base64 !== rawBufferValue && normalized.base64) {
-    params.args.buffer = normalized.base64;
-    if (normalized.contentType && !contentTypeParam) {
-      params.args.contentType = normalized.contentType;
-    }
-  }
-
-  const filename = readStringParam(params.args, "filename");
-  const mediaSource = mediaHint ?? fileHint;
-
-  if (!params.dryRun && !rawBufferValue && mediaSource) {
-    const maxBytes = resolveAttachmentMaxBytes({
-      cfg: params.cfg,
-      channel: params.channel,
-      accountId: params.accountId,
-    });
-    const media = await loadWebMedia(mediaSource, maxBytes, {
-      ssrfPolicy: resolveLocalMediaSsrPolicy(mediaSource),
-    });
-    params.args.buffer = media.buffer.toString("base64");
-    if (!contentTypeParam && media.contentType) {
-      params.args.contentType = media.contentType;
-    }
-    if (!filename) {
-      params.args.filename = inferAttachmentFilename({
-        mediaHint: media.fileName ?? mediaSource,
-        contentType: media.contentType ?? contentTypeParam ?? undefined,
-      });
-    }
-  } else if (!filename) {
-    params.args.filename = inferAttachmentFilename({
-      mediaHint: mediaSource,
-      contentType: contentTypeParam ?? undefined,
-    });
-  }
-}
-
-function parseButtonsParam(params: Record<string, unknown>): void {
-  const raw = params.buttons;
-  if (typeof raw !== "string") {
-    return;
-  }
-  const trimmed = raw.trim();
-  if (!trimmed) {
-    delete params.buttons;
-    return;
-  }
-  try {
-    params.buttons = JSON.parse(trimmed) as unknown;
-  } catch {
-    throw new Error("--buttons must be valid JSON");
-  }
-}
-
-function parseCardParam(params: Record<string, unknown>): void {
-  const raw = params.card;
-  if (typeof raw !== "string") {
-    return;
-  }
-  const trimmed = raw.trim();
-  if (!trimmed) {
-    delete params.card;
-    return;
-  }
-  try {
-    params.card = JSON.parse(trimmed) as unknown;
-  } catch {
-    throw new Error("--card must be valid JSON");
-  }
-}
-
-async function resolveChannel(cfg: OpenClawConfig, params: Record<string, unknown>) {
-  const channelHint = readStringParam(params, "channel");
+async function resolveChannel(
+  cfg: OpenClawConfig,
+  params: Record<string, unknown>,
+  toolContext?: { currentChannelProvider?: string },
+) {
   const selection = await resolveMessageChannelSelection({
     cfg,
-    channel: channelHint,
+    channel: readStringParam(params, "channel"),
+    fallbackChannel: toolContext?.currentChannelProvider,
   });
+  if (selection.source === "tool-context-fallback") {
+    params.channel = selection.channel;
+  }
   return selection.channel;
 }
 
@@ -702,7 +318,7 @@ async function handleBroadcastAction(
   }
   const targetChannels =
     channelHint && channelHint.trim().toLowerCase() !== "all"
-      ? [await resolveChannel(input.cfg, { channel: channelHint })]
+      ? [await resolveChannel(input.cfg, { channel: channelHint }, input.toolContext)]
       : configured;
   const results: Array<{
     channel: ChannelId;
@@ -763,14 +379,6 @@ async function handleBroadcastAction(
   };
 }
 
-function throwIfAborted(abortSignal?: AbortSignal): void {
-  if (abortSignal?.aborted) {
-    const err = new Error("Message send aborted");
-    err.name = "AbortError";
-    throw err;
-  }
-}
-
 async function handleSendAction(ctx: ResolvedActionContext): Promise<MessageActionRunResult> {
   const {
     cfg,
@@ -794,6 +402,7 @@ async function handleSendAction(ctx: ResolvedActionContext): Promise<MessageActi
     readStringParam(params, "filePath", { trim: false });
   const hasCard = params.card != null && typeof params.card === "object";
   const hasComponents = params.components != null && typeof params.components === "object";
+  const caption = readStringParam(params, "caption", { allowEmpty: true }) ?? "";
   let message =
     readStringParam(params, "message", {
       required: !mediaHint && !hasCard && !hasComponents,
@@ -801,6 +410,9 @@ async function handleSendAction(ctx: ResolvedActionContext): Promise<MessageActi
     }) ?? "";
   if (message.includes("\\n")) {
     message = message.replaceAll("\\n", "\n");
+  }
+  if (!message.trim() && caption.trim()) {
+    message = caption;
   }
 
   const parsed = parseReplyDirectives(message);
@@ -865,25 +477,15 @@ async function handleSendAction(ctx: ResolvedActionContext): Promise<MessageActi
   params.message = message;
   const gifPlayback = readBooleanParam(params, "gifPlayback") ?? false;
   const bestEffort = readBooleanParam(params, "bestEffort");
+  const silent = readBooleanParam(params, "silent");
 
   const replyToId = readStringParam(params, "replyTo");
-  const threadId = readStringParam(params, "threadId");
-  // Slack auto-threading can inject threadTs without explicit params; mirror to that session key.
-  const slackAutoThreadId =
-    channel === "slack" && !replyToId && !threadId
-      ? resolveSlackAutoThreadId({ to, toolContext: input.toolContext })
-      : undefined;
-  // Telegram forum topic auto-threading: inject threadId so media/buttons land in the correct topic.
-  const telegramAutoThreadId =
-    channel === "telegram" && !threadId
-      ? resolveTelegramAutoThreadId({ to, toolContext: input.toolContext })
-      : undefined;
-  const resolvedThreadId = threadId ?? slackAutoThreadId ?? telegramAutoThreadId;
-  // Write auto-resolved threadId back into params so downstream dispatch
-  // (plugin `readStringParam(params, "threadId")`) picks it up.
-  if (resolvedThreadId && !params.threadId) {
-    params.threadId = resolvedThreadId;
-  }
+  const resolvedThreadId = resolveAndApplyOutboundThreadId(params, {
+    channel,
+    to,
+    toolContext: input.toolContext,
+    allowSlackAutoThread: channel === "slack" && !replyToId,
+  });
   const outboundRoute =
     agentId && !dryRun
       ? await resolveOutboundSessionRoute({
@@ -936,6 +538,7 @@ async function handleSendAction(ctx: ResolvedActionContext): Promise<MessageActi
             }
           : undefined,
       abortSignal,
+      silent: silent ?? undefined,
     },
     to,
     message,
@@ -943,6 +546,8 @@ async function handleSendAction(ctx: ResolvedActionContext): Promise<MessageActi
     mediaUrls: mergedMediaUrls.length ? mergedMediaUrls : undefined,
     gifPlayback,
     bestEffort: bestEffort ?? undefined,
+    replyToId: replyToId ?? undefined,
+    threadId: resolvedThreadId ?? undefined,
   });
 
   return {
@@ -970,11 +575,36 @@ async function handlePollAction(ctx: ResolvedActionContext): Promise<MessageActi
   if (options.length < 2) {
     throw new Error("pollOption requires at least two values");
   }
+  const silent = readBooleanParam(params, "silent");
   const allowMultiselect = readBooleanParam(params, "pollMulti") ?? false;
+  const pollAnonymous = readBooleanParam(params, "pollAnonymous");
+  const pollPublic = readBooleanParam(params, "pollPublic");
+  if (pollAnonymous && pollPublic) {
+    throw new Error("pollAnonymous and pollPublic are mutually exclusive");
+  }
+  const isAnonymous = pollAnonymous ? true : pollPublic ? false : undefined;
   const durationHours = readNumberParam(params, "pollDurationHours", {
     integer: true,
   });
+  const durationSeconds = readNumberParam(params, "pollDurationSeconds", {
+    integer: true,
+  });
   const maxSelections = allowMultiselect ? Math.max(2, options.length) : 1;
+
+  if (durationSeconds !== undefined && channel !== "telegram") {
+    throw new Error("pollDurationSeconds is only supported for Telegram polls");
+  }
+  if (isAnonymous !== undefined && channel !== "telegram") {
+    throw new Error("pollAnonymous/pollPublic are only supported for Telegram polls");
+  }
+
+  const resolvedThreadId = resolveAndApplyOutboundThreadId(params, {
+    channel,
+    to,
+    toolContext: input.toolContext,
+    allowSlackAutoThread: channel === "slack",
+  });
+
   const base = typeof params.message === "string" ? params.message : "";
   await maybeApplyCrossContextMarker({
     cfg,
@@ -997,12 +627,16 @@ async function handlePollAction(ctx: ResolvedActionContext): Promise<MessageActi
       gateway,
       toolContext: input.toolContext,
       dryRun,
+      silent: silent ?? undefined,
     },
     to,
     question,
     options,
     maxSelections,
+    durationSeconds: durationSeconds ?? undefined,
     durationHours: durationHours ?? undefined,
+    threadId: resolvedThreadId ?? undefined,
+    isAnonymous,
   });
 
   return {
@@ -1062,7 +696,7 @@ export async function runMessageAction(
   input: RunMessageActionParams,
 ): Promise<MessageActionRunResult> {
   const cfg = input.cfg;
-  const params = { ...input.params };
+  let params = { ...input.params };
   const resolvedAgentId =
     input.agentId ??
     (input.sessionKey
@@ -1076,79 +710,44 @@ export async function runMessageAction(
   if (action === "broadcast") {
     return handleBroadcastAction(input, params);
   }
+  params = normalizeMessageActionInput({
+    action,
+    args: params,
+    toolContext: input.toolContext,
+  });
 
-  const explicitTarget = typeof params.target === "string" ? params.target.trim() : "";
-  const hasLegacyTarget =
-    (typeof params.to === "string" && params.to.trim().length > 0) ||
-    (typeof params.channelId === "string" && params.channelId.trim().length > 0);
-  if (explicitTarget && hasLegacyTarget) {
-    delete params.to;
-    delete params.channelId;
-  }
-  if (
-    !explicitTarget &&
-    !hasLegacyTarget &&
-    actionRequiresTarget(action) &&
-    !actionHasTarget(action, params)
-  ) {
-    const inferredTarget = input.toolContext?.currentChannelId?.trim();
-    if (inferredTarget) {
-      params.target = inferredTarget;
+  const channel = await resolveChannel(cfg, params, input.toolContext);
+  let accountId = readStringParam(params, "accountId") ?? input.defaultAccountId;
+  if (!accountId && resolvedAgentId) {
+    const byAgent = buildChannelAccountBindings(cfg).get(channel);
+    const boundAccountIds = byAgent?.get(normalizeAgentId(resolvedAgentId));
+    if (boundAccountIds && boundAccountIds.length > 0) {
+      accountId = boundAccountIds[0];
     }
   }
-  if (!explicitTarget && actionRequiresTarget(action) && hasLegacyTarget) {
-    const legacyTo = typeof params.to === "string" ? params.to.trim() : "";
-    const legacyChannelId = typeof params.channelId === "string" ? params.channelId.trim() : "";
-    const legacyTarget = legacyTo || legacyChannelId;
-    if (legacyTarget) {
-      params.target = legacyTarget;
-      delete params.to;
-      delete params.channelId;
-    }
-  }
-  const explicitChannel = typeof params.channel === "string" ? params.channel.trim() : "";
-  if (!explicitChannel) {
-    const inferredChannel = normalizeMessageChannel(input.toolContext?.currentChannelProvider);
-    if (inferredChannel && isDeliverableMessageChannel(inferredChannel)) {
-      params.channel = inferredChannel;
-    }
-  }
-
-  applyTargetToParams({ action, args: params });
-  if (actionRequiresTarget(action)) {
-    if (!actionHasTarget(action, params)) {
-      throw new Error(`Action ${action} requires a target.`);
-    }
-  }
-
-  const channel = await resolveChannel(cfg, params);
-  const accountId = readStringParam(params, "accountId") ?? input.defaultAccountId;
   if (accountId) {
     params.accountId = accountId;
   }
   const dryRun = Boolean(input.dryRun ?? readBooleanParam(params, "dryRun"));
+  const mediaLocalRoots = getAgentScopedMediaLocalRoots(cfg, resolvedAgentId);
+  const mediaPolicy = resolveAttachmentMediaPolicy({
+    sandboxRoot: input.sandboxRoot,
+    mediaLocalRoots,
+  });
 
   await normalizeSandboxMediaParams({
     args: params,
-    sandboxRoot: input.sandboxRoot,
+    mediaPolicy,
   });
 
-  await hydrateSendAttachmentParams({
+  await hydrateAttachmentParamsForAction({
     cfg,
     channel,
     accountId,
     args: params,
     action,
     dryRun,
-  });
-
-  await hydrateSetGroupIconParams({
-    cfg,
-    channel,
-    accountId,
-    args: params,
-    action,
-    dryRun,
+    mediaPolicy,
   });
 
   const resolvedTarget = await resolveActionTarget({
