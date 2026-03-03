@@ -694,6 +694,36 @@ describe("runMessageAction sendAttachment hydration", () => {
       tempPrefix: "msg-group-icon-",
     });
   });
+  it("blocks loopback URLs for sendAttachment media", async () => {
+    const cfg = {
+      channels: {
+        bluebubbles: {
+          enabled: true,
+          serverUrl: "http://localhost:1234",
+          password: "test-password",
+        },
+      },
+    } as OpenClawConfig;
+
+    await restoreRealMediaLoader();
+
+    await expect(
+      runMessageAction({
+        cfg,
+        action: "sendAttachment",
+        params: {
+          channel: "bluebubbles",
+          target: "+15551234567",
+          media: "http://127.0.0.1:18800/api/sessions",
+          message: "caption",
+        },
+      }),
+    ).rejects.toThrow(/Blocked hostname|private\/internal\/special-use IP address/i);
+
+    const call = vi.mocked(loadWebMedia).mock.calls[0];
+    expect(call?.[0]).toBe("http://127.0.0.1:18800/api/sessions");
+    expect(call?.[2]).toBeUndefined();
+  });
 });
 
 describe("runMessageAction sandboxed media validation", () => {
