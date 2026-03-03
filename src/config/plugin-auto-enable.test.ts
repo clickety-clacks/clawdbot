@@ -204,7 +204,7 @@ describe("applyPluginAutoEnable", () => {
     expect(result.config.plugins?.entries?.acpx?.enabled).toBeUndefined();
   });
 
-  it("registers clawline plugin as disabled when clawline is configured", () => {
+  it("auto-enables clawline when clawline is configured", () => {
     const result = applyPluginAutoEnable({
       config: {
         channels: { clawline: { enabled: true } },
@@ -212,8 +212,8 @@ describe("applyPluginAutoEnable", () => {
       env: {},
     });
 
-    expect(result.config.plugins?.entries?.clawline?.enabled).toBe(false);
-    expect(result.changes.join("\n")).toContain("clawline configured, not enabled yet.");
+    expect(result.config.plugins?.entries?.clawline?.enabled).toBe(true);
+    expect(result.changes.join("\n")).toContain("clawline configured, enabled automatically.");
   });
 
   it("skips when plugins are globally disabled", () => {

@@ -492,26 +492,6 @@ export function applyPluginAutoEnable(params: {
 
   for (const entry of configured) {
     const builtInChannelId = normalizeChatChannelId(entry.pluginId);
-    if (entry.pluginId === "clawline") {
-      const existing = next.plugins?.entries?.clawline as Record<string, unknown> | undefined;
-      if (existing?.enabled !== false) {
-        next = {
-          ...next,
-          plugins: {
-            ...next.plugins,
-            entries: {
-              ...next.plugins?.entries,
-              clawline: {
-                ...existing,
-                enabled: false,
-              },
-            },
-          },
-        };
-      }
-      changes.push("clawline configured, not enabled yet.");
-      continue;
-    }
     if (isPluginDenied(next, entry.pluginId)) {
       continue;
     }
