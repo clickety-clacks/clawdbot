@@ -1,17 +1,17 @@
-import BetterSqlite3 from "better-sqlite3";
-import jwt from "jsonwebtoken";
 import { Blob } from "node:buffer";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import BetterSqlite3 from "better-sqlite3";
+import jwt from "jsonwebtoken";
 import { FormData, fetch, getGlobalDispatcher } from "undici";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import type { getReplyFromConfig } from "../auto-reply/reply.js";
 import type { OpenClawConfig } from "../config/config.js";
-import type { AllowlistEntry, Logger, ProviderServer } from "./domain.js";
 import { enqueueSystemEvent, resetSystemEventsForTest } from "../infra/system-events.js";
+import type { AllowlistEntry, Logger, ProviderServer } from "./domain.js";
 
 const gatewayCallMock = vi.fn();
 vi.mock("../gateway/call.js", () => ({
@@ -1086,13 +1086,9 @@ describe.sequential("clawline provider server", () => {
       expect(userAuth.features).toContain("session_info");
       expect(adminSessionInfo?.sessionKeys).toEqual([
         "agent:main:clawline:flynn:main",
-        "agent:main:clawline:flynn:dm",
         "agent:main:main",
       ]);
-      expect(userSessionInfo?.sessionKeys).toEqual([
-        "agent:main:clawline:qa_sim:main",
-        "agent:main:clawline:qa_sim:dm",
-      ]);
+      expect(userSessionInfo?.sessionKeys).toEqual(["agent:main:clawline:qa_sim:main"]);
       expect(adminStreamSnapshot.streams).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
@@ -1101,13 +1097,8 @@ describe.sequential("clawline provider server", () => {
             kind: "main",
           }),
           expect.objectContaining({
-            sessionKey: "agent:main:clawline:flynn:dm",
-            displayName: "DM",
-            kind: "dm",
-          }),
-          expect.objectContaining({
             sessionKey: "agent:main:main",
-            displayName: "Admin",
+            displayName: "Global DM",
             kind: "global_dm",
           }),
         ]),
@@ -1118,11 +1109,6 @@ describe.sequential("clawline provider server", () => {
             sessionKey: "agent:main:clawline:qa_sim:main",
             displayName: "Personal",
             kind: "main",
-          }),
-          expect.objectContaining({
-            sessionKey: "agent:main:clawline:qa_sim:dm",
-            displayName: "DM",
-            kind: "dm",
           }),
         ]),
       );
@@ -1597,11 +1583,6 @@ describe.sequential("clawline provider server", () => {
             kind: "main",
             displayName: "Personal",
           }),
-          expect.objectContaining({
-            sessionKey: "agent:main:clawline:flynn:dm",
-            kind: "dm",
-            displayName: "DM",
-          }),
         ]),
       );
       ws.terminate();
@@ -1656,11 +1637,6 @@ describe.sequential("clawline provider server", () => {
             sessionKey: "agent:main:clawline:flynn:main",
             kind: "main",
             displayName: "Personal",
-          }),
-          expect.objectContaining({
-            sessionKey: "agent:main:clawline:flynn:dm",
-            kind: "dm",
-            displayName: "DM",
           }),
         ]),
       );
@@ -2162,11 +2138,6 @@ describe.sequential("clawline provider server", () => {
             sessionKey: "agent:main:clawline:flynn:main",
             kind: "main",
             displayName: "Personal",
-          }),
-          expect.objectContaining({
-            sessionKey: "agent:main:clawline:flynn:dm",
-            kind: "dm",
-            displayName: "DM",
           }),
         ]),
       );
