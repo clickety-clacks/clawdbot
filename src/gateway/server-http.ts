@@ -59,6 +59,7 @@ import {
   type PluginHttpRequestHandler,
   type PluginRoutePathContext,
 } from "./server/plugins-http.js";
+import { applyWakeOverlay } from "./server/wake-overlay.js";
 import type { GatewayWsClient } from "./server/ws-types.js";
 import { handleToolsInvokeHttpRequest } from "./tools-invoke-http.js";
 
@@ -325,7 +326,16 @@ export function createHooksRequestHandler(
         sendJson(res, 400, { ok: false, error: normalized.error });
         return true;
       }
-      dispatchWakeHook(normalized.value);
+      const text = await applyWakeOverlay({
+        baseText: normalized.value.text,
+        wakeOverlayPath: hooksConfig.wakeOverlayPath,
+        maxBytes: hooksConfig.maxBodyBytes,
+        logHooks,
+      });
+      dispatchWakeHook({
+        text,
+        mode: normalized.value.mode,
+      });
       sendJson(res, 200, { ok: true, mode: normalized.value.mode });
       return true;
     }

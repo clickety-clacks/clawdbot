@@ -205,6 +205,8 @@ const INTERACTIVE_HTML_MIME = "application/vnd.clawline.interactive-html+json";
 const INTERACTIVE_CALLBACK_MIME = "application/vnd.clawline.interactive-callback+json";
 const CLIENT_FEATURE_TERMINAL_BUBBLES_V1 = "terminal_bubbles_v1";
 const SERVER_FEATURE_SESSION_INFO = "session_info";
+const TERMINAL_BUBBLES_UNSUPPORTED_NOTICE =
+  "Terminal session hidden: this client does not support terminal bubbles yet. Update Clawline to view it.";
 const INLINE_DOCUMENT_MIME_TYPES = new Set([TERMINAL_SESSION_MIME, INTERACTIVE_HTML_MIME]);
 const SUPPORTED_CLIENT_FEATURES = new Set([CLIENT_FEATURE_TERMINAL_BUBBLES_V1]);
 const MAX_INTERACTIVE_ACTION_CHARS = 128;
@@ -321,6 +323,19 @@ function isTerminalSessionDocumentAttachment(value: unknown): boolean {
   return normalizeMimeForComparison(attachment.mimeType) === TERMINAL_SESSION_MIME;
 }
 
+function countTerminalSessionDocumentAttachments(values?: unknown[]): number {
+  if (!Array.isArray(values) || values.length === 0) {
+    return 0;
+  }
+  let count = 0;
+  for (const value of values) {
+    if (isTerminalSessionDocumentAttachment(value)) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
 function buildAuthResultFeatures(session: Session): string[] {
   const features = [SERVER_FEATURE_SESSION_INFO];
   if (session.clientFeatures.has(CLIENT_FEATURE_TERMINAL_BUBBLES_V1)) {
@@ -339,19 +354,32 @@ function normalizePayloadForSession(
     return null;
   }
   let attachments = payload.attachments;
+  let strippedTerminalAttachments = 0;
   if (
     Array.isArray(attachments) &&
     attachments.length > 0 &&
     !session.clientFeatures.has(CLIENT_FEATURE_TERMINAL_BUBBLES_V1)
   ) {
-    const filtered = attachments.filter(
-      (attachment) => !isTerminalSessionDocumentAttachment(attachment),
-    );
+    const filtered = attachments.filter((attachment) => {
+      if (isTerminalSessionDocumentAttachment(attachment)) {
+        strippedTerminalAttachments += 1;
+        return false;
+      }
+      return true;
+    });
     attachments = filtered.length > 0 ? filtered : undefined;
+  }
+  let content = payload.content;
+  if (strippedTerminalAttachments > 0 && !content.includes(TERMINAL_BUBBLES_UNSUPPORTED_NOTICE)) {
+    const trimmed = content.trim();
+    content = trimmed
+      ? `${content}\n\n${TERMINAL_BUBBLES_UNSUPPORTED_NOTICE}`
+      : TERMINAL_BUBBLES_UNSUPPORTED_NOTICE;
   }
   return {
     ...payload,
     sessionKey: effectiveSessionKey,
+    content,
     attachments,
   };
 }
@@ -3542,7 +3570,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             sessionKey: params.sessionKey,
             ownerUserId: params.ownerUserId,
           });
-          continue;
+          throw new Error(
+            "Clawline terminal session descriptor is invalid (expected base64 JSON with terminalSessionId).",
+          );
         }
         const now = nowMs();
         terminalSessions.set(descriptor.terminalSessionId, {
@@ -4471,6 +4501,20 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         attachmentCount: Array.isArray(normalized.attachments) ? normalized.attachments.length : 0,
         replay: true,
       });
+      const replayTerminalFilteredCount =
+        countTerminalSessionDocumentAttachments(event.attachments) -
+        countTerminalSessionDocumentAttachments(normalized.attachments);
+      if (replayTerminalFilteredCount > 0) {
+        logger.warn?.("[clawline] terminal_attachment_filtered_for_client_feature", {
+          deviceId: session.deviceId,
+          userId: session.userId,
+          messageId: normalized.id,
+          sessionKey: normalized.sessionKey,
+          filteredCount: replayTerminalFilteredCount,
+          replay: true,
+          reason: "missing_terminal_bubbles_v1",
+        });
+      }
       const stats = summarizeAttachmentStats(normalized.attachments);
       if (stats) {
         logger.info?.(
@@ -4495,6 +4539,20 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     const normalized = normalizePayloadForSession(session, payload, mainSessionKey.toLowerCase());
     if (!normalized) {
       return;
+    }
+    const terminalFilteredCount =
+      countTerminalSessionDocumentAttachments(payload.attachments) -
+      countTerminalSessionDocumentAttachments(normalized.attachments);
+    if (terminalFilteredCount > 0) {
+      logger.warn?.("[clawline] terminal_attachment_filtered_for_client_feature", {
+        deviceId: session.deviceId,
+        userId: session.userId,
+        messageId: normalized.id,
+        sessionKey: normalized.sessionKey,
+        filteredCount: terminalFilteredCount,
+        replay: false,
+        reason: "missing_terminal_bubbles_v1",
+      });
     }
     if (session.socket.readyState !== WebSocket.OPEN) {
       return;

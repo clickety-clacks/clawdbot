@@ -16,6 +16,7 @@ export type HooksConfigResolved = {
   basePath: string;
   token: string;
   maxBodyBytes: number;
+  wakeOverlayPath?: string;
   mappings: HookMappingResolved[];
   agentPolicy: HookAgentPolicyResolved;
   sessionPolicy: HookSessionPolicyResolved;
@@ -51,6 +52,7 @@ export function resolveHooksConfig(cfg: OpenClawConfig): HooksConfigResolved | n
     cfg.hooks?.maxBodyBytes && cfg.hooks.maxBodyBytes > 0
       ? cfg.hooks.maxBodyBytes
       : DEFAULT_HOOKS_MAX_BODY_BYTES;
+  const wakeOverlayPath = resolveWakeOverlayPath(cfg.hooks?.wakeOverlayPath);
   const mappings = resolveHookMappings(cfg.hooks);
   const defaultAgentId = resolveDefaultAgentId(cfg);
   const knownAgentIds = resolveKnownAgentIds(cfg, defaultAgentId);
@@ -79,6 +81,7 @@ export function resolveHooksConfig(cfg: OpenClawConfig): HooksConfigResolved | n
     basePath: trimmed,
     token,
     maxBodyBytes,
+    wakeOverlayPath,
     mappings,
     agentPolicy: {
       defaultAgentId,
@@ -123,6 +126,11 @@ function resolveAllowedAgentIds(raw: string[] | undefined): Set<string> | undefi
 }
 
 function resolveSessionKey(raw: string | undefined): string | undefined {
+  const value = raw?.trim();
+  return value ? value : undefined;
+}
+
+function resolveWakeOverlayPath(raw: string | undefined): string | undefined {
   const value = raw?.trim();
   return value ? value : undefined;
 }
