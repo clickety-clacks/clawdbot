@@ -884,7 +884,7 @@
               },
               {
                 "group": "Advanced",
-                "pages": ["install/development-channels"]
+                "pages": ["install/development-channels", "install/fork-testing"]
               }
             ]
           },
