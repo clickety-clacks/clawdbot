@@ -1,4 +1,4 @@
-import { type Api, completeSimple, type Model } from "@mariozechner/pi-ai";
+import { type Api, completeSimple, type Context, type Model } from "@mariozechner/pi-ai";
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
 import { loadConfig } from "../config/config.js";
@@ -88,6 +88,17 @@ function isInstructionsRequiredError(raw: string): boolean {
   return /instructions are required/i.test(raw);
 }
 
+function withLiveSystemPrompt(model: Model<Api>, context: Context): Context {
+  // OpenAI Codex responses now require instructions/system context for some models.
+  if (model.provider === "openai-codex" && !context.systemPrompt?.trim()) {
+    return {
+      ...context,
+      systemPrompt: "You are a concise assistant. Follow the user's request exactly.",
+    };
+  }
+  return context;
+}
+
 function toInt(value: string | undefined, fallback: number): number {
   const trimmed = value?.trim();
   if (!trimmed) {
@@ -140,7 +151,7 @@ async function completeOkWithRetry(params: {
   const runOnce = async (maxTokens: number) => {
     const res = await completeSimpleWithTimeout(
       params.model,
-      {
+      withLiveSystemPrompt(params.model, {
         messages: [
           {
             role: "user",
@@ -148,7 +159,7 @@ async function completeOkWithRetry(params: {
             timestamp: Date.now(),
           },
         ],
-      },
+      }),
       {
         apiKey: params.apiKey,
         reasoning: resolveTestReasoning(params.model),
