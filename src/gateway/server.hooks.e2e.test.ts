@@ -6,7 +6,9 @@ import { resolveMainSessionKeyFromConfig } from "../config/sessions.js";
 import { drainSystemEvents, peekSystemEvents } from "../infra/system-events.js";
 import {
   cronIsolatedRun,
+  getFreePort,
   installGatewayTestHooks,
+  startGatewayServer,
   testState,
   withGatewayServer,
   waitForSystemEvent,
@@ -234,6 +236,39 @@ describe("gateway server hooks", () => {
       expect(second.status).toBe(200);
       const secondEvents = await waitForSystemEvent();
       expect(secondEvents).toContain("Wake B\n\nOverlay two");
+      drainSystemEvents(resolveMainKey());
+    } finally {
+      await server.close();
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("uses base /hooks/wake text when overlay would exceed hooks.maxBodyBytes", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-hooks-wake-overlay-"));
+    const overlayPath = path.join(tempDir, "wake-overlay.txt");
+    const overlayText = "x".repeat(90);
+    testState.hooksConfig = {
+      enabled: true,
+      token: "hook-secret",
+      wakeOverlayPath: overlayPath,
+      maxBodyBytes: 80,
+    };
+    const port = await getFreePort();
+    const server = await startGatewayServer(port);
+    try {
+      await fs.writeFile(overlayPath, overlayText, "utf8");
+      const res = await fetch(`http://127.0.0.1:${port}/hooks/wake`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer hook-secret",
+        },
+        body: JSON.stringify({ text: "Wake C", mode: "next-heartbeat" }),
+      });
+      expect(res.status).toBe(200);
+      const events = await waitForSystemEvent();
+      expect(events).toContain("Wake C");
+      expect(events.some((event) => event.includes(overlayText))).toBe(false);
       drainSystemEvents(resolveMainKey());
     } finally {
       await server.close();

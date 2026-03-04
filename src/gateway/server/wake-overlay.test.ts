@@ -7,6 +7,7 @@ import { applyWakeOverlay } from "./wake-overlay.js";
 const tmpDirs: string[] = [];
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   while (tmpDirs.length > 0) {
     const dir = tmpDirs.pop();
     if (dir) {
@@ -68,6 +69,28 @@ describe("applyWakeOverlay", () => {
         logHooks: { warn: vi.fn() },
       }),
     ).resolves.toBe("Ping");
+  });
+
+  test("logs warning and falls back to base text when overlay read fails with non-ENOENT", async () => {
+    const wakeOverlayPath = "/tmp/denied-overlay.txt";
+    const warn = vi.fn();
+    vi.spyOn(fs, "readFile").mockRejectedValueOnce(
+      Object.assign(new Error("permission denied"), { code: "EACCES" }),
+    );
+
+    await expect(
+      applyWakeOverlay({
+        baseText: "Ping",
+        wakeOverlayPath,
+        maxBytes: 1024,
+        logHooks: { warn },
+      }),
+    ).resolves.toBe("Ping");
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    const [message, meta] = warn.mock.calls[0] as [string, Record<string, unknown> | undefined];
+    expect(message).toContain("overlay read failed");
+    expect(meta?.wakeOverlayPath).toBe(wakeOverlayPath);
   });
 
   test("skips overlay and logs warning when combined text would exceed max bytes", async () => {
