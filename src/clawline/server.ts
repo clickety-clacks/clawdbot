@@ -6387,7 +6387,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
 
     try {
-      await tmuxBackend.execTmux(["new-session", "-d", "-s", name], {
+      // Pass an explicit shell sentinel command so the pane stays alive in
+      // headless / daemon environments where the default shell may exit
+      // immediately before resolveTmuxPaneId can query the pane.  The shell
+      // itself is the persistent foreground process; when the user attaches
+      // they land in an interactive shell rather than a dead pane.
+      const shell = process.env.SHELL?.trim() || "/bin/sh";
+      await tmuxBackend.execTmux(["new-session", "-d", "-s", name, shell], {
         timeout: 5_000,
         maxBuffer: 1024 * 1024,
       });

@@ -2476,4 +2476,126 @@ describe.sequential("clawline provider server", () => {
       await ctx.cleanup();
     }
   });
+
+  it("T001: on-demand terminal session stays alive so terminal_ready is returned (not terminal_error)", async () => {
+    // This test verifies the sentinel-shell fix: ensureTmuxSessionExists now passes
+    // an explicit shell command to `tmux new-session -d -s <name> <shell>` so the
+    // pane stays alive in headless/daemon environments, allowing resolveTmuxPaneId
+    // to succeed on the second call and the WS handshake to return terminal_ready.
+    const { execFile: execFileCb } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const execFile = promisify(execFileCb);
+
+    // Skip if tmux not found on this machine.
+    let tmuxPath: string;
+    try {
+      const { stdout } = await execFile("which", ["tmux"]);
+      tmuxPath = String(stdout).trim();
+    } catch {
+      console.warn("Skipping T001 terminal test: tmux not found");
+      return;
+    }
+    if (!tmuxPath) {
+      console.warn("Skipping T001 terminal test: tmux not found");
+      return;
+    }
+
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      isAdmin: false,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry], {
+      terminalTmux: { mode: "local" },
+    });
+
+    // The tmux session name will equal the terminalSessionId we generate.
+    const terminalSessionId = `term_t001_${randomUUID().replace(/-/g, "").slice(0, 12)}`;
+
+    try {
+      // Register the terminal session by sending a message with a terminal descriptor.
+      const descriptor = { terminalSessionId, title: "T001 test session", version: 1 };
+      const base64 = Buffer.from(JSON.stringify(descriptor), "utf8").toString("base64");
+      await ctx.server.sendMessage({
+        target: entry.userId,
+        text: "terminal",
+        attachments: [
+          {
+            data: base64,
+            mimeType: "application/vnd.clawline.terminal-session+json",
+          },
+        ],
+      });
+
+      // Build a JWT auth token for the terminal WS.
+      const statePath = path.dirname(ctx.allowlistPath);
+      const jwtKey = (await fs.readFile(path.join(statePath, "jwt.key"), "utf8")).trim();
+      const authToken = jwt.sign(
+        { sub: entry.userId, deviceId: entry.deviceId, isAdmin: entry.isAdmin },
+        jwtKey,
+        { algorithm: "HS256" },
+      );
+
+      // Open the terminal WebSocket and send terminal_auth.
+      const ws = new WebSocket(`ws://127.0.0.1:${ctx.port}/ws/terminal`);
+      await waitForOpen(ws);
+
+      // Collect JSON messages; ignore binary frames (PTY output after auth).
+      const jsonMessages: unknown[] = [];
+      const messagePromise = new Promise<unknown>((resolve) => {
+        ws.on("message", (raw, isBinary) => {
+          if (isBinary) {
+            return;
+          } // PTY output after auth — skip
+          try {
+            const parsed = JSON.parse(decodeRawData(raw));
+            jsonMessages.push(parsed);
+            // Resolve on the first JSON message that has a type.
+            if (parsed && typeof parsed === "object" && "type" in (parsed as object)) {
+              resolve(parsed);
+            }
+          } catch {
+            // non-JSON text frame — ignore
+          }
+        });
+      });
+
+      ws.send(
+        JSON.stringify({
+          type: "terminal_auth",
+          protocolVersion: PROTOCOL_VERSION,
+          terminalSessionId,
+          deviceId: entry.deviceId,
+          authToken,
+          cols: 80,
+          rows: 24,
+          backfillLines: 0,
+        }),
+      );
+
+      // Wait up to 10 s for the auth response.
+      const response = await Promise.race([
+        messagePromise,
+        new Promise<{ type: string; message?: string }>((_, reject) =>
+          setTimeout(
+            () => reject(new Error("Timed out waiting for terminal auth response")),
+            10_000,
+          ),
+        ),
+      ]);
+
+      ws.terminate();
+
+      // Assert: must be terminal_ready, not terminal_error.
+      expect((response as { type: string }).type).toBe("terminal_ready");
+    } finally {
+      // Best-effort cleanup: kill the tmux session we created on-demand.
+      try {
+        await execFile("tmux", ["kill-session", "-t", terminalSessionId]);
+      } catch {
+        // session may not exist if test failed before creation — that's fine
+      }
+      await ctx.cleanup();
+    }
+  }, 30_000); // 30-second timeout for tmux startup
 });
