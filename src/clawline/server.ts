@@ -1,9 +1,6 @@
-import type { Database as SqliteDatabase, Statement as SqliteStatement } from "better-sqlite3";
-import type { Stats } from "node:fs";
-import BetterSqlite3 from "better-sqlite3";
-import jwt from "jsonwebtoken";
 import { execFile as execFileCb } from "node:child_process";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import type { Stats } from "node:fs";
 import { watch, type FSWatcher, createReadStream } from "node:fs";
 import fs from "node:fs/promises";
 import http from "node:http";
@@ -12,10 +9,44 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import type { Database as SqliteDatabase, Statement as SqliteStatement } from "better-sqlite3";
+import BetterSqlite3 from "better-sqlite3";
+import jwt from "jsonwebtoken";
 import { type Dispatcher } from "undici";
 import WebSocket, { WebSocketServer } from "ws";
+import {
+  resolveEffectiveMessagesConfig,
+  resolveHumanDelayConfig,
+  resolveIdentityName,
+} from "../agents/identity.js";
+import { type AnnounceQueueItem, enqueueAnnounce } from "../agents/subagent-announce-queue.js";
+import { DEFAULT_AGENT_WORKSPACE_DIR } from "../agents/workspace.js";
+import { dispatchReplyFromConfig } from "../auto-reply/reply/dispatch-from-config.js";
+import { finalizeInboundContext } from "../auto-reply/reply/inbound-context.js";
+import { getFollowupQueueDepth, resolveQueueSettings } from "../auto-reply/reply/queue.js";
+import { createReplyDispatcherWithTyping } from "../auto-reply/reply/reply-dispatcher.js";
 import type { ResponsePrefixContext } from "../auto-reply/reply/response-prefix-template.js";
+import { extractShortModelName } from "../auto-reply/reply/response-prefix-template.js";
 import type { ReplyPayload } from "../auto-reply/types.js";
+import { recordInboundSession } from "../channels/session.js";
+import { resolveAgentIdFromSessionKey, resolveSessionTranscriptPath } from "../config/sessions.js";
+import { callGateway } from "../gateway/call.js";
+import { ADMIN_SCOPE } from "../gateway/method-scopes.js";
+import {
+  createPinnedDispatcher,
+  resolvePinnedHostname,
+  closeDispatcher,
+  type PinnedHostname,
+} from "../infra/net/ssrf.js";
+import { peekSystemEvents } from "../infra/system-events.js";
+import { loadGatewayTlsRuntime } from "../infra/tls/gateway.js";
+import { rawDataToString } from "../infra/ws.js";
+import { mediaKindFromMime, maxBytesForKind } from "../media/constants.js";
+import { hasAlphaChannel, optimizeImageToPng } from "../media/image-ops.js";
+import { detectMime } from "../media/mime.js";
+import { DEFAULT_ACCOUNT_ID } from "../routing/resolve-route.js";
+import { optimizeImageToJpeg } from "../web/media.js";
+import { clawlineAttachmentsToImages } from "./attachments.js";
 import type { ClawlineAdapterOverrides } from "./config.js";
 import type {
   AllowlistEntry,
@@ -38,36 +69,6 @@ import type {
   StreamUpdatedServerMessage,
   StreamDeletedServerMessage,
 } from "./domain.js";
-import {
-  resolveEffectiveMessagesConfig,
-  resolveHumanDelayConfig,
-  resolveIdentityName,
-} from "../agents/identity.js";
-import { type AnnounceQueueItem, enqueueAnnounce } from "../agents/subagent-announce-queue.js";
-import { DEFAULT_AGENT_WORKSPACE_DIR } from "../agents/workspace.js";
-import { dispatchReplyFromConfig } from "../auto-reply/reply/dispatch-from-config.js";
-import { finalizeInboundContext } from "../auto-reply/reply/inbound-context.js";
-import { getFollowupQueueDepth, resolveQueueSettings } from "../auto-reply/reply/queue.js";
-import { createReplyDispatcherWithTyping } from "../auto-reply/reply/reply-dispatcher.js";
-import { extractShortModelName } from "../auto-reply/reply/response-prefix-template.js";
-import { recordInboundSession } from "../channels/session.js";
-import { resolveAgentIdFromSessionKey, resolveSessionTranscriptPath } from "../config/sessions.js";
-import { callGateway } from "../gateway/call.js";
-import {
-  createPinnedDispatcher,
-  resolvePinnedHostname,
-  closeDispatcher,
-  type PinnedHostname,
-} from "../infra/net/ssrf.js";
-import { peekSystemEvents } from "../infra/system-events.js";
-import { loadGatewayTlsRuntime } from "../infra/tls/gateway.js";
-import { rawDataToString } from "../infra/ws.js";
-import { mediaKindFromMime, maxBytesForKind } from "../media/constants.js";
-import { hasAlphaChannel, optimizeImageToPng } from "../media/image-ops.js";
-import { detectMime } from "../media/mime.js";
-import { DEFAULT_ACCOUNT_ID } from "../routing/resolve-route.js";
-import { optimizeImageToJpeg } from "../web/media.js";
-import { clawlineAttachmentsToImages } from "./attachments.js";
 import { ClientMessageError, HttpError } from "./errors.js";
 import { createAssetHandlers } from "./http-assets.js";
 import { createPerUserTaskQueue } from "./per-user-task-queue.js";
@@ -3327,6 +3328,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           origin?.threadId != null && origin.threadId !== "" ? String(origin.threadId) : undefined;
         await callGateway({
           token: gatewayToken,
+          // Alert queue delivery is a system-owned action and must preserve owner-capable
+          // ingress behavior to avoid auth/tool gating differences from origin/main.
+          scopes: [ADMIN_SCOPE],
           method: "agent",
           params: {
             sessionKey: item.sessionKey,
