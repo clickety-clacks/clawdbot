@@ -1,16 +1,14 @@
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("openclaw/plugin-sdk", async () => {
-  const actual = await vi.importActual<any>("openclaw/plugin-sdk");
+vi.mock("./runtime/outbound.js", () => {
   return {
-    ...actual,
     sendClawlineOutboundMessage: vi.fn(),
   };
 });
 
-import { sendClawlineOutboundMessage } from "openclaw/plugin-sdk";
 import { clawlineMessageActions } from "./actions.js";
+import { sendClawlineOutboundMessage } from "./runtime/outbound.js";
 
 describe("clawlineMessageActions", () => {
   const fetchMock = vi.fn<typeof fetch>();

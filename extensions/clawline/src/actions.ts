@@ -1,14 +1,15 @@
+import { randomBytes } from "node:crypto";
+import os from "node:os";
+import path from "node:path";
+import BetterSqlite3 from "better-sqlite3";
 import type {
   AgentToolResult,
   ChannelMessageActionAdapter,
   ChannelMessageActionName,
   OpenClawConfig,
 } from "openclaw/plugin-sdk";
-import BetterSqlite3 from "better-sqlite3";
-import { randomBytes } from "node:crypto";
-import os from "node:os";
-import path from "node:path";
-import { jsonResult, sendClawlineOutboundMessage } from "openclaw/plugin-sdk";
+import { jsonResult } from "openclaw/plugin-sdk";
+import { sendClawlineOutboundMessage } from "./runtime/outbound.js";
 
 const DEFAULT_CLAWLINE_PORT = 18800;
 const STREAM_API_TIMEOUT_MS = 15_000;

@@ -1,6 +1,7 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import { emptyPluginConfigSchema, startClawlineService } from "openclaw/plugin-sdk";
+import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
 import { clawlinePlugin } from "./src/channel.js";
+import { startClawlineService } from "./src/runtime/service.js";
 import { setClawlineSurfAceRuntime } from "./src/surf-ace-runtime.js";
 import { createSurfAceTools } from "./src/surf-ace-tools.js";
 
