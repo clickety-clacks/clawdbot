@@ -800,6 +800,5 @@ export type {
 } from "../context-engine/types.js";
 export { registerContextEngine } from "../context-engine/registry.js";
 export type { ContextEngineFactory } from "../context-engine/registry.js";
-
 // Security utilities
 export { redactSensitiveText } from "../logging/redact.js";
