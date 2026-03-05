@@ -116,6 +116,9 @@ export interface ProviderConfig {
     allowedOrigins?: string[];
   };
   adapter?: string | null;
+  server: {
+    cluSecret?: string | null;
+  };
   auth: {
     jwtSigningKey?: string | null;
     tokenTtlSeconds: number | null;

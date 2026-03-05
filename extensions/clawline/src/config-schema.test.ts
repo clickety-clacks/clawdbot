@@ -4,12 +4,16 @@ import { ClawlineConfigSchema } from "./config-schema.js";
 describe("ClawlineConfigSchema", () => {
   it("accepts stream Phase A limits", () => {
     const parsed = ClawlineConfigSchema.parse({
+      server: {
+        cluSecret: "clu-secret-1",
+      },
       streams: {
         maxStreamsPerUser: 32,
         maxDisplayNameBytes: 120,
       },
     });
 
+    expect(parsed.server?.cluSecret).toBe("clu-secret-1");
     expect(parsed.streams?.maxStreamsPerUser).toBe(32);
     expect(parsed.streams?.maxDisplayNameBytes).toBe(120);
   });

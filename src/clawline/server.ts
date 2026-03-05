@@ -936,6 +936,9 @@ const DEFAULT_CONFIG: ProviderConfig = {
     allowedOrigins: [],
   },
   adapter: null,
+  server: {
+    cluSecret: null,
+  },
   auth: {
     jwtSigningKey: null,
     tokenTtlSeconds: 31_536_000,

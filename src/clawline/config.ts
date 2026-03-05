@@ -81,6 +81,9 @@ const DEFAULTS: ResolvedClawlineConfig = {
   },
   adapter: null,
   adapterOverrides: {},
+  server: {
+    cluSecret: null,
+  },
   auth: {
     jwtSigningKey: null,
     tokenTtlSeconds: 31_536_000,

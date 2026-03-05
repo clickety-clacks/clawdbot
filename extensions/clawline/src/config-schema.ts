@@ -30,6 +30,13 @@ const AuthSchema = z
   .strict()
   .optional();
 
+const ServerSchema = z
+  .object({
+    cluSecret: z.string().min(1).nullable().optional(),
+  })
+  .strict()
+  .optional();
+
 const PairingSchema = z
   .object({
     maxPendingRequests: z.number().int().positive().optional(),
@@ -93,6 +100,7 @@ export const ClawlineConfigSchema = z
     webRoot: WebRootSchema,
     network: NetworkSchema,
     adapter: AdapterSchema,
+    server: ServerSchema,
     auth: AuthSchema,
     pairing: PairingSchema,
     media: MediaSchema,

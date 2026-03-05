@@ -13,6 +13,7 @@ import { jsonResult, sendClawlineOutboundMessage } from "openclaw/plugin-sdk";
 const DEFAULT_CLAWLINE_PORT = 18800;
 const STREAM_API_TIMEOUT_MS = 15_000;
 const STREAM_DELETE_USER_ACTION = "delete_stream";
+const CLU_SECRET_HEADER = "X-CLU-Secret";
 
 type EventRow = {
   id: string;
@@ -208,14 +209,28 @@ async function callStreamApi(params: {
   body?: Record<string, unknown>;
   extraHeaders?: Record<string, string>;
 }): Promise<StreamApiCallResult> {
-  const token = readStringParam(params.actionParams, ["token", "bearerToken", "authToken"]);
-  if (!token) {
-    throw new Error("Clawline stream actions require token (bearerToken/authToken also accepted)");
+  const clawlineConfig = params.cfg.channels?.clawline;
+  const serverConfig =
+    clawlineConfig &&
+    typeof clawlineConfig === "object" &&
+    !Array.isArray(clawlineConfig) &&
+    "server" in clawlineConfig
+      ? (clawlineConfig as Record<string, unknown>).server
+      : undefined;
+  const cluSecret =
+    serverConfig &&
+    typeof serverConfig === "object" &&
+    !Array.isArray(serverConfig) &&
+    typeof (serverConfig as Record<string, unknown>).cluSecret === "string"
+      ? ((serverConfig as Record<string, unknown>).cluSecret as string).trim()
+      : "";
+  if (!cluSecret) {
+    throw new Error("Clawline stream lifecycle requires channels.clawline.server.cluSecret");
   }
   const baseUrl = resolveClawlineApiBaseUrl(params.cfg, params.actionParams);
   const requestUrl = new URL(params.path, `${baseUrl}/`);
   const headers: Record<string, string> = {
-    Authorization: `Bearer ${token}`,
+    [CLU_SECRET_HEADER]: cluSecret,
     ...params.extraHeaders,
   };
   if (params.body) {
@@ -257,6 +272,18 @@ function buildIdempotencyKey(actionParams: Record<string, unknown>): string {
     return existing;
   }
   return `req_${randomBytes(4).toString("hex")}`;
+}
+
+function readLifecycleUserId(actionParams: Record<string, unknown>): string {
+  const userId = readStringParam(actionParams, ["userId"]);
+  if (!userId) {
+    throw new Error("Clawline stream lifecycle actions require userId");
+  }
+  return userId;
+}
+
+function buildServerStreamsBasePath(userId: string): string {
+  return `/api/server/users/${encodeURIComponent(userId)}/streams`;
 }
 
 function summarizeOutboundResult(result: Awaited<ReturnType<typeof sendClawlineOutboundMessage>>) {
@@ -480,16 +507,18 @@ export const clawlineMessageActions: ChannelMessageActionAdapter = {
     }
 
     if (action === "channel-list") {
+      const userId = readLifecycleUserId(params);
       const result = await callStreamApi({
         cfg,
         actionParams: params,
         method: "GET",
-        path: "/api/streams",
+        path: buildServerStreamsBasePath(userId),
       });
       return jsonResult(result.ok ? { ok: true, status: result.status, ...result.body } : result);
     }
 
     if (action === "channel-create") {
+      const userId = readLifecycleUserId(params);
       const displayName = readStringParam(params, ["displayName", "name", "title"]);
       if (!displayName) {
         throw new Error("Clawline channel-create requires displayName (or name/title)");
@@ -499,7 +528,7 @@ export const clawlineMessageActions: ChannelMessageActionAdapter = {
         cfg,
         actionParams: params,
         method: "POST",
-        path: "/api/streams",
+        path: buildServerStreamsBasePath(userId),
         body: { displayName, idempotencyKey },
       });
       return jsonResult(
@@ -510,6 +539,7 @@ export const clawlineMessageActions: ChannelMessageActionAdapter = {
     }
 
     if (action === "channel-edit") {
+      const userId = readLifecycleUserId(params);
       const sessionKey = readStringParam(params, ["channelId", "sessionKey", "to"]);
       if (!sessionKey) {
         throw new Error("Clawline channel-edit requires channelId/sessionKey");
@@ -522,13 +552,14 @@ export const clawlineMessageActions: ChannelMessageActionAdapter = {
         cfg,
         actionParams: params,
         method: "PATCH",
-        path: `/api/streams/${encodeURIComponent(sessionKey)}`,
+        path: `${buildServerStreamsBasePath(userId)}/${encodeURIComponent(sessionKey)}`,
         body: { displayName },
       });
       return jsonResult(result.ok ? { ok: true, status: result.status, ...result.body } : result);
     }
 
     if (action === "channel-delete") {
+      const userId = readLifecycleUserId(params);
       const sessionKey = readStringParam(params, ["channelId", "sessionKey", "to"]);
       if (!sessionKey) {
         throw new Error("Clawline channel-delete requires channelId/sessionKey");
@@ -538,7 +569,7 @@ export const clawlineMessageActions: ChannelMessageActionAdapter = {
         cfg,
         actionParams: params,
         method: "DELETE",
-        path: `/api/streams/${encodeURIComponent(sessionKey)}`,
+        path: `${buildServerStreamsBasePath(userId)}/${encodeURIComponent(sessionKey)}`,
         body: { idempotencyKey },
         extraHeaders: {
           "x-clawline-user-action": STREAM_DELETE_USER_ACTION,
