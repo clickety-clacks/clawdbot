@@ -201,6 +201,20 @@ function parseStreamApiError(
   };
 }
 
+/**
+ * Resolve the CLU server secret from config for stream lifecycle endpoints.
+ */
+function resolveCluSecret(cfg: OpenClawConfig): string | undefined {
+  const secret = (cfg.channels?.clawline as Record<string, unknown> | undefined)?.server;
+  if (secret && typeof secret === "object" && !Array.isArray(secret)) {
+    const cluSecret = (secret as Record<string, unknown>).cluSecret;
+    if (typeof cluSecret === "string" && cluSecret.trim().length > 0) {
+      return cluSecret.trim();
+    }
+  }
+  return undefined;
+}
+
 async function callStreamApi(params: {
   cfg: OpenClawConfig;
   actionParams: Record<string, unknown>;
@@ -209,24 +223,11 @@ async function callStreamApi(params: {
   body?: Record<string, unknown>;
   extraHeaders?: Record<string, string>;
 }): Promise<StreamApiCallResult> {
-  const clawlineConfig = params.cfg.channels?.clawline;
-  const serverConfig =
-    clawlineConfig &&
-    typeof clawlineConfig === "object" &&
-    !Array.isArray(clawlineConfig) &&
-    "server" in clawlineConfig
-      ? (clawlineConfig as Record<string, unknown>).server
-      : undefined;
-  const cluSecret =
-    serverConfig &&
-    typeof serverConfig === "object" &&
-    !Array.isArray(serverConfig) &&
-    typeof (serverConfig as Record<string, unknown>).cluSecret === "string"
-      ? ((serverConfig as Record<string, unknown>).cluSecret as string).trim()
-      : "";
+  const cluSecret = resolveCluSecret(params.cfg);
   if (!cluSecret) {
     throw new Error("Clawline stream lifecycle requires channels.clawline.server.cluSecret");
   }
+
   const baseUrl = resolveClawlineApiBaseUrl(params.cfg, params.actionParams);
   const requestUrl = new URL(params.path, `${baseUrl}/`);
   const headers: Record<string, string> = {

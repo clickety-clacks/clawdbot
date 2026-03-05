@@ -3950,7 +3950,62 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     return JSON.stringify({ operation, payload });
   }
 
+  /**
+   * CLU-secret authentication path for server-side stream lifecycle management.
+   *
+   * When `config.server.cluSecret` is set, CLU can authenticate stream API calls
+   * by sending `X-CLU-Secret: <secret>` instead of a bearer JWT. This removes
+   * the dependency on the iOS bearer token for provider-side stream operations.
+   *
+   * The target userId is taken from `X-CLU-User-Id` header when present; otherwise
+   * falls back to the first admin user in the allowlist (single-user deployments).
+   *
+   * Spec reference: shared-workspace/clawline/specs/stream-lifecycle.md §5 Auth Model.
+   */
+  function authenticateCluSecretRequest(
+    req: http.IncomingMessage,
+    cluSecretRaw: string,
+  ): { deviceId: string; userId: string; isAdmin: true } | null {
+    const cluSecret = cluSecretRaw.trim();
+    if (!cluSecret) {
+      return null;
+    }
+    const incomingRaw = req.headers["x-clu-secret"];
+    const incoming = (Array.isArray(incomingRaw) ? incomingRaw[0] : incomingRaw) ?? "";
+    if (!timingSafeStringEqual(incoming.trim(), cluSecret)) {
+      return null;
+    }
+    // Resolve userId: explicit header first, then first admin from allowlist.
+    const userIdRaw = req.headers["x-clu-user-id"];
+    const userIdHeader = (Array.isArray(userIdRaw) ? userIdRaw[0] : userIdRaw)?.trim() ?? "";
+    if (userIdHeader) {
+      return { deviceId: "clu-server", userId: userIdHeader, isAdmin: true };
+    }
+    // Fall back to first admin (or first) allowlist entry.
+    const entries = allowlist.entries;
+    const adminEntry = entries.find((e) => e.isAdmin) ?? entries[0];
+    if (!adminEntry) {
+      return null;
+    }
+    return { deviceId: "clu-server", userId: adminEntry.userId, isAdmin: true };
+  }
+
   function authenticateHttpRequest(req: http.IncomingMessage) {
+    // CLU-secret path: allows server-side CLU stream management without iOS bearer token.
+    const cluSecret = config.server?.cluSecret;
+    if (cluSecret) {
+      const cluAuth = authenticateCluSecretRequest(req, cluSecret);
+      if (cluAuth) {
+        return cluAuth;
+      }
+      // If X-CLU-Secret header is present but wrong, reject immediately (don't fall through).
+      const incomingRaw = req.headers["x-clu-secret"];
+      const incoming = (Array.isArray(incomingRaw) ? incomingRaw[0] : incomingRaw) ?? "";
+      if (incoming.trim()) {
+        throw new HttpError(403, "clu_secret_invalid", "Invalid CLU secret");
+      }
+    }
+
     const header = req.headers.authorization;
     if (!header || !header.startsWith("Bearer ")) {
       throw new HttpError(401, "auth_failed", "Missing authorization");

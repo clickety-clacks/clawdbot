@@ -30,13 +30,6 @@ const AuthSchema = z
   .strict()
   .optional();
 
-const ServerSchema = z
-  .object({
-    cluSecret: z.string().min(1).nullable().optional(),
-  })
-  .strict()
-  .optional();
-
 const PairingSchema = z
   .object({
     maxPendingRequests: z.number().int().positive().optional(),
@@ -79,6 +72,23 @@ const StreamsSchema = z
     chunkBufferBytes: z.number().int().positive().optional(),
     maxStreamsPerUser: z.number().int().positive().optional(),
     maxDisplayNameBytes: z.number().int().positive().optional(),
+  })
+  .strict()
+  .optional();
+
+/**
+ * Server-side CLU identity configuration.
+ * Allows CLU to manage stream lifecycle without an iOS bearer token.
+ * See spec: stream-lifecycle.md §5 Auth Model.
+ */
+const ServerSchema = z
+  .object({
+    /**
+     * Shared secret for CLU server-side stream management.
+     * Sent via `X-CLU-Secret` request header. Min 22 chars recommended.
+     * Must not be sent to iOS clients.
+     */
+    cluSecret: z.string().min(1).nullable().optional(),
   })
   .strict()
   .optional();
