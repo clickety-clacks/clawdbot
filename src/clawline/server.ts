@@ -1,6 +1,9 @@
+import type { Database as SqliteDatabase, Statement as SqliteStatement } from "better-sqlite3";
+import type { Stats } from "node:fs";
+import BetterSqlite3 from "better-sqlite3";
+import jwt from "jsonwebtoken";
 import { execFile as execFileCb } from "node:child_process";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import type { Stats } from "node:fs";
 import { watch, type FSWatcher, createReadStream } from "node:fs";
 import fs from "node:fs/promises";
 import http from "node:http";
@@ -9,44 +12,10 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import type { Database as SqliteDatabase, Statement as SqliteStatement } from "better-sqlite3";
-import BetterSqlite3 from "better-sqlite3";
-import jwt from "jsonwebtoken";
 import { type Dispatcher } from "undici";
 import WebSocket, { WebSocketServer } from "ws";
-import {
-  resolveEffectiveMessagesConfig,
-  resolveHumanDelayConfig,
-  resolveIdentityName,
-} from "../agents/identity.js";
-import { type AnnounceQueueItem, enqueueAnnounce } from "../agents/subagent-announce-queue.js";
-import { DEFAULT_AGENT_WORKSPACE_DIR } from "../agents/workspace.js";
-import { dispatchReplyFromConfig } from "../auto-reply/reply/dispatch-from-config.js";
-import { finalizeInboundContext } from "../auto-reply/reply/inbound-context.js";
-import { getFollowupQueueDepth, resolveQueueSettings } from "../auto-reply/reply/queue.js";
-import { createReplyDispatcherWithTyping } from "../auto-reply/reply/reply-dispatcher.js";
 import type { ResponsePrefixContext } from "../auto-reply/reply/response-prefix-template.js";
-import { extractShortModelName } from "../auto-reply/reply/response-prefix-template.js";
 import type { ReplyPayload } from "../auto-reply/types.js";
-import { recordInboundSession } from "../channels/session.js";
-import { resolveAgentIdFromSessionKey, resolveSessionTranscriptPath } from "../config/sessions.js";
-import { callGateway } from "../gateway/call.js";
-import { ADMIN_SCOPE } from "../gateway/method-scopes.js";
-import {
-  createPinnedDispatcher,
-  resolvePinnedHostname,
-  closeDispatcher,
-  type PinnedHostname,
-} from "../infra/net/ssrf.js";
-import { peekSystemEvents } from "../infra/system-events.js";
-import { loadGatewayTlsRuntime } from "../infra/tls/gateway.js";
-import { rawDataToString } from "../infra/ws.js";
-import { mediaKindFromMime, maxBytesForKind } from "../media/constants.js";
-import { hasAlphaChannel, optimizeImageToPng } from "../media/image-ops.js";
-import { detectMime } from "../media/mime.js";
-import { DEFAULT_ACCOUNT_ID } from "../routing/resolve-route.js";
-import { optimizeImageToJpeg } from "../web/media.js";
-import { clawlineAttachmentsToImages } from "./attachments.js";
 import type { ClawlineAdapterOverrides } from "./config.js";
 import type {
   AllowlistEntry,
@@ -69,6 +38,37 @@ import type {
   StreamUpdatedServerMessage,
   StreamDeletedServerMessage,
 } from "./domain.js";
+import {
+  resolveEffectiveMessagesConfig,
+  resolveHumanDelayConfig,
+  resolveIdentityName,
+} from "../agents/identity.js";
+import { type AnnounceQueueItem, enqueueAnnounce } from "../agents/subagent-announce-queue.js";
+import { DEFAULT_AGENT_WORKSPACE_DIR } from "../agents/workspace.js";
+import { dispatchReplyFromConfig } from "../auto-reply/reply/dispatch-from-config.js";
+import { finalizeInboundContext } from "../auto-reply/reply/inbound-context.js";
+import { getFollowupQueueDepth, resolveQueueSettings } from "../auto-reply/reply/queue.js";
+import { createReplyDispatcherWithTyping } from "../auto-reply/reply/reply-dispatcher.js";
+import { extractShortModelName } from "../auto-reply/reply/response-prefix-template.js";
+import { recordInboundSession } from "../channels/session.js";
+import { resolveAgentIdFromSessionKey, resolveSessionTranscriptPath } from "../config/sessions.js";
+import { callGateway } from "../gateway/call.js";
+import { ADMIN_SCOPE } from "../gateway/method-scopes.js";
+import {
+  createPinnedDispatcher,
+  resolvePinnedHostname,
+  closeDispatcher,
+  type PinnedHostname,
+} from "../infra/net/ssrf.js";
+import { peekSystemEvents } from "../infra/system-events.js";
+import { loadGatewayTlsRuntime } from "../infra/tls/gateway.js";
+import { rawDataToString } from "../infra/ws.js";
+import { mediaKindFromMime, maxBytesForKind } from "../media/constants.js";
+import { hasAlphaChannel, optimizeImageToPng } from "../media/image-ops.js";
+import { detectMime } from "../media/mime.js";
+import { DEFAULT_ACCOUNT_ID } from "../routing/resolve-route.js";
+import { optimizeImageToJpeg } from "../web/media.js";
+import { clawlineAttachmentsToImages } from "./attachments.js";
 import { ClientMessageError, HttpError } from "./errors.js";
 import { createAssetHandlers } from "./http-assets.js";
 import { createPerUserTaskQueue } from "./per-user-task-queue.js";
@@ -144,12 +144,26 @@ function createTerminalTmuxBackend(config: ProviderConfig, logger: Logger): Term
 
   const useRemote = isRemote && sshTarget.length > 0;
 
+  /**
+   * Shell-quote a single argument for safe insertion into a remote shell command string.
+   * SSH concatenates args after the host with spaces and passes the result to the remote
+   * shell. Characters like `#` (comment in zsh non-interactive mode) can silently swallow
+   * subsequent arguments. Single-quoting every arg prevents all shell interpretation.
+   */
+  function shellQuoteArg(arg: string): string {
+    // Wrap in single quotes, escaping any embedded single quotes as '"'"''.
+    return "'" + arg.replace(/'/g, "'\\''") + "'";
+  }
+
   return {
     async execTmux(args: string[], options: { timeout: number; maxBuffer: number }) {
       if (!useRemote) {
         return execFile("tmux", args, options);
       }
-      return execFile("ssh", [...sshBaseArgs, sshTarget, "--", "tmux", ...args], options);
+      // Build a single quoted shell command so special chars (e.g. `#` in tmux format
+      // strings like `#{pane_id}`) are not misinterpreted by the remote shell.
+      const remoteCmd = ["tmux", ...args].map(shellQuoteArg).join(" ");
+      return execFile("ssh", [...sshBaseArgs, sshTarget, remoteCmd], options);
     },
     async spawnAttachPty(params: { sessionName: string; cols: number; rows: number }) {
       const ptyModule = (await import("@lydell/node-pty")) as unknown as {
