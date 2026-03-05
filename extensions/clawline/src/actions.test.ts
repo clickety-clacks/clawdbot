@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -304,5 +307,78 @@ describe("clawlineMessageActions", () => {
       error: { code: "stream_not_found", message: "Stream not found" },
       body: { error: { code: "stream_not_found", message: "Stream not found" } },
     });
+  });
+
+  it("auto-resolves local token from state directory when no token in params", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "clawline-test-"));
+    try {
+      // Write a test JWT key and allowlist
+      const testJwtKey = "test-jwt-signing-key-for-actions-test";
+      fs.writeFileSync(path.join(tmpDir, "jwt.key"), testJwtKey + "\n");
+      fs.writeFileSync(
+        path.join(tmpDir, "allowlist.json"),
+        JSON.stringify({
+          version: 1,
+          entries: [
+            {
+              deviceId: "TEST-DEVICE-ID",
+              userId: "testuser",
+              isAdmin: true,
+              tokenDelivered: true,
+              createdAt: Date.now(),
+              lastSeenAt: Date.now(),
+            },
+          ],
+        }),
+      );
+
+      const cfg: OpenClawConfig = {
+        channels: {
+          clawline: {
+            enabled: true,
+            port: 19191,
+            network: { bindAddress: "127.0.0.1" },
+            statePath: tmpDir,
+          },
+        },
+      };
+
+      fetchMock.mockResolvedValueOnce(
+        new Response(JSON.stringify({ deletedSessionKey: "agent:main:clawline:testuser:s_abc" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+
+      // Call channel-delete WITHOUT an explicit token in params
+      const result = await clawlineMessageActions.handleAction({
+        action: "channel-delete",
+        params: {
+          channelId: "agent:main:clawline:testuser:s_abc",
+          idempotencyKey: "req_autotoken_test",
+          // No token field — should auto-resolve from statePath
+        },
+        cfg,
+        accountId: null,
+      });
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      // The Authorization header must be set (auto-resolved from local state)
+      const reqHeaders = fetchMock.mock.calls[0]?.[1]?.headers as Record<string, string>;
+      expect(reqHeaders["Authorization"]).toMatch(/^Bearer /);
+      // Confirm the auto-token is a valid JWT signed with our test key
+      const { default: jwt } = await import("jsonwebtoken");
+      const decoded = jwt.verify(reqHeaders["Authorization"]!.slice(7), testJwtKey) as Record<
+        string,
+        unknown
+      >;
+      expect(decoded.sub).toBe("testuser");
+      expect(decoded.deviceId).toBe("TEST-DEVICE-ID");
+      expect(decoded.isAdmin).toBe(true);
+
+      expect(result.details).toEqual(expect.objectContaining({ ok: true, status: 200 }));
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 });

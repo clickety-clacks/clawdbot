@@ -1,13 +1,15 @@
+import { randomBytes } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import BetterSqlite3 from "better-sqlite3";
+import jwt from "jsonwebtoken";
 import type {
   AgentToolResult,
   ChannelMessageActionAdapter,
   ChannelMessageActionName,
   OpenClawConfig,
 } from "openclaw/plugin-sdk";
-import BetterSqlite3 from "better-sqlite3";
-import { randomBytes } from "node:crypto";
-import os from "node:os";
-import path from "node:path";
 import { jsonResult, sendClawlineOutboundMessage } from "openclaw/plugin-sdk";
 
 const DEFAULT_CLAWLINE_PORT = 18800;
@@ -62,6 +64,60 @@ function resolveClawlineDbPath(cfg: OpenClawConfig): string {
   // Default path
   const homeDir = os.homedir();
   return path.join(homeDir, ".openclaw", "clawline", "clawline.sqlite");
+}
+
+function resolveClawlineStatePath(cfg: OpenClawConfig): string {
+  return cfg.channels?.clawline?.statePath ?? path.join(os.homedir(), ".openclaw", "clawline");
+}
+
+/**
+ * Resolve a local Clawline server token from the state directory.
+ * Used when no explicit token is provided in action params.
+ * Reads the JWT signing key and allowlist from disk and issues a short-lived token
+ * for the first admin entry (falling back to any entry).
+ */
+function resolveLocalClawlineToken(cfg: OpenClawConfig): string | undefined {
+  try {
+    const statePath = resolveClawlineStatePath(cfg);
+    const jwtKeyPath = path.join(statePath, "jwt.key");
+    const allowlistPath = path.join(statePath, "allowlist.json");
+
+    if (!fs.existsSync(jwtKeyPath) || !fs.existsSync(allowlistPath)) {
+      return undefined;
+    }
+
+    const jwtKey = fs.readFileSync(jwtKeyPath, "utf8").trim();
+    if (!jwtKey) {
+      return undefined;
+    }
+
+    const allowlistRaw = JSON.parse(fs.readFileSync(allowlistPath, "utf8"));
+    const entries: Array<{
+      deviceId: string;
+      userId: string;
+      isAdmin?: boolean;
+    }> = Array.isArray(allowlistRaw.entries) ? allowlistRaw.entries : [];
+
+    // Prefer admin entry; fall back to any entry.
+    const entry = entries.find((e) => e.isAdmin === true) ?? entries[0];
+
+    if (!entry) {
+      return undefined;
+    }
+
+    const payload: jwt.JwtPayload = {
+      sub: entry.userId,
+      deviceId: entry.deviceId,
+      isAdmin: entry.isAdmin ?? false,
+      iat: Math.floor(Date.now() / 1000),
+      // Short-lived: 5 minutes is enough for one operation.
+      exp: Math.floor(Date.now() / 1000) + 300,
+    };
+
+    return jwt.sign(payload, jwtKey, { algorithm: "HS256" });
+  } catch {
+    return undefined;
+  }
 }
 
 function parseEventPayload(row: EventRow): ParsedMessage {
@@ -208,7 +264,9 @@ async function callStreamApi(params: {
   body?: Record<string, unknown>;
   extraHeaders?: Record<string, string>;
 }): Promise<StreamApiCallResult> {
-  const token = readStringParam(params.actionParams, ["token", "bearerToken", "authToken"]);
+  const token =
+    readStringParam(params.actionParams, ["token", "bearerToken", "authToken"]) ??
+    resolveLocalClawlineToken(params.cfg);
   if (!token) {
     throw new Error("Clawline stream actions require token (bearerToken/authToken also accepted)");
   }
