@@ -160,6 +160,19 @@ export interface ProviderConfig {
     maxStreamsPerUser: number;
     maxDisplayNameBytes: number;
   };
+  /**
+   * Server-side CLU identity configuration.
+   * Allows CLU to authenticate stream lifecycle requests without an iOS bearer token.
+   * See spec: shared-workspace/clawline/specs/stream-lifecycle.md §5 Auth Model.
+   */
+  server?: {
+    /**
+     * Secret used by CLU for server-side stream management.
+     * Passed via `X-CLU-Secret` header. Must never be sent to iOS clients.
+     * Min 22 chars / 128 bits entropy. Null disables CLU-secret auth path.
+     */
+    cluSecret?: string | null;
+  };
   surfAce: {
     discoveryIntervalMs: number;
     discoveryTimeoutMs: number;

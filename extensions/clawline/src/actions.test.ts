@@ -309,6 +309,8 @@ describe("clawlineMessageActions", () => {
     });
   });
 
+  // --- Auto-JWT fallback: T140 original fix (no token in params, no CLU secret) ---
+
   it("auto-resolves local token from state directory when no token in params", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "clawline-test-"));
     try {
@@ -380,5 +382,149 @@ describe("clawlineMessageActions", () => {
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
+  });
+
+  // --- CLU-secret auth path (T140 follow-up: spec §5 Auth Model) ---
+
+  it("uses X-CLU-Secret header when server.cluSecret is configured (no bearer needed)", async () => {
+    const cfg: OpenClawConfig = {
+      channels: {
+        clawline: {
+          enabled: true,
+          port: 19191,
+          network: { bindAddress: "127.0.0.1" },
+          server: { cluSecret: "test-clu-secret-min22chars!!" },
+        },
+      },
+    };
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          streams: [{ sessionKey: "agent:main:clawline:flynn:main", displayName: "Personal" }],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    // No token param — CLU secret from config should be used
+    const result = await clawlineMessageActions.handleAction({
+      action: "channel-list",
+      params: {},
+      cfg,
+      accountId: null,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const call = fetchMock.mock.calls[0]!;
+    expect(String(call[0])).toBe("http://127.0.0.1:19191/api/streams");
+    // Must send CLU secret header, not Authorization bearer
+    expect((call[1] as RequestInit).headers).toEqual(
+      expect.objectContaining({ "X-CLU-Secret": "test-clu-secret-min22chars!!" }),
+    );
+    expect((call[1] as RequestInit).headers).not.toHaveProperty("Authorization");
+    expect(result.details).toMatchObject({ ok: true, status: 200 });
+  });
+
+  it("X-CLU-User-Id header is set when userId param provided with CLU-secret auth", async () => {
+    const cfg: OpenClawConfig = {
+      channels: {
+        clawline: {
+          enabled: true,
+          port: 19191,
+          network: { bindAddress: "127.0.0.1" },
+          server: { cluSecret: "test-clu-secret-min22chars!!" },
+        },
+      },
+    };
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ streams: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    await clawlineMessageActions.handleAction({
+      action: "channel-list",
+      params: { userId: "flynn" },
+      cfg,
+      accountId: null,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const headers = fetchMock.mock.calls[0]![1]!.headers as Record<string, string>;
+    expect(headers["X-CLU-Secret"]).toBe("test-clu-secret-min22chars!!");
+    expect(headers["X-CLU-User-Id"]).toBe("flynn");
+  });
+
+  it("falls back to bearer token when server.cluSecret is not configured", async () => {
+    const cfg: OpenClawConfig = {
+      channels: {
+        clawline: {
+          enabled: true,
+          port: 19191,
+          network: { bindAddress: "127.0.0.1" },
+          // No server.cluSecret
+        },
+      },
+    };
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ streams: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    await clawlineMessageActions.handleAction({
+      action: "channel-list",
+      params: { token: "ios-bearer-token" },
+      cfg,
+      accountId: null,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const headers = fetchMock.mock.calls[0]![1]!.headers as Record<string, string>;
+    expect(headers["Authorization"]).toBe("Bearer ios-bearer-token");
+    expect(headers).not.toHaveProperty("X-CLU-Secret");
+  });
+
+  it("CLU-secret delete carries x-clawline-user-action header", async () => {
+    const cfg: OpenClawConfig = {
+      channels: {
+        clawline: {
+          enabled: true,
+          port: 19191,
+          network: { bindAddress: "127.0.0.1" },
+          server: { cluSecret: "test-clu-secret-min22chars!!" },
+        },
+      },
+    };
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ deletedSessionKey: "agent:main:clawline:flynn:s_deadbeef" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    const result = await clawlineMessageActions.handleAction({
+      action: "channel-delete",
+      params: {
+        channelId: "agent:main:clawline:flynn:s_deadbeef",
+        idempotencyKey: "req_clu_del_1",
+      },
+      cfg,
+      accountId: null,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const call = fetchMock.mock.calls[0]!;
+    const headers = (call[1] as RequestInit).headers as Record<string, string>;
+    expect(headers["X-CLU-Secret"]).toBe("test-clu-secret-min22chars!!");
+    expect(headers["x-clawline-user-action"]).toBe("delete_stream");
+    expect(result.details).toMatchObject({
+      ok: true,
+      status: 200,
+      idempotencyKey: "req_clu_del_1",
+      deletedSessionKey: "agent:main:clawline:flynn:s_deadbeef",
+    });
   });
 });

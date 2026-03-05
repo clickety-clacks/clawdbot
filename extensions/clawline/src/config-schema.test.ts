@@ -23,4 +23,26 @@ describe("ClawlineConfigSchema", () => {
       }),
     ).toThrow();
   });
+
+  it("accepts server.cluSecret for CLU-secret auth (T140 follow-up)", () => {
+    const parsed = ClawlineConfigSchema.parse({
+      server: {
+        cluSecret: "my-secret-at-least-22chars!!",
+      },
+    });
+    expect(parsed.server?.cluSecret).toBe("my-secret-at-least-22chars!!");
+  });
+
+  it("accepts server.cluSecret as null (disables CLU-secret path)", () => {
+    const parsed = ClawlineConfigSchema.parse({ server: { cluSecret: null } });
+    expect(parsed.server?.cluSecret).toBeNull();
+  });
+
+  it("rejects unknown keys inside server block", () => {
+    expect(() =>
+      ClawlineConfigSchema.parse({
+        server: { unknownKey: true },
+      }),
+    ).toThrow();
+  });
 });

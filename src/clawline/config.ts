@@ -1,9 +1,9 @@
 import os from "node:os";
 import path from "node:path";
-import type { OpenClawConfig } from "../config/config.js";
-import type { ProviderConfig } from "./domain.js";
 import { DEFAULT_AGENT_WORKSPACE_DIR } from "../agents/workspace.js";
+import type { OpenClawConfig } from "../config/config.js";
 import { resolveUserPath } from "../utils.js";
+import type { ProviderConfig } from "./domain.js";
 import { deepMerge } from "./utils/deep-merge.js";
 
 export type ClawlineAdapterOverrides = {
@@ -124,6 +124,9 @@ const DEFAULTS: ResolvedClawlineConfig = {
   surfAce: {
     discoveryIntervalMs: 5_000,
     discoveryTimeoutMs: 1_500,
+  },
+  server: {
+    cluSecret: null,
   },
 };
 

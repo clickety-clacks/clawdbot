@@ -256,6 +256,22 @@ function parseStreamApiError(
   };
 }
 
+/**
+ * Resolve the CLU server secret from config for server-side stream management.
+ * When present, this is used as `X-CLU-Secret` instead of a bearer token.
+ * See spec: stream-lifecycle.md §5 Auth Model.
+ */
+function resolveCluSecret(cfg: OpenClawConfig): string | undefined {
+  const secret = (cfg.channels?.clawline as Record<string, unknown> | undefined)?.server;
+  if (secret && typeof secret === "object" && !Array.isArray(secret)) {
+    const cluSecret = (secret as Record<string, unknown>).cluSecret;
+    if (typeof cluSecret === "string" && cluSecret.trim().length > 0) {
+      return cluSecret.trim();
+    }
+  }
+  return undefined;
+}
+
 async function callStreamApi(params: {
   cfg: OpenClawConfig;
   actionParams: Record<string, unknown>;
@@ -264,18 +280,37 @@ async function callStreamApi(params: {
   body?: Record<string, unknown>;
   extraHeaders?: Record<string, string>;
 }): Promise<StreamApiCallResult> {
-  const token =
+  // Auth priority:
+  // 1. server.cluSecret in config → X-CLU-Secret header (spec-aligned, no iOS bearer needed)
+  // 2. explicit token param → Authorization: Bearer <token> (backward compat)
+  // 3. neither → fall back to auto-resolved local JWT from state directory (T140 original fix)
+  // 4. nothing → throw
+  const cluSecret = resolveCluSecret(params.cfg);
+  const bearerToken =
     readStringParam(params.actionParams, ["token", "bearerToken", "authToken"]) ??
-    resolveLocalClawlineToken(params.cfg);
-  if (!token) {
-    throw new Error("Clawline stream actions require token (bearerToken/authToken also accepted)");
+    (!cluSecret ? resolveLocalClawlineToken(params.cfg) : undefined);
+
+  if (!cluSecret && !bearerToken) {
+    throw new Error(
+      "Clawline stream actions require either server.cluSecret in config or token (bearerToken/authToken also accepted)",
+    );
   }
+
   const baseUrl = resolveClawlineApiBaseUrl(params.cfg, params.actionParams);
   const requestUrl = new URL(params.path, `${baseUrl}/`);
-  const headers: Record<string, string> = {
-    Authorization: `Bearer ${token}`,
-    ...params.extraHeaders,
-  };
+  const headers: Record<string, string> = cluSecret
+    ? { "X-CLU-Secret": cluSecret }
+    : { Authorization: `Bearer ${bearerToken!}` };
+
+  // Allow caller to provide explicit userId for CLU-secret requests when targeting a specific user.
+  const cluUserId = readStringParam(params.actionParams, ["userId", "targetUserId"]);
+  if (cluSecret && cluUserId) {
+    headers["X-CLU-User-Id"] = cluUserId;
+  }
+  // Merge extra headers (e.g. x-clawline-user-action for delete) last so they always apply.
+  if (params.extraHeaders) {
+    Object.assign(headers, params.extraHeaders);
+  }
   if (params.body) {
     headers["Content-Type"] = "application/json";
   }
