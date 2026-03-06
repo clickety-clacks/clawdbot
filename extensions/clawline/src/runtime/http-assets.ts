@@ -10,6 +10,61 @@ import { ClientMessageError, HttpError } from "./errors.js";
 
 export type AuthDetails = { deviceId: string; userId: string; isAdmin: boolean };
 
+const OCTET_STREAM_MIME = "application/octet-stream";
+const MIME_SNIFF_MAX_BYTES = 32;
+
+function normalizeMimeType(mimeType: string | undefined): string {
+  const normalized = typeof mimeType === "string" ? mimeType.trim().toLowerCase() : "";
+  return normalized || OCTET_STREAM_MIME;
+}
+
+function sniffMimeTypeFromMagicBytes(sample: Buffer): string | null {
+  if (
+    sample.length >= 8 &&
+    sample[0] === 0x89 &&
+    sample[1] === 0x50 &&
+    sample[2] === 0x4e &&
+    sample[3] === 0x47 &&
+    sample[4] === 0x0d &&
+    sample[5] === 0x0a &&
+    sample[6] === 0x1a &&
+    sample[7] === 0x0a
+  ) {
+    return "image/png";
+  }
+  if (sample.length >= 3 && sample[0] === 0xff && sample[1] === 0xd8 && sample[2] === 0xff) {
+    return "image/jpeg";
+  }
+  if (sample.length >= 6) {
+    const gifHeader = sample.subarray(0, 6).toString("ascii");
+    if (gifHeader === "GIF87a" || gifHeader === "GIF89a") {
+      return "image/gif";
+    }
+  }
+  if (
+    sample.length >= 12 &&
+    sample.subarray(0, 4).toString("ascii") === "RIFF" &&
+    sample.subarray(8, 12).toString("ascii") === "WEBP"
+  ) {
+    return "image/webp";
+  }
+  if (sample.length >= 12 && sample.subarray(4, 8).toString("ascii") === "ftyp") {
+    const brand = sample.subarray(8, 12).toString("ascii");
+    if (brand === "heic" || brand === "heix" || brand === "hevc" || brand === "hevx") {
+      return "image/heic";
+    }
+  }
+  return null;
+}
+
+function resolveStoredMimeType(declaredMimeType: string, sample: Buffer): string {
+  const normalizedDeclared = normalizeMimeType(declaredMimeType);
+  if (normalizedDeclared !== OCTET_STREAM_MIME) {
+    return normalizedDeclared;
+  }
+  return sniffMimeTypeFromMagicBytes(sample) ?? OCTET_STREAM_MIME;
+}
+
 export type AssetHandlerDeps = {
   config: ProviderConfig;
   tmpDir: string;
@@ -53,7 +108,8 @@ export function createAssetHandlers(deps: AssetHandlerDeps) {
       const auth = authenticateHttpRequest(req);
       const assetId = `a_${randomUUID()}`;
       tmpPath = path.join(tmpDir, `${assetId}.tmp`);
-      let detectedMime = "application/octet-stream";
+      let declaredMimeType = OCTET_STREAM_MIME;
+      let mimeSniffSample = Buffer.alloc(0);
       let size = 0;
       await new Promise<void>((resolve, reject) => {
         const busboy = Busboy({
@@ -82,7 +138,7 @@ export function createAssetHandlers(deps: AssetHandlerDeps) {
             return;
           }
           handled = true;
-          detectedMime = info.mimeType || "application/octet-stream";
+          declaredMimeType = normalizeMimeType(info.mimeType);
           const writeStream = createWriteStream(tmpPath!);
           let aborted = false;
           writeDone = new Promise<void>((writeResolve, writeReject) => {
@@ -91,6 +147,11 @@ export function createAssetHandlers(deps: AssetHandlerDeps) {
           });
           file.on("data", (chunk) => {
             size += chunk.length;
+            if (mimeSniffSample.length < MIME_SNIFF_MAX_BYTES) {
+              const remaining = MIME_SNIFF_MAX_BYTES - mimeSniffSample.length;
+              const nextChunk = chunk.subarray(0, remaining);
+              mimeSniffSample = Buffer.concat([mimeSniffSample, nextChunk]);
+            }
             if (!aborted && size > config.media.maxUploadBytes) {
               aborted = true;
               file.unpipe(writeStream);
@@ -123,11 +184,19 @@ export function createAssetHandlers(deps: AssetHandlerDeps) {
       if (size === 0) {
         throw new ClientMessageError("invalid_message", "Empty upload");
       }
+      const storedMimeType = resolveStoredMimeType(declaredMimeType, mimeSniffSample);
+      if (!storedMimeType.startsWith("image/")) {
+        logger.warn("[clawline] upload_stored_non_image_mime", {
+          assetId,
+          mimeType: storedMimeType,
+          declaredMimeType,
+        });
+      }
       const finalPath = path.join(assetsDir, assetId);
       await fs.rename(tmpPath, finalPath);
       try {
         await enqueueWriteTask(() =>
-          insertAssetStmt.run(assetId, auth.userId, detectedMime, size, nowMs(), auth.deviceId),
+          insertAssetStmt.run(assetId, auth.userId, storedMimeType, size, nowMs(), auth.deviceId),
         );
       } catch (err) {
         await safeUnlink(finalPath);
@@ -135,7 +204,7 @@ export function createAssetHandlers(deps: AssetHandlerDeps) {
       }
       res.setHeader("Content-Type", "application/json");
       res.writeHead(200);
-      res.end(JSON.stringify({ assetId, mimeType: detectedMime, size }));
+      res.end(JSON.stringify({ assetId, mimeType: storedMimeType, size }));
     } catch (err) {
       if (tmpPath) {
         await safeUnlink(tmpPath);

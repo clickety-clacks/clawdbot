@@ -10,10 +10,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import type { getReplyFromConfig } from "../../../../src/auto-reply/reply.js";
 import type { OpenClawConfig } from "../../../../src/config/config.js";
-import {
-  enqueueSystemEvent,
-  resetSystemEventsForTest,
-} from "../../../../src/infra/system-events.js";
+import { enqueueSystemEvent, resetSystemEventsForTest } from "../infra/system-events.js";
 import type { AllowlistEntry, Logger, ProviderServer } from "./domain.js";
 
 const gatewayCallMock = vi.fn();
@@ -576,6 +573,34 @@ describe.sequential("clawline provider server", () => {
       const assetPath = path.join(ctx.mediaPath, "assets", upload.assetId);
       const stored = await fs.readFile(assetPath);
       expect(stored.equals(bytes)).toBe(true);
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("sniffs image mime type for octet-stream uploads", async () => {
+    const deviceId = randomUUID();
+    const entry = createAllowlistEntry({
+      deviceId,
+      isAdmin: true,
+      tokenDelivered: false,
+      lastSeenAt: null,
+    });
+    const ctx = await setupTestServer([entry]);
+    try {
+      const pairResponse = await performPairRequest(ctx.port, deviceId, { claimedName: "Flynn" });
+      expect(pairResponse.success).toBe(true);
+      const token = pairResponse.token as string;
+      const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00]);
+
+      const upload = await uploadAsset(ctx.port, token, pngBytes, "application/octet-stream");
+      expect(upload.mimeType).toBe("image/png");
+
+      const response = await fetch(`http://127.0.0.1:${ctx.port}/download/${upload.assetId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toContain("image/png");
     } finally {
       await ctx.cleanup();
     }

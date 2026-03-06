@@ -2565,6 +2565,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     mimeType: string;
   } | null> {
     const asset = selectAssetStmt.get(assetId) as { mimeType: string } | undefined;
+    if (!asset) {
+      logger.warn?.("[clawline] inbound_asset_row_missing", { assetId });
+      return null;
+    }
     const mimeType = typeof asset?.mimeType === "string" ? asset.mimeType.trim().toLowerCase() : "";
     if (!mimeType.startsWith("image/")) {
       return null;
@@ -5127,10 +5131,22 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               session.socket.send(JSON.stringify({ type: "ack", id: payload.id }), (err) => {
                 if (!err) {
                   markAckSent(session.deviceId, payload.id);
+                  return;
                 }
+                logger.warn?.(`[clawline] ack_send_failed: ${formatError(err)}`, {
+                  messageId: payload.id,
+                  deviceId: session.deviceId,
+                });
               });
             } else {
-              session.socket.send(JSON.stringify({ type: "ack", id: payload.id }), () => {});
+              session.socket.send(JSON.stringify({ type: "ack", id: payload.id }), (err) => {
+                if (err) {
+                  logger.warn?.(`[clawline] duplicate_ack_send_failed: ${formatError(err)}`, {
+                    messageId: payload.id,
+                    deviceId: session.deviceId,
+                  });
+                }
+              });
             }
             return;
           }
@@ -5165,6 +5181,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             session.socket.send(JSON.stringify({ type: "ack", id: payload.id }), (err) => {
               if (!err) {
                 markAckSent(session.deviceId, payload.id);
+              } else {
+                logger.warn?.(`[clawline] ack_send_failed: ${formatError(err)}`, {
+                  messageId: payload.id,
+                  deviceId: session.deviceId,
+                });
               }
               resolve();
             });
