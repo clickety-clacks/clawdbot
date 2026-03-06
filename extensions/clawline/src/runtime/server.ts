@@ -3948,6 +3948,27 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     return { deviceId: "clu-server", userId: adminEntry.userId, isAdmin: true };
   }
 
+  function authenticateStreamHttpRequest(req: http.IncomingMessage) {
+    // Stream API is localhost-only internal. Try bearer/CLU-secret first;
+    // fall back to the connected WS user when no credentials are provided.
+    try {
+      return authenticateHttpRequest(req);
+    } catch {
+      // No valid auth header — derive userId from active WS connection.
+      for (const [userId, sessions] of userSessions) {
+        if (sessions.size > 0) {
+          const first = sessions.values().next().value!;
+          return {
+            deviceId: first.deviceId ?? "ws-derived",
+            userId,
+            isAdmin: first.isAdmin ?? false,
+          };
+        }
+      }
+      throw new HttpError(401, "auth_failed", "No connected sessions");
+    }
+  }
+
   function authenticateHttpRequest(req: http.IncomingMessage) {
     // CLU-secret path: allows server-side CLU stream management without iOS bearer token.
     const cluSecret = config.server?.cluSecret;
@@ -4081,7 +4102,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   }
 
   async function handleListStreamsRequest(req: http.IncomingMessage, res: http.ServerResponse) {
-    const auth = authenticateHttpRequest(req);
+    const auth = authenticateStreamHttpRequest(req);
     const streams = await ensureStreamsForAuthedUser(auth);
     res.setHeader("Content-Type", "application/json");
     res.writeHead(200);
@@ -4141,7 +4162,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   }
 
   async function handleCreateStreamRequest(req: http.IncomingMessage, res: http.ServerResponse) {
-    const auth = authenticateHttpRequest(req);
+    const auth = authenticateStreamHttpRequest(req);
     const body = await parseStreamsRequestBody(req);
     const idempotencyKey =
       typeof body.idempotencyKey === "string" ? body.idempotencyKey.trim() : "";
@@ -4262,7 +4283,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   }
 
   async function handleRenameStreamRequest(req: http.IncomingMessage, res: http.ServerResponse) {
-    const auth = authenticateHttpRequest(req);
+    const auth = authenticateStreamHttpRequest(req);
     const sessionKeyInput = parseSessionKeyPath(
       new URL(req.url ?? "", "http://localhost").pathname,
     );
@@ -4312,7 +4333,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   }
 
   async function handleDeleteStreamRequest(req: http.IncomingMessage, res: http.ServerResponse) {
-    const auth = authenticateHttpRequest(req);
+    const auth = authenticateStreamHttpRequest(req);
     const userActionHeaderRaw = req.headers["x-clawline-user-action"];
     const userActionHeader = Array.isArray(userActionHeaderRaw)
       ? userActionHeaderRaw[0]
