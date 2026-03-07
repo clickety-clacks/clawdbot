@@ -3948,25 +3948,20 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     return { deviceId: "clu-server", userId: adminEntry.userId, isAdmin: true };
   }
 
-  function authenticateStreamHttpRequest(req: http.IncomingMessage) {
-    // Stream API is localhost-only internal. Try bearer/CLU-secret first;
-    // fall back to the connected WS user when no credentials are provided.
-    try {
-      return authenticateHttpRequest(req);
-    } catch {
-      // No valid auth header — derive userId from active WS connection.
-      for (const [userId, sessions] of userSessions) {
-        if (sessions.size > 0) {
-          const first = sessions.values().next().value!;
-          return {
-            deviceId: first.deviceId ?? "ws-derived",
-            userId,
-            isAdmin: first.isAdmin ?? false,
-          };
-        }
+  function authenticateStreamHttpRequest(_req: http.IncomingMessage) {
+    // Stream API is localhost-only internal — no auth required.
+    // Derive userId from the active WebSocket connection.
+    for (const [userId, sessions] of userSessions) {
+      if (sessions.size > 0) {
+        const first = sessions.values().next().value!;
+        return {
+          deviceId: first.deviceId ?? "ws-derived",
+          userId,
+          isAdmin: first.isAdmin ?? false,
+        };
       }
-      throw new HttpError(401, "auth_failed", "No connected sessions");
     }
+    throw new HttpError(401, "auth_failed", "No connected sessions");
   }
 
   function authenticateHttpRequest(req: http.IncomingMessage) {
