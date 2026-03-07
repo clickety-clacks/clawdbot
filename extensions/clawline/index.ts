@@ -2,8 +2,6 @@ import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
 import { clawlinePlugin } from "./src/channel.js";
 import { startClawlineService } from "./src/runtime/service.js";
-import { setClawlineSurfAceRuntime } from "./src/surf-ace-runtime.js";
-import { createSurfAceTools } from "./src/surf-ace-tools.js";
 
 let serviceHandle: Awaited<ReturnType<typeof startClawlineService>> = null;
 let serviceStart: Promise<void> | null = null;
@@ -15,7 +13,6 @@ const plugin = {
   configSchema: emptyPluginConfigSchema(),
   register(api: OpenClawPluginApi) {
     api.registerChannel({ plugin: clawlinePlugin });
-    api.registerTool((ctx) => createSurfAceTools({ context: ctx }));
     api.registerService({
       id: "clawline",
       start: async ({ config, logger }) => {
@@ -33,11 +30,9 @@ const plugin = {
         serviceStart = (async () => {
           try {
             serviceHandle = await startClawlineService({ config, logger });
-            setClawlineSurfAceRuntime(serviceHandle?.getSurfAceRuntime() ?? null);
           } catch (err) {
             logger.error?.(`clawline service failed to start: ${String(err)}`);
             serviceHandle = null;
-            setClawlineSurfAceRuntime(null);
           } finally {
             serviceStart = null;
           }
@@ -45,7 +40,6 @@ const plugin = {
         await serviceStart;
       },
       stop: async () => {
-        setClawlineSurfAceRuntime(null);
         if (!serviceHandle) {
           return;
         }

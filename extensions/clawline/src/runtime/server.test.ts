@@ -1337,7 +1337,7 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
-  it("handles Surf Ace event callback endpoint", async () => {
+  it("returns 404 for unknown callback routes", async () => {
     const ctx = await setupTestServer([]);
     try {
       const response = await fetch(`http://127.0.0.1:${ctx.port}/surf-ace/events/a1b2c3d4`, {
@@ -1346,8 +1346,6 @@ describe.sequential("clawline provider server", () => {
         body: JSON.stringify({ event: "text_selected", text: "oops" }),
       });
       expect(response.status).toBe(404);
-      const payload = (await response.json()) as { ok?: boolean; error?: string };
-      expect(payload).toEqual({ ok: false, error: "unknown_screen" });
     } finally {
       await ctx.cleanup();
     }
