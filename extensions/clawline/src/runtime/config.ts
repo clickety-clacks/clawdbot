@@ -1,9 +1,9 @@
 import os from "node:os";
 import path from "node:path";
-import type { OpenClawConfig } from "../config/config.js";
+import { DEFAULT_AGENT_WORKSPACE_DIR } from "../../../../src/agents/workspace.js";
+import type { OpenClawConfig } from "../../../../src/config/config.js";
+import { resolveUserPath } from "../../../../src/utils.js";
 import type { ProviderConfig } from "./domain.js";
-import { DEFAULT_AGENT_WORKSPACE_DIR } from "../agents/workspace.js";
-import { resolveUserPath } from "../utils.js";
 import { deepMerge } from "./utils/deep-merge.js";
 
 export type ClawlineAdapterOverrides = {

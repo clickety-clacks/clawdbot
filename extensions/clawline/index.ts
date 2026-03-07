@@ -1,6 +1,7 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import { emptyPluginConfigSchema, startClawlineService } from "openclaw/plugin-sdk";
+import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
 import { clawlinePlugin } from "./src/channel.js";
+import { startClawlineService } from "./src/runtime/service.js";
 
 let serviceHandle: Awaited<ReturnType<typeof startClawlineService>> = null;
 let serviceStart: Promise<void> | null = null;

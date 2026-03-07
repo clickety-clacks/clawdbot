@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { loadSessionStore, resolveSessionTranscriptPath } from "../config/sessions.js";
+import { loadSessionStore, resolveSessionTranscriptPath } from "../../../../src/config/sessions.js";
 import { recordClawlineSessionActivity } from "./session-store.js";
 
 describe("recordClawlineSessionActivity", () => {

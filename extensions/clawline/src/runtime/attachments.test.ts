@@ -10,13 +10,10 @@ describe("clawlineAttachmentsToImages", () => {
   });
 
   it("maps asset image attachments via loader", async () => {
-    const images = await clawlineAttachmentsToImages(
-      [{ type: "asset", assetId: "a_test" }],
-      {
-        loadAssetImage: async (assetId) =>
-          assetId === "a_test" ? { mimeType: "image/png", data: "ZXhhbXBsZQ==" } : null,
-      },
-    );
+    const images = await clawlineAttachmentsToImages([{ type: "asset", assetId: "a_test" }], {
+      loadAssetImage: async (assetId) =>
+        assetId === "a_test" ? { mimeType: "image/png", data: "ZXhhbXBsZQ==" } : null,
+    });
     expect(images).toEqual([{ type: "image", mimeType: "image/png", data: "ZXhhbXBsZQ==" }]);
   });
 

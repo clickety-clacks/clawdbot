@@ -1,13 +1,10 @@
 import type { ChannelPlugin, OpenClawConfig } from "openclaw/plugin-sdk";
-import {
-  buildChannelConfigSchema,
-  ClawlineDeliveryTarget,
-  DEFAULT_ACCOUNT_ID,
-} from "openclaw/plugin-sdk";
+import { buildChannelConfigSchema, DEFAULT_ACCOUNT_ID } from "openclaw/plugin-sdk";
 import { clawlineMessageActions } from "./actions.js";
 import { ClawlineConfigSchema } from "./config-schema.js";
 import { clawlineOnboardingAdapter } from "./onboarding.js";
 import { clawlineOutbound } from "./outbound.js";
+import { ClawlineDeliveryTarget } from "./runtime/routing.js";
 
 type ResolvedClawlineAccount = {
   accountId: string;

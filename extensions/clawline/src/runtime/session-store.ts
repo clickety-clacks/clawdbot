@@ -1,12 +1,12 @@
 import path from "node:path";
-import type { SessionChannelId, SessionEntry } from "../config/sessions.js";
+import type { SessionChannelId, SessionEntry } from "../../../../src/config/sessions.js";
 import {
   mergeSessionEntry,
   resolveAgentIdFromSessionKey,
   resolveSessionTranscriptPath,
   resolveSessionTranscriptsDirForAgent,
   updateSessionStore,
-} from "../config/sessions.js";
+} from "../../../../src/config/sessions.js";
 
 export const CLAWLINE_SESSION_CHANNEL = "clawline" as SessionChannelId;
 

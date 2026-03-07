@@ -448,7 +448,6 @@ export {
   resolveWhatsAppGroupToolPolicy,
 } from "../channels/plugins/group-mentions.js";
 export { recordInboundSession } from "../channels/session.js";
-export { ClawlineDeliveryTarget } from "../clawline/routing.js";
 export {
   buildChannelKeyCandidates,
   normalizeChannelSlug,
@@ -687,10 +686,6 @@ export type { ProcessedLineMessage } from "../line/markdown-to-line.js";
 
 // Media utilities
 export { loadWebMedia, type WebMediaResult } from "../web/media.js";
-
-// Clawline service
-export { sendClawlineOutboundMessage } from "../clawline/outbound.js";
-export { startClawlineService, type ClawlineServiceHandle } from "../clawline/service.js";
 
 // Security utilities
 export { redactSensitiveText } from "../logging/redact.js";

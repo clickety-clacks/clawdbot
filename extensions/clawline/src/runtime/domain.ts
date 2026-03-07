@@ -1,5 +1,5 @@
-import type { getReplyFromConfig } from "../auto-reply/reply.js";
-import type { OpenClawConfig } from "../config/config.js";
+import type { getReplyFromConfig } from "../../../../src/auto-reply/reply.js";
+import type { OpenClawConfig } from "../../../../src/config/config.js";
 
 export type DeviceInfo = {
   platform: string;

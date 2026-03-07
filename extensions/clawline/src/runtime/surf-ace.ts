@@ -3,8 +3,8 @@ import { lookup } from "node:dns/promises";
 import fs from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
+import { runCommandWithTimeout } from "../../../../src/process/exec.js";
 import type { Logger } from "./domain.js";
-import { runCommandWithTimeout } from "../process/exec.js";
 
 const SURF_ACE_SERVICE_TYPE = "_surf-ace._tcp";
 const TRUST_STORE_FILE = "surf-ace-trust.json";
