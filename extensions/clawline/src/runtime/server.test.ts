@@ -1,17 +1,17 @@
+import BetterSqlite3 from "better-sqlite3";
+import jwt from "jsonwebtoken";
 import { Blob } from "node:buffer";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import BetterSqlite3 from "better-sqlite3";
-import jwt from "jsonwebtoken";
 import { FormData, fetch, getGlobalDispatcher } from "undici";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import type { getReplyFromConfig } from "../../../../src/auto-reply/reply.js";
 import type { OpenClawConfig } from "../../../../src/config/config.js";
-import { enqueueSystemEvent, resetSystemEventsForTest } from "../infra/system-events.js";
 import type { AllowlistEntry, Logger, ProviderServer } from "./domain.js";
+import { enqueueSystemEvent, resetSystemEventsForTest } from "../infra/system-events.js";
 
 const gatewayCallMock = vi.fn();
 vi.mock("../gateway/call.js", () => ({
@@ -1340,7 +1340,7 @@ describe.sequential("clawline provider server", () => {
   it("returns 404 for unknown callback routes", async () => {
     const ctx = await setupTestServer([]);
     try {
-      const response = await fetch(`http://127.0.0.1:${ctx.port}/surf-ace/events/a1b2c3d4`, {
+      const response = await fetch(`http://127.0.0.1:${ctx.port}/callbacks/unknown/a1b2c3d4`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ event: "text_selected", text: "oops" }),
