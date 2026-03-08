@@ -1343,7 +1343,7 @@ describe.sequential("clawline provider server", () => {
   it("returns 404 for unknown callback routes", async () => {
     const ctx = await setupTestServer([]);
     try {
-      const response = await fetch(`http://127.0.0.1:${ctx.port}/surf-ace/events/a1b2c3d4`, {
+      const response = await fetch(`http://127.0.0.1:${ctx.port}/callbacks/unknown/a1b2c3d4`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ event: "text_selected", text: "oops" }),
