@@ -2,127 +2,6 @@ import OpenClawKit
 import Foundation
 import SwiftUI
 
-enum ChatInlineAttachmentSupport {
-    enum Kind: Equatable {
-        case file
-        case document
-        case terminalSession
-        case interactiveHTML
-    }
-
-    static let terminalSessionMimeType = "application/vnd.clawline.terminal-session+json"
-    static let interactiveHTMLMimeType = "application/vnd.clawline.interactive-html+json"
-
-    static func inlineAttachments(from contentBlocks: [OpenClawChatMessageContent]) -> [OpenClawChatMessageContent] {
-        contentBlocks.filter { self.kind(for: $0) != nil }
-    }
-
-    static func kind(for content: OpenClawChatMessageContent) -> Kind? {
-        switch self.normalizedType(content.type) {
-        case "file", "attachment":
-            return .file
-        case "document":
-            if self.mimeTypeEquals(content.mimeType, expected: self.terminalSessionMimeType) {
-                return .terminalSession
-            }
-            if self.mimeTypeEquals(content.mimeType, expected: self.interactiveHTMLMimeType) {
-                return .interactiveHTML
-            }
-            return .document
-        default:
-            return nil
-        }
-    }
-
-    static func iconName(for content: OpenClawChatMessageContent) -> String {
-        switch self.kind(for: content) {
-        case .terminalSession:
-            return "terminal"
-        case .interactiveHTML:
-            return "globe"
-        case .document:
-            return "doc.richtext"
-        case .file, nil:
-            return "paperclip"
-        }
-    }
-
-    static func displayName(for content: OpenClawChatMessageContent) -> String {
-        let fileName = self.nonEmptyString(content.fileName)
-        switch self.kind(for: content) {
-        case .terminalSession:
-            return self.descriptorTitle(from: content.content) ?? fileName ?? "Terminal session"
-        case .interactiveHTML:
-            return self.descriptorTitle(from: content.content) ?? fileName ?? "Interactive document"
-        case .document:
-            return fileName ?? "Document"
-        case .file, nil:
-            return fileName ?? "Attachment"
-        }
-    }
-
-    static func subtitle(for content: OpenClawChatMessageContent) -> String? {
-        switch self.kind(for: content) {
-        case .terminalSession:
-            return "Terminal session"
-        case .interactiveHTML:
-            return "Interactive document"
-        case .file, .document, nil:
-            return nil
-        }
-    }
-
-    private static func normalizedType(_ raw: String?) -> String {
-        raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
-    }
-
-    private static func descriptorTitle(from payload: AnyCodable?) -> String? {
-        guard let payload else { return nil }
-        guard let root = self.dictionary(from: payload.value) else { return nil }
-        if let title = self.nonEmptyString(root["title"]) {
-            return title
-        }
-        guard let metadata = root["metadata"],
-              let metadataDict = self.dictionary(from: metadata) else {
-            return nil
-        }
-        return self.nonEmptyString(metadataDict["title"])
-    }
-
-    private static func dictionary(from value: Any) -> [String: Any]? {
-        if let dict = value as? [String: Any] {
-            return dict
-        }
-        if let dict = value as? [String: AnyCodable] {
-            return dict.mapValues(\.value)
-        }
-        if let wrapped = value as? AnyCodable {
-            return self.dictionary(from: wrapped.value)
-        }
-        return nil
-    }
-
-    private static func nonEmptyString(_ value: Any?) -> String? {
-        if let wrapped = value as? AnyCodable {
-            return self.nonEmptyString(wrapped.value)
-        }
-        guard let string = value as? String else { return nil }
-        let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
-    }
-
-    private static func mimeTypeEquals(_ raw: String?, expected: String) -> Bool {
-        self.normalizedMimeType(raw) == expected
-    }
-
-    private static func normalizedMimeType(_ raw: String?) -> String? {
-        guard let raw else { return nil }
-        let base = raw.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: false).first ?? Substring(raw)
-        let normalized = base.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return normalized.isEmpty ? nil : normalized
-    }
-}
-
 private enum ChatUIConstants {
     static let bubbleMaxWidth: CGFloat = 560
     static let bubbleCorner: CGFloat = 18
@@ -366,7 +245,14 @@ private struct ChatMessageBody: View {
     }
 
     private var inlineAttachments: [OpenClawChatMessageContent] {
-        ChatInlineAttachmentSupport.inlineAttachments(from: self.message.content)
+        self.message.content.filter { content in
+            switch content.type ?? "text" {
+            case "file", "attachment":
+                true
+            default:
+                false
+            }
+        }
     }
 
     private var toolCalls: [OpenClawChatMessageContent] {
@@ -470,18 +356,11 @@ private struct AttachmentRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: ChatInlineAttachmentSupport.iconName(for: self.att))
-            VStack(alignment: .leading, spacing: 2) {
-                Text(ChatInlineAttachmentSupport.displayName(for: self.att))
-                    .font(.footnote)
-                    .lineLimit(1)
-                    .foregroundStyle(self.isUser ? OpenClawChatTheme.userText : OpenClawChatTheme.assistantText)
-                if let subtitle = ChatInlineAttachmentSupport.subtitle(for: self.att) {
-                    Text(subtitle)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-            }
+            Image(systemName: "paperclip")
+            Text(self.att.fileName ?? "Attachment")
+                .font(.footnote)
+                .lineLimit(1)
+                .foregroundStyle(self.isUser ? OpenClawChatTheme.userText : OpenClawChatTheme.assistantText)
             Spacer()
         }
         .padding(10)
