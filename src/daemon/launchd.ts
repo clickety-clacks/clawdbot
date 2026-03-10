@@ -121,8 +121,7 @@ export type LaunchctlPrintInfo = {
 
 const MAC_APP_LAUNCH_AGENT_LABEL = "ai.openclaw.mac";
 const MAC_APP_BUNDLE_ID = "ai.openclaw.mac";
-const MAC_APP_RECOVERY_WAIT_TIMEOUT_MS = 30_000;
-const MAC_APP_RECOVERY_WAIT_INTERVAL_MS = 500;
+const MAC_APP_DEFAULT_PATH = "/Applications/OpenClaw.app";
 
 export function parseLaunchctlPrint(output: string): LaunchctlPrintInfo {
   const entries = parseKeyValueOutput(output, "=");
@@ -219,9 +218,10 @@ export async function repairLaunchAgentBootstrap(args: {
   if (boot.code !== 0) {
     return { ok: false, detail: (boot.stderr || boot.stdout).trim() || undefined };
   }
-  const kick = await execLaunchctl(["kickstart", "-k", `${domain}/${label}`]);
-  if (kick.code !== 0) {
-    return { ok: false, detail: (kick.stderr || kick.stdout).trim() || undefined };
+  try {
+    await ensureLaunchctlServiceStarted(`${domain}/${label}`);
+  } catch (error) {
+    return { ok: false, detail: error instanceof Error ? error.message : String(error) };
   }
   return { ok: true };
 }
@@ -349,18 +349,6 @@ async function sleepMs(ms: number): Promise<void> {
   });
 }
 
-async function waitForLaunchctlServiceLoaded(serviceId: string): Promise<boolean> {
-  const deadline = Date.now() + MAC_APP_RECOVERY_WAIT_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    const res = await execLaunchctl(["print", serviceId]);
-    if (res.code === 0) {
-      return true;
-    }
-    await sleepMs(MAC_APP_RECOVERY_WAIT_INTERVAL_MS);
-  }
-  return false;
-}
-
 async function waitForPidExit(pid: number): Promise<void> {
   if (!Number.isFinite(pid) || pid <= 1) {
     return;
@@ -377,6 +365,30 @@ async function waitForPidExit(pid: number): Promise<void> {
       return;
     }
     await sleepMs(RESTART_PID_WAIT_INTERVAL_MS);
+  }
+}
+
+async function ensureLaunchctlServiceStarted(serviceId: string): Promise<void> {
+  const runtime = await execLaunchctl(["print", serviceId]);
+  if (runtime.code === 0) {
+    const info = parseLaunchctlPrint(runtime.stdout || runtime.stderr || "");
+    const state = info.state?.toLowerCase();
+    if (state === "running" || typeof info.pid === "number") {
+      return;
+    }
+  }
+  const start = await execLaunchctl(["kickstart", serviceId]);
+  if (start.code !== 0) {
+    throw new Error(`launchctl kickstart failed: ${start.stderr || start.stdout}`.trim());
+  }
+}
+
+async function resolveMacAppOpenArgs(): Promise<string[]> {
+  try {
+    await fs.access(MAC_APP_DEFAULT_PATH);
+    return ["-g", "-a", MAC_APP_DEFAULT_PATH];
+  } catch {
+    return ["-g", "-b", MAC_APP_BUNDLE_ID];
   }
 }
 
@@ -449,7 +461,7 @@ export async function installLaunchAgent({
     }
     throw new Error(`launchctl bootstrap failed: ${detail}`);
   }
-  await execLaunchctl(["kickstart", "-k", `${domain}/${label}`]);
+  await ensureLaunchctlServiceStarted(`${domain}/${label}`);
 
   // Ensure we don't end up writing to a clack spinner line (wizards show progress without a newline).
   writeFormattedLines(
@@ -506,10 +518,7 @@ export async function restartLaunchAgent({
     throw new Error(`launchctl bootstrap failed: ${detail}`);
   }
 
-  const start = await execLaunchctl(["kickstart", "-k", `${domain}/${label}`]);
-  if (start.code !== 0) {
-    throw new Error(`launchctl kickstart failed: ${start.stderr || start.stdout}`.trim());
-  }
+  await ensureLaunchctlServiceStarted(`${domain}/${label}`);
   try {
     stdout.write(`${formatLine("Restarted LaunchAgent", `${domain}/${label}`)}\n`);
   } catch (err: unknown) {
@@ -527,6 +536,7 @@ export async function recoverLaunchAgentWithAppBounce({
   const domain = resolveGuiDomain();
   const gatewayLabel = resolveLaunchAgentLabel({ env: serviceEnv });
   const gatewayServiceId = `${domain}/${gatewayLabel}`;
+  const gatewayPlistPath = resolveLaunchAgentPlistPath(serviceEnv);
   const appServiceId = `${domain}/${MAC_APP_LAUNCH_AGENT_LABEL}`;
 
   const gatewayRuntime = await execLaunchctl(["print", gatewayServiceId]);
@@ -559,20 +569,17 @@ export async function recoverLaunchAgentWithAppBounce({
     code: 0,
   }));
 
-  const open = await execFileUtf8("/usr/bin/open", ["-g", "-b", MAC_APP_BUNDLE_ID]);
+  const open = await execFileUtf8("/usr/bin/open", await resolveMacAppOpenArgs());
   if (open.code !== 0) {
     throw new Error(`open failed: ${open.stderr || open.stdout}`.trim());
   }
 
-  const loaded = await waitForLaunchctlServiceLoaded(gatewayServiceId);
-  if (!loaded) {
-    throw new Error(`launchctl print failed after app relaunch: ${gatewayServiceId}`);
+  await execLaunchctl(["enable", gatewayServiceId]);
+  const boot = await execLaunchctl(["bootstrap", domain, gatewayPlistPath]);
+  if (boot.code !== 0) {
+    throw new Error(`launchctl bootstrap failed: ${boot.stderr || boot.stdout}`.trim());
   }
-
-  const start = await execLaunchctl(["kickstart", gatewayServiceId]);
-  if (start.code !== 0) {
-    throw new Error(`launchctl kickstart failed: ${start.stderr || start.stdout}`.trim());
-  }
+  await ensureLaunchctlServiceStarted(gatewayServiceId);
 
   try {
     stdout.write(`${formatLine("Recovered LaunchAgent via app bounce", gatewayServiceId)}\n`);

@@ -164,7 +164,7 @@ describe("launchctl list detection", () => {
 });
 
 describe("launchd bootstrap repair", () => {
-  it("enables, bootstraps, and kickstarts the resolved label", async () => {
+  it("enables, bootstraps, and only non-destructively kickstarts the resolved label", async () => {
     const env: Record<string, string | undefined> = {
       HOME: "/Users/test",
       OPENCLAW_PROFILE: "default",
@@ -184,7 +184,7 @@ describe("launchd bootstrap repair", () => {
       (c) => c[0] === "bootstrap" && c[1] === domain && c[2] === plistPath,
     );
     const kickstartIndex = state.launchctlCalls.findIndex(
-      (c) => c[0] === "kickstart" && c[1] === "-k" && c[2] === serviceId,
+      (c) => c[0] === "kickstart" && c[1] === serviceId,
     );
 
     expect(enableIndex).toBeGreaterThanOrEqual(0);
@@ -192,6 +192,7 @@ describe("launchd bootstrap repair", () => {
     expect(kickstartIndex).toBeGreaterThanOrEqual(0);
     expect(enableIndex).toBeLessThan(bootstrapIndex);
     expect(bootstrapIndex).toBeLessThan(kickstartIndex);
+    expect(state.launchctlCalls).not.toContainEqual(["kickstart", "-k", serviceId]);
   });
 });
 
@@ -284,7 +285,7 @@ describe("launchd install", () => {
       (c) => c[0] === "bootstrap" && c[1] === domain && c[2] === plistPath,
     );
     const kickstartIndex = state.launchctlCalls.findIndex(
-      (c) => c[0] === "kickstart" && c[1] === "-k" && c[2] === serviceId,
+      (c) => c[0] === "kickstart" && c[1] === serviceId,
     );
 
     expect(bootoutIndex).toBeGreaterThanOrEqual(0);
@@ -294,6 +295,7 @@ describe("launchd install", () => {
     expect(bootoutIndex).toBeLessThan(enableIndex);
     expect(enableIndex).toBeLessThan(bootstrapIndex);
     expect(bootstrapIndex).toBeLessThan(kickstartIndex);
+    expect(state.launchctlCalls).not.toContainEqual(["kickstart", "-k", serviceId]);
   });
 
   it("waits for previous launchd pid to exit before bootstrapping", async () => {
@@ -332,12 +334,12 @@ describe("launchd install", () => {
     }
   });
 
-  it("recovers via app bounce and starts gateway without kill kickstart", async () => {
+  it("recovers via app bounce and re-bootstraps the gateway without kill kickstart", async () => {
     const env = createDefaultLaunchdEnv();
+    state.dirs.add("/Applications/OpenClaw.app");
     state.printOutputs.push(
       ["state = running", "pid = 4242"].join("\n"),
       ["state = running", "pid = 9001"].join("\n"),
-      ["state = running", "pid = 7777"].join("\n"),
     );
     const killSpy = vi.spyOn(process, "kill");
     killSpy
@@ -363,10 +365,13 @@ describe("launchd install", () => {
       const domain = typeof process.getuid === "function" ? `gui/${process.getuid()}` : "gui/501";
       const gatewayServiceId = `${domain}/ai.openclaw.gateway`;
       const appServiceId = `${domain}/ai.openclaw.mac`;
+      const gatewayPlistPath = resolveLaunchAgentPlistPath(env);
       expect(killSpy).toHaveBeenCalledWith(4242, 0);
       expect(killSpy).toHaveBeenCalledWith(9001, 0);
       expect(state.launchctlCalls).toContainEqual(["bootout", gatewayServiceId]);
       expect(state.launchctlCalls).toContainEqual(["bootout", appServiceId]);
+      expect(state.launchctlCalls).toContainEqual(["enable", gatewayServiceId]);
+      expect(state.launchctlCalls).toContainEqual(["bootstrap", domain, gatewayPlistPath]);
       expect(state.launchctlCalls).toContainEqual(["kickstart", gatewayServiceId]);
       expect(state.launchctlCalls).not.toContainEqual(["kickstart", "-k", gatewayServiceId]);
       expect(state.rawExecCalls).toContainEqual({
@@ -375,7 +380,7 @@ describe("launchd install", () => {
       });
       expect(state.rawExecCalls).toContainEqual({
         file: "/usr/bin/open",
-        args: ["-g", "-b", "ai.openclaw.mac"],
+        args: ["-g", "-a", "/Applications/OpenClaw.app"],
       });
     } finally {
       vi.useRealTimers();
