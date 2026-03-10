@@ -296,6 +296,28 @@ export async function runDaemonRestart(opts: DaemonLifecycleOptions = {}): Promi
         });
       }
 
+      const needsDarwinRecovery =
+        !health.healthy &&
+        process.platform === "darwin" &&
+        typeof service.recover === "function" &&
+        health.runtime.status === "running" &&
+        health.portUsage.status === "free";
+      if (needsDarwinRecovery) {
+        const recoveryMsg = `Gateway runtime is running but port ${restartPort} is still free; attempting one macOS app bounce recovery.`;
+        warnings.push(recoveryMsg);
+        if (!json) {
+          defaultRuntime.log(theme.warn(recoveryMsg));
+        }
+        await service.recover({ env: process.env, stdout });
+        health = await waitForGatewayHealthyRestart({
+          service,
+          port: restartPort,
+          attempts: POST_RESTART_HEALTH_ATTEMPTS,
+          delayMs: POST_RESTART_HEALTH_DELAY_MS,
+          includeUnknownListenersAsStale: process.platform === "win32",
+        });
+      }
+
       if (health.healthy) {
         return;
       }

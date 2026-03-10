@@ -119,6 +119,11 @@ export type LaunchctlPrintInfo = {
   lastExitReason?: string;
 };
 
+const MAC_APP_LAUNCH_AGENT_LABEL = "ai.openclaw.mac";
+const MAC_APP_BUNDLE_ID = "ai.openclaw.mac";
+const MAC_APP_RECOVERY_WAIT_TIMEOUT_MS = 30_000;
+const MAC_APP_RECOVERY_WAIT_INTERVAL_MS = 500;
+
 export function parseLaunchctlPrint(output: string): LaunchctlPrintInfo {
   const entries = parseKeyValueOutput(output, "=");
   const info: LaunchctlPrintInfo = {};
@@ -344,6 +349,18 @@ async function sleepMs(ms: number): Promise<void> {
   });
 }
 
+async function waitForLaunchctlServiceLoaded(serviceId: string): Promise<boolean> {
+  const deadline = Date.now() + MAC_APP_RECOVERY_WAIT_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const res = await execLaunchctl(["print", serviceId]);
+    if (res.code === 0) {
+      return true;
+    }
+    await sleepMs(MAC_APP_RECOVERY_WAIT_INTERVAL_MS);
+  }
+  return false;
+}
+
 async function waitForPidExit(pid: number): Promise<void> {
   if (!Number.isFinite(pid) || pid <= 1) {
     return;
@@ -495,6 +512,70 @@ export async function restartLaunchAgent({
   }
   try {
     stdout.write(`${formatLine("Restarted LaunchAgent", `${domain}/${label}`)}\n`);
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException)?.code !== "EPIPE") {
+      throw err;
+    }
+  }
+}
+
+export async function recoverLaunchAgentWithAppBounce({
+  stdout,
+  env,
+}: GatewayServiceControlArgs): Promise<void> {
+  const serviceEnv = env ?? (process.env as GatewayServiceEnv);
+  const domain = resolveGuiDomain();
+  const gatewayLabel = resolveLaunchAgentLabel({ env: serviceEnv });
+  const gatewayServiceId = `${domain}/${gatewayLabel}`;
+  const appServiceId = `${domain}/${MAC_APP_LAUNCH_AGENT_LABEL}`;
+
+  const gatewayRuntime = await execLaunchctl(["print", gatewayServiceId]);
+  const gatewayPid =
+    gatewayRuntime.code === 0
+      ? parseLaunchctlPrint(gatewayRuntime.stdout || gatewayRuntime.stderr || "").pid
+      : undefined;
+  const appRuntime = await execLaunchctl(["print", appServiceId]);
+  const appPid =
+    appRuntime.code === 0
+      ? parseLaunchctlPrint(appRuntime.stdout || appRuntime.stderr || "").pid
+      : undefined;
+
+  const stopGateway = await execLaunchctl(["bootout", gatewayServiceId]);
+  if (stopGateway.code !== 0 && !isLaunchctlNotLoaded(stopGateway)) {
+    throw new Error(`launchctl bootout failed: ${stopGateway.stderr || stopGateway.stdout}`.trim());
+  }
+  if (typeof gatewayPid === "number") {
+    await waitForPidExit(gatewayPid);
+  }
+
+  await execLaunchctl(["bootout", appServiceId]);
+  if (typeof appPid === "number") {
+    await waitForPidExit(appPid);
+  }
+
+  await execFileUtf8("/usr/bin/pkill", ["-x", "OpenClaw"]).catch(() => ({
+    stdout: "",
+    stderr: "",
+    code: 0,
+  }));
+
+  const open = await execFileUtf8("/usr/bin/open", ["-g", "-b", MAC_APP_BUNDLE_ID]);
+  if (open.code !== 0) {
+    throw new Error(`open failed: ${open.stderr || open.stdout}`.trim());
+  }
+
+  const loaded = await waitForLaunchctlServiceLoaded(gatewayServiceId);
+  if (!loaded) {
+    throw new Error(`launchctl print failed after app relaunch: ${gatewayServiceId}`);
+  }
+
+  const start = await execLaunchctl(["kickstart", gatewayServiceId]);
+  if (start.code !== 0) {
+    throw new Error(`launchctl kickstart failed: ${start.stderr || start.stdout}`.trim());
+  }
+
+  try {
+    stdout.write(`${formatLine("Recovered LaunchAgent via app bounce", gatewayServiceId)}\n`);
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException)?.code !== "EPIPE") {
       throw err;

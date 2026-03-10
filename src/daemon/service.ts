@@ -3,6 +3,7 @@ import {
   isLaunchAgentLoaded,
   readLaunchAgentProgramArguments,
   readLaunchAgentRuntime,
+  recoverLaunchAgentWithAppBounce,
   restartLaunchAgent,
   stopLaunchAgent,
   uninstallLaunchAgent,
@@ -59,6 +60,7 @@ export type GatewayService = {
   uninstall: (args: GatewayServiceManageArgs) => Promise<void>;
   stop: (args: GatewayServiceControlArgs) => Promise<void>;
   restart: (args: GatewayServiceControlArgs) => Promise<void>;
+  recover?: (args: GatewayServiceControlArgs) => Promise<void>;
   isLoaded: (args: GatewayServiceEnvArgs) => Promise<boolean>;
   readCommand: (env: GatewayServiceEnv) => Promise<GatewayServiceCommandConfig | null>;
   readRuntime: (env: GatewayServiceEnv) => Promise<GatewayServiceRuntime>;
@@ -75,6 +77,7 @@ const GATEWAY_SERVICE_REGISTRY: Record<SupportedGatewayServicePlatform, GatewayS
     uninstall: uninstallLaunchAgent,
     stop: stopLaunchAgent,
     restart: restartLaunchAgent,
+    recover: recoverLaunchAgentWithAppBounce,
     isLoaded: isLaunchAgentLoaded,
     readCommand: readLaunchAgentProgramArguments,
     readRuntime: readLaunchAgentRuntime,

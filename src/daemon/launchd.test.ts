@@ -9,14 +9,17 @@ import {
   isLaunchAgentListed,
   parseLaunchctlPrint,
   repairLaunchAgentBootstrap,
+  recoverLaunchAgentWithAppBounce,
   restartLaunchAgent,
   resolveLaunchAgentPlistPath,
 } from "./launchd.js";
 
 const state = vi.hoisted(() => ({
   launchctlCalls: [] as string[][],
+  rawExecCalls: [] as Array<{ file: string; args: string[] }>,
   listOutput: "",
   printOutput: "",
+  printOutputs: [] as string[],
   bootstrapError: "",
   dirs: new Set<string>(),
   files: new Map<string, string>(),
@@ -36,13 +39,16 @@ function normalizeLaunchctlArgs(file: string, args: string[]): string[] {
 
 vi.mock("./exec-file.js", () => ({
   execFileUtf8: vi.fn(async (file: string, args: string[]) => {
+    state.rawExecCalls.push({ file, args });
     const call = normalizeLaunchctlArgs(file, args);
     state.launchctlCalls.push(call);
     if (call[0] === "list") {
       return { stdout: state.listOutput, stderr: "", code: 0 };
     }
     if (call[0] === "print") {
-      return { stdout: state.printOutput, stderr: "", code: 0 };
+      const stdout =
+        state.printOutputs.length > 0 ? (state.printOutputs.shift() ?? "") : state.printOutput;
+      return { stdout, stderr: "", code: 0 };
     }
     if (call[0] === "bootstrap" && state.bootstrapError) {
       return { stdout: "", stderr: state.bootstrapError, code: 1 };
@@ -79,8 +85,10 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 
 beforeEach(() => {
   state.launchctlCalls.length = 0;
+  state.rawExecCalls.length = 0;
   state.listOutput = "";
   state.printOutput = "";
+  state.printOutputs.length = 0;
   state.bootstrapError = "";
   state.dirs.clear();
   state.files.clear();
@@ -318,6 +326,57 @@ describe("launchd install", () => {
       expect(bootoutIndex).toBeGreaterThanOrEqual(0);
       expect(bootstrapIndex).toBeGreaterThanOrEqual(0);
       expect(bootoutIndex).toBeLessThan(bootstrapIndex);
+    } finally {
+      vi.useRealTimers();
+      killSpy.mockRestore();
+    }
+  });
+
+  it("recovers via app bounce and starts gateway without kill kickstart", async () => {
+    const env = createDefaultLaunchdEnv();
+    state.printOutputs.push(
+      ["state = running", "pid = 4242"].join("\n"),
+      ["state = running", "pid = 9001"].join("\n"),
+      ["state = running", "pid = 7777"].join("\n"),
+    );
+    const killSpy = vi.spyOn(process, "kill");
+    killSpy
+      .mockImplementationOnce(() => true)
+      .mockImplementationOnce(() => {
+        const err = new Error("no such process") as NodeJS.ErrnoException;
+        err.code = "ESRCH";
+        throw err;
+      })
+      .mockImplementationOnce(() => true)
+      .mockImplementationOnce(() => {
+        const err = new Error("no such process") as NodeJS.ErrnoException;
+        err.code = "ESRCH";
+        throw err;
+      });
+
+    vi.useFakeTimers();
+    try {
+      const stdout = new PassThrough();
+      const recoverPromise = recoverLaunchAgentWithAppBounce({ env, stdout });
+      await vi.advanceTimersByTimeAsync(1_000);
+      await recoverPromise;
+      const domain = typeof process.getuid === "function" ? `gui/${process.getuid()}` : "gui/501";
+      const gatewayServiceId = `${domain}/ai.openclaw.gateway`;
+      const appServiceId = `${domain}/ai.openclaw.mac`;
+      expect(killSpy).toHaveBeenCalledWith(4242, 0);
+      expect(killSpy).toHaveBeenCalledWith(9001, 0);
+      expect(state.launchctlCalls).toContainEqual(["bootout", gatewayServiceId]);
+      expect(state.launchctlCalls).toContainEqual(["bootout", appServiceId]);
+      expect(state.launchctlCalls).toContainEqual(["kickstart", gatewayServiceId]);
+      expect(state.launchctlCalls).not.toContainEqual(["kickstart", "-k", gatewayServiceId]);
+      expect(state.rawExecCalls).toContainEqual({
+        file: "/usr/bin/pkill",
+        args: ["-x", "OpenClaw"],
+      });
+      expect(state.rawExecCalls).toContainEqual({
+        file: "/usr/bin/open",
+        args: ["-g", "-b", "ai.openclaw.mac"],
+      });
     } finally {
       vi.useRealTimers();
       killSpy.mockRestore();
