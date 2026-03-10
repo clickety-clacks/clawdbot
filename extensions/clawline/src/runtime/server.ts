@@ -3343,7 +3343,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             idempotencyKey: randomUUID(),
           },
           expectFinal: true,
-          timeoutMs: 60_000,
+          timeoutMs: 300_000,
         });
       };
 
