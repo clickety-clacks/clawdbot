@@ -10,19 +10,16 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import type { getReplyFromConfig } from "../../../../src/auto-reply/reply.js";
 import type { OpenClawConfig } from "../../../../src/config/config.js";
-import {
-  enqueueSystemEvent,
-  resetSystemEventsForTest,
-} from "../../../../src/infra/system-events.js";
 import type { AllowlistEntry, Logger, ProviderServer } from "./domain.js";
+import { enqueueSystemEvent, resetSystemEventsForTest } from "./system-events.js";
 
 const gatewayCallMock = vi.fn();
-vi.mock("../../../../src/gateway/call.js", () => ({
+vi.mock("./gateway-client.js", () => ({
   callGateway: (...args: unknown[]) => gatewayCallMock(...args),
 }));
 
 const enqueueAnnounceMock = vi.fn();
-vi.mock("../../../../src/agents/subagent-announce-queue.js", () => ({
+vi.mock("./announce-queue.js", () => ({
   enqueueAnnounce: (...args: unknown[]) => enqueueAnnounceMock(...args),
 }));
 
