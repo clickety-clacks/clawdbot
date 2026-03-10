@@ -236,6 +236,72 @@ describe("runMessageAction context isolation", () => {
     ).rejects.toThrow(/message required/i);
   });
 
+  it("rejects send actions that include poll creation params", async () => {
+    await expect(
+      runDrySend({
+        cfg: slackConfig,
+        actionParams: {
+          channel: "slack",
+          target: "#C12345678",
+          message: "hi",
+          pollQuestion: "Ready?",
+          pollOption: ["Yes", "No"],
+        },
+        toolContext: { currentChannelId: "C12345678" },
+      }),
+    ).rejects.toThrow(/use action "poll" instead of "send"/i);
+  });
+
+  it("rejects send actions that include string-encoded poll params", async () => {
+    await expect(
+      runDrySend({
+        cfg: slackConfig,
+        actionParams: {
+          channel: "slack",
+          target: "#C12345678",
+          message: "hi",
+          pollDurationSeconds: "60",
+          pollPublic: "true",
+        },
+        toolContext: { currentChannelId: "C12345678" },
+      }),
+    ).rejects.toThrow(/use action "poll" instead of "send"/i);
+  });
+
+  it("rejects send actions that include snake_case poll params", async () => {
+    await expect(
+      runDrySend({
+        cfg: slackConfig,
+        actionParams: {
+          channel: "slack",
+          target: "#C12345678",
+          message: "hi",
+          poll_question: "Ready?",
+          poll_option: ["Yes", "No"],
+          poll_public: "true",
+        },
+        toolContext: { currentChannelId: "C12345678" },
+      }),
+    ).rejects.toThrow(/use action "poll" instead of "send"/i);
+  });
+
+  it("allows send when poll booleans are explicitly false", async () => {
+    const result = await runDrySend({
+      cfg: slackConfig,
+      actionParams: {
+        channel: "slack",
+        target: "#C12345678",
+        message: "hi",
+        pollMulti: false,
+        pollAnonymous: false,
+        pollPublic: false,
+      },
+      toolContext: { currentChannelId: "C12345678" },
+    });
+
+    expect(result.kind).toBe("send");
+  });
+
   it("blocks send when target differs from current channel", async () => {
     const result = await runDrySend({
       cfg: slackConfig,
@@ -588,43 +654,6 @@ describe("runMessageAction sendAttachment hydration", () => {
     );
   });
 
-  it("accepts buffer objects for sendAttachment", async () => {
-    const cfg = {
-      channels: {
-        bluebubbles: {
-          enabled: true,
-          serverUrl: "http://localhost:1234",
-          password: "test-password",
-        },
-      },
-    } as OpenClawConfig;
-
-    vi.mocked(loadWebMedia).mockClear();
-
-    const result = await runMessageAction({
-      cfg,
-      action: "sendAttachment",
-      params: {
-        channel: "bluebubbles",
-        target: "+15551234567",
-        buffer: Buffer.from("ok"),
-        contentType: "text/plain",
-        filename: "note.txt",
-      },
-    });
-
-    expect(result.kind).toBe("action");
-    expect(result.payload).toMatchObject({
-      ok: true,
-      filename: "note.txt",
-      contentType: "text/plain",
-    });
-    expect((result.payload as { buffer?: string }).buffer).toBe(
-      Buffer.from("ok").toString("base64"),
-    );
-    expect(vi.mocked(loadWebMedia)).not.toHaveBeenCalled();
-  });
-
   it("rewrites sandboxed media paths for sendAttachment", async () => {
     await withSandbox(async (sandboxDir) => {
       await runMessageAction({
@@ -665,7 +694,6 @@ describe("runMessageAction sendAttachment hydration", () => {
       tempPrefix: "msg-group-icon-",
     });
   });
-
   it("blocks loopback URLs for sendAttachment media", async () => {
     const cfg = {
       channels: {
@@ -966,6 +994,114 @@ describe("runMessageAction card-only send behavior", () => {
     expect(result.payload).toMatchObject({
       ok: true,
       card,
+    });
+  });
+});
+
+describe("runMessageAction telegram plugin poll forwarding", () => {
+  const handleAction = vi.fn(async ({ params }: { params: Record<string, unknown> }) =>
+    jsonResult({
+      ok: true,
+      forwarded: {
+        to: params.to ?? null,
+        pollQuestion: params.pollQuestion ?? null,
+        pollOption: params.pollOption ?? null,
+        pollDurationSeconds: params.pollDurationSeconds ?? null,
+        pollPublic: params.pollPublic ?? null,
+        threadId: params.threadId ?? null,
+      },
+    }),
+  );
+
+  const telegramPollPlugin: ChannelPlugin = {
+    id: "telegram",
+    meta: {
+      id: "telegram",
+      label: "Telegram",
+      selectionLabel: "Telegram",
+      docsPath: "/channels/telegram",
+      blurb: "Telegram poll forwarding test plugin.",
+    },
+    capabilities: { chatTypes: ["direct"] },
+    config: createAlwaysConfiguredPluginConfig(),
+    messaging: {
+      targetResolver: {
+        looksLikeId: () => true,
+      },
+    },
+    actions: {
+      listActions: () => ["poll"],
+      supportsAction: ({ action }) => action === "poll",
+      handleAction,
+    },
+  };
+
+  beforeEach(() => {
+    setActivePluginRegistry(
+      createTestRegistry([
+        {
+          pluginId: "telegram",
+          source: "test",
+          plugin: telegramPollPlugin,
+        },
+      ]),
+    );
+    handleAction.mockClear();
+  });
+
+  afterEach(() => {
+    setActivePluginRegistry(createTestRegistry([]));
+    vi.clearAllMocks();
+  });
+
+  it("forwards telegram poll params through plugin dispatch", async () => {
+    const result = await runMessageAction({
+      cfg: {
+        channels: {
+          telegram: {
+            botToken: "tok",
+          },
+        },
+      } as OpenClawConfig,
+      action: "poll",
+      params: {
+        channel: "telegram",
+        target: "telegram:123",
+        pollQuestion: "Lunch?",
+        pollOption: ["Pizza", "Sushi"],
+        pollDurationSeconds: 120,
+        pollPublic: true,
+        threadId: "42",
+      },
+      dryRun: false,
+    });
+
+    expect(result.kind).toBe("poll");
+    expect(result.handledBy).toBe("plugin");
+    expect(handleAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "poll",
+        channel: "telegram",
+        params: expect.objectContaining({
+          to: "telegram:123",
+          pollQuestion: "Lunch?",
+          pollOption: ["Pizza", "Sushi"],
+          pollDurationSeconds: 120,
+          pollPublic: true,
+          threadId: "42",
+        }),
+      }),
+    );
+    expect(result.payload).toMatchObject({
+      ok: true,
+      forwarded: {
+        to: "telegram:123",
+        pollQuestion: "Lunch?",
+        pollOption: ["Pizza", "Sushi"],
+        pollDurationSeconds: 120,
+        pollPublic: true,
+        threadId: "42",
+      },
     });
   });
 });

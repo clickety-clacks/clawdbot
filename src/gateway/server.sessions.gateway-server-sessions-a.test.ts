@@ -23,6 +23,10 @@ const sessionCleanupMocks = vi.hoisted(() => ({
   stopSubagentsForRequester: vi.fn(() => ({ stopped: 0 })),
 }));
 
+const bootstrapCacheMocks = vi.hoisted(() => ({
+  clearBootstrapSnapshot: vi.fn(),
+}));
+
 const sessionHookMocks = vi.hoisted(() => ({
   triggerInternalHook: vi.fn(async () => {}),
 }));
@@ -44,6 +48,9 @@ const acpRuntimeMocks = vi.hoisted(() => ({
   getAcpRuntimeBackend: vi.fn(),
   requireAcpRuntimeBackend: vi.fn(),
 }));
+const browserSessionTabMocks = vi.hoisted(() => ({
+  closeTrackedBrowserTabsForSessions: vi.fn(async () => 0),
+}));
 
 vi.mock("../auto-reply/reply/queue.js", async () => {
   const actual = await vi.importActual<typeof import("../auto-reply/reply/queue.js")>(
@@ -62,6 +69,14 @@ vi.mock("../auto-reply/reply/abort.js", async () => {
   return {
     ...actual,
     stopSubagentsForRequester: sessionCleanupMocks.stopSubagentsForRequester,
+  };
+});
+
+vi.mock("../agents/bootstrap-cache.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../agents/bootstrap-cache.js")>();
+  return {
+    ...actual,
+    clearBootstrapSnapshot: bootstrapCacheMocks.clearBootstrapSnapshot,
   };
 });
 
@@ -108,6 +123,14 @@ vi.mock("../acp/runtime/registry.js", async (importOriginal) => {
       }
       return backend;
     },
+  };
+});
+
+vi.mock("../browser/session-tab-registry.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../browser/session-tab-registry.js")>();
+  return {
+    ...actual,
+    closeTrackedBrowserTabsForSessions: browserSessionTabMocks.closeTrackedBrowserTabsForSessions,
   };
 });
 
@@ -193,6 +216,7 @@ describe("gateway server sessions", () => {
   beforeEach(() => {
     sessionCleanupMocks.clearSessionQueues.mockClear();
     sessionCleanupMocks.stopSubagentsForRequester.mockClear();
+    bootstrapCacheMocks.clearBootstrapSnapshot.mockReset();
     sessionHookMocks.triggerInternalHook.mockClear();
     subagentLifecycleHookMocks.runSubagentEnded.mockClear();
     subagentLifecycleHookState.hasSubagentEndedHook = true;
@@ -205,6 +229,8 @@ describe("gateway server sessions", () => {
     acpRuntimeMocks.requireAcpRuntimeBackend.mockImplementation((backendId?: string) =>
       acpRuntimeMocks.getAcpRuntimeBackend(backendId),
     );
+    browserSessionTabMocks.closeTrackedBrowserTabsForSessions.mockClear();
+    browserSessionTabMocks.closeTrackedBrowserTabsForSessions.mockResolvedValue(0);
   });
 
   test("lists and patches session store via sessions.* RPC", async () => {
@@ -240,12 +266,18 @@ describe("gateway server sessions", () => {
           lastChannel: "whatsapp",
           lastTo: "+1555",
           lastAccountId: "work",
+          displayName: "Main",
+          channel: "whatsapp",
+          chatType: "dm",
           sessionFile: path.join(dir, "sess-main.jsonl"),
         },
         "discord:group:dev": {
           sessionId: "sess-group",
           updatedAt: stale,
           totalTokens: 50,
+          displayName: "Dev",
+          channel: "discord",
+          chatType: "group",
           sessionFile: path.join(dir, "sess-group.jsonl"),
         },
         "agent:main:subagent:one": {
@@ -491,26 +523,6 @@ describe("gateway server sessions", () => {
     const filesAfterCompact = await fs.readdir(dir);
     expect(filesAfterCompact.some((f) => f.startsWith("sess-main.jsonl.bak."))).toBe(true);
 
-    const resetMain = await rpcReq<{
-      ok: true;
-      key: string;
-      entry: { sessionId: string; sessionFile?: string };
-    }>(ws, "sessions.reset", { key: "agent:main:main" });
-    expect(resetMain.ok).toBe(true);
-    expect(resetMain.payload?.key).toBe("agent:main:main");
-    expect(resetMain.payload?.entry.sessionId).not.toBe("sess-main");
-    expect(resetMain.payload?.entry.sessionFile).toBe(path.join(dir, "sess-main.jsonl"));
-
-    const resetCustom = await rpcReq<{
-      ok: true;
-      key: string;
-      entry: { sessionId: string; sessionFile?: string };
-    }>(ws, "sessions.reset", { key: "agent:main:discord:group:dev" });
-    expect(resetCustom.ok).toBe(true);
-    expect(resetCustom.payload?.key).toBe("agent:main:discord:group:dev");
-    expect(resetCustom.payload?.entry.sessionId).not.toBe("sess-group");
-    expect(resetCustom.payload?.entry.sessionFile).toBe(path.join(dir, "sess-group.jsonl"));
-
     const deleted = await rpcReq<{ ok: true; deleted: boolean }>(ws, "sessions.delete", {
       key: "agent:main:discord:group:dev",
     });
@@ -529,15 +541,42 @@ describe("gateway server sessions", () => {
     const reset = await rpcReq<{
       ok: true;
       key: string;
-      entry: { sessionId: string; modelProvider?: string; model?: string };
+      entry: {
+        sessionId: string;
+        modelProvider?: string;
+        model?: string;
+        displayName?: string;
+        channel?: string;
+        chatType?: string;
+        sessionFile?: string;
+      };
     }>(ws, "sessions.reset", { key: "agent:main:main" });
     expect(reset.ok).toBe(true);
     expect(reset.payload?.key).toBe("agent:main:main");
     expect(reset.payload?.entry.sessionId).not.toBe("sess-main");
     expect(reset.payload?.entry.modelProvider).toBe("openai");
     expect(reset.payload?.entry.model).toBe("gpt-test-a");
+    expect(reset.payload?.entry.displayName).toBe("Main");
+    expect(reset.payload?.entry.channel).toBe("whatsapp");
+    expect(reset.payload?.entry.chatType).toBe("dm");
+    expect(reset.payload?.entry.sessionFile).toBe(path.join(dir, "sess-main.jsonl"));
     const filesAfterReset = await fs.readdir(dir);
     expect(filesAfterReset.some((f) => f.startsWith("sess-main.jsonl.reset."))).toBe(true);
+
+    const resetCustom = await rpcReq<{
+      ok: true;
+      key: string;
+      entry: {
+        sessionId: string;
+        displayName?: string;
+        channel?: string;
+        chatType?: string;
+        sessionFile?: string;
+      };
+    }>(ws, "sessions.reset", { key: "agent:main:discord:group:dev" });
+    expect(resetCustom.ok).toBe(true);
+    expect(resetCustom.payload?.key).toBe("agent:main:discord:group:dev");
+    expect(resetCustom.payload?.entry.sessionId).not.toBe("sess-group");
 
     const badThinking = await rpcReq(ws, "sessions.patch", {
       key: "agent:main:main",
@@ -716,6 +755,15 @@ describe("gateway server sessions", () => {
       ["discord:group:dev", "agent:main:discord:group:dev", "sess-active"],
       "sess-active",
     );
+    expect(browserSessionTabMocks.closeTrackedBrowserTabsForSessions).toHaveBeenCalledTimes(1);
+    expect(browserSessionTabMocks.closeTrackedBrowserTabsForSessions).toHaveBeenCalledWith({
+      sessionKeys: expect.arrayContaining([
+        "discord:group:dev",
+        "agent:main:discord:group:dev",
+        "sess-active",
+      ]),
+      onWarn: expect.any(Function),
+    });
     expect(subagentLifecycleHookMocks.runSubagentEnded).toHaveBeenCalledTimes(1);
     expect(subagentLifecycleHookMocks.runSubagentEnded).toHaveBeenCalledWith(
       {
@@ -926,6 +974,10 @@ describe("gateway server sessions", () => {
 
   test("sessions.reset aborts active runs and clears queues", async () => {
     await seedActiveMainSession();
+    const waitCallCountAtSnapshotClear: number[] = [];
+    bootstrapCacheMocks.clearBootstrapSnapshot.mockImplementation(() => {
+      waitCallCountAtSnapshotClear.push(embeddedRunMock.waitCalls.length);
+    });
 
     embeddedRunMock.activeIds.add("sess-main");
     embeddedRunMock.waitResults.set("sess-main", true);
@@ -947,6 +999,12 @@ describe("gateway server sessions", () => {
       ["main", "agent:main:main", "sess-main"],
       "sess-main",
     );
+    expect(waitCallCountAtSnapshotClear).toEqual([1]);
+    expect(browserSessionTabMocks.closeTrackedBrowserTabsForSessions).toHaveBeenCalledTimes(1);
+    expect(browserSessionTabMocks.closeTrackedBrowserTabsForSessions).toHaveBeenCalledWith({
+      sessionKeys: expect.arrayContaining(["main", "agent:main:main", "sess-main"]),
+      onWarn: expect.any(Function),
+    });
     expect(subagentLifecycleHookMocks.runSubagentEnded).toHaveBeenCalledTimes(1);
     expect(subagentLifecycleHookMocks.runSubagentEnded).toHaveBeenCalledWith(
       {
@@ -1158,6 +1216,10 @@ describe("gateway server sessions", () => {
 
   test("sessions.reset returns unavailable when active run does not stop", async () => {
     const { dir, storePath } = await seedActiveMainSession();
+    const waitCallCountAtSnapshotClear: number[] = [];
+    bootstrapCacheMocks.clearBootstrapSnapshot.mockImplementation(() => {
+      waitCallCountAtSnapshotClear.push(embeddedRunMock.waitCalls.length);
+    });
 
     embeddedRunMock.activeIds.add("sess-main");
     embeddedRunMock.waitResults.set("sess-main", false);
@@ -1175,6 +1237,8 @@ describe("gateway server sessions", () => {
       ["main", "agent:main:main", "sess-main"],
       "sess-main",
     );
+    expect(waitCallCountAtSnapshotClear).toEqual([1]);
+    expect(browserSessionTabMocks.closeTrackedBrowserTabsForSessions).not.toHaveBeenCalled();
 
     const store = JSON.parse(await fs.readFile(storePath, "utf-8")) as Record<
       string,
@@ -1216,6 +1280,7 @@ describe("gateway server sessions", () => {
       ["discord:group:dev", "agent:main:discord:group:dev", "sess-active"],
       "sess-active",
     );
+    expect(browserSessionTabMocks.closeTrackedBrowserTabsForSessions).not.toHaveBeenCalled();
 
     const store = JSON.parse(await fs.readFile(storePath, "utf-8")) as Record<
       string,

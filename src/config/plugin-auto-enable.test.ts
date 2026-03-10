@@ -215,7 +215,6 @@ describe("applyPluginAutoEnable", () => {
     expect(result.config.plugins?.entries?.clawline?.enabled).toBe(true);
     expect(result.changes.join("\n")).toContain("clawline configured, enabled automatically.");
   });
-
   it("skips when plugins are globally disabled", () => {
     const result = applyPluginAutoEnable({
       config: {

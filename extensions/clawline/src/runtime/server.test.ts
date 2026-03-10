@@ -1,25 +1,25 @@
-import BetterSqlite3 from "better-sqlite3";
-import jwt from "jsonwebtoken";
 import { Blob } from "node:buffer";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import BetterSqlite3 from "better-sqlite3";
+import jwt from "jsonwebtoken";
 import { FormData, fetch, getGlobalDispatcher } from "undici";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import type { getReplyFromConfig } from "../../../../src/auto-reply/reply.js";
 import type { OpenClawConfig } from "../../../../src/config/config.js";
 import type { AllowlistEntry, Logger, ProviderServer } from "./domain.js";
-import { enqueueSystemEvent, resetSystemEventsForTest } from "../infra/system-events.js";
+import { enqueueSystemEvent, resetSystemEventsForTest } from "./system-events.js";
 
 const gatewayCallMock = vi.fn();
-vi.mock("../gateway/call.js", () => ({
+vi.mock("./gateway-client.js", () => ({
   callGateway: (...args: unknown[]) => gatewayCallMock(...args),
 }));
 
 const enqueueAnnounceMock = vi.fn();
-vi.mock("../agents/subagent-announce-queue.js", () => ({
+vi.mock("./announce-queue.js", () => ({
   enqueueAnnounce: (...args: unknown[]) => enqueueAnnounceMock(...args),
 }));
 
@@ -158,6 +158,11 @@ const createAuthHeader = async (ctx: TestServerContext, entry: AllowlistEntry): 
   };
   const token = jwt.sign(payload, jwtKey, { algorithm: "HS256", issuer: "clawline" });
   return `Bearer ${token}`;
+};
+
+const createAuthToken = async (ctx: TestServerContext, entry: AllowlistEntry): Promise<string> => {
+  const authHeader = await createAuthHeader(ctx, entry);
+  return authHeader.replace(/^Bearer\s+/i, "");
 };
 
 async function setupTestServer(
@@ -1385,6 +1390,8 @@ describe.sequential("clawline provider server", () => {
     const entry = createAllowlistEntry();
     const ctx = await setupTestServer([entry]);
     const authHeader = await createAuthHeader(ctx, entry);
+    const authToken = await createAuthToken(ctx, entry);
+    const { ws } = await authenticateDevice(ctx.port, entry.deviceId, authToken);
     try {
       const createResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
         method: "POST",
@@ -1420,6 +1427,7 @@ describe.sequential("clawline provider server", () => {
         to: streamSessionKey,
       });
     } finally {
+      ws.terminate();
       await ctx.cleanup();
     }
   });
@@ -1881,6 +1889,7 @@ describe.sequential("clawline provider server", () => {
     try {
       const pair = await performPairRequest(ctx.port, deviceId);
       const token = pair.token as string;
+      const { ws } = await authenticateDevice(ctx.port, deviceId, token);
 
       const renameResponse = await fetch(
         `http://127.0.0.1:${ctx.port}/api/streams/${encodeURIComponent("%%%")}`,
@@ -1915,6 +1924,7 @@ describe.sequential("clawline provider server", () => {
         error: { code: string; message: string };
       };
       expect(deletePayload.error.code).toBe("stream_not_found");
+      ws.terminate();
     } finally {
       await ctx.cleanup();
     }
@@ -1932,6 +1942,7 @@ describe.sequential("clawline provider server", () => {
     try {
       const pair = await performPairRequest(ctx.port, deviceId);
       const token = pair.token as string;
+      const { ws: streamWs } = await authenticateDevice(ctx.port, deviceId, token);
       const listResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -2070,8 +2081,7 @@ describe.sequential("clawline provider server", () => {
         },
       });
 
-      const { ws } = await authenticateDevice(ctx.port, deviceId, token);
-      ws.send(
+      streamWs.send(
         JSON.stringify({
           type: "message",
           id: `c_${randomUUID()}`,
@@ -2079,12 +2089,12 @@ describe.sequential("clawline provider server", () => {
           sessionKey: created.stream.sessionKey,
         }),
       );
-      const wsResponse = await waitForMessage(ws);
+      const wsResponse = await waitForMessage(streamWs);
       expect(wsResponse).toMatchObject({
         type: "error",
         code: "stream_not_found",
       });
-      ws.terminate();
+      streamWs.terminate();
     } finally {
       await ctx.cleanup();
     }
@@ -2184,6 +2194,7 @@ describe.sequential("clawline provider server", () => {
     try {
       const pair = await performPairRequest(ctx.port, entry.deviceId);
       const token = pair.token as string;
+      const { ws } = await authenticateDevice(ctx.port, entry.deviceId, token);
       const streamsResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -2229,6 +2240,7 @@ describe.sequential("clawline provider server", () => {
       } finally {
         db.close();
       }
+      ws.terminate();
     } finally {
       await ctx.cleanup();
     }
@@ -2332,6 +2344,7 @@ describe.sequential("clawline provider server", () => {
     try {
       const pair = await performPairRequest(ctx.port, deviceId);
       const token = pair.token as string;
+      const { ws } = await authenticateDevice(ctx.port, deviceId, token);
 
       // Rapid create+delete cycles to expose timing/normalization issues
       for (let i = 0; i < 5; i++) {
@@ -2374,6 +2387,7 @@ describe.sequential("clawline provider server", () => {
         const list = (await listResponse.json()) as { streams: Array<{ sessionKey: string }> };
         expect(list.streams.find((s) => s.sessionKey === sessionKey)).toBeUndefined();
       }
+      ws.terminate();
     } finally {
       await ctx.cleanup();
     }
@@ -2400,6 +2414,8 @@ describe.sequential("clawline provider server", () => {
       const pair2 = await performPairRequest(ctx.port, deviceId2);
       const token1 = pair1.token as string;
       const token2 = pair2.token as string;
+      const { ws: ws1 } = await authenticateDevice(ctx.port, deviceId1, token1);
+      const { ws: ws2 } = await authenticateDevice(ctx.port, deviceId2, token2);
 
       // Create from device 1
       const createResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
@@ -2427,6 +2443,8 @@ describe.sequential("clawline provider server", () => {
         body: JSON.stringify({ idempotencyKey: "req_delete_concurrent" }),
       });
       expect(deleteResponse.status).toBe(200);
+      ws1.terminate();
+      ws2.terminate();
     } finally {
       await ctx.cleanup();
     }
@@ -2444,6 +2462,7 @@ describe.sequential("clawline provider server", () => {
     try {
       const pair = await performPairRequest(ctx.port, deviceId);
       const token = pair.token as string;
+      const { ws } = await authenticateDevice(ctx.port, deviceId, token);
 
       // Create
       const createResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
@@ -2484,6 +2503,7 @@ describe.sequential("clawline provider server", () => {
       expect(del2.status).toBe(404);
       const payload = (await del2.json()) as { error: { code: string } };
       expect(payload.error.code).toBe("stream_not_found");
+      ws.terminate();
     } finally {
       await ctx.cleanup();
     }

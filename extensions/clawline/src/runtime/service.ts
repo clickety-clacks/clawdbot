@@ -8,6 +8,7 @@ import { resolveClawlineConfig } from "./config.js";
 import type { Logger, ProviderServer } from "./domain.js";
 import { setClawlineOutboundSender } from "./outbound.js";
 import { createProviderServer } from "./server.js";
+import type { SurfAceRuntime } from "./surf-ace.js";
 
 export type ClawlineServiceHandle = {
   stop: () => Promise<void>;
