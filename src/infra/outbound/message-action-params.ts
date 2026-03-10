@@ -152,25 +152,6 @@ function normalizeBase64Payload(params: { base64?: string; contentType?: string 
   };
 }
 
-function normalizeAttachmentBufferArg(args: Record<string, unknown>): void {
-  const raw = args.buffer;
-  if (Buffer.isBuffer(raw)) {
-    args.buffer = raw.toString("base64");
-    return;
-  }
-  if (raw instanceof Uint8Array) {
-    args.buffer = Buffer.from(raw).toString("base64");
-    return;
-  }
-  if (
-    raw &&
-    typeof raw === "object" &&
-    (raw as { type?: unknown }).type === "Buffer" &&
-    Array.isArray((raw as { data?: unknown }).data)
-  ) {
-    args.buffer = Buffer.from((raw as { data: number[] }).data).toString("base64");
-  }
-}
 export type AttachmentMediaPolicy =
   | {
       mode: "sandbox";
