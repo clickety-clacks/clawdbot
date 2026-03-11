@@ -146,7 +146,7 @@ export function resolveFallbackRetryPrompt(params: {
   if (!params.isFallbackRetry) {
     return params.body;
   }
-  if (params.body.trimStart().startsWith("System Alert:")) {
+  if (params.body.includes("System Alert:")) {
     return [
       params.body,
       "The previous model attempt failed or timed out. Continue handling this exact alert and do not answer with NO_REPLY unless the alert explicitly requires silence.",

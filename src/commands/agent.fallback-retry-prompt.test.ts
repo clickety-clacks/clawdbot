@@ -21,4 +21,17 @@ describe("resolveFallbackRetryPrompt", () => {
       "System Alert: Check on Flynn\n\nThe previous model attempt failed or timed out. Continue handling this exact alert and do not answer with NO_REPLY unless the alert explicitly requires silence.",
     );
   });
+
+  it("preserves wrapped system alert bodies across fallback retries", () => {
+    const body =
+      "OpenClaw runtime context (internal):\n- queued event\n\nSystem Alert: Check on Flynn";
+    expect(
+      resolveFallbackRetryPrompt({
+        body,
+        isFallbackRetry: true,
+      }),
+    ).toBe(
+      `${body}\n\nThe previous model attempt failed or timed out. Continue handling this exact alert and do not answer with NO_REPLY unless the alert explicitly requires silence.`,
+    );
+  });
 });
