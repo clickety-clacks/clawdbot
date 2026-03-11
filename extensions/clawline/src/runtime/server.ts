@@ -917,6 +917,8 @@ type TerminalSessionRecord = {
 };
 
 export const DEFAULT_ALERT_INSTRUCTIONS_TEXT = `After handling this alert, evaluate: would Flynn want to know what happened? If yes, report to him. Don't just process silently.`;
+export const MAIN_SESSION_ALERT_REPLY_TEXT =
+  "Reply with one brief visible update to Flynn for this alert. Do not answer with NO_REPLY.";
 
 const DEFAULT_CONFIG: ProviderConfig = {
   port: 18800,
@@ -2842,6 +2844,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       if (payload.noOverlay !== true) {
         text = await applyAlertInstructions(text);
       }
+      text = applyMainSessionAlertRequirement(text, alertResolvedKey);
       await wakeGatewayForAlert(text, alertResolvedKey);
       res.setHeader("Content-Type", "application/json");
       res.writeHead(200);
@@ -3219,6 +3222,22 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         reason: "message_too_large",
         textBytes: Buffer.byteLength(text, "utf8"),
         instructionsBytes: Buffer.byteLength(instructions, "utf8"),
+      });
+      return text;
+    }
+    return combined;
+  }
+
+  function applyMainSessionAlertRequirement(text: string, sessionKey: string): string {
+    if (!sessionKeyEq(sessionKey, mainSessionKey)) {
+      return text;
+    }
+    const combined = `${text}\n\n${MAIN_SESSION_ALERT_REPLY_TEXT}`;
+    if (Buffer.byteLength(combined, "utf8") > config.sessions.maxMessageBytes) {
+      logger.warn?.("main_session_alert_requirement_skipped", {
+        reason: "message_too_large",
+        textBytes: Buffer.byteLength(text, "utf8"),
+        requirementBytes: Buffer.byteLength(MAIN_SESSION_ALERT_REPLY_TEXT, "utf8"),
       });
       return text;
     }
