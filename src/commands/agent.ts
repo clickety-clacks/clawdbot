@@ -146,13 +146,12 @@ export function resolveFallbackRetryPrompt(params: {
   if (!params.isFallbackRetry) {
     return params.body;
   }
-  if (params.body.includes("System Alert:")) {
-    return [
-      params.body,
-      "The previous model attempt failed or timed out. Continue handling this exact alert and do not answer with NO_REPLY unless the alert explicitly requires silence.",
-    ].join("\n\n");
-  }
-  return "Continue where you left off. The previous model attempt failed or timed out.";
+  // Retry-time prompt rewriting assumes the retried model can safely infer what changed between
+  // attempts. That assumption proved brittle for alert delivery because it silently dropped the
+  // original request shape and produced false NO_REPLY outcomes.
+  // TODO: Remove this helper entirely if upstream adds a durable pre-retry contract that can carry
+  // retry metadata without mutating the original user/system prompt.
+  return params.body;
 }
 
 function prependInternalEventContext(

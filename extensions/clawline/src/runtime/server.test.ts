@@ -521,7 +521,7 @@ describe.sequential("clawline provider server", () => {
         item?: { prompt?: string; origin?: { channel?: string; to?: string } };
       };
       expect(call?.key).toBe("agent:main:main");
-      expect(call?.item?.prompt).toBe("System Alert: New device pending approval: qa sim (iOS)");
+      expect(call?.item?.prompt).toBe("New device pending approval: qa sim (iOS)");
       expect(call?.item?.origin).toEqual({ channel: "clawline", to: "agent:main:main" });
       expect(gatewayCallMock).not.toHaveBeenCalled();
     } finally {
@@ -1339,9 +1339,7 @@ describe.sequential("clawline provider server", () => {
         item?: { prompt?: string; origin?: { channel?: string; to?: string } };
       };
       expect(call?.key).toBe("agent:main:main");
-      expect(call?.item?.prompt).toBe(
-        withMainAlertReplyRequirement("System Alert: [codex] Check on Flynn"),
-      );
+      expect(call?.item?.prompt).toBe(withMainAlertReplyRequirement("[codex] Check on Flynn"));
       expect(call?.item?.origin).toEqual({ channel: "clawline", to: "agent:main:main" });
     } finally {
       await ctx.cleanup();
@@ -1503,7 +1501,7 @@ describe.sequential("clawline provider server", () => {
         item?: { prompt?: string; origin?: { channel?: string; to?: string } };
       };
       expect(call?.key).toBe("agent:main:clawline:flynn:main");
-      expect(call?.item?.prompt).toBe("System Alert: [codex] Check personal channel");
+      expect(call?.item?.prompt).toBe("[codex] Check personal channel");
       expect(call?.item?.origin).toEqual({
         channel: "clawline",
         to: "agent:main:clawline:flynn:main",
@@ -1602,7 +1600,7 @@ describe.sequential("clawline provider server", () => {
         | { item?: { prompt?: string } }
         | undefined;
       const expected = withMainAlertReplyRequirement(
-        `System Alert: These items completed. Execute the next task, or identify what is blocking.\n\n[codex] Check on Flynn`,
+        `These items completed. Execute the next task, or identify what is blocking.\n\n[codex] Check on Flynn`,
       );
       expect(call?.item?.prompt).toBe(expected);
     } finally {
@@ -1629,7 +1627,7 @@ describe.sequential("clawline provider server", () => {
       const call = enqueueAnnounceMock.mock.calls[0]?.[0] as
         | { item?: { prompt?: string } }
         | undefined;
-      expect(call?.item?.prompt).toBe(withMainAlertReplyRequirement(`System Alert: ${expected}`));
+      expect(call?.item?.prompt).toBe(withMainAlertReplyRequirement(expected));
     } finally {
       await ctx.cleanup();
     }
@@ -1653,9 +1651,7 @@ describe.sequential("clawline provider server", () => {
       const call = enqueueAnnounceMock.mock.calls[0]?.[0] as
         | { item?: { prompt?: string } }
         | undefined;
-      expect(call?.item?.prompt).toBe(
-        withMainAlertReplyRequirement("System Alert: [codex] Check on Flynn"),
-      );
+      expect(call?.item?.prompt).toBe(withMainAlertReplyRequirement("[codex] Check on Flynn"));
     } finally {
       await ctx.cleanup();
     }
@@ -1678,7 +1674,7 @@ describe.sequential("clawline provider server", () => {
       const call = enqueueAnnounceMock.mock.calls[0]?.[0] as
         | { item?: { prompt?: string } }
         | undefined;
-      expect(call?.item?.prompt).toBe(withMainAlertReplyRequirement(`System Alert: ${expected}`));
+      expect(call?.item?.prompt).toBe(withMainAlertReplyRequirement(expected));
     } finally {
       await ctx.cleanup();
     }

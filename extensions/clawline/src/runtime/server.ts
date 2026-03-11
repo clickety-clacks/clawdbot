@@ -3449,7 +3449,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         key: resolvedSessionKey,
         item: {
           announceId: alertRunId,
-          prompt: `System Alert: ${text}`,
+          prompt: text,
           summaryLine: "System Alert",
           enqueuedAt: Date.now(),
           sessionKey: resolvedSessionKey,
