@@ -3268,6 +3268,46 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     return rawSessionKey?.trim() || mainSessionKey;
   }
 
+  function logAlertRunPhase(
+    phase:
+      | "queued"
+      | "wake-dispatched"
+      | "agent-run-start"
+      | "agent-run-end"
+      | "replied"
+      | "no-reply",
+    details: {
+      sessionKey: string;
+      runId: string;
+      payloadCount?: number;
+      status?: string;
+      error?: string;
+    },
+  ) {
+    logger.info?.("[clawline] alert_run_phase", {
+      phase,
+      sessionKey: details.sessionKey,
+      runId: details.runId,
+      ...(typeof details.payloadCount === "number" ? { payloadCount: details.payloadCount } : {}),
+      ...(details.status ? { status: details.status } : {}),
+      ...(details.error ? { error: details.error } : {}),
+    });
+  }
+
+  function countAlertReplyPayloads(result: unknown): number {
+    if (!result || typeof result !== "object") {
+      return 0;
+    }
+    const payloads = (
+      result as {
+        result?: {
+          payloads?: unknown;
+        };
+      }
+    ).result?.payloads;
+    return Array.isArray(payloads) ? payloads.length : 0;
+  }
+
   async function resolveValidatedAlertSessionKey(rawSessionKey?: string): Promise<string> {
     const resolvedSessionKey = resolveAlertSessionKey(rawSessionKey);
     if (!resolvedSessionKey.toLowerCase().startsWith("agent:main:")) {
@@ -3322,29 +3362,56 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       logger.info?.(`[clawline] alert_wake_start sessionKey=${resolvedSessionKey}`);
 
       const queueSettings = resolveQueueSettings({ cfg: openClawCfg });
+      const alertRunId = randomUUID();
       const sendQueuedAlert = async (item: AnnounceQueueItem) => {
+        const correlatedRunId = item.announceId?.trim() || alertRunId;
+        const phaseBase = {
+          sessionKey: item.sessionKey,
+          runId: correlatedRunId,
+        };
         const origin = item.origin;
         const threadId =
           origin?.threadId != null && origin.threadId !== "" ? String(origin.threadId) : undefined;
-        await callGateway({
-          token: gatewayToken,
-          // Alert queue delivery is a system-owned action and must preserve owner-capable
-          // ingress behavior to avoid auth/tool gating differences from origin/main.
-          scopes: [ADMIN_SCOPE],
-          method: "agent",
-          params: {
-            sessionKey: item.sessionKey,
-            message: item.prompt,
-            channel: origin?.channel,
-            accountId: origin?.accountId,
-            to: origin?.to,
-            threadId,
-            deliver: true,
-            idempotencyKey: randomUUID(),
-          },
-          expectFinal: true,
-          timeoutMs: 300_000,
-        });
+        logAlertRunPhase("wake-dispatched", phaseBase);
+        logAlertRunPhase("agent-run-start", phaseBase);
+        try {
+          const result = await callGateway({
+            token: gatewayToken,
+            // Alert queue delivery is a system-owned action and must preserve owner-capable
+            // ingress behavior to avoid auth/tool gating differences from origin/main.
+            scopes: [ADMIN_SCOPE],
+            method: "agent",
+            params: {
+              sessionKey: item.sessionKey,
+              message: item.prompt,
+              channel: origin?.channel,
+              accountId: origin?.accountId,
+              to: origin?.to,
+              threadId,
+              deliver: true,
+              idempotencyKey: correlatedRunId,
+            },
+            expectFinal: true,
+            timeoutMs: 300_000,
+          });
+          const payloadCount = countAlertReplyPayloads(result);
+          logAlertRunPhase("agent-run-end", {
+            ...phaseBase,
+            status: "ok",
+            payloadCount,
+          });
+          logAlertRunPhase(payloadCount > 0 ? "replied" : "no-reply", {
+            ...phaseBase,
+            payloadCount,
+          });
+        } catch (err) {
+          logAlertRunPhase("agent-run-end", {
+            ...phaseBase,
+            status: "error",
+            error: formatError(err),
+          });
+          throw err;
+        }
       };
 
       // Always enqueue — never send directly to the agent, even if it appears idle.
@@ -3361,6 +3428,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       enqueueAnnounce({
         key: resolvedSessionKey,
         item: {
+          announceId: alertRunId,
           prompt: `System Alert: ${text}`,
           summaryLine: "System Alert",
           enqueuedAt: Date.now(),
@@ -3372,6 +3440,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       });
 
       logger.info?.(`[clawline] alert_wake_result outcome=queued sessionKey=${resolvedSessionKey}`);
+      logAlertRunPhase("queued", {
+        sessionKey: resolvedSessionKey,
+        runId: alertRunId,
+      });
     } catch (err) {
       logger.error?.(`alert_gateway_wake_failed: ${formatError(err)}`);
       throw err instanceof HttpError

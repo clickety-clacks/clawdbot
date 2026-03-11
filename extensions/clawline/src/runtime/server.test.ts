@@ -173,6 +173,7 @@ async function setupTestServer(
     webRootPathRelative?: string;
     seedLegacyDatabase?: (dbPath: string) => Promise<void>;
     replyResolver?: typeof getReplyFromConfig;
+    logger?: Logger;
     terminalTmux?: {
       mode?: "local" | "ssh";
       sshTarget?: string;
@@ -238,7 +239,7 @@ async function setupTestServer(
     },
     openClawConfig: testOpenClawConfig,
     replyResolver: options.replyResolver ?? testReplyResolver,
-    logger: silentLogger,
+    logger: options.logger ?? silentLogger,
     sessionStorePath,
   });
   await server.start();
@@ -1337,6 +1338,136 @@ describe.sequential("clawline provider server", () => {
       expect(call?.key).toBe("agent:main:main");
       expect(call?.item?.prompt).toBe("System Alert: [codex] Check on Flynn");
       expect(call?.item?.origin).toEqual({ channel: "clawline", to: "agent:main:main" });
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("logs correlated alert phases for replied main-session alerts", async () => {
+    const entry = createAllowlistEntry();
+    const info = vi.fn();
+    const ctx = await setupTestServer([entry], {
+      logger: {
+        ...silentLogger,
+        info,
+      },
+    });
+    const authHeader = await createAuthHeader(ctx, entry);
+    gatewayCallMock.mockResolvedValueOnce({
+      runId: "ignored",
+      status: "ok",
+      result: {
+        payloads: [{ type: "text", text: "Alert received" }],
+      },
+    });
+    try {
+      const response = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: authHeader },
+        body: JSON.stringify({ message: "Check on Flynn", source: "codex" }),
+      });
+      expect(response.status).toBe(200);
+      const queued = enqueueAnnounceMock.mock.calls[0]?.[0] as
+        | {
+            item?: { announceId?: string; sessionKey?: string };
+            send?: (item: unknown) => Promise<void>;
+          }
+        | undefined;
+      expect(typeof queued?.item?.announceId).toBe("string");
+      await queued?.send?.(queued.item);
+
+      const alertLogs = info.mock.calls
+        .filter(([message]) => message === "[clawline] alert_run_phase")
+        .map(([, details]) => details as Record<string, unknown>);
+      expect(alertLogs.map((details) => details.phase)).toEqual([
+        "queued",
+        "wake-dispatched",
+        "agent-run-start",
+        "agent-run-end",
+        "replied",
+      ]);
+      expect(new Set(alertLogs.map((details) => details.runId))).toEqual(
+        new Set([queued?.item?.announceId]),
+      );
+      expect(new Set(alertLogs.map((details) => details.sessionKey))).toEqual(
+        new Set(["agent:main:main"]),
+      );
+      expect(alertLogs.at(-2)).toMatchObject({
+        phase: "agent-run-end",
+        status: "ok",
+        payloadCount: 1,
+      });
+      expect(alertLogs.at(-1)).toMatchObject({
+        phase: "replied",
+        payloadCount: 1,
+      });
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("logs correlated alert phases for no-reply stream alerts", async () => {
+    const entry = createAllowlistEntry();
+    const info = vi.fn();
+    const ctx = await setupTestServer([entry], {
+      logger: {
+        ...silentLogger,
+        info,
+      },
+    });
+    const authHeader = await createAuthHeader(ctx, entry);
+    gatewayCallMock.mockResolvedValueOnce({
+      runId: "ignored",
+      status: "ok",
+      result: {
+        payloads: [],
+      },
+    });
+    try {
+      const response = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: authHeader },
+        body: JSON.stringify({
+          message: "Check personal channel",
+          source: "codex",
+          sessionKey: "agent:main:clawline:flynn:main",
+        }),
+      });
+      expect(response.status).toBe(200);
+      const queued = enqueueAnnounceMock.mock.calls[0]?.[0] as
+        | {
+            item?: { announceId?: string; sessionKey?: string };
+            send?: (item: unknown) => Promise<void>;
+          }
+        | undefined;
+      expect(typeof queued?.item?.announceId).toBe("string");
+      await queued?.send?.(queued.item);
+
+      const alertLogs = info.mock.calls
+        .filter(([message]) => message === "[clawline] alert_run_phase")
+        .map(([, details]) => details as Record<string, unknown>);
+      expect(alertLogs.map((details) => details.phase)).toEqual([
+        "queued",
+        "wake-dispatched",
+        "agent-run-start",
+        "agent-run-end",
+        "no-reply",
+      ]);
+      expect(new Set(alertLogs.map((details) => details.runId))).toEqual(
+        new Set([queued?.item?.announceId]),
+      );
+      expect(new Set(alertLogs.map((details) => details.sessionKey))).toEqual(
+        new Set(["agent:main:clawline:flynn:main"]),
+      );
+      expect(alertLogs.at(-2)).toMatchObject({
+        phase: "agent-run-end",
+        status: "ok",
+        payloadCount: 0,
+      });
+      expect(alertLogs.at(-1)).toMatchObject({
+        phase: "no-reply",
+        payloadCount: 0,
+      });
     } finally {
       await ctx.cleanup();
     }
