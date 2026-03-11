@@ -3284,14 +3284,15 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       error?: string;
     },
   ) {
-    logger.info?.("[clawline] alert_run_phase", {
-      phase,
-      sessionKey: details.sessionKey,
-      runId: details.runId,
-      ...(typeof details.payloadCount === "number" ? { payloadCount: details.payloadCount } : {}),
-      ...(details.status ? { status: details.status } : {}),
-      ...(details.error ? { error: details.error } : {}),
-    });
+    const suffix = [
+      `phase=${phase}`,
+      `sessionKey=${details.sessionKey}`,
+      `runId=${details.runId}`,
+      ...(typeof details.payloadCount === "number" ? [`payloadCount=${details.payloadCount}`] : []),
+      ...(details.status ? [`status=${details.status}`] : []),
+      ...(details.error ? [`error=${details.error}`] : []),
+    ].join(" ");
+    logger.info?.(`[clawline] alert_run_phase ${suffix}`);
   }
 
   function countAlertReplyPayloads(result: unknown): number {

@@ -1377,30 +1377,25 @@ describe.sequential("clawline provider server", () => {
       await queued?.send?.(queued.item);
 
       const alertLogs = info.mock.calls
-        .filter(([message]) => message === "[clawline] alert_run_phase")
-        .map(([, details]) => details as Record<string, unknown>);
-      expect(alertLogs.map((details) => details.phase)).toEqual([
-        "queued",
-        "wake-dispatched",
-        "agent-run-start",
-        "agent-run-end",
-        "replied",
+        .map(([message]) => String(message))
+        .filter((message) => message.startsWith("[clawline] alert_run_phase "));
+      expect(alertLogs).toEqual([
+        expect.stringContaining(
+          `phase=queued sessionKey=agent:main:main runId=${queued?.item?.announceId}`,
+        ),
+        expect.stringContaining(
+          `phase=wake-dispatched sessionKey=agent:main:main runId=${queued?.item?.announceId}`,
+        ),
+        expect.stringContaining(
+          `phase=agent-run-start sessionKey=agent:main:main runId=${queued?.item?.announceId}`,
+        ),
+        expect.stringContaining(
+          `phase=agent-run-end sessionKey=agent:main:main runId=${queued?.item?.announceId} payloadCount=1 status=ok`,
+        ),
+        expect.stringContaining(
+          `phase=replied sessionKey=agent:main:main runId=${queued?.item?.announceId} payloadCount=1`,
+        ),
       ]);
-      expect(new Set(alertLogs.map((details) => details.runId))).toEqual(
-        new Set([queued?.item?.announceId]),
-      );
-      expect(new Set(alertLogs.map((details) => details.sessionKey))).toEqual(
-        new Set(["agent:main:main"]),
-      );
-      expect(alertLogs.at(-2)).toMatchObject({
-        phase: "agent-run-end",
-        status: "ok",
-        payloadCount: 1,
-      });
-      expect(alertLogs.at(-1)).toMatchObject({
-        phase: "replied",
-        payloadCount: 1,
-      });
     } finally {
       await ctx.cleanup();
     }
@@ -1444,30 +1439,25 @@ describe.sequential("clawline provider server", () => {
       await queued?.send?.(queued.item);
 
       const alertLogs = info.mock.calls
-        .filter(([message]) => message === "[clawline] alert_run_phase")
-        .map(([, details]) => details as Record<string, unknown>);
-      expect(alertLogs.map((details) => details.phase)).toEqual([
-        "queued",
-        "wake-dispatched",
-        "agent-run-start",
-        "agent-run-end",
-        "no-reply",
+        .map(([message]) => String(message))
+        .filter((message) => message.startsWith("[clawline] alert_run_phase "));
+      expect(alertLogs).toEqual([
+        expect.stringContaining(
+          `phase=queued sessionKey=agent:main:clawline:flynn:main runId=${queued?.item?.announceId}`,
+        ),
+        expect.stringContaining(
+          `phase=wake-dispatched sessionKey=agent:main:clawline:flynn:main runId=${queued?.item?.announceId}`,
+        ),
+        expect.stringContaining(
+          `phase=agent-run-start sessionKey=agent:main:clawline:flynn:main runId=${queued?.item?.announceId}`,
+        ),
+        expect.stringContaining(
+          `phase=agent-run-end sessionKey=agent:main:clawline:flynn:main runId=${queued?.item?.announceId} payloadCount=0 status=ok`,
+        ),
+        expect.stringContaining(
+          `phase=no-reply sessionKey=agent:main:clawline:flynn:main runId=${queued?.item?.announceId} payloadCount=0`,
+        ),
       ]);
-      expect(new Set(alertLogs.map((details) => details.runId))).toEqual(
-        new Set([queued?.item?.announceId]),
-      );
-      expect(new Set(alertLogs.map((details) => details.sessionKey))).toEqual(
-        new Set(["agent:main:clawline:flynn:main"]),
-      );
-      expect(alertLogs.at(-2)).toMatchObject({
-        phase: "agent-run-end",
-        status: "ok",
-        payloadCount: 0,
-      });
-      expect(alertLogs.at(-1)).toMatchObject({
-        phase: "no-reply",
-        payloadCount: 0,
-      });
     } finally {
       await ctx.cleanup();
     }
