@@ -139,9 +139,18 @@ async function persistSessionEntry(params: PersistSessionEntryParams): Promise<v
   params.sessionStore[params.sessionKey] = persisted;
 }
 
-function resolveFallbackRetryPrompt(params: { body: string; isFallbackRetry: boolean }): string {
+export function resolveFallbackRetryPrompt(params: {
+  body: string;
+  isFallbackRetry: boolean;
+}): string {
   if (!params.isFallbackRetry) {
     return params.body;
+  }
+  if (params.body.trimStart().startsWith("System Alert:")) {
+    return [
+      params.body,
+      "The previous model attempt failed or timed out. Continue handling this exact alert and do not answer with NO_REPLY unless the alert explicitly requires silence.",
+    ].join("\n\n");
   }
   return "Continue where you left off. The previous model attempt failed or timed out.";
 }
