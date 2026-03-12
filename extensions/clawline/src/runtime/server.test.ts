@@ -1608,6 +1608,48 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("does not prepend exec completion prompt for unrelated clawline streams", async () => {
+    const entry = createAllowlistEntry();
+    const ctx = await setupTestServer([entry]);
+    const authHeader = await createAuthHeader(ctx, entry);
+    const authToken = await createAuthToken(ctx, entry);
+    const { ws } = await authenticateDevice(ctx.port, entry.deviceId, authToken);
+    try {
+      const createResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: authHeader },
+        body: JSON.stringify({
+          displayName: "Rebase",
+          idempotencyKey: `alert-stream-${randomUUID()}`,
+        }),
+      });
+      expect(createResponse.status).toBe(201);
+      const created = (await createResponse.json()) as { stream?: { sessionKey?: string } };
+      const streamSessionKey = created.stream?.sessionKey;
+      expect(typeof streamSessionKey).toBe("string");
+
+      enqueueSystemEvent("Exec finished: voicemail", { sessionKey: "agent:main:main" });
+
+      const response = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: authHeader },
+        body: JSON.stringify({
+          message: "Check on Flynn",
+          source: "codex",
+          sessionKey: streamSessionKey,
+        }),
+      });
+      expect(response.status).toBe(200);
+      const call = enqueueAnnounceMock.mock.calls[0]?.[0] as
+        | { item?: { prompt?: string } }
+        | undefined;
+      expect(call?.item?.prompt).toBe("[codex] Check on Flynn");
+    } finally {
+      ws.terminate();
+      await ctx.cleanup();
+    }
+  });
+
   it("appends alert instructions text to alert payloads", async () => {
     const entry = createAllowlistEntry();
     const ctx = await setupTestServer([entry], {

@@ -47,6 +47,7 @@ const SCOPE_KEY_ALPHA = "agent:alpha";
 const SCOPE_KEY_BETA = "agent:beta";
 const TEST_EXEC_DEFAULTS = { security: "full" as const, ask: "off" as const };
 const DEFAULT_NOTIFY_SESSION_KEY = "agent:main:main";
+const CLAWLINE_STREAM_NOTIFY_SESSION_KEY = "agent:main:clawline:flynn:s_105e446e";
 const ECHO_HI_COMMAND = shellEcho("hi");
 let callIdCounter = 0;
 const nextCallId = () => `call${++callIdCounter}`;
@@ -551,6 +552,18 @@ describe("exec notifyOnExit", () => {
     } finally {
       dispose();
     }
+  });
+
+  it("routes clawline-stream notifyOnExit events to the agent main session", async () => {
+    const tool = createNotifyOnExitExecTool({ sessionKey: CLAWLINE_STREAM_NOTIFY_SESSION_KEY });
+
+    const sessionId = await startBackgroundCommand(tool, echoAfterDelay("notify"));
+
+    const { finished, hasEvent } = await waitForNotifyEvent(sessionId);
+
+    expect(finished).toBeTruthy();
+    expect(hasEvent).toBe(true);
+    expect(peekSystemEvents(CLAWLINE_STREAM_NOTIFY_SESSION_KEY)).toEqual([]);
   });
 
   it("keeps notifyOnExit heartbeat wake unscoped for non-agent session keys", async () => {
