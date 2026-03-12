@@ -5333,13 +5333,16 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             humanDelay: resolveHumanDelayConfig(openClawCfg, route.agentId),
             deliver: async (replyPayload) => {
               const deliverStartedAt = Date.now();
-              logger.info?.("[clawline] agent_run_phase", {
-                phase: "deliver_start",
-                messageId: payload.id,
-                sessionKey: resolvedSessionKey,
-                hasText: Boolean(replyPayload.text?.trim()),
-                mediaUrlCount: replyPayload.mediaUrls?.length ?? (replyPayload.mediaUrl ? 1 : 0),
-              });
+              logger.info?.(
+                `[clawline] agent_run_phase phase=deliver_start messageId=${payload.id} sessionKey=${resolvedSessionKey} hasText=${String(Boolean(replyPayload.text?.trim()))} mediaUrlCount=${replyPayload.mediaUrls?.length ?? (replyPayload.mediaUrl ? 1 : 0)}`,
+                {
+                  phase: "deliver_start",
+                  messageId: payload.id,
+                  sessionKey: resolvedSessionKey,
+                  hasText: Boolean(replyPayload.text?.trim()),
+                  mediaUrlCount: replyPayload.mediaUrls?.length ?? (replyPayload.mediaUrl ? 1 : 0),
+                },
+              );
               // Stop activity signal when first content arrives (streaming begins)
               if (activitySignaled) {
                 activitySignaled = false;
@@ -5381,14 +5384,17 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
                 attachments,
               );
               broadcastToSessionKey(resolvedSessionKey, assistantEvent);
-              logger.info?.("[clawline] agent_run_phase", {
-                phase: "deliver_done",
-                messageId: payload.id,
-                sessionKey: resolvedSessionKey,
-                assistantTextLength: assistantText.length,
-                attachmentCount: attachments.length,
-                elapsedMs: Date.now() - deliverStartedAt,
-              });
+              logger.info?.(
+                `[clawline] agent_run_phase phase=deliver_done messageId=${payload.id} sessionKey=${resolvedSessionKey} assistantTextLength=${assistantText.length} attachmentCount=${attachments.length} elapsedMs=${Date.now() - deliverStartedAt}`,
+                {
+                  phase: "deliver_done",
+                  messageId: payload.id,
+                  sessionKey: resolvedSessionKey,
+                  assistantTextLength: assistantText.length,
+                  attachmentCount: attachments.length,
+                  elapsedMs: Date.now() - deliverStartedAt,
+                },
+              );
             },
             onError: (err, info) => {
               logger.error?.("[clawline] reply_delivery_failed", {
@@ -5418,12 +5424,17 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             let deliveredCount = 0;
             const dispatchStartedAt = Date.now();
             try {
-              logger.info?.("[clawline] agent_run_phase", {
-                phase: "dispatch_start",
-                messageId: payload.id,
-                sessionKey: resolvedSessionKey,
-                imageCount: inboundImages.length,
-              });
+              logger.info?.(
+                `[clawline] agent_run_phase phase=dispatch_start messageId=${payload.id} sessionKey=${resolvedSessionKey} imageCount=${inboundImages.length} attachmentCount=${ownership.attachments.length} rawTextLength=${rawContent.length}`,
+                {
+                  phase: "dispatch_start",
+                  messageId: payload.id,
+                  sessionKey: resolvedSessionKey,
+                  imageCount: inboundImages.length,
+                  attachmentCount: ownership.attachments.length,
+                  rawTextLength: rawContent.length,
+                },
+              );
               const result = await dispatchReplyFromConfig({
                 ctx: ctxPayload,
                 cfg: openClawCfg,
@@ -5443,35 +5454,44 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               queuedFinal = result.queuedFinal;
               // Count all delivered content (streaming blocks, tool results, and final replies)
               deliveredCount = result.counts.block + result.counts.tool + result.counts.final;
-              logger.info?.("[clawline] agent_run_phase", {
-                phase: "dispatch_return",
-                messageId: payload.id,
-                sessionKey: resolvedSessionKey,
-                queuedFinal,
-                deliveredCount,
-                blockCount: result.counts.block,
-                toolCount: result.counts.tool,
-                finalCount: result.counts.final,
-                elapsedMs: Date.now() - dispatchStartedAt,
-              });
+              logger.info?.(
+                `[clawline] agent_run_phase phase=dispatch_return messageId=${payload.id} sessionKey=${resolvedSessionKey} queuedFinal=${String(queuedFinal)} deliveredCount=${deliveredCount} blockCount=${result.counts.block} toolCount=${result.counts.tool} finalCount=${result.counts.final} elapsedMs=${Date.now() - dispatchStartedAt}`,
+                {
+                  phase: "dispatch_return",
+                  messageId: payload.id,
+                  sessionKey: resolvedSessionKey,
+                  queuedFinal,
+                  deliveredCount,
+                  blockCount: result.counts.block,
+                  toolCount: result.counts.tool,
+                  finalCount: result.counts.final,
+                  elapsedMs: Date.now() - dispatchStartedAt,
+                },
+              );
             } catch (err) {
               logger.error?.(`[clawline] dispatch_failed: ${formatError(err)}`);
               queuedFinal = false;
             }
             const waitForIdleStartedAt = Date.now();
-            logger.info?.("[clawline] agent_run_phase", {
-              phase: "wait_for_idle_start",
-              messageId: payload.id,
-              sessionKey: resolvedSessionKey,
-            });
+            logger.info?.(
+              `[clawline] agent_run_phase phase=wait_for_idle_start messageId=${payload.id} sessionKey=${resolvedSessionKey}`,
+              {
+                phase: "wait_for_idle_start",
+                messageId: payload.id,
+                sessionKey: resolvedSessionKey,
+              },
+            );
             markDispatchIdle();
             await dispatcher.waitForIdle();
-            logger.info?.("[clawline] agent_run_phase", {
-              phase: "wait_for_idle_done",
-              messageId: payload.id,
-              sessionKey: resolvedSessionKey,
-              elapsedMs: Date.now() - waitForIdleStartedAt,
-            });
+            logger.info?.(
+              `[clawline] agent_run_phase phase=wait_for_idle_done messageId=${payload.id} sessionKey=${resolvedSessionKey} elapsedMs=${Date.now() - waitForIdleStartedAt}`,
+              {
+                phase: "wait_for_idle_done",
+                messageId: payload.id,
+                sessionKey: resolvedSessionKey,
+                elapsedMs: Date.now() - waitForIdleStartedAt,
+              },
+            );
 
             // Always send activity=false when done
             if (activitySignaled) {
@@ -5772,15 +5792,18 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             humanDelay: resolveHumanDelayConfig(openClawCfg, route.agentId),
             deliver: async (replyPayload) => {
               const deliverStartedAt = Date.now();
-              logger.info?.("[clawline] agent_run_phase", {
-                phase: "deliver_start",
-                messageId: clientId,
-                sessionKey: resolvedSessionKey,
-                hasText: Boolean(replyPayload.text?.trim()),
-                mediaUrlCount: replyPayload.mediaUrls?.length ?? (replyPayload.mediaUrl ? 1 : 0),
-                sourceMessageId,
-                interactiveAction: action,
-              });
+              logger.info?.(
+                `[clawline] agent_run_phase phase=deliver_start messageId=${clientId} sessionKey=${resolvedSessionKey} hasText=${String(Boolean(replyPayload.text?.trim()))} mediaUrlCount=${replyPayload.mediaUrls?.length ?? (replyPayload.mediaUrl ? 1 : 0)} sourceMessageId=${sourceMessageId} interactiveAction=${action}`,
+                {
+                  phase: "deliver_start",
+                  messageId: clientId,
+                  sessionKey: resolvedSessionKey,
+                  hasText: Boolean(replyPayload.text?.trim()),
+                  mediaUrlCount: replyPayload.mediaUrls?.length ?? (replyPayload.mediaUrl ? 1 : 0),
+                  sourceMessageId,
+                  interactiveAction: action,
+                },
+              );
               // Stop activity signal when first content arrives (streaming begins)
               if (activitySignaled) {
                 activitySignaled = false;
@@ -5822,16 +5845,19 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
                 replyAttachments,
               );
               broadcastToSessionKey(resolvedSessionKey, assistantEvent);
-              logger.info?.("[clawline] agent_run_phase", {
-                phase: "deliver_done",
-                messageId: clientId,
-                sessionKey: resolvedSessionKey,
-                assistantTextLength: assistantText.length,
-                attachmentCount: replyAttachments.length,
-                elapsedMs: Date.now() - deliverStartedAt,
-                sourceMessageId,
-                interactiveAction: action,
-              });
+              logger.info?.(
+                `[clawline] agent_run_phase phase=deliver_done messageId=${clientId} sessionKey=${resolvedSessionKey} assistantTextLength=${assistantText.length} attachmentCount=${replyAttachments.length} elapsedMs=${Date.now() - deliverStartedAt} sourceMessageId=${sourceMessageId} interactiveAction=${action}`,
+                {
+                  phase: "deliver_done",
+                  messageId: clientId,
+                  sessionKey: resolvedSessionKey,
+                  assistantTextLength: assistantText.length,
+                  attachmentCount: replyAttachments.length,
+                  elapsedMs: Date.now() - deliverStartedAt,
+                  sourceMessageId,
+                  interactiveAction: action,
+                },
+              );
             },
             onError: (err, info) => {
               logger.error?.("[clawline] reply_delivery_failed", {
@@ -5863,14 +5889,19 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             let deliveredCount = 0;
             const dispatchStartedAt = Date.now();
             try {
-              logger.info?.("[clawline] agent_run_phase", {
-                phase: "dispatch_start",
-                messageId: clientId,
-                sessionKey: resolvedSessionKey,
-                imageCount: inboundImages.length,
-                sourceMessageId,
-                interactiveAction: action,
-              });
+              logger.info?.(
+                `[clawline] agent_run_phase phase=dispatch_start messageId=${clientId} sessionKey=${resolvedSessionKey} imageCount=${inboundImages.length} attachmentCount=${attachments.length} rawTextLength=${rawContent.length} sourceMessageId=${sourceMessageId} interactiveAction=${action}`,
+                {
+                  phase: "dispatch_start",
+                  messageId: clientId,
+                  sessionKey: resolvedSessionKey,
+                  imageCount: inboundImages.length,
+                  attachmentCount: attachments.length,
+                  rawTextLength: rawContent.length,
+                  sourceMessageId,
+                  interactiveAction: action,
+                },
+              );
               const result = await dispatchReplyFromConfig({
                 ctx: ctxPayload,
                 cfg: openClawCfg,
@@ -5890,41 +5921,50 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               queuedFinal = result.queuedFinal;
               // Count all delivered content (streaming blocks, tool results, and final replies)
               deliveredCount = result.counts.block + result.counts.tool + result.counts.final;
-              logger.info?.("[clawline] agent_run_phase", {
-                phase: "dispatch_return",
-                messageId: clientId,
-                sessionKey: resolvedSessionKey,
-                queuedFinal,
-                deliveredCount,
-                blockCount: result.counts.block,
-                toolCount: result.counts.tool,
-                finalCount: result.counts.final,
-                elapsedMs: Date.now() - dispatchStartedAt,
-                sourceMessageId,
-                interactiveAction: action,
-              });
+              logger.info?.(
+                `[clawline] agent_run_phase phase=dispatch_return messageId=${clientId} sessionKey=${resolvedSessionKey} queuedFinal=${String(queuedFinal)} deliveredCount=${deliveredCount} blockCount=${result.counts.block} toolCount=${result.counts.tool} finalCount=${result.counts.final} elapsedMs=${Date.now() - dispatchStartedAt} sourceMessageId=${sourceMessageId} interactiveAction=${action}`,
+                {
+                  phase: "dispatch_return",
+                  messageId: clientId,
+                  sessionKey: resolvedSessionKey,
+                  queuedFinal,
+                  deliveredCount,
+                  blockCount: result.counts.block,
+                  toolCount: result.counts.tool,
+                  finalCount: result.counts.final,
+                  elapsedMs: Date.now() - dispatchStartedAt,
+                  sourceMessageId,
+                  interactiveAction: action,
+                },
+              );
             } catch (err) {
               logger.error?.(`[clawline] dispatch_failed: ${formatError(err)}`);
               queuedFinal = false;
             }
             const waitForIdleStartedAt = Date.now();
-            logger.info?.("[clawline] agent_run_phase", {
-              phase: "wait_for_idle_start",
-              messageId: clientId,
-              sessionKey: resolvedSessionKey,
-              sourceMessageId,
-              interactiveAction: action,
-            });
+            logger.info?.(
+              `[clawline] agent_run_phase phase=wait_for_idle_start messageId=${clientId} sessionKey=${resolvedSessionKey} sourceMessageId=${sourceMessageId} interactiveAction=${action}`,
+              {
+                phase: "wait_for_idle_start",
+                messageId: clientId,
+                sessionKey: resolvedSessionKey,
+                sourceMessageId,
+                interactiveAction: action,
+              },
+            );
             markDispatchIdle();
             await dispatcher.waitForIdle();
-            logger.info?.("[clawline] agent_run_phase", {
-              phase: "wait_for_idle_done",
-              messageId: clientId,
-              sessionKey: resolvedSessionKey,
-              elapsedMs: Date.now() - waitForIdleStartedAt,
-              sourceMessageId,
-              interactiveAction: action,
-            });
+            logger.info?.(
+              `[clawline] agent_run_phase phase=wait_for_idle_done messageId=${clientId} sessionKey=${resolvedSessionKey} elapsedMs=${Date.now() - waitForIdleStartedAt} sourceMessageId=${sourceMessageId} interactiveAction=${action}`,
+              {
+                phase: "wait_for_idle_done",
+                messageId: clientId,
+                sessionKey: resolvedSessionKey,
+                elapsedMs: Date.now() - waitForIdleStartedAt,
+                sourceMessageId,
+                interactiveAction: action,
+              },
+            );
 
             // Always send activity=false when done
             if (activitySignaled) {
