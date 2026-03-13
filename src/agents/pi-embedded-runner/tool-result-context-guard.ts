@@ -229,6 +229,9 @@ function enforceToolResultContextBudgetInPlace(params: {
 export function installToolResultContextGuard(params: {
   agent: GuardableAgent;
   contextWindowTokens: number;
+  sessionId?: string;
+  sessionKey?: string;
+  runId?: string;
 }): () => void {
   const contextWindowTokens = Math.max(1, Math.floor(params.contextWindowTokens));
   const contextBudgetChars = Math.max(
@@ -248,12 +251,19 @@ export function installToolResultContextGuard(params: {
   const originalTransformContext = mutableAgent.transformContext;
 
   mutableAgent.transformContext = (async (messages: AgentMessage[], signal: AbortSignal) => {
+    const correlation =
+      `sessionKey=${params.sessionKey ?? "unknown"} ` +
+      `sessionId=${params.sessionId ?? "unknown"} ` +
+      `runId=${params.runId ?? "unknown"}`;
     const beforeSummary = summarizeImageBearingMessages(messages);
     if (beforeSummary.count > 0) {
       log.info(
-        `[tool-result-context-guard] pre-transform image-bearing messages: roles=${beforeSummary.roleCounts} recent=${beforeSummary.recent}`,
+        `[tool-result-context-guard] pre-transform image-bearing messages: ${correlation} roles=${beforeSummary.roleCounts} recent=${beforeSummary.recent}`,
         {
           stage: "pre-transform",
+          sessionKey: params.sessionKey,
+          sessionId: params.sessionId,
+          runId: params.runId,
           imageBearingRoleCounts: beforeSummary.roleCounts,
           recentImageBearingMessages: beforeSummary.recent,
         },
@@ -267,9 +277,12 @@ export function installToolResultContextGuard(params: {
     const afterOriginalSummary = summarizeImageBearingMessages(contextMessages);
     if (afterOriginalSummary.count > 0) {
       log.info(
-        `[tool-result-context-guard] post-original-transform image-bearing messages: roles=${afterOriginalSummary.roleCounts} recent=${afterOriginalSummary.recent}`,
+        `[tool-result-context-guard] post-original-transform image-bearing messages: ${correlation} roles=${afterOriginalSummary.roleCounts} recent=${afterOriginalSummary.recent}`,
         {
           stage: "post-original-transform",
+          sessionKey: params.sessionKey,
+          sessionId: params.sessionId,
+          runId: params.runId,
           imageBearingRoleCounts: afterOriginalSummary.roleCounts,
           recentImageBearingMessages: afterOriginalSummary.recent,
         },
@@ -283,9 +296,12 @@ export function installToolResultContextGuard(params: {
     const afterGuardSummary = summarizeImageBearingMessages(contextMessages);
     if (afterGuardSummary.count > 0) {
       log.info(
-        `[tool-result-context-guard] post-guard image-bearing messages: roles=${afterGuardSummary.roleCounts} recent=${afterGuardSummary.recent}`,
+        `[tool-result-context-guard] post-guard image-bearing messages: ${correlation} roles=${afterGuardSummary.roleCounts} recent=${afterGuardSummary.recent}`,
         {
           stage: "post-guard",
+          sessionKey: params.sessionKey,
+          sessionId: params.sessionId,
+          runId: params.runId,
           imageBearingRoleCounts: afterGuardSummary.roleCounts,
           recentImageBearingMessages: afterGuardSummary.recent,
         },
