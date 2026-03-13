@@ -1857,8 +1857,24 @@ export async function runEmbeddedAttempt(
         });
         if (timedOutDuringCompaction) {
           if (!isProbeSession) {
+            const selectedSummary = summarizeSessionContext(snapshotSelection.messagesSnapshot);
+            const preCompactionSummary = preCompactionSnapshot
+              ? summarizeSessionContext(preCompactionSnapshot)
+              : null;
+            const currentSummary = summarizeSessionContext(activeSession.messages);
             log.warn(
-              `using ${snapshotSelection.source} snapshot: timed out during compaction runId=${params.runId} sessionId=${params.sessionId}`,
+              `using ${snapshotSelection.source} snapshot: timed out during compaction runId=${params.runId} sessionId=${params.sessionId} selectedImageBlocks=${selectedSummary.totalImageBlocks} selectedMessages=${snapshotSelection.messagesSnapshot.length} preCompactionImageBlocks=${preCompactionSummary?.totalImageBlocks ?? -1} preCompactionMessages=${preCompactionSnapshot?.length ?? -1} currentImageBlocks=${currentSummary.totalImageBlocks} currentMessages=${activeSession.messages.length}`,
+              {
+                runId: params.runId,
+                sessionId: params.sessionId,
+                snapshotSource: snapshotSelection.source,
+                selectedImageBlocks: selectedSummary.totalImageBlocks,
+                selectedMessages: snapshotSelection.messagesSnapshot.length,
+                preCompactionImageBlocks: preCompactionSummary?.totalImageBlocks ?? -1,
+                preCompactionMessages: preCompactionSnapshot?.length ?? -1,
+                currentImageBlocks: currentSummary.totalImageBlocks,
+                currentMessages: activeSession.messages.length,
+              },
             );
           }
         }
