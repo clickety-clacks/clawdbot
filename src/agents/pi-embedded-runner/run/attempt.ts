@@ -742,52 +742,6 @@ function summarizeSessionContext(messages: AgentMessage[]): {
   };
 }
 
-function summarizeImageBearingMessages(messages: AgentMessage[]): {
-  roleCounts: string;
-  recent: string;
-} {
-  const roleCounts = new Map<string, number>();
-  const recent: string[] = [];
-
-  for (let index = 0; index < messages.length; index++) {
-    const msg = messages[index];
-    const payload = summarizeMessagePayload(msg);
-    if (payload.imageBlocks <= 0) {
-      continue;
-    }
-    const role = typeof msg.role === "string" ? msg.role : "unknown";
-    roleCounts.set(role, (roleCounts.get(role) ?? 0) + 1);
-    const content = (msg as { content?: unknown }).content;
-    let preview = "";
-    if (typeof content === "string") {
-      preview = content;
-    } else if (Array.isArray(content)) {
-      preview =
-        content
-          .filter(
-            (block): block is { type?: unknown; text?: unknown } =>
-              !!block && typeof block === "object",
-          )
-          .filter((block) => typeof block.text === "string")
-          .map((block) => String(block.text).trim())
-          .find((text) => text.length > 0) ?? "";
-    }
-    const compactPreview = preview.replace(/\s+/gu, " ").slice(0, 120);
-    recent.push(
-      `${index}:${role}:imageBlocks=${payload.imageBlocks}:textPreview=${JSON.stringify(compactPreview)}`,
-    );
-  }
-
-  return {
-    roleCounts:
-      [...roleCounts.entries()]
-        .toSorted((a, b) => a[0].localeCompare(b[0]))
-        .map(([role, count]) => `${role}:${count}`)
-        .join(",") || "none",
-    recent: recent.slice(-5).join(" | ") || "none",
-  };
-}
-
 export async function runEmbeddedAttempt(
   params: EmbeddedRunAttemptParams,
 ): Promise<EmbeddedRunAttemptResult> {
@@ -1792,19 +1746,6 @@ export async function runEmbeddedAttempt(
                 `promptImages=${imageResult.images.length} ` +
                 `provider=${params.provider}/${params.modelId} sessionFile=${params.sessionFile}`,
             );
-          }
-          if (activeSession.messages.length > 0) {
-            const imageBearing = summarizeImageBearingMessages(activeSession.messages);
-            if (imageBearing.roleCounts !== "none") {
-              log.info(
-                `[context-diag] image-bearing history before prompt: sessionKey=${params.sessionKey ?? params.sessionId} roleCounts=${imageBearing.roleCounts} recent=${imageBearing.recent}`,
-                {
-                  sessionKey: params.sessionKey ?? params.sessionId,
-                  imageBearingRoleCounts: imageBearing.roleCounts,
-                  recentImageBearingMessages: imageBearing.recent,
-                },
-              );
-            }
           }
 
           if (hookRunner?.hasHooks("llm_input")) {
