@@ -650,48 +650,6 @@ function wrapStreamFnWithDiagnostics(
   };
 }
 
-type PromptStageDiagnosticAgent = {
-  convertToLlm?: (messages: unknown[]) => Promise<unknown[]>;
-};
-
-function installPromptStageDiagnostics(
-  agent: unknown,
-  meta: {
-    runId: string;
-    sessionId: string;
-    sessionKey?: string;
-  },
-) {
-  const mutableAgent = agent as PromptStageDiagnosticAgent;
-  const originalConvertToLlm = mutableAgent.convertToLlm;
-  if (typeof originalConvertToLlm !== "function") {
-    return () => {};
-  }
-  mutableAgent.convertToLlm = async (messages: unknown[]) => {
-    const startedAt = Date.now();
-    const messageCount = Array.isArray(messages) ? messages.length : 0;
-    log.info(
-      `[embedded-stream-diag] convert_start runId=${meta.runId} sessionId=${meta.sessionId} sessionKey=${meta.sessionKey ?? "unknown"} messageCount=${messageCount}`,
-    );
-    try {
-      const converted = await originalConvertToLlm.call(mutableAgent, messages);
-      const llmMessageCount = Array.isArray(converted) ? converted.length : 0;
-      log.info(
-        `[embedded-stream-diag] convert_done runId=${meta.runId} sessionId=${meta.sessionId} sessionKey=${meta.sessionKey ?? "unknown"} elapsedMs=${Date.now() - startedAt} llmMessages=${llmMessageCount}`,
-      );
-      return converted;
-    } catch (error) {
-      log.info(
-        `[embedded-stream-diag] convert_error runId=${meta.runId} sessionId=${meta.sessionId} sessionKey=${meta.sessionKey ?? "unknown"} elapsedMs=${Date.now() - startedAt} error=${describeUnknownError(error)}`,
-      );
-      throw error;
-    }
-  };
-  return () => {
-    mutableAgent.convertToLlm = originalConvertToLlm;
-  };
-}
-
 export async function resolvePromptBuildHookResult(params: {
   prompt: string;
   messages: unknown[];
@@ -1268,7 +1226,6 @@ export async function runEmbeddedAttempt(
     let sessionManager: ReturnType<typeof guardSessionManager> | undefined;
     let session: Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
     let removeToolResultContextGuard: (() => void) | undefined;
-    let removePromptStageDiagnostics: (() => void) | undefined;
     try {
       await repairSessionFileIfNeeded({
         sessionFile: params.sessionFile,
@@ -1407,11 +1364,6 @@ export async function runEmbeddedAttempt(
         sessionId: params.sessionId,
         sessionKey: params.sessionKey,
         runId: params.runId,
-      });
-      removePromptStageDiagnostics = installPromptStageDiagnostics(activeSession.agent, {
-        runId: params.runId,
-        sessionId: params.sessionId,
-        sessionKey: params.sessionKey,
       });
       const cacheTrace = createCacheTrace({
         cfg: params.config,
@@ -1685,7 +1637,6 @@ export async function runEmbeddedAttempt(
           }
         }
       } catch (err) {
-        removePromptStageDiagnostics?.();
         await flushPendingToolResultsAfterIdle({
           agent: activeSession?.agent,
           sessionManager,
@@ -2334,7 +2285,6 @@ export async function runEmbeddedAttempt(
       // synthetic "missing tool result" errors and causing silent agent failures.
       // See: https://github.com/openclaw/openclaw/issues/8643
       removeToolResultContextGuard?.();
-      removePromptStageDiagnostics?.();
       await flushPendingToolResultsAfterIdle({
         agent: session?.agent,
         sessionManager,

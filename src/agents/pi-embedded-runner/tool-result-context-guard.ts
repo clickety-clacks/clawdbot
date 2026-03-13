@@ -255,17 +255,6 @@ export function installToolResultContextGuard(params: {
       `sessionKey=${params.sessionKey ?? "unknown"} ` +
       `sessionId=${params.sessionId ?? "unknown"} ` +
       `runId=${params.runId ?? "unknown"}`;
-    const startedAt = Date.now();
-    log.info(
-      `[tool-result-context-guard] transform_start ${correlation} messageCount=${messages.length}`,
-      {
-        stage: "transform-start",
-        sessionKey: params.sessionKey,
-        sessionId: params.sessionId,
-        runId: params.runId,
-        messageCount: messages.length,
-      },
-    );
     const beforeSummary = summarizeImageBearingMessages(messages);
     if (beforeSummary.count > 0) {
       log.info(
@@ -280,24 +269,9 @@ export function installToolResultContextGuard(params: {
         },
       );
     }
-    let transformed: AgentMessage[];
-    try {
-      transformed = originalTransformContext
-        ? await originalTransformContext.call(mutableAgent, messages, signal)
-        : messages;
-    } catch (error) {
-      log.info(
-        `[tool-result-context-guard] transform_error ${correlation} elapsedMs=${Date.now() - startedAt} error=${error instanceof Error ? error.message : String(error)}`,
-        {
-          stage: "transform-error",
-          sessionKey: params.sessionKey,
-          sessionId: params.sessionId,
-          runId: params.runId,
-          elapsedMs: Date.now() - startedAt,
-        },
-      );
-      throw error;
-    }
+    const transformed = originalTransformContext
+      ? await originalTransformContext.call(mutableAgent, messages, signal)
+      : messages;
 
     const contextMessages = Array.isArray(transformed) ? transformed : messages;
     const afterOriginalSummary = summarizeImageBearingMessages(contextMessages);
@@ -333,17 +307,6 @@ export function installToolResultContextGuard(params: {
         },
       );
     }
-    log.info(
-      `[tool-result-context-guard] transform_done ${correlation} elapsedMs=${Date.now() - startedAt} messageCount=${contextMessages.length}`,
-      {
-        stage: "transform-done",
-        sessionKey: params.sessionKey,
-        sessionId: params.sessionId,
-        runId: params.runId,
-        elapsedMs: Date.now() - startedAt,
-        messageCount: contextMessages.length,
-      },
-    );
 
     return contextMessages;
   }) as GuardableTransformContext;
