@@ -210,9 +210,8 @@ async function resizeImageBase64IfNeeded(params: {
           buf.byteLength > 0
             ? Number((((buf.byteLength - out.byteLength) / buf.byteLength) * 100).toFixed(1))
             : 0;
-        const labelPrefix = params.label ? `${params.label} ` : "";
         log.info(
-          `Image resized to fit limits: ${labelPrefix}${sourceWithFile} ${formatBytesShort(buf.byteLength)} -> ${formatBytesShort(out.byteLength)} (-${byteReductionPct}%)`,
+          `Image resized to fit limits: ${sourceWithFile} ${formatBytesShort(buf.byteLength)} -> ${formatBytesShort(out.byteLength)} (-${byteReductionPct}%)`,
           {
             label: params.label,
             fileName: params.fileName,
@@ -248,9 +247,8 @@ async function resizeImageBase64IfNeeded(params: {
   const sourcePixels =
     typeof width === "number" && typeof height === "number" ? `${width}x${height}px` : "unknown";
   const sourceWithFile = params.fileName ? `${params.fileName} ${sourcePixels}` : sourcePixels;
-  const labelPrefix = params.label ? `${params.label} ` : "";
   log.warn(
-    `Image resize failed to fit limits: ${labelPrefix}${sourceWithFile} best=${formatBytesShort(best.byteLength)} limit=${formatBytesShort(params.maxBytes)}`,
+    `Image resize failed to fit limits: ${sourceWithFile} best=${formatBytesShort(best.byteLength)} limit=${formatBytesShort(params.maxBytes)}`,
     {
       label: params.label,
       fileName: params.fileName,
