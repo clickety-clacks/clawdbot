@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import type { AgentMessage, StreamFn } from "@mariozechner/pi-agent-core";
-import { streamSimple } from "@mariozechner/pi-ai";
+import { createAssistantMessageEventStream, streamSimple } from "@mariozechner/pi-ai";
 import {
   createAgentSession,
   DefaultResourceLoader,
@@ -533,6 +533,120 @@ function wrapStreamFnDecodeXaiToolCallArguments(baseFn: StreamFn): StreamFn {
       );
     }
     return wrapStreamDecodeXaiToolCallArguments(maybeStream);
+  };
+}
+
+function countImageBlocksInLlmMessages(messages: unknown): number {
+  if (!Array.isArray(messages)) {
+    return 0;
+  }
+  let imageBlocks = 0;
+  for (const message of messages) {
+    if (!message || typeof message !== "object") {
+      continue;
+    }
+    const content = (message as { content?: unknown }).content;
+    if (!Array.isArray(content)) {
+      continue;
+    }
+    for (const block of content) {
+      if (!!block && typeof block === "object" && (block as { type?: unknown }).type === "image") {
+        imageBlocks += 1;
+      }
+    }
+  }
+  return imageBlocks;
+}
+
+function wrapStreamFnWithDiagnostics(
+  baseFn: StreamFn,
+  meta: {
+    runId: string;
+    sessionId: string;
+    sessionKey?: string;
+    provider: string;
+    modelId: string;
+  },
+): StreamFn {
+  const wrapStream = (
+    stream: AsyncIterable<unknown> & { result: () => Promise<unknown> },
+    startedAt: number,
+  ) => {
+    let firstEventLogged = false;
+    const wrapped = createAssistantMessageEventStream();
+    void (async () => {
+      try {
+        for await (const event of stream) {
+          if (!firstEventLogged) {
+            firstEventLogged = true;
+            const rawEventType =
+              !!event && typeof event === "object" && "type" in event
+                ? (event as { type?: unknown }).type
+                : undefined;
+            const eventType = typeof rawEventType === "string" ? rawEventType : "unknown";
+            log.info(
+              `[embedded-stream-diag] stream_first_event runId=${meta.runId} sessionId=${meta.sessionId} sessionKey=${meta.sessionKey ?? "unknown"} provider=${meta.provider} model=${meta.modelId} eventType=${eventType} elapsedMs=${Date.now() - startedAt}`,
+            );
+          }
+          wrapped.push(event as never);
+        }
+        if (!firstEventLogged) {
+          log.info(
+            `[embedded-stream-diag] stream_iter_end_without_events runId=${meta.runId} sessionId=${meta.sessionId} sessionKey=${meta.sessionKey ?? "unknown"} provider=${meta.provider} model=${meta.modelId} elapsedMs=${Date.now() - startedAt}`,
+          );
+        }
+        const result = await stream.result();
+        log.info(
+          `[embedded-stream-diag] stream_result runId=${meta.runId} sessionId=${meta.sessionId} sessionKey=${meta.sessionKey ?? "unknown"} provider=${meta.provider} model=${meta.modelId} firstEvent=${firstEventLogged ? "yes" : "no"} elapsedMs=${Date.now() - startedAt}`,
+        );
+        wrapped.end(result as never);
+      } catch (err) {
+        log.info(
+          `[embedded-stream-diag] stream_iter_error runId=${meta.runId} sessionId=${meta.sessionId} sessionKey=${meta.sessionKey ?? "unknown"} provider=${meta.provider} model=${meta.modelId} elapsedMs=${Date.now() - startedAt} error=${describeUnknownError(err)}`,
+        );
+        try {
+          const result = await stream.result();
+          log.info(
+            `[embedded-stream-diag] stream_result_error runId=${meta.runId} sessionId=${meta.sessionId} sessionKey=${meta.sessionKey ?? "unknown"} provider=${meta.provider} model=${meta.modelId} firstEvent=${firstEventLogged ? "yes" : "no"} elapsedMs=${Date.now() - startedAt} error=${describeUnknownError(err)}`,
+          );
+          wrapped.end(result as never);
+        } catch {
+          // Let the caller's timeout/error path surface if the underlying stream
+          // cannot provide a terminal result after iteration failure.
+        }
+      }
+    })();
+    return wrapped;
+  };
+
+  return (model, context, options) => {
+    const startedAt = Date.now();
+    const llmMessages = (context as { messages?: unknown }).messages;
+    const llmMessageCount = Array.isArray(llmMessages) ? llmMessages.length : 0;
+    const llmImageBlocks = countImageBlocksInLlmMessages(llmMessages);
+    log.info(
+      `[embedded-stream-diag] stream_start runId=${meta.runId} sessionId=${meta.sessionId} sessionKey=${meta.sessionKey ?? "unknown"} provider=${meta.provider} model=${meta.modelId} llmMessages=${llmMessageCount} llmImageBlocks=${llmImageBlocks}`,
+    );
+    const maybeStream = baseFn(model, context, options);
+    if (maybeStream && typeof maybeStream === "object" && "then" in maybeStream) {
+      return Promise.resolve(maybeStream)
+        .then((stream) => {
+          log.info(
+            `[embedded-stream-diag] stream_created runId=${meta.runId} sessionId=${meta.sessionId} sessionKey=${meta.sessionKey ?? "unknown"} provider=${meta.provider} model=${meta.modelId} elapsedMs=${Date.now() - startedAt}`,
+          );
+          return wrapStream(stream, startedAt);
+        })
+        .catch((err) => {
+          log.info(
+            `[embedded-stream-diag] stream_create_error runId=${meta.runId} sessionId=${meta.sessionId} sessionKey=${meta.sessionKey ?? "unknown"} provider=${meta.provider} model=${meta.modelId} elapsedMs=${Date.now() - startedAt} error=${describeUnknownError(err)}`,
+          );
+          throw err;
+        });
+    }
+    log.info(
+      `[embedded-stream-diag] stream_created runId=${meta.runId} sessionId=${meta.sessionId} sessionKey=${meta.sessionKey ?? "unknown"} provider=${meta.provider} model=${meta.modelId} elapsedMs=${Date.now() - startedAt}`,
+    );
+    return wrapStream(maybeStream, startedAt);
   };
 }
 
@@ -1432,6 +1546,14 @@ export async function runEmbeddedAttempt(
           activeSession.agent.streamFn,
         );
       }
+
+      activeSession.agent.streamFn = wrapStreamFnWithDiagnostics(activeSession.agent.streamFn, {
+        runId: params.runId,
+        sessionId: params.sessionId,
+        sessionKey: params.sessionKey,
+        provider: params.provider,
+        modelId: params.modelId,
+      });
 
       try {
         const builtSessionContext = sessionManager.buildSessionContext();
