@@ -517,47 +517,6 @@ export function applyGoogleTurnOrderingFix(params: {
   return { messages: sanitized, didPrepend };
 }
 
-function summarizeImageBearingMessages(messages: AgentMessage[]): {
-  count: number;
-  roleCounts: string;
-  recent: string;
-} {
-  const roleCounts = new Map<string, number>();
-  const recent: string[] = [];
-  for (const [index, msg] of messages.entries()) {
-    const content = (msg as { content?: unknown }).content;
-    if (!Array.isArray(content)) {
-      continue;
-    }
-    const imageBlocks = content.filter(
-      (block) =>
-        !!block && typeof block === "object" && (block as { type?: unknown }).type === "image",
-    ).length;
-    if (imageBlocks <= 0) {
-      continue;
-    }
-    const role = typeof msg.role === "string" ? msg.role : "unknown";
-    roleCounts.set(role, (roleCounts.get(role) ?? 0) + 1);
-    const preview =
-      content
-        .filter((block): block is { text?: unknown } => !!block && typeof block === "object")
-        .map((block) => (typeof block.text === "string" ? block.text.trim() : ""))
-        .find((text) => text.length > 0) ?? "";
-    recent.push(
-      `${index}:${role}:imageBlocks=${imageBlocks}:textPreview=${JSON.stringify(preview.slice(0, 100))}`,
-    );
-  }
-  return {
-    count: recent.length,
-    roleCounts:
-      [...roleCounts.entries()]
-        .toSorted((a, b) => a[0].localeCompare(b[0]))
-        .map(([role, count]) => `${role}:${count}`)
-        .join(",") || "none",
-    recent: recent.slice(-5).join(" | ") || "none",
-  };
-}
-
 export async function sanitizeSessionHistory(params: {
   messages: AgentMessage[];
   modelApi?: string | null;
@@ -567,7 +526,6 @@ export async function sanitizeSessionHistory(params: {
   config?: OpenClawConfig;
   sessionManager: SessionManager;
   sessionId: string;
-  runId?: string;
   policy?: TranscriptPolicy;
 }): Promise<AgentMessage[]> {
   // Keep docs/reference/transcript-hygiene.md in sync with any logic changes here.
@@ -579,18 +537,6 @@ export async function sanitizeSessionHistory(params: {
       modelId: params.modelId,
     });
   const withInterSessionMarkers = annotateInterSessionUserMessages(params.messages);
-  const imageBearing = summarizeImageBearingMessages(withInterSessionMarkers);
-  if (imageBearing.count > 0) {
-    log.info(
-      `[sanitize-session-history] pre-sanitize image-bearing messages: sessionId=${params.sessionId} runId=${params.runId ?? "none"} roles=${imageBearing.roleCounts} recent=${imageBearing.recent}`,
-      {
-        sessionId: params.sessionId,
-        runId: params.runId,
-        imageBearingRoleCounts: imageBearing.roleCounts,
-        recentImageBearingMessages: imageBearing.recent,
-      },
-    );
-  }
   const sanitizedImages = await sanitizeSessionMessagesImages(
     withInterSessionMarkers,
     "session:history",
