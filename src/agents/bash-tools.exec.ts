@@ -8,11 +8,7 @@ import {
   resolveShellEnvFallbackTimeoutMs,
 } from "../infra/shell-env.js";
 import { logInfo } from "../logger.js";
-import {
-  buildAgentMainSessionKey,
-  parseAgentSessionKey,
-  resolveAgentIdFromSessionKey,
-} from "../routing/session-key.js";
+import { parseAgentSessionKey, resolveAgentIdFromSessionKey } from "../routing/session-key.js";
 import { markBackgrounded } from "./bash-process-registry.js";
 import { processGatewayAllowlist } from "./bash-tools.exec-host-gateway.js";
 import { executeNodeHostCommand } from "./bash-tools.exec-host-node.js";
@@ -152,24 +148,6 @@ async function validateScriptFileForShellBleed(params: {
   }
 }
 
-function resolveExecNotifySessionKey(sessionKey?: string): string | undefined {
-  const trimmed = sessionKey?.trim();
-  if (!trimmed) {
-    return undefined;
-  }
-  const parsed = parseAgentSessionKey(trimmed);
-  if (!parsed) {
-    return trimmed;
-  }
-  // Internal exec notices are owner-scoped operational events. Clawline stream
-  // session keys are user-visible substreams, so keep exec notices on the
-  // agent's canonical main session instead of injecting them into the stream.
-  if (parsed.rest.startsWith("clawline:")) {
-    return buildAgentMainSessionKey({ agentId: parsed.agentId });
-  }
-  return trimmed;
-}
-
 export function createExecTool(
   defaults?: ExecToolDefaults,
   // oxlint-disable-next-line typescript/no-explicit-any
@@ -214,7 +192,7 @@ export function createExecTool(
   }
   const notifyOnExit = defaults?.notifyOnExit !== false;
   const notifyOnExitEmptySuccess = defaults?.notifyOnExitEmptySuccess === true;
-  const notifySessionKey = resolveExecNotifySessionKey(defaults?.sessionKey);
+  const notifySessionKey = defaults?.sessionKey?.trim() || undefined;
   const approvalRunningNoticeMs = resolveApprovalRunningNoticeMs(defaults?.approvalRunningNoticeMs);
   // Derive agentId only when sessionKey is an agent session key.
   const parsedAgentSession = parseAgentSessionKey(defaults?.sessionKey);
