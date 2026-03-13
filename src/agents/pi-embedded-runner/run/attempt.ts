@@ -128,7 +128,7 @@ import {
   selectCompactionTimeoutSnapshot,
   shouldFlagCompactionTimeout,
 } from "./compaction-timeout.js";
-import { pruneProcessedHistoryImages } from "./history-image-prune.js";
+import { pruneProcessedHistoryImagesInSession } from "./history-image-prune.js";
 import { detectAndLoadPromptImages } from "./images.js";
 import type { EmbeddedRunAttemptParams, EmbeddedRunAttemptResult } from "./types.js";
 
@@ -1747,9 +1747,10 @@ export async function runEmbeddedAttempt(
         try {
           // Idempotent cleanup for legacy sessions with persisted image payloads.
           // Called each run; only mutates already-answered user turns that still carry image blocks.
-          const didPruneImages = pruneProcessedHistoryImages(activeSession.messages);
+          const didPruneImages = pruneProcessedHistoryImagesInSession(sessionManager);
           if (didPruneImages) {
-            activeSession.agent.replaceMessages(activeSession.messages);
+            const prunedContext = sessionManager.buildSessionContext();
+            activeSession.agent.replaceMessages(prunedContext.messages);
           }
 
           // Detect and load images referenced in the prompt for vision-capable models.
