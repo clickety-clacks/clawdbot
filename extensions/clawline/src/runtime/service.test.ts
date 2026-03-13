@@ -1,0 +1,113 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ClawlineOutboundSendResult, ProviderServer } from "./domain.js";
+
+const resolveStorePathMock = vi.hoisted(() => vi.fn(() => "/tmp/clawline-session-store.json"));
+const resolveMainSessionKeyMock = vi.hoisted(() => vi.fn(() => "agent:main:main"));
+const resolveAgentIdFromSessionKeyMock = vi.hoisted(() => vi.fn(() => "main"));
+const resolveClawlineConfigMock = vi.hoisted(() => vi.fn());
+const createProviderServerMock = vi.hoisted(() => vi.fn<() => Promise<ProviderServer>>());
+
+vi.mock("../../../../src/config/sessions.js", () => ({
+  resolveStorePath: resolveStorePathMock,
+  resolveMainSessionKey: resolveMainSessionKeyMock,
+  resolveAgentIdFromSessionKey: resolveAgentIdFromSessionKeyMock,
+}));
+
+vi.mock("./config.js", () => ({
+  resolveClawlineConfig: resolveClawlineConfigMock,
+}));
+
+vi.mock("./server.js", () => ({
+  createProviderServer: createProviderServerMock,
+}));
+
+describe("startClawlineService", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    resolveStorePathMock.mockReturnValue("/tmp/clawline-session-store.json");
+    resolveMainSessionKeyMock.mockReturnValue("agent:main:main");
+    resolveAgentIdFromSessionKeyMock.mockReturnValue("main");
+  });
+
+  afterEach(async () => {
+    const { setClawlineOutboundSender } = await import("./outbound.js");
+    setClawlineOutboundSender(null);
+  });
+
+  it("does not register an outbound sender when clawline is disabled", async () => {
+    resolveClawlineConfigMock.mockReturnValue({
+      enabled: false,
+    });
+    const { startClawlineService } = await import("./service.js");
+    const outbound = await import("./outbound.js");
+
+    await expect(startClawlineService({ config: {}, logger: console })).resolves.toBeNull();
+    expect(createProviderServerMock).not.toHaveBeenCalled();
+    expect(outbound.hasClawlineOutboundSender()).toBe(false);
+  });
+
+  it("registers the outbound sender on start and clears it on stop", async () => {
+    const sendResult: ClawlineOutboundSendResult = {
+      messageId: "msg-1",
+      userId: "flynn",
+      deviceId: "device-1",
+    };
+    const sendMessageMock = vi.fn(async () => sendResult);
+    const startMock = vi.fn(async () => {});
+    const stopMock = vi.fn(async () => {});
+
+    resolveClawlineConfigMock.mockReturnValue({
+      enabled: true,
+      port: 18800,
+      network: {
+        bindAddress: "127.0.0.1",
+      },
+    });
+    createProviderServerMock.mockResolvedValue({
+      start: startMock,
+      stop: stopMock,
+      getPort: () => 19191,
+      sendMessage: sendMessageMock,
+    });
+
+    const { startClawlineService } = await import("./service.js");
+    const outbound = await import("./outbound.js");
+    const handle = await startClawlineService({
+      config: { channels: { clawline: { enabled: true } } },
+      logger: console,
+    });
+
+    expect(handle).not.toBeNull();
+    expect(startMock).toHaveBeenCalledTimes(1);
+    expect(createProviderServerMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionStorePath: "/tmp/clawline-session-store.json",
+        mainSessionKey: "agent:main:main",
+      }),
+    );
+    expect(outbound.hasClawlineOutboundSender()).toBe(true);
+
+    await expect(
+      outbound.sendClawlineOutboundMessage({
+        target: "flynn:main",
+        text: "hello",
+      }),
+    ).resolves.toEqual(sendResult);
+    expect(sendMessageMock).toHaveBeenCalledWith({
+      target: "flynn:main",
+      text: "hello",
+    });
+
+    await handle?.stop();
+
+    expect(stopMock).toHaveBeenCalledTimes(1);
+    expect(outbound.hasClawlineOutboundSender()).toBe(false);
+    await expect(
+      outbound.sendClawlineOutboundMessage({
+        target: "flynn:main",
+        text: "after-stop",
+      }),
+    ).rejects.toThrow("clawline outbound delivery is not available (service not running)");
+  });
+});
