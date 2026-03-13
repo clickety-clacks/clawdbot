@@ -1431,26 +1431,6 @@ export async function runEmbeddedAttempt(
       }
 
       try {
-        const builtSessionContext = sessionManager.buildSessionContext();
-        const loadedSummary = summarizeSessionContext(activeSession.messages);
-        const builtSummary = summarizeSessionContext(builtSessionContext.messages);
-        if (
-          loadedSummary.totalImageBlocks !== builtSummary.totalImageBlocks ||
-          activeSession.messages.length !== builtSessionContext.messages.length
-        ) {
-          log.info(
-            `[context-diag] pre-sanitize loaded-vs-built mismatch: sessionKey=${params.sessionKey ?? params.sessionId} loadedMessages=${activeSession.messages.length} loadedImageBlocks=${loadedSummary.totalImageBlocks} builtMessages=${builtSessionContext.messages.length} builtImageBlocks=${builtSummary.totalImageBlocks}`,
-            {
-              sessionKey: params.sessionKey ?? params.sessionId,
-              loadedMessages: activeSession.messages.length,
-              loadedImageBlocks: loadedSummary.totalImageBlocks,
-              builtMessages: builtSessionContext.messages.length,
-              builtImageBlocks: builtSummary.totalImageBlocks,
-              loadedRoleCounts: loadedSummary.roleCounts,
-              builtRoleCounts: builtSummary.roleCounts,
-            },
-          );
-        }
         const prior = await sanitizeSessionHistory({
           messages: activeSession.messages,
           modelApi: params.model.api,
