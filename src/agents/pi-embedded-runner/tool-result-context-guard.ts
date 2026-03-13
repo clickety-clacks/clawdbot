@@ -1,5 +1,4 @@
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
-import { log } from "./logger.js";
 import {
   CHARS_PER_TOKEN_ESTIMATE,
   TOOL_RESULT_CHARS_PER_TOKEN_ESTIMATE,
@@ -32,50 +31,6 @@ type GuardableAgent = object;
 type GuardableAgentRecord = {
   transformContext?: GuardableTransformContext;
 };
-
-function summarizeImageBearingMessages(messages: AgentMessage[]): {
-  count: number;
-  roleCounts: string;
-  recent: string;
-} {
-  const roleCounts = new Map<string, number>();
-  const recent: string[] = [];
-
-  for (let index = 0; index < messages.length; index++) {
-    const msg = messages[index];
-    const content = (msg as { content?: unknown }).content;
-    if (!Array.isArray(content)) {
-      continue;
-    }
-    const imageBlocks = content.filter(
-      (block) =>
-        !!block && typeof block === "object" && (block as { type?: unknown }).type === "image",
-    ).length;
-    if (imageBlocks <= 0) {
-      continue;
-    }
-    const role = typeof msg.role === "string" ? msg.role : "unknown";
-    roleCounts.set(role, (roleCounts.get(role) ?? 0) + 1);
-    const preview =
-      content
-        .filter((block): block is { text?: unknown } => !!block && typeof block === "object")
-        .map((block) => (typeof block.text === "string" ? block.text.trim() : ""))
-        .find((text) => text.length > 0) ?? "";
-    recent.push(
-      `${index}:${role}:imageBlocks=${imageBlocks}:textPreview=${JSON.stringify(preview.slice(0, 100))}`,
-    );
-  }
-
-  return {
-    count: recent.length,
-    roleCounts:
-      [...roleCounts.entries()]
-        .toSorted((a, b) => a[0].localeCompare(b[0]))
-        .map(([role, count]) => `${role}:${count}`)
-        .join(",") || "none",
-    recent: recent.slice(-5).join(" | ") || "none",
-  };
-}
 
 function truncateTextToBudget(text: string, maxChars: number): string {
   if (text.length <= maxChars) {
@@ -248,49 +203,16 @@ export function installToolResultContextGuard(params: {
   const originalTransformContext = mutableAgent.transformContext;
 
   mutableAgent.transformContext = (async (messages: AgentMessage[], signal: AbortSignal) => {
-    const beforeSummary = summarizeImageBearingMessages(messages);
-    if (beforeSummary.count > 0) {
-      log.info(
-        `[tool-result-context-guard] pre-transform image-bearing messages: roles=${beforeSummary.roleCounts} recent=${beforeSummary.recent}`,
-        {
-          stage: "pre-transform",
-          imageBearingRoleCounts: beforeSummary.roleCounts,
-          recentImageBearingMessages: beforeSummary.recent,
-        },
-      );
-    }
     const transformed = originalTransformContext
       ? await originalTransformContext.call(mutableAgent, messages, signal)
       : messages;
 
     const contextMessages = Array.isArray(transformed) ? transformed : messages;
-    const afterOriginalSummary = summarizeImageBearingMessages(contextMessages);
-    if (afterOriginalSummary.count > 0) {
-      log.info(
-        `[tool-result-context-guard] post-original-transform image-bearing messages: roles=${afterOriginalSummary.roleCounts} recent=${afterOriginalSummary.recent}`,
-        {
-          stage: "post-original-transform",
-          imageBearingRoleCounts: afterOriginalSummary.roleCounts,
-          recentImageBearingMessages: afterOriginalSummary.recent,
-        },
-      );
-    }
     enforceToolResultContextBudgetInPlace({
       messages: contextMessages,
       contextBudgetChars,
       maxSingleToolResultChars,
     });
-    const afterGuardSummary = summarizeImageBearingMessages(contextMessages);
-    if (afterGuardSummary.count > 0) {
-      log.info(
-        `[tool-result-context-guard] post-guard image-bearing messages: roles=${afterGuardSummary.roleCounts} recent=${afterGuardSummary.recent}`,
-        {
-          stage: "post-guard",
-          imageBearingRoleCounts: afterGuardSummary.roleCounts,
-          recentImageBearingMessages: afterGuardSummary.recent,
-        },
-      );
-    }
 
     return contextMessages;
   }) as GuardableTransformContext;
