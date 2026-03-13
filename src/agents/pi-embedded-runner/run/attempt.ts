@@ -1247,9 +1247,6 @@ export async function runEmbeddedAttempt(
             params.model.contextWindow ?? params.model.maxTokens ?? DEFAULT_CONTEXT_TOKENS,
           ),
         ),
-        sessionId: params.sessionId,
-        sessionKey: params.sessionKey,
-        runId: params.runId,
       });
       const cacheTrace = createCacheTrace({
         cfg: params.config,
