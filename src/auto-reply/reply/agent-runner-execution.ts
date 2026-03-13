@@ -21,7 +21,6 @@ import {
 } from "../../config/sessions.js";
 import { logVerbose } from "../../globals.js";
 import { emitAgentEvent, registerAgentRunContext } from "../../infra/agent-events.js";
-import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { defaultRuntime } from "../../runtime.js";
 import {
   isMarkdownCapableMessageChannel,
@@ -48,8 +47,6 @@ import type { FollowupRun } from "./queue.js";
 import { createBlockReplyDeliveryHandler } from "./reply-delivery.js";
 import { createReplyMediaPathNormalizer } from "./reply-media-paths.js";
 import type { TypingSignaler } from "./typing-mode.js";
-
-const log = createSubsystemLogger("auto-reply/agent-runner-execution");
 
 export type RuntimeFallbackAttempt = {
   provider: string;
@@ -203,33 +200,6 @@ export async function runAgentTurnWithFallback(params: {
       const fallbackResult = await runWithModelFallback({
         ...resolveModelFallbackOptions(params.followupRun.run),
         run: (provider, model, runOptions) => {
-          const imageCount = params.opts?.images?.length ?? 0;
-          if (imageCount > 0) {
-            log.info(
-              `runAgentTurnWithFallback passing images: runId=${runId} sessionKey=${params.sessionKey ?? "none"} provider=${provider} model=${model} imageCount=${imageCount} heartbeat=${String(params.isHeartbeat)}`,
-              {
-                runId,
-                sessionKey: params.sessionKey,
-                provider,
-                model,
-                imageCount,
-                heartbeat: params.isHeartbeat,
-                imageMimeTypes: params.opts?.images?.map((image) => image.mimeType),
-              },
-            );
-          } else {
-            log.info(
-              `runAgentTurnWithFallback passing no images: runId=${runId} sessionKey=${params.sessionKey ?? "none"} provider=${provider} model=${model} heartbeat=${String(params.isHeartbeat)}`,
-              {
-                runId,
-                sessionKey: params.sessionKey,
-                provider,
-                model,
-                imageCount: 0,
-                heartbeat: params.isHeartbeat,
-              },
-            );
-          }
           // Notify that model selection is complete (including after fallback).
           // This allows responsePrefix template interpolation with the actual model.
           params.opts?.onModelSelected?.({
