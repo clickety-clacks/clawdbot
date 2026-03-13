@@ -62,20 +62,6 @@ function normalizeRefForDedupe(raw: string): string {
   return process.platform === "win32" ? raw.toLowerCase() : raw;
 }
 
-function summarizePromptImageRefSignals(prompt: string) {
-  const mediaAttachedPattern = /\[media attached(?:\s+\d+\/\d+)?:\s*([^\]]+)\]/giu;
-  const messageImagePattern = new RegExp(MESSAGE_IMAGE_REGEX_SOURCE, "giu");
-  const fileUrlPattern = new RegExp(FILE_URL_REGEX_SOURCE, "giu");
-  const pathPattern = new RegExp(PATH_REGEX_SOURCE, "giu");
-
-  return {
-    mediaAttachedMatches: [...prompt.matchAll(mediaAttachedPattern)].length,
-    messageImageMatches: [...prompt.matchAll(messageImagePattern)].length,
-    fileUrlMatches: [...prompt.matchAll(fileUrlPattern)].length,
-    pathMatches: [...prompt.matchAll(pathPattern)].length,
-  };
-}
-
 async function sanitizeImagesWithLog(
   images: ImageContent[],
   label: string,
@@ -324,7 +310,6 @@ export async function detectAndLoadPromptImages(params: {
 
   // Detect images from current prompt
   const allRefs = detectImageReferences(params.prompt);
-  const refSignals = summarizePromptImageRefSignals(params.prompt);
 
   if (allRefs.length === 0) {
     return {
@@ -335,16 +320,7 @@ export async function detectAndLoadPromptImages(params: {
     };
   }
 
-  log.info(
-    `Native image refs detected in embedded prompt: refCount=${allRefs.length} existingImages=${params.existingImages?.length ?? 0} promptLength=${params.prompt.length} mediaAttachedMatches=${refSignals.mediaAttachedMatches} messageImageMatches=${refSignals.messageImageMatches} fileUrlMatches=${refSignals.fileUrlMatches} pathMatches=${refSignals.pathMatches} firstRef=${JSON.stringify(allRefs[0]?.raw ?? "")}`,
-    {
-      refCount: allRefs.length,
-      existingImages: params.existingImages?.length ?? 0,
-      promptLength: params.prompt.length,
-      ...refSignals,
-      firstRef: allRefs[0]?.raw ?? "",
-    },
-  );
+  log.debug(`Native image: detected ${allRefs.length} image refs in prompt`);
 
   const promptImages: ImageContent[] = [...(params.existingImages ?? [])];
 
