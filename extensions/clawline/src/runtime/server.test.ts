@@ -14,12 +14,12 @@ import type { AllowlistEntry, Logger, ProviderServer } from "./domain.js";
 import { enqueueSystemEvent, resetSystemEventsForTest } from "./system-events.js";
 
 const gatewayCallMock = vi.fn();
-vi.mock("./gateway-client.js", () => ({
+vi.mock("../../../../src/gateway/call.js", () => ({
   callGateway: (...args: unknown[]) => gatewayCallMock(...args),
 }));
 
 const enqueueAnnounceMock = vi.fn();
-vi.mock("./announce-queue.js", () => ({
+vi.mock("../../../../src/agents/subagent-announce-queue.js", () => ({
   enqueueAnnounce: (...args: unknown[]) => enqueueAnnounceMock(...args),
 }));
 

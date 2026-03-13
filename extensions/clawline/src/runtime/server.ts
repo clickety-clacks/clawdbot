@@ -19,6 +19,10 @@ import {
   resolveHumanDelayConfig,
   resolveIdentityName,
 } from "../../../../src/agents/identity.js";
+import {
+  type AnnounceQueueItem,
+  enqueueAnnounce,
+} from "../../../../src/agents/subagent-announce-queue.js";
 import { DEFAULT_AGENT_WORKSPACE_DIR } from "../../../../src/agents/workspace.js";
 import { dispatchReplyFromConfig } from "../../../../src/auto-reply/reply/dispatch-from-config.js";
 import { finalizeInboundContext } from "../../../../src/auto-reply/reply/inbound-context.js";
@@ -35,6 +39,7 @@ import {
   resolveAgentIdFromSessionKey,
   resolveSessionTranscriptPath,
 } from "../../../../src/config/sessions.js";
+import { callGateway } from "../../../../src/gateway/call.js";
 import { ADMIN_SCOPE } from "../../../../src/gateway/method-scopes.js";
 import {
   createPinnedDispatcher,
@@ -49,7 +54,6 @@ import { hasAlphaChannel, optimizeImageToPng } from "../../../../src/media/image
 import { detectMime } from "../../../../src/media/mime.js";
 import { DEFAULT_ACCOUNT_ID } from "../../../../src/routing/resolve-route.js";
 import { optimizeImageToJpeg } from "../../../../src/web/media.js";
-import { type AnnounceQueueItem, enqueueAnnounce } from "./announce-queue.js";
 import { clawlineAttachmentsToImages } from "./attachments.js";
 import type { ClawlineAdapterOverrides } from "./config.js";
 import type {
@@ -74,7 +78,6 @@ import type {
   StreamDeletedServerMessage,
 } from "./domain.js";
 import { ClientMessageError, HttpError } from "./errors.js";
-import { callGateway } from "./gateway-client.js";
 import { createAssetHandlers } from "./http-assets.js";
 import { createPerUserTaskQueue } from "./per-user-task-queue.js";
 import { SlidingWindowRateLimiter } from "./rate-limiter.js";
