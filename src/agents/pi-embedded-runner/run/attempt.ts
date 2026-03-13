@@ -1460,6 +1460,7 @@ export async function runEmbeddedAttempt(
           config: params.config,
           sessionManager,
           sessionId: params.sessionId,
+          runId: params.runId,
           policy: transcriptPolicy,
         });
         cacheTrace?.recordStage("session:sanitized", { messages: prior });

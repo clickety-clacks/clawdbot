@@ -671,6 +671,7 @@ export async function compactEmbeddedPiSessionDirect(
           config: params.config,
           sessionManager,
           sessionId: params.sessionId,
+          runId,
           policy: transcriptPolicy,
         });
         const validatedGemini = transcriptPolicy.validateGeminiTurns
