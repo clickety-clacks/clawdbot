@@ -692,6 +692,25 @@ function installPromptStageDiagnostics(
   };
 }
 
+function logPrePromptStage(
+  stage: string,
+  meta: {
+    runId: string;
+    sessionId: string;
+    sessionKey?: string;
+  },
+  startedAt: number,
+  extra?: Record<string, string | number | boolean | undefined>,
+) {
+  const suffix = Object.entries(extra ?? {})
+    .filter(([, value]) => value !== undefined)
+    .map(([key, value]) => `${key}=${String(value)}`)
+    .join(" ");
+  log.info(
+    `[embedded-preprompt] ${stage} runId=${meta.runId} sessionId=${meta.sessionId} sessionKey=${meta.sessionKey ?? "unknown"} elapsedMs=${Date.now() - startedAt}${suffix ? ` ${suffix}` : ""}`,
+  );
+}
+
 export async function resolvePromptBuildHookResult(params: {
   prompt: string;
   messages: unknown[];
@@ -1258,22 +1277,32 @@ export async function runEmbeddedAttempt(
     const systemPromptOverride = createSystemPromptOverride(appendPrompt);
     let systemPromptText = systemPromptOverride();
 
+    const prePromptSetupStartedAt = Date.now();
+    const prePromptMeta = {
+      runId: params.runId,
+      sessionId: params.sessionId,
+      sessionKey: params.sessionKey,
+    };
+    logPrePromptStage("lock_wait_start", prePromptMeta, prePromptSetupStartedAt);
     const sessionLock = await acquireSessionWriteLock({
       sessionFile: params.sessionFile,
       maxHoldMs: resolveSessionLockMaxHoldFromTimeout({
         timeoutMs: params.timeoutMs,
       }),
     });
+    logPrePromptStage("lock_acquired", prePromptMeta, prePromptSetupStartedAt);
 
     let sessionManager: ReturnType<typeof guardSessionManager> | undefined;
     let session: Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
     let removeToolResultContextGuard: (() => void) | undefined;
     let removePromptStageDiagnostics: (() => void) | undefined;
     try {
+      logPrePromptStage("repair_start", prePromptMeta, prePromptSetupStartedAt);
       await repairSessionFileIfNeeded({
         sessionFile: params.sessionFile,
         warn: (message) => log.warn(message),
       });
+      logPrePromptStage("repair_done", prePromptMeta, prePromptSetupStartedAt);
       const hadSessionFile = await fs
         .stat(params.sessionFile)
         .then(() => true)
@@ -1285,7 +1314,9 @@ export async function runEmbeddedAttempt(
         modelId: params.modelId,
       });
 
+      logPrePromptStage("prewarm_start", prePromptMeta, prePromptSetupStartedAt);
       await prewarmSessionFile(params.sessionFile);
+      logPrePromptStage("prewarm_done", prePromptMeta, prePromptSetupStartedAt);
       sessionManager = guardSessionManager(SessionManager.open(params.sessionFile), {
         agentId: sessionAgentId,
         sessionKey: params.sessionKey,
@@ -1293,6 +1324,7 @@ export async function runEmbeddedAttempt(
         allowSyntheticToolResults: transcriptPolicy.allowSyntheticToolResults,
         allowedToolNames,
       });
+      logPrePromptStage("session_manager_opened", prePromptMeta, prePromptSetupStartedAt);
       trackSessionManagerAccess(params.sessionFile);
 
       if (hadSessionFile && params.contextEngine?.bootstrap) {
@@ -1306,6 +1338,7 @@ export async function runEmbeddedAttempt(
         }
       }
 
+      logPrePromptStage("session_prepare_start", prePromptMeta, prePromptSetupStartedAt);
       await prepareSessionManagerForRun({
         sessionManager,
         sessionFile: params.sessionFile,
@@ -1313,6 +1346,7 @@ export async function runEmbeddedAttempt(
         sessionId: params.sessionId,
         cwd: effectiveWorkspace,
       });
+      logPrePromptStage("session_prepare_done", prePromptMeta, prePromptSetupStartedAt);
 
       const settingsManager = createPreparedEmbeddedPiSettingsManager({
         cwd: effectiveWorkspace,
@@ -1343,7 +1377,9 @@ export async function runEmbeddedAttempt(
           settingsManager,
           extensionFactories,
         });
+        logPrePromptStage("resource_loader_reload_start", prePromptMeta, prePromptSetupStartedAt);
         await resourceLoader.reload();
+        logPrePromptStage("resource_loader_reload_done", prePromptMeta, prePromptSetupStartedAt);
       }
 
       // Get hook runner early so it's available when creating tools
@@ -1378,6 +1414,7 @@ export async function runEmbeddedAttempt(
 
       const allCustomTools = [...customTools, ...clientToolDefs];
 
+      logPrePromptStage("create_session_start", prePromptMeta, prePromptSetupStartedAt);
       ({ session } = await createAgentSession({
         cwd: resolvedWorkspace,
         agentDir,
@@ -1391,6 +1428,7 @@ export async function runEmbeddedAttempt(
         settingsManager,
         resourceLoader,
       }));
+      logPrePromptStage("create_session_done", prePromptMeta, prePromptSetupStartedAt);
       applySystemPromptOverrideToSession(session, systemPromptText);
       if (!session) {
         throw new Error("Embedded agent session missing");
@@ -1787,6 +1825,7 @@ export async function runEmbeddedAttempt(
         getUsageTotals,
         getCompactionCount,
       } = subscription;
+      logPrePromptStage("subscription_ready", prePromptMeta, prePromptSetupStartedAt);
 
       const queueHandle: EmbeddedPiQueueHandle = {
         queueMessage: async (text: string) => {
@@ -1880,6 +1919,7 @@ export async function runEmbeddedAttempt(
           trigger: params.trigger,
           channelId: params.messageChannel ?? params.messageProvider ?? undefined,
         };
+        logPrePromptStage("prompt_hooks_start", prePromptMeta, prePromptSetupStartedAt);
         const hookResult = await resolvePromptBuildHookResult({
           prompt: params.prompt,
           messages: activeSession.messages,
@@ -1887,6 +1927,7 @@ export async function runEmbeddedAttempt(
           hookRunner,
           legacyBeforeAgentStartResult: params.legacyBeforeAgentStartResult,
         });
+        logPrePromptStage("prompt_hooks_done", prePromptMeta, prePromptSetupStartedAt);
         {
           if (hookResult?.prependContext) {
             effectivePrompt = `${hookResult.prependContext}\n\n${params.prompt}`;
@@ -1950,6 +1991,7 @@ export async function runEmbeddedAttempt(
 
           // Detect and load images referenced in the prompt for vision-capable models.
           // Images are prompt-local only (pi-like behavior).
+          logPrePromptStage("prompt_image_detect_start", prePromptMeta, prePromptSetupStartedAt);
           const imageResult = await detectAndLoadPromptImages({
             prompt: effectivePrompt,
             workspaceDir: effectiveWorkspace,
@@ -1963,6 +2005,9 @@ export async function runEmbeddedAttempt(
               sandbox?.enabled && sandbox?.fsBridge
                 ? { root: sandbox.workspaceDir, bridge: sandbox.fsBridge }
                 : undefined,
+          });
+          logPrePromptStage("prompt_image_detect_done", prePromptMeta, prePromptSetupStartedAt, {
+            imageCount: imageResult.images.length,
           });
 
           cacheTrace?.recordStage("prompt:images", {
@@ -2031,9 +2076,19 @@ export async function runEmbeddedAttempt(
           // Only pass images option if there are actually images to pass
           // This avoids potential issues with models that don't expect the images parameter
           if (imageResult.images.length > 0) {
+            logPrePromptStage("prompt_invoke", prePromptMeta, prePromptSetupStartedAt, {
+              promptLength: effectivePrompt.length,
+              imageCount: imageResult.images.length,
+            });
             await abortable(activeSession.prompt(effectivePrompt, { images: imageResult.images }));
+            logPrePromptStage("prompt_resolved", prePromptMeta, prePromptSetupStartedAt);
           } else {
+            logPrePromptStage("prompt_invoke", prePromptMeta, prePromptSetupStartedAt, {
+              promptLength: effectivePrompt.length,
+              imageCount: 0,
+            });
             await abortable(activeSession.prompt(effectivePrompt));
+            logPrePromptStage("prompt_resolved", prePromptMeta, prePromptSetupStartedAt);
           }
         } catch (err) {
           promptError = err;
