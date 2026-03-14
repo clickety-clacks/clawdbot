@@ -201,6 +201,10 @@ function hasNotifyEventForPrefix(prefix: string): boolean {
   return peekSystemEvents(DEFAULT_NOTIFY_SESSION_KEY).some((event) => event.includes(prefix));
 }
 
+function hasNotifyEventForSessionPrefix(sessionKey: string, prefix: string): boolean {
+  return peekSystemEvents(sessionKey).some((event) => event.includes(prefix));
+}
+
 async function waitForNotifyEvent(sessionId: string) {
   const prefix = sessionId.slice(0, 8);
   let finished = getFinishedSession(sessionId);
@@ -554,16 +558,38 @@ describe("exec notifyOnExit", () => {
     }
   });
 
-  it("routes clawline-stream notifyOnExit events to the agent main session", async () => {
+  it("preserves caller-provided clawline stream session keys for notifyOnExit events", async () => {
     const tool = createNotifyOnExitExecTool({ sessionKey: CLAWLINE_STREAM_NOTIFY_SESSION_KEY });
+    const wakeHandler = vi.fn().mockResolvedValue({ status: "skipped", reason: "disabled" });
+    const dispose = setHeartbeatWakeHandler(
+      wakeHandler as unknown as Parameters<typeof setHeartbeatWakeHandler>[0],
+    );
+    try {
+      const sessionId = await startBackgroundCommand(tool, echoAfterDelay("notify"));
+      const prefix = sessionId.slice(0, 8);
 
-    const sessionId = await startBackgroundCommand(tool, echoAfterDelay("notify"));
+      await expect
+        .poll(
+          () => ({
+            finished: getFinishedSession(sessionId),
+            hasEvent: hasNotifyEventForSessionPrefix(CLAWLINE_STREAM_NOTIFY_SESSION_KEY, prefix),
+            wake: wakeHandler.mock.calls[0]?.[0],
+          }),
+          NOTIFY_POLL_OPTIONS,
+        )
+        .toMatchObject({
+          hasEvent: true,
+          wake: {
+            reason: `exec:${sessionId}:exit`,
+            sessionKey: CLAWLINE_STREAM_NOTIFY_SESSION_KEY,
+          },
+        });
 
-    const { finished, hasEvent } = await waitForNotifyEvent(sessionId);
-
-    expect(finished).toBeTruthy();
-    expect(hasEvent).toBe(true);
-    expect(peekSystemEvents(CLAWLINE_STREAM_NOTIFY_SESSION_KEY)).toEqual([]);
+      expect(getFinishedSession(sessionId)).toBeTruthy();
+      expect(peekSystemEvents(DEFAULT_NOTIFY_SESSION_KEY)).toEqual([]);
+    } finally {
+      dispose();
+    }
   });
 
   it("keeps notifyOnExit heartbeat wake unscoped for non-agent session keys", async () => {
