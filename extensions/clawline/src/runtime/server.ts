@@ -82,6 +82,7 @@ import { createAssetHandlers } from "./http-assets.js";
 import { createPerUserTaskQueue } from "./per-user-task-queue.js";
 import { SlidingWindowRateLimiter } from "./rate-limiter.js";
 import { ClawlineDeliveryTarget } from "./routing.js";
+import { resolveSubscribedSessionKeys } from "./session-keys.js";
 import { recordClawlineSessionActivity } from "./session-store.js";
 import { peekSystemEvents } from "./system-events.js";
 import { deepMerge } from "./utils/deep-merge.js";
@@ -4805,7 +4806,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
     const normalizedKey = payload.sessionKey.toLowerCase();
     for (const target of sessionsByDevice.values()) {
-      const keys = target.sessionKeys?.length ? target.sessionKeys : [target.sessionKey];
+      const keys = resolveSubscribedSessionKeys(target);
       if (!keys.some((key) => key.toLowerCase() === normalizedKey)) {
         continue;
       }
