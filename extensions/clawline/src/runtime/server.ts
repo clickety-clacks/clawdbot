@@ -3949,6 +3949,21 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     });
   }
 
+  function socketStateLabel(ws: WebSocket): string {
+    switch (ws.readyState) {
+      case WebSocket.CONNECTING:
+        return "connecting";
+      case WebSocket.OPEN:
+        return "open";
+      case WebSocket.CLOSING:
+        return "closing";
+      case WebSocket.CLOSED:
+        return "closed";
+      default:
+        return `unknown:${String(ws.readyState)}`;
+    }
+  }
+
   function markAckSent(deviceId: string, clientId: string) {
     updateMessageAckStmt.run(deviceId, clientId);
   }
@@ -4677,6 +4692,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   function sendPayloadToSession(session: Session, payload: ServerMessage) {
     const normalized = normalizePayloadForSession(session, payload, mainSessionKey.toLowerCase());
     if (!normalized) {
+      logger.warn?.("[clawline] outbound_delivery_skipped", {
+        reason: "normalize_payload_nil",
+        payloadMessageId: payload.id,
+        payloadSessionKey: payload.sessionKey,
+        deviceId: session.deviceId,
+        sessionId: session.sessionId,
+      });
       return;
     }
     const terminalFilteredCount =
@@ -4694,8 +4716,28 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       });
     }
     if (session.socket.readyState !== WebSocket.OPEN) {
+      logger.warn?.("[clawline] outbound_delivery_skipped", {
+        reason: "socket_not_open",
+        payloadMessageId: normalized.id,
+        payloadSessionKey: normalized.sessionKey,
+        deviceId: session.deviceId,
+        sessionId: session.sessionId,
+        socketState: socketStateLabel(session.socket),
+      });
       return;
     }
+    logger.info?.("[clawline] outbound_delivery_attempt", {
+      payloadMessageId: normalized.id,
+      payloadSessionKey: normalized.sessionKey,
+      role: normalized.role ?? "assistant",
+      streaming: Boolean(normalized.streaming),
+      deviceId: session.deviceId,
+      sessionId: session.sessionId,
+      subscribedSessionKeys: session.sessionKeys,
+      socketState: socketStateLabel(session.socket),
+      contentLength: typeof normalized.content === "string" ? normalized.content.trim().length : 0,
+      attachmentCount: Array.isArray(normalized.attachments) ? normalized.attachments.length : 0,
+    });
     const stats = summarizeAttachmentStats(normalized.attachments);
     if (stats) {
       logger.info?.(
@@ -4714,9 +4756,25 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
     session.socket.send(JSON.stringify(normalized), (err) => {
       if (err) {
+        logger.warn?.("[clawline] outbound_delivery_send_failed", {
+          payloadMessageId: normalized.id,
+          payloadSessionKey: normalized.sessionKey,
+          deviceId: session.deviceId,
+          sessionId: session.sessionId,
+          socketState: socketStateLabel(session.socket),
+          error: formatError(err),
+        });
         session.socket.close();
         return;
       }
+      logger.info?.("[clawline] outbound_delivery_send_ok", {
+        payloadMessageId: normalized.id,
+        payloadSessionKey: normalized.sessionKey,
+        role: normalized.role ?? "assistant",
+        streaming: Boolean(normalized.streaming),
+        deviceId: session.deviceId,
+        sessionId: session.sessionId,
+      });
       const role = normalized.role ?? "assistant";
       const streaming = Boolean(normalized.streaming);
       const sessionKey = normalized.sessionKey;
@@ -4805,13 +4863,20 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       payload.sessionKey = sessionKey;
     }
     const normalizedKey = payload.sessionKey.toLowerCase();
+    let matchedTargets = 0;
     for (const target of sessionsByDevice.values()) {
       const keys = resolveSubscribedSessionKeys(target);
       if (!keys.some((key) => key.toLowerCase() === normalizedKey)) {
         continue;
       }
+      matchedTargets += 1;
       sendPayloadToSession(target, payload);
     }
+    logger.info?.("[clawline] outbound_broadcast_result", {
+      payloadMessageId: payload.id,
+      payloadSessionKey: payload.sessionKey,
+      matchedTargets,
+    });
   }
 
   async function appendEvent(event: ServerMessage, userId: string, originatingDeviceId?: string) {
@@ -5085,7 +5150,17 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   // Clawline WS payloads are runtime-validated; keep `any` here to avoid a huge type layer.
   // oxlint-disable-next-line typescript/no-explicit-any
   async function processClientMessage(session: Session, payload: any) {
+    let processStage = "start";
+    const markProcessStage = (stage: string) => {
+      processStage = stage;
+      logger.info?.(`[clawline] processClientMessage_stage: ${stage}`, {
+        messageId: typeof payload?.id === "string" ? payload.id : undefined,
+        deviceId: session.deviceId,
+        userId: session.userId,
+      });
+    };
     try {
+      markProcessStage("validate_payload");
       if (payload.type !== "message") {
         throw new ClientMessageError("invalid_message", "Unsupported type");
       }
@@ -5093,6 +5168,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         throw new ClientMessageError("invalid_message", "Invalid id");
       }
       const rawContent = typeof payload.content === "string" ? payload.content : "";
+      markProcessStage("normalize_attachments");
       const attachmentsInfo = normalizeAttachmentsInput(payload.attachments, config.media);
       const hasContent = rawContent.trim().length > 0;
       if (!hasContent && attachmentsInfo.attachments.length === 0) {
@@ -5103,6 +5179,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         throw new ClientMessageError("payload_too_large", "Message too large");
       }
       const attachmentsHash = hashAttachments(attachmentsInfo.attachments);
+      markProcessStage("resolve_session_key");
       const payloadSessionKey =
         typeof payload.sessionKey === "string" ? payload.sessionKey.trim() : "";
       const normalizedPayloadSessionKey = payloadSessionKey
@@ -5142,6 +5219,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         }
         streamSuffix = parsed.streamSuffix;
       }
+      markProcessStage("route_inbound_message");
       logger.info?.("[clawline] inbound message routing", {
         messageId: payload.id,
         payloadSessionKey: payload.sessionKey,
@@ -5158,9 +5236,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       const targetUserId = session.userId;
 
       let runAgentDispatch: (() => Promise<void>) | null = null;
+      markProcessStage("run_per_user_task");
       await runPerUserTask(
         session.userId,
         async () => {
+          markProcessStage("duplicate_lookup");
           const existing = selectMessageStmt.get(session.deviceId, payload.id) as
             | {
                 deviceId: string;
@@ -5205,15 +5285,18 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             return;
           }
 
+          markProcessStage("message_rate_limit");
           if (!messageRateLimiter.attempt(session.deviceId)) {
             throw new ClientMessageError("rate_limited", "Too many messages");
           }
 
+          markProcessStage("materialize_inline_attachments");
           const materialized = await materializeInlineAttachments({
             attachments: attachmentsInfo.attachments,
             ownerUserId: targetUserId,
             deviceId: session.deviceId,
           });
+          markProcessStage("ensure_attachment_ownership");
           const assetIds = attachmentsInfo.assetIds.concat(materialized.inlineAssetIds);
           const ownership = await ensureChannelAttachmentOwnership({
             attachments: materialized.attachments,
@@ -5221,6 +5304,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             session,
           });
 
+          markProcessStage("persist_user_message");
           const { event } = await persistUserMessage(
             session,
             targetUserId,
@@ -5231,6 +5315,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             ownership.assetIds,
             resolvedSessionKey,
           );
+          markProcessStage("send_ack");
           await new Promise<void>((resolve) => {
             session.socket.send(JSON.stringify({ type: "ack", id: payload.id }), (err) => {
               if (!err) {
@@ -5244,16 +5329,19 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               resolve();
             });
           });
+          markProcessStage("broadcast_user_message");
           broadcastToSessionKey(resolvedSessionKey, event);
 
           const attachmentSummary = describeClawlineAttachments(ownership.attachments);
           const inboundBody = attachmentSummary
             ? `${rawContent}\n\n${attachmentSummary}`
             : rawContent;
+          markProcessStage("load_inbound_images");
           const inboundImages = await clawlineAttachmentsToImages(ownership.attachments, {
             loadAssetImage: loadInboundAssetImage,
           });
 
+          markProcessStage("build_delivery_context");
           const channelLabel = "clawline";
           const routeSessionKey = resolvedSessionKey;
           const route = {
@@ -5296,6 +5384,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
                   accountId: route.accountId,
                 }
               : undefined;
+          markProcessStage("record_inbound_session");
           await recordInboundSession({
             storePath: sessionStorePath,
             sessionKey: route.sessionKey,
@@ -5330,6 +5419,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             }).catch(() => {});
           };
 
+          markProcessStage("create_reply_dispatcher");
           const { dispatcher, replyOptions, markDispatchIdle } = createReplyDispatcherWithTyping({
             responsePrefix: resolveEffectiveMessagesConfig(openClawCfg, route.agentId)
               .responsePrefix,
@@ -5409,7 +5499,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             },
           });
 
+          markProcessStage("prepare_agent_run");
           runAgentDispatch = async () => {
+            markProcessStage("agent_run_start");
             logger.info?.("[clawline] agent_run_start", {
               messageId: payload.id,
               sessionId: session.sessionId,
@@ -5506,17 +5598,33 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             });
 
             if (!wasDelivered && !wasQueued) {
+              logger.warn?.("[clawline] agent_run_no_delivery", {
+                messageId: payload.id,
+                sessionId: session.sessionId,
+                sessionKey: resolvedSessionKey,
+                userId: session.userId,
+                deviceId: session.deviceId,
+                deliveredCount,
+                queuedFinal,
+                queueDepth,
+              });
               updateMessageStreamingStmt.run(
                 MessageStreamingState.Failed,
                 session.deviceId,
                 payload.id,
               );
-              await sendJson(session.socket, {
+              const errorSent = await sendJson(session.socket, {
                 type: "error",
                 code: "server_error",
                 message: "Unable to deliver reply",
                 messageId: payload.id,
-              }).catch(() => {});
+              }).catch(() => false);
+              logger.warn?.("[clawline] agent_run_no_delivery_error_emit", {
+                messageId: payload.id,
+                sessionKey: resolvedSessionKey,
+                deviceId: session.deviceId,
+                errorSent,
+              });
               return;
             }
 
@@ -5534,6 +5642,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       if (!dispatchAgentRun) {
         return;
       }
+      markProcessStage("dispatch_agent_run");
       await dispatchAgentRun();
     } catch (err) {
       if (err instanceof ClientMessageError) {
@@ -5553,11 +5662,15 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         return;
       }
       // Log unexpected errors and notify client so UI can show failure
-      logger.error?.("[clawline] processClientMessage_unexpected_error", {
-        error: err instanceof Error ? err.message : String(err),
-        messageId: payload?.id,
-        userId: session.userId,
-      });
+      const formattedError = formatError(err);
+      logger.error?.(
+        `[clawline] processClientMessage_unexpected_error stage=${processStage}: ${formattedError}`,
+        {
+          messageId: payload?.id,
+          userId: session.userId,
+          deviceId: session.deviceId,
+        },
+      );
       await sendJson(session.socket, {
         type: "error",
         code: "server_error",
