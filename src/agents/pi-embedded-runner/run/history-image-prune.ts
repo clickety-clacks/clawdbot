@@ -28,7 +28,10 @@ function isSessionManagerLike(value: unknown): value is SessionManagerLike {
 }
 
 function pruneMessageImages(message: AgentMessage): boolean {
-  if (message.role !== "user" || !Array.isArray(message.content)) {
+  if (
+    (message.role !== "user" && message.role !== "toolResult") ||
+    !Array.isArray(message.content)
+  ) {
     return false;
   }
 

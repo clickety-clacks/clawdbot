@@ -25,6 +25,7 @@ import type {
   GatewayServiceEnvArgs,
   GatewayServiceInstallArgs,
   GatewayServiceManageArgs,
+  GatewayServiceRestartResult,
 } from "./service-types.js";
 import {
   installSystemdService,
@@ -42,6 +43,7 @@ export type {
   GatewayServiceEnvArgs,
   GatewayServiceInstallArgs,
   GatewayServiceManageArgs,
+  GatewayServiceRestartResult,
 } from "./service-types.js";
 
 function ignoreInstallResult(
@@ -59,12 +61,37 @@ export type GatewayService = {
   install: (args: GatewayServiceInstallArgs) => Promise<void>;
   uninstall: (args: GatewayServiceManageArgs) => Promise<void>;
   stop: (args: GatewayServiceControlArgs) => Promise<void>;
-  restart: (args: GatewayServiceControlArgs) => Promise<void>;
+  restart: (args: GatewayServiceControlArgs) => Promise<GatewayServiceRestartResult>;
   recover?: (args: GatewayServiceControlArgs) => Promise<void>;
   isLoaded: (args: GatewayServiceEnvArgs) => Promise<boolean>;
   readCommand: (env: GatewayServiceEnv) => Promise<GatewayServiceCommandConfig | null>;
   readRuntime: (env: GatewayServiceEnv) => Promise<GatewayServiceRuntime>;
 };
+
+export function describeGatewayServiceRestart(
+  serviceNoun: string,
+  result: GatewayServiceRestartResult,
+): {
+  scheduled: boolean;
+  daemonActionResult: "restarted" | "scheduled";
+  message: string;
+  progressMessage: string;
+} {
+  if (result.outcome === "scheduled") {
+    return {
+      scheduled: true,
+      daemonActionResult: "scheduled",
+      message: `restart scheduled, ${serviceNoun.toLowerCase()} will restart momentarily`,
+      progressMessage: `${serviceNoun} service restart scheduled.`,
+    };
+  }
+  return {
+    scheduled: false,
+    daemonActionResult: "restarted",
+    message: `${serviceNoun} service restarted.`,
+    progressMessage: `${serviceNoun} service restarted.`,
+  };
+}
 
 type SupportedGatewayServicePlatform = "darwin" | "linux" | "win32";
 
