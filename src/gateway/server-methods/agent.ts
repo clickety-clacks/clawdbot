@@ -401,6 +401,7 @@ export const agentHandlers: GatewayRequestHandlers = {
         cliSessionIds: entry?.cliSessionIds,
         claudeCliSessionId: entry?.claudeCliSessionId,
       };
+      // Clawline: fall back to the request channel so send-policy checks still work before session metadata is persisted.
       const requestChannel =
         typeof request.channel === "string" && request.channel.trim()
           ? request.channel.trim()

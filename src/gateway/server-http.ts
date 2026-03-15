@@ -70,6 +70,7 @@ import {
   type PluginRoutePathContext,
 } from "./server/plugins-http.js";
 import type { ReadinessChecker } from "./server/readiness.js";
+import { applyWakeOverlay } from "./server/wake-overlay.js";
 import type { GatewayWsClient } from "./server/ws-types.js";
 import { handleToolsInvokeHttpRequest } from "./tools-invoke-http.js";
 
@@ -448,6 +449,14 @@ export function createHooksRequestHandler(
     return cached.runId;
   };
 
+  const resolveWakeText = async (hooksConfig: HooksConfigResolved, baseText: string) =>
+    await applyWakeOverlay({
+      baseText,
+      wakeOverlayPath: hooksConfig.wakeOverlayPath,
+      maxBytes: hooksConfig.maxBodyBytes,
+      logHooks,
+    });
+
   const rememberHookRunId = (key: string | undefined, runId: string, now: number) => {
     if (!key) {
       return;
@@ -542,7 +551,10 @@ export function createHooksRequestHandler(
         sendJson(res, 400, { ok: false, error: normalized.error });
         return true;
       }
-      dispatchWakeHook(normalized.value);
+      dispatchWakeHook({
+        ...normalized.value,
+        text: await resolveWakeText(hooksConfig, normalized.value.text),
+      });
       sendJson(res, 200, { ok: true, mode: normalized.value.mode });
       return true;
     }
@@ -626,7 +638,7 @@ export function createHooksRequestHandler(
           }
           if (mapped.action.kind === "wake") {
             dispatchWakeHook({
-              text: mapped.action.text,
+              text: await resolveWakeText(hooksConfig, mapped.action.text),
               mode: mapped.action.mode,
             });
             sendJson(res, 200, { ok: true, mode: mapped.action.mode });

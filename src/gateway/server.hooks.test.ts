@@ -1,4 +1,6 @@
 import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { resolveMainSessionKeyFromConfig } from "../config/sessions.js";
 import { drainSystemEvents, peekSystemEvents } from "../infra/system-events.js";
@@ -290,6 +292,34 @@ describe("gateway server hooks", () => {
       const mappedBadPrefix = await postHook(port, "/hooks/mapped-bad", { subject: "hello" });
       expect(mappedBadPrefix.status).toBe(400);
     });
+  });
+
+  test("applies wake overlay text to hook wake dispatches", async () => {
+    const overlayDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-hook-overlay-"));
+    const overlayPath = path.join(overlayDir, "wake-overlay.txt");
+    await fs.writeFile(overlayPath, "Overlay instructions", "utf8");
+
+    testState.hooksConfig = {
+      enabled: true,
+      token: HOOK_TOKEN,
+      wakeOverlayPath: overlayPath,
+    };
+
+    try {
+      await withGatewayServer(async ({ port }) => {
+        const response = await postHook(port, "/hooks/wake", { text: "Ping" });
+        expect(response.status).toBe(200);
+        const wakeEvents = await waitForSystemEvent();
+        expect(
+          wakeEvents.some(
+            (event) => event.includes("Ping") && event.includes("Overlay instructions"),
+          ),
+        ).toBe(true);
+        drainSystemEvents(resolveMainKey());
+      });
+    } finally {
+      await fs.rm(overlayDir, { recursive: true, force: true });
+    }
   });
 
   test("normalizes duplicate target-agent prefixes before isolated dispatch", async () => {

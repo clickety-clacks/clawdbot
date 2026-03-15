@@ -2380,6 +2380,7 @@ export async function runEmbeddedAttempt(
         try {
           // Idempotent cleanup for legacy sessions with persisted image payloads.
           // Called each run; only mutates already-answered user turns that still carry image blocks.
+          // Clawline: prune the persisted session file before the run so durable history stops rehydrating stale images.
           const didPruneImages = pruneProcessedHistoryImagesInSession(sessionManager);
           if (didPruneImages) {
             const prunedContext = sessionManager.buildSessionContext();

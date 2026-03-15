@@ -314,6 +314,7 @@ export async function performGatewaySessionReset(params: {
       contextTokens: resetEntry?.contextTokens,
       sendPolicy: currentEntry?.sendPolicy,
       label: currentEntry?.label,
+      // Clawline: preserve display/channel metadata across resets so the session still routes back to the same surface.
       displayName: currentEntry?.displayName,
       channel: currentEntry?.channel,
       chatType: currentEntry?.chatType,

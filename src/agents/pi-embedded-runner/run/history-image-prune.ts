@@ -88,6 +88,7 @@ export function pruneProcessedHistoryImages(messages: AgentMessage[]): boolean {
  * the stale image payloads from disk.
  */
 export function pruneProcessedHistoryImagesInSession(sessionManager: unknown): boolean {
+  // Clawline: rewrite the persisted session after pruning so large image payloads do not come back on the next wake.
   if (!isSessionManagerLike(sessionManager)) {
     return false;
   }

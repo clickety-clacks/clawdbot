@@ -233,6 +233,7 @@ export async function runDaemonRestart(opts: DaemonLifecycleOptions = {}): Promi
         health.runtime.status === "running" &&
         health.portUsage.status === "free";
       if (needsDarwinRecovery) {
+        // Clawline: retry once via macOS app bounce because launchd can report running before the port binds.
         const recoveryMsg = `Gateway runtime is running but port ${restartPort} is still free; attempting one macOS app bounce recovery.`;
         warnings.push(recoveryMsg);
         if (!json) {

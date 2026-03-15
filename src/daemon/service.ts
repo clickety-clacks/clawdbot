@@ -62,6 +62,7 @@ export type GatewayService = {
   uninstall: (args: GatewayServiceManageArgs) => Promise<void>;
   stop: (args: GatewayServiceControlArgs) => Promise<void>;
   restart: (args: GatewayServiceControlArgs) => Promise<GatewayServiceRestartResult>;
+  // Clawline: expose the macOS app-bounce recovery path for the launchd restart race.
   recover?: (args: GatewayServiceControlArgs) => Promise<void>;
   isLoaded: (args: GatewayServiceEnvArgs) => Promise<boolean>;
   readCommand: (env: GatewayServiceEnv) => Promise<GatewayServiceCommandConfig | null>;

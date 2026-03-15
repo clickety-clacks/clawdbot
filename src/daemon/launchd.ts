@@ -293,6 +293,7 @@ export async function repairLaunchAgentBootstrap(args: {
     return { ok: false, detail: (boot.stderr || boot.stdout).trim() || undefined };
   }
   try {
+    // Clawline: avoid `kickstart -k` here because the forced restart races the customer macOS app.
     await ensureLaunchctlServiceStarted(`${domain}/${label}`);
   } catch (error) {
     return { ok: false, detail: error instanceof Error ? error.message : String(error) };
@@ -601,6 +602,7 @@ export async function recoverLaunchAgentWithAppBounce({
   stdout,
   env,
 }: GatewayServiceControlArgs): Promise<void> {
+  // Clawline: bounce the macOS app when launchd says "running" but the gateway port never binds.
   const serviceEnv = env ?? (process.env as GatewayServiceEnv);
   const domain = resolveGuiDomain();
   const gatewayLabel = resolveLaunchAgentLabel({ env: serviceEnv });

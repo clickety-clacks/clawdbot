@@ -153,6 +153,7 @@ function normalizeBase64Payload(params: { base64?: string; contentType?: string 
 }
 
 function normalizeAttachmentBufferArg(args: Record<string, unknown>): void {
+  // Clawline: normalize serialized attachment buffers before base64 parsing so outbound media survives RPC hops.
   const raw = args.buffer;
   if (Buffer.isBuffer(raw)) {
     args.buffer = raw.toString("base64");

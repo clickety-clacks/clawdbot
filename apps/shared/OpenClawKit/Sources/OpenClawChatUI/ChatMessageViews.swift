@@ -2,6 +2,7 @@ import OpenClawKit
 import Foundation
 import SwiftUI
 
+// Clawline intentionally renders its custom document MIME types inline so chat transcripts stay understandable.
 enum ChatInlineAttachmentSupport {
     enum Kind: Equatable {
         case file

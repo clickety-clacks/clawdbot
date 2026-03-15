@@ -146,9 +146,7 @@ export function resolveFallbackRetryPrompt(params: {
   if (!params.isFallbackRetry) {
     return params.body;
   }
-  // Retry-time prompt rewriting assumes the retried model can safely infer what changed between
-  // attempts. That assumption proved brittle for alert delivery because it silently dropped the
-  // original request shape and produced false NO_REPLY outcomes.
+  // Clawline: preserve the original prompt on fallback retries so alert deliveries keep their full request context.
   // TODO: Remove this helper entirely if upstream adds a durable pre-retry contract that can carry
   // retry metadata without mutating the original user/system prompt.
   return params.body;
