@@ -1921,10 +1921,12 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
-  it("lists trackable sessions from the gateway session store excluding provisioned streams", async () => {
+  it("lists trackable sessions from the gateway session store with spec-aligned exclusions", async () => {
     const userId = "flynn";
     const deviceId = randomUUID();
     const now = Date.now();
+    const excludedSessionKey = "agent:main:openclaw:flynn:s_local_adopted";
+    const provisionedSessionKey = "agent:main:openclaw:flynn:s_provisioned";
     const ctx = await setupTestServer([
       {
         claimedName: "Flynn",
@@ -1956,6 +1958,30 @@ describe.sequential("clawline provider server", () => {
               lastChannel: "openclaw",
               lastTo: "flynn",
             },
+            "agent:main:openclaw:flynn:s_label_only": {
+              sessionId: "sess_label_only",
+              updatedAt: now - 200,
+              label: "Label Session",
+              channel: "openclaw",
+            },
+            [excludedSessionKey]: {
+              sessionId: "sess_excluded",
+              updatedAt: now - 50,
+              displayName: "Already Adopted",
+              channel: "openclaw",
+            },
+            [provisionedSessionKey]: {
+              sessionId: "sess_provisioned",
+              updatedAt: now - 75,
+              displayName: "Provisioned Session",
+              channel: "openclaw",
+            },
+            "agent:main:clawline:flynn:s_hidden": {
+              sessionId: "sess_native_clawline",
+              updatedAt: now - 25,
+              displayName: "Native Clawline Session",
+              channel: "clawline",
+            },
             "agent:main:openclaw:other:s_hidden": {
               sessionId: "sess_other",
               updatedAt: now - 50,
@@ -1971,10 +1997,35 @@ describe.sequential("clawline provider server", () => {
       const pairResult = await performPairRequest(ctx.port, deviceId);
       const token = pairResult.token as string;
       const { ws } = await authenticateDevice(ctx.port, deviceId, token);
+      const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
+      const db = new BetterSqlite3(dbPath);
+      try {
+        db.prepare(
+          `INSERT INTO stream_sessions
+             (userId, sessionKey, displayName, kind, orderIndex, isBuiltIn, createdAt, updatedAt)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          userId,
+          provisionedSessionKey,
+          "Provisioned Session",
+          "custom",
+          7,
+          0,
+          now - 75,
+          now - 75,
+        );
+      } finally {
+        db.close();
+      }
 
-      const response = await fetch(`http://127.0.0.1:${ctx.port}/api/trackable-sessions`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const response = await fetch(
+        `http://127.0.0.1:${ctx.port}/api/trackable-sessions?excludeSessionKey=${encodeURIComponent(
+          excludedSessionKey,
+        )}`,
+        {
+          headers: { Authorization: `Bearer ${token}` },
+        },
+      );
       expect(response.status).toBe(200);
       const payload = (await response.json()) as {
         sessions: Array<{
@@ -1986,13 +2037,20 @@ describe.sequential("clawline provider server", () => {
         }>;
       };
       expect(payload.sessions).toEqual([
-        expect.objectContaining({
+        {
           sessionKey: "agent:main:openclaw:flynn:s_trackme",
           displayName: "Research Session",
+          updatedAt: now - 100,
           channel: "openclaw",
           lastChannel: "openclaw",
           lastTo: "flynn",
-        }),
+        },
+        {
+          sessionKey: "agent:main:openclaw:flynn:s_label_only",
+          displayName: "Label Session",
+          updatedAt: now - 200,
+          channel: "openclaw",
+        },
       ]);
 
       ws.terminate();
