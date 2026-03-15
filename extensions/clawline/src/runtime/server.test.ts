@@ -130,6 +130,7 @@ type TestServerContext = {
   mediaPath: string;
   alertInstructionsPath: string;
   webRootPath: string;
+  sessionStorePath: string;
   cleanup: () => Promise<void>;
 };
 
@@ -270,6 +271,7 @@ async function setupTestServer(
     mediaPath,
     alertInstructionsPath,
     webRootPath,
+    sessionStorePath,
     cleanup,
   };
 }
@@ -1914,6 +1916,86 @@ describe.sequential("clawline provider server", () => {
       secondQueue.dispose();
       firstWs.terminate();
       secondWs.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("lists trackable sessions from the gateway session store excluding provisioned streams", async () => {
+    const userId = "flynn";
+    const deviceId = randomUUID();
+    const now = Date.now();
+    const ctx = await setupTestServer([
+      {
+        claimedName: "Flynn",
+        deviceInfo: { platform: "iOS", model: "iPhone" },
+        userId,
+        isAdmin: false,
+        tokenDelivered: true,
+        createdAt: now - 5_000,
+        lastSeenAt: now - 2_000,
+        deviceId,
+      },
+    ]);
+    try {
+      await fs.writeFile(
+        ctx.sessionStorePath,
+        JSON.stringify(
+          {
+            "agent:main:clawline:flynn:main": {
+              sessionId: "sess_stream",
+              updatedAt: now - 300,
+              displayName: "Personal",
+              channel: "clawline",
+            },
+            "agent:main:openclaw:flynn:s_trackme": {
+              sessionId: "sess_trackable",
+              updatedAt: now - 100,
+              displayName: "Research Session",
+              channel: "openclaw",
+              lastChannel: "openclaw",
+              lastTo: "flynn",
+            },
+            "agent:main:openclaw:other:s_hidden": {
+              sessionId: "sess_other",
+              updatedAt: now - 50,
+              displayName: "Other User",
+              channel: "openclaw",
+            },
+          },
+          null,
+          2,
+        ),
+      );
+
+      const pairResult = await performPairRequest(ctx.port, deviceId);
+      const token = pairResult.token as string;
+      const { ws } = await authenticateDevice(ctx.port, deviceId, token);
+
+      const response = await fetch(`http://127.0.0.1:${ctx.port}/api/trackable-sessions`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      expect(response.status).toBe(200);
+      const payload = (await response.json()) as {
+        sessions: Array<{
+          sessionKey: string;
+          displayName: string;
+          channel?: string;
+          lastChannel?: string;
+          lastTo?: string;
+        }>;
+      };
+      expect(payload.sessions).toEqual([
+        expect.objectContaining({
+          sessionKey: "agent:main:openclaw:flynn:s_trackme",
+          displayName: "Research Session",
+          channel: "openclaw",
+          lastChannel: "openclaw",
+          lastTo: "flynn",
+        }),
+      ]);
+
+      ws.terminate();
     } finally {
       await ctx.cleanup();
     }

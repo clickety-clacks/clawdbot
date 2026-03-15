@@ -37,6 +37,7 @@ import type { ReplyPayload } from "../../../../src/auto-reply/types.js";
 import { recordInboundSession } from "../../../../src/channels/session.js";
 import {
   resolveAgentIdFromSessionKey,
+  loadSessionStore,
   resolveSessionTranscriptPath,
 } from "../../../../src/config/sessions.js";
 import { callGateway } from "../../../../src/gateway/call.js";
@@ -653,6 +654,21 @@ function parseClawlineUserSessionKey(sessionKey: string): {
   return { agentId, userId, streamSuffix };
 }
 
+function parseUserScopedAgentSessionKey(sessionKey: string): { userId: string } | null {
+  const parts = sessionKey.split(":");
+  if (parts.length !== 5) {
+    return null;
+  }
+  if ((parts[0] ?? "").trim().toLowerCase() !== "agent") {
+    return null;
+  }
+  const userId = sanitizeUserId(parts[3] ?? "").toLowerCase();
+  if (!parts[1] || !parts[2] || !parts[4] || !userId) {
+    return null;
+  }
+  return { userId };
+}
+
 function streamKindToDisplayName(kind: StreamSessionKind): string {
   if (kind === "main") {
     return "Personal";
@@ -884,6 +900,15 @@ type StreamServerMessage =
   | StreamCreatedServerMessage
   | StreamUpdatedServerMessage
   | StreamDeletedServerMessage;
+
+type TrackableSessionApiEntry = {
+  sessionKey: string;
+  displayName: string;
+  updatedAt: number;
+  channel?: string;
+  lastChannel?: string;
+  lastTo?: string;
+};
 
 type StreamSessionRow = {
   userId: string;
@@ -2669,6 +2694,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           return;
         }
       }
+      if (req.method === "GET" && parsedUrl.pathname === "/api/trackable-sessions") {
+        await handleListTrackableSessionsRequest(req, res);
+        return;
+      }
       if (
         parsedUrl.pathname === WEBROOT_PREFIX ||
         parsedUrl.pathname.startsWith(`${WEBROOT_PREFIX}/`)
@@ -2687,8 +2716,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       res.writeHead(404).end();
     } catch (err) {
       const pathName = req.url ? new URL(req.url, "http://localhost").pathname : "";
-      const isStreamApi = pathName === "/api/streams" || pathName.startsWith("/api/streams/");
-      if (isStreamApi) {
+      const isControlPlaneApi =
+        pathName === "/api/streams" ||
+        pathName.startsWith("/api/streams/") ||
+        pathName === "/api/trackable-sessions";
+      if (isControlPlaneApi) {
         if (err instanceof HttpError) {
           sendStreamApiError(res, err.status, err.code, err.message);
         } else {
@@ -4210,6 +4242,66 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     res.setHeader("Content-Type", "application/json");
     res.writeHead(200);
     res.end(JSON.stringify({ streams }));
+  }
+
+  async function loadTrackableSessionsForAuthedUser(auth: {
+    userId: string;
+    isAdmin: boolean;
+  }): Promise<TrackableSessionApiEntry[]> {
+    return runPerUserTask(auth.userId, async () =>
+      enqueueWriteTask(() => {
+        const streams = ensureStreamSessionsForUser({ userId: auth.userId, isAdmin: auth.isAdmin });
+        syncUserSessionSubscriptions(auth.userId, streams);
+        const provisionedKeys = new Set(
+          streams.map((stream) => normalizeSessionKey(stream.sessionKey)),
+        );
+        const normalizedUserId = sanitizeUserId(auth.userId).toLowerCase();
+        const sessionStore = loadSessionStore(sessionStorePath);
+        return Object.entries(sessionStore)
+          .flatMap(([sessionKey, entry]): TrackableSessionApiEntry[] => {
+            const candidateKey = sessionKey.trim();
+            if (!candidateKey) {
+              return [];
+            }
+            if (provisionedKeys.has(normalizeSessionKey(candidateKey))) {
+              return [];
+            }
+            const parsed = parseUserScopedAgentSessionKey(candidateKey);
+            if (!parsed || parsed.userId !== normalizedUserId) {
+              return [];
+            }
+            const displayName =
+              sanitizeLabel(entry.displayName) ?? sanitizeLabel(entry.label) ?? candidateKey;
+            return [
+              {
+                sessionKey: candidateKey,
+                displayName,
+                updatedAt: entry.updatedAt,
+                channel: typeof entry.channel === "string" ? entry.channel : undefined,
+                lastChannel: typeof entry.lastChannel === "string" ? entry.lastChannel : undefined,
+                lastTo: typeof entry.lastTo === "string" ? entry.lastTo : undefined,
+              },
+            ];
+          })
+          .toSorted((a, b) => {
+            if (a.updatedAt !== b.updatedAt) {
+              return b.updatedAt - a.updatedAt;
+            }
+            return a.sessionKey.localeCompare(b.sessionKey);
+          });
+      }),
+    );
+  }
+
+  async function handleListTrackableSessionsRequest(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ) {
+    const auth = authenticateStreamHttpRequest(req);
+    const sessions = await loadTrackableSessionsForAuthedUser(auth);
+    res.setHeader("Content-Type", "application/json");
+    res.writeHead(200);
+    res.end(JSON.stringify({ sessions }));
   }
 
   async function parseStreamsRequestBody(
