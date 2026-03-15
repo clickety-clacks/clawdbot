@@ -276,24 +276,19 @@ export function resolveSessionFilePath(
   return resolveSessionTranscriptPathInDir(sessionId, sessionsDir);
 }
 
-export function resolveStorePath(
-  store?: string,
-  opts?: { agentId?: string; env?: NodeJS.ProcessEnv },
-) {
+export function resolveStorePath(store?: string, opts?: { agentId?: string }) {
   const agentId = normalizeAgentId(opts?.agentId ?? DEFAULT_AGENT_ID);
-  const env = opts?.env ?? process.env;
-  const homedir = () => resolveRequiredHomeDir(env, os.homedir);
   if (!store) {
-    return path.join(resolveAgentSessionsDir(agentId, env, homedir), "sessions.json");
+    return resolveDefaultSessionStorePath(agentId);
   }
   if (store.includes("{agentId}")) {
     const expanded = store.replaceAll("{agentId}", agentId);
     if (expanded.startsWith("~")) {
       return path.resolve(
         expandHomePrefix(expanded, {
-          home: resolveRequiredHomeDir(env, homedir),
-          env,
-          homedir,
+          home: resolveRequiredHomeDir(process.env, os.homedir),
+          env: process.env,
+          homedir: os.homedir,
         }),
       );
     }
@@ -302,28 +297,11 @@ export function resolveStorePath(
   if (store.startsWith("~")) {
     return path.resolve(
       expandHomePrefix(store, {
-        home: resolveRequiredHomeDir(env, homedir),
-        env,
-        homedir,
+        home: resolveRequiredHomeDir(process.env, os.homedir),
+        env: process.env,
+        homedir: os.homedir,
       }),
     );
   }
   return path.resolve(store);
-}
-
-export function resolveAgentsDirFromSessionStorePath(storePath: string): string | undefined {
-  const candidateAbsPath = path.resolve(storePath);
-  if (path.basename(candidateAbsPath) !== "sessions.json") {
-    return undefined;
-  }
-  const sessionsDir = path.dirname(candidateAbsPath);
-  if (path.basename(sessionsDir) !== "sessions") {
-    return undefined;
-  }
-  const agentDir = path.dirname(sessionsDir);
-  const agentsDir = path.dirname(agentDir);
-  if (path.basename(agentsDir) !== "agents") {
-    return undefined;
-  }
-  return agentsDir;
 }

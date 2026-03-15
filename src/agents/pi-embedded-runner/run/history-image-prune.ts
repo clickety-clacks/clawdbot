@@ -28,10 +28,7 @@ function isSessionManagerLike(value: unknown): value is SessionManagerLike {
 }
 
 function pruneMessageImages(message: AgentMessage): boolean {
-  if (
-    (message.role !== "user" && message.role !== "toolResult") ||
-    !Array.isArray(message.content)
-  ) {
+  if (message.role !== "user" || !Array.isArray(message.content)) {
     return false;
   }
 
@@ -88,7 +85,6 @@ export function pruneProcessedHistoryImages(messages: AgentMessage[]): boolean {
  * the stale image payloads from disk.
  */
 export function pruneProcessedHistoryImagesInSession(sessionManager: unknown): boolean {
-  // Clawline: rewrite the persisted session after pruning so large image payloads do not come back on the next wake.
   if (!isSessionManagerLike(sessionManager)) {
     return false;
   }

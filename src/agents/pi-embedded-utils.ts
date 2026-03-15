@@ -34,32 +34,6 @@ export function stripMinimaxToolCallXml(text: string): string {
 }
 
 /**
- * Strip model control tokens leaked into assistant text output.
- *
- * Models like GLM-5 and DeepSeek sometimes emit internal delimiter tokens
- * (e.g. `<|assistant|>`, `<|tool_call_result_begin|>`, `<｜begin▁of▁sentence｜>`)
- * in their responses. These use the universal `<|...|>` convention (ASCII or
- * full-width pipe variants) and should never reach end users.
- *
- * This is a provider bug — no upstream fix tracked yet.
- * Remove this function when upstream providers stop leaking tokens.
- * @see https://github.com/openclaw/openclaw/issues/40020
- */
-// Match both ASCII pipe <|...|> and full-width pipe <｜...｜> (U+FF5C) variants.
-const MODEL_SPECIAL_TOKEN_RE = /<[|｜][^|｜]*[|｜]>/g;
-
-export function stripModelSpecialTokens(text: string): string {
-  if (!text) {
-    return text;
-  }
-  if (!MODEL_SPECIAL_TOKEN_RE.test(text)) {
-    return text;
-  }
-  MODEL_SPECIAL_TOKEN_RE.lastIndex = 0;
-  return text.replace(MODEL_SPECIAL_TOKEN_RE, " ").replace(/  +/g, " ").trim();
-}
-
-/**
  * Strip downgraded tool call text representations that leak into text content.
  * When replaying history to Gemini, tool calls without `thought_signature` are
  * downgraded to text blocks like `[Tool Call: name (ID: ...)]`. These should
@@ -238,16 +212,14 @@ export function extractAssistantText(msg: AssistantMessage): string {
     extractTextFromChatContent(msg.content, {
       sanitizeText: (text) =>
         stripThinkingTagsFromText(
-          stripDowngradedToolCallText(stripModelSpecialTokens(stripMinimaxToolCallXml(text))),
+          stripDowngradedToolCallText(stripMinimaxToolCallXml(text)),
         ).trim(),
       joinWith: "\n",
       normalizeText: (text) => text.trim(),
     }) ?? "";
   // Only apply keyword-based error rewrites when the assistant message is actually an error.
   // Otherwise normal prose that *mentions* errors (e.g. "context overflow") can get clobbered.
-  // Gate on stopReason only — a non-error response with an errorMessage set (e.g. from a
-  // background tool failure) should not have its content rewritten (#13935).
-  const errorContext = msg.stopReason === "error";
+  const errorContext = msg.stopReason === "error" || Boolean(msg.errorMessage?.trim());
   return sanitizeUserFacingText(extracted, { errorContext });
 }
 

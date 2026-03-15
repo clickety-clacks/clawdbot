@@ -27,13 +27,13 @@ import type { TemplateContext } from "../templating.js";
 import type { VerboseLevel } from "../thinking.js";
 import type { GetReplyOptions } from "../types.js";
 import {
-  buildEmbeddedRunExecutionParams,
+  buildEmbeddedRunBaseParams,
+  buildEmbeddedRunContexts,
   resolveModelFallbackOptions,
 } from "./agent-runner-utils.js";
 import {
   hasAlreadyFlushedForCurrentCompaction,
   resolveMemoryFlushContextWindowTokens,
-  resolveMemoryFlushRelativePathForRun,
   resolveMemoryFlushPromptForRun,
   resolveMemoryFlushSettings,
   shouldRunMemoryFlush,
@@ -465,11 +465,6 @@ export async function runMemoryFlushIfNeeded(params: {
     });
   }
   let memoryCompactionCompleted = false;
-  const memoryFlushNowMs = Date.now();
-  const memoryFlushWritePath = resolveMemoryFlushRelativePathForRun({
-    cfg: params.cfg,
-    nowMs: memoryFlushNowMs,
-  });
   const flushSystemPrompt = [
     params.followupRun.run.extraSystemPrompt,
     memoryFlushSettings.systemPrompt,
@@ -479,15 +474,19 @@ export async function runMemoryFlushIfNeeded(params: {
   try {
     await runWithModelFallback({
       ...resolveModelFallbackOptions(params.followupRun.run),
-      runId: flushRunId,
       run: async (provider, model, runOptions) => {
-        const { embeddedContext, senderContext, runBaseParams } = buildEmbeddedRunExecutionParams({
+        const { authProfile, embeddedContext, senderContext } = buildEmbeddedRunContexts({
           run: params.followupRun.run,
           sessionCtx: params.sessionCtx,
           hasRepliedRef: params.opts?.hasRepliedRef,
           provider,
+        });
+        const runBaseParams = buildEmbeddedRunBaseParams({
+          run: params.followupRun.run,
+          provider,
           model,
           runId: flushRunId,
+          authProfile,
           allowTransientCooldownProbe: runOptions?.allowTransientCooldownProbe,
         });
         const result = await runEmbeddedPiAgent({
@@ -495,11 +494,9 @@ export async function runMemoryFlushIfNeeded(params: {
           ...senderContext,
           ...runBaseParams,
           trigger: "memory",
-          memoryFlushWritePath,
           prompt: resolveMemoryFlushPromptForRun({
             prompt: memoryFlushSettings.prompt,
             cfg: params.cfg,
-            nowMs: memoryFlushNowMs,
           }),
           extraSystemPrompt: flushSystemPrompt,
           bootstrapPromptWarningSignaturesSeen,

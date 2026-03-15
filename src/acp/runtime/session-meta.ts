@@ -1,11 +1,9 @@
+import path from "node:path";
+import { resolveAgentSessionDirs } from "../../agents/session-dirs.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import { loadConfig } from "../../config/config.js";
-import {
-  loadSessionStore,
-  resolveAllAgentSessionStoreTargets,
-  resolveStorePath,
-  updateSessionStore,
-} from "../../config/sessions.js";
+import { resolveStateDir } from "../../config/paths.js";
+import { loadSessionStore, resolveStorePath, updateSessionStore } from "../../config/sessions.js";
 import {
   mergeSessionEntry,
   type SessionAcpMeta,
@@ -90,17 +88,14 @@ export function readAcpSessionEntry(params: {
 
 export async function listAcpSessionEntries(params: {
   cfg?: OpenClawConfig;
-  env?: NodeJS.ProcessEnv;
 }): Promise<AcpSessionStoreEntry[]> {
   const cfg = params.cfg ?? loadConfig();
-  const storeTargets = await resolveAllAgentSessionStoreTargets(
-    cfg,
-    params.env ? { env: params.env } : undefined,
-  );
+  const stateDir = resolveStateDir(process.env);
+  const sessionDirs = await resolveAgentSessionDirs(stateDir);
   const entries: AcpSessionStoreEntry[] = [];
 
-  for (const target of storeTargets) {
-    const storePath = target.storePath;
+  for (const sessionsDir of sessionDirs) {
+    const storePath = path.join(sessionsDir, "sessions.json");
     let store: Record<string, SessionEntry>;
     try {
       store = loadSessionStore(storePath);

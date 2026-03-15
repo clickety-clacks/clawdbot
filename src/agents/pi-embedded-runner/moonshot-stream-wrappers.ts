@@ -35,14 +35,6 @@ function isMoonshotToolChoiceCompatible(toolChoice: unknown): boolean {
   return false;
 }
 
-function isPinnedToolChoice(toolChoice: unknown): boolean {
-  if (!toolChoice || typeof toolChoice !== "object" || Array.isArray(toolChoice)) {
-    return false;
-  }
-  const typeValue = (toolChoice as Record<string, unknown>).type;
-  return typeValue === "tool" || typeValue === "function";
-}
-
 export function shouldApplySiliconFlowThinkingOffCompat(params: {
   provider: string;
   modelId: string;
@@ -55,41 +47,20 @@ export function shouldApplySiliconFlowThinkingOffCompat(params: {
   );
 }
 
-export function shouldApplyMoonshotPayloadCompat(params: {
-  provider: string;
-  modelId: string;
-}): boolean {
-  const normalizedProvider = params.provider.trim().toLowerCase();
-  const normalizedModelId = params.modelId.trim().toLowerCase();
-
-  if (normalizedProvider === "moonshot") {
-    return true;
-  }
-
-  // Ollama Cloud exposes Kimi variants through OpenAI-compatible model IDs such
-  // as `kimi-k2.5:cloud`, but they still need the same payload normalization as
-  // native Moonshot endpoints when thinking/tool_choice are enabled together.
-  return (
-    normalizedProvider === "ollama" &&
-    normalizedModelId.startsWith("kimi-k") &&
-    normalizedModelId.includes(":cloud")
-  );
-}
-
 export function createSiliconFlowThinkingWrapper(baseStreamFn: StreamFn | undefined): StreamFn {
   const underlying = baseStreamFn ?? streamSimple;
   return (model, context, options) => {
     const originalOnPayload = options?.onPayload;
     return underlying(model, context, {
       ...options,
-      onPayload: (payload) => {
+      onPayload: (payload, payloadModel) => {
         if (payload && typeof payload === "object") {
           const payloadObj = payload as Record<string, unknown>;
           if (payloadObj.thinking === "off") {
             payloadObj.thinking = null;
           }
         }
-        return originalOnPayload?.(payload, model);
+        return originalOnPayload?.(payload, payloadModel);
       },
     });
   };
@@ -118,7 +89,7 @@ export function createMoonshotThinkingWrapper(
     const originalOnPayload = options?.onPayload;
     return underlying(model, context, {
       ...options,
-      onPayload: (payload) => {
+      onPayload: (payload, payloadModel) => {
         if (payload && typeof payload === "object") {
           const payloadObj = payload as Record<string, unknown>;
           let effectiveThinkingType = normalizeMoonshotThinkingType(payloadObj.thinking);
@@ -132,14 +103,10 @@ export function createMoonshotThinkingWrapper(
             effectiveThinkingType === "enabled" &&
             !isMoonshotToolChoiceCompatible(payloadObj.tool_choice)
           ) {
-            if (payloadObj.tool_choice === "required") {
-              payloadObj.tool_choice = "auto";
-            } else if (isPinnedToolChoice(payloadObj.tool_choice)) {
-              payloadObj.thinking = { type: "disabled" };
-            }
+            payloadObj.tool_choice = "auto";
           }
         }
-        return originalOnPayload?.(payload, model);
+        return originalOnPayload?.(payload, payloadModel);
       },
     });
   };

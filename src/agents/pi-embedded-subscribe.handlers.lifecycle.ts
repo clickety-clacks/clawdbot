@@ -1,11 +1,6 @@
 import { emitAgentEvent } from "../infra/agent-events.js";
 import { createInlineCodeState } from "../markdown/code-spans.js";
-import {
-  buildApiErrorObservationFields,
-  buildTextObservationFields,
-  sanitizeForConsole,
-} from "./pi-embedded-error-observation.js";
-import { classifyFailoverReason, formatAssistantErrorText } from "./pi-embedded-helpers.js";
+import { formatAssistantErrorText } from "./pi-embedded-helpers.js";
 import type { EmbeddedPiSubscribeContext } from "./pi-embedded-subscribe.handlers.types.js";
 import { isAssistantMessage } from "./pi-embedded-utils.js";
 
@@ -41,33 +36,16 @@ export function handleAgentEnd(ctx: EmbeddedPiSubscribeContext) {
       provider: lastAssistant.provider,
       model: lastAssistant.model,
     });
-    const rawError = lastAssistant.errorMessage?.trim();
-    const failoverReason = classifyFailoverReason(rawError ?? "");
     const errorText = (friendlyError || lastAssistant.errorMessage || "LLM request failed.").trim();
-    const observedError = buildApiErrorObservationFields(rawError);
-    const safeErrorText =
-      buildTextObservationFields(errorText).textPreview ?? "LLM request failed.";
-    const safeRunId = sanitizeForConsole(ctx.params.runId) ?? "-";
-    const safeModel = sanitizeForConsole(lastAssistant.model) ?? "unknown";
-    const safeProvider = sanitizeForConsole(lastAssistant.provider) ?? "unknown";
-    ctx.log.warn("embedded run agent end", {
-      event: "embedded_run_agent_end",
-      tags: ["error_handling", "lifecycle", "agent_end", "assistant_error"],
-      runId: ctx.params.runId,
-      isError: true,
-      error: safeErrorText,
-      failoverReason,
-      model: lastAssistant.model,
-      provider: lastAssistant.provider,
-      ...observedError,
-      consoleMessage: `embedded run agent end: runId=${safeRunId} isError=true model=${safeModel} provider=${safeProvider} error=${safeErrorText}`,
-    });
+    ctx.log.warn(
+      `embedded run agent end: runId=${ctx.params.runId} isError=true error=${errorText}`,
+    );
     emitAgentEvent({
       runId: ctx.params.runId,
       stream: "lifecycle",
       data: {
         phase: "error",
-        error: safeErrorText,
+        error: errorText,
         endedAt: Date.now(),
       },
     });
@@ -75,7 +53,7 @@ export function handleAgentEnd(ctx: EmbeddedPiSubscribeContext) {
       stream: "lifecycle",
       data: {
         phase: "error",
-        error: safeErrorText,
+        error: errorText,
       },
     });
   } else {

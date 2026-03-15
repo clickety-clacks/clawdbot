@@ -5,11 +5,9 @@ import type { ThinkLevel } from "../../auto-reply/thinking.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import {
   createAnthropicBetaHeadersWrapper,
-  createAnthropicFastModeWrapper,
   createAnthropicToolPayloadCompatibilityWrapper,
   createBedrockNoCacheWrapper,
   isAnthropicBedrockModel,
-  resolveAnthropicFastMode,
   resolveAnthropicBetas,
   resolveCacheRetention,
 } from "./anthropic-stream-wrappers.js";
@@ -18,16 +16,13 @@ import {
   createMoonshotThinkingWrapper,
   createSiliconFlowThinkingWrapper,
   resolveMoonshotThinkingType,
-  shouldApplyMoonshotPayloadCompat,
   shouldApplySiliconFlowThinkingOffCompat,
 } from "./moonshot-stream-wrappers.js";
 import {
   createCodexDefaultTransportWrapper,
   createOpenAIDefaultTransportWrapper,
-  createOpenAIFastModeWrapper,
   createOpenAIResponsesContextManagementWrapper,
   createOpenAIServiceTierWrapper,
-  resolveOpenAIFastMode,
   resolveOpenAIServiceTier,
 } from "./openai-stream-wrappers.js";
 import {
@@ -227,7 +222,7 @@ function createGoogleThinkingPayloadWrapper(
     const onPayload = options?.onPayload;
     return underlying(model, context, {
       ...options,
-      onPayload: (payload) => {
+      onPayload: (payload, payloadModel) => {
         if (model.api === "google-generative-ai") {
           sanitizeGoogleThinkingPayload({
             payload,
@@ -235,7 +230,7 @@ function createGoogleThinkingPayloadWrapper(
             thinkingLevel,
           });
         }
-        return onPayload?.(payload, model);
+        return onPayload?.(payload, payloadModel);
       },
     });
   };
@@ -263,12 +258,12 @@ function createZaiToolStreamWrapper(
     const originalOnPayload = options?.onPayload;
     return underlying(model, context, {
       ...options,
-      onPayload: (payload) => {
+      onPayload: (payload, payloadModel) => {
         if (payload && typeof payload === "object") {
           // Inject tool_stream: true for Z.AI API
           (payload as Record<string, unknown>).tool_stream = true;
         }
-        return originalOnPayload?.(payload, model);
+        return originalOnPayload?.(payload, payloadModel);
       },
     });
   };
@@ -311,11 +306,11 @@ function createParallelToolCallsWrapper(
     const originalOnPayload = options?.onPayload;
     return underlying(model, context, {
       ...options,
-      onPayload: (payload) => {
+      onPayload: (payload, payloadModel) => {
         if (payload && typeof payload === "object") {
           (payload as Record<string, unknown>).parallel_tool_calls = enabled;
         }
-        return originalOnPayload?.(payload, model);
+        return originalOnPayload?.(payload, payloadModel);
       },
     });
   };
@@ -378,7 +373,7 @@ export function applyExtraParamsToAgent(
     agent.streamFn = createSiliconFlowThinkingWrapper(agent.streamFn);
   }
 
-  if (shouldApplyMoonshotPayloadCompat({ provider, modelId })) {
+  if (provider === "moonshot") {
     const moonshotThinkingType = resolveMoonshotThinkingType({
       configuredThinking: merged?.thinking,
       thinkingLevel,
@@ -440,18 +435,6 @@ export function applyExtraParamsToAgent(
   // Guard Google payloads against invalid negative thinking budgets emitted by
   // upstream model-ID heuristics for Gemini 3.1 variants.
   agent.streamFn = createGoogleThinkingPayloadWrapper(agent.streamFn, thinkingLevel);
-
-  const anthropicFastMode = resolveAnthropicFastMode(merged);
-  if (anthropicFastMode !== undefined) {
-    log.debug(`applying Anthropic fast mode=${anthropicFastMode} for ${provider}/${modelId}`);
-    agent.streamFn = createAnthropicFastModeWrapper(agent.streamFn, anthropicFastMode);
-  }
-
-  const openAIFastMode = resolveOpenAIFastMode(merged);
-  if (openAIFastMode) {
-    log.debug(`applying OpenAI fast mode for ${provider}/${modelId}`);
-    agent.streamFn = createOpenAIFastModeWrapper(agent.streamFn);
-  }
 
   const openAIServiceTier = resolveOpenAIServiceTier(merged);
   if (openAIServiceTier) {

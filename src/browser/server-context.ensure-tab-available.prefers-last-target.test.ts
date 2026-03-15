@@ -25,9 +25,9 @@ function makeBrowserState(): BrowserServerState {
       headless: true,
       noSandbox: false,
       attachOnly: false,
-      defaultProfile: "chrome-relay",
+      defaultProfile: "chrome",
       profiles: {
-        "chrome-relay": {
+        chrome: {
           driver: "extension",
           cdpUrl: "http://127.0.0.1:18792",
           cdpPort: 18792,

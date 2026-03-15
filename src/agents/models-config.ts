@@ -1,8 +1,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import {
+  getRuntimeConfigSnapshot,
   getRuntimeConfigSourceSnapshot,
-  projectConfigOntoRuntimeSourceSnapshot,
   type OpenClawConfig,
   loadConfig,
 } from "../config/config.js";
@@ -42,31 +42,19 @@ async function writeModelsFileAtomic(targetPath: string, contents: string): Prom
   await fs.rename(tempPath, targetPath);
 }
 
-function resolveModelsConfigInput(config?: OpenClawConfig): {
-  config: OpenClawConfig;
-  sourceConfigForSecrets: OpenClawConfig;
-} {
+function resolveModelsConfigInput(config?: OpenClawConfig): OpenClawConfig {
   const runtimeSource = getRuntimeConfigSourceSnapshot();
-  if (!config) {
-    const loaded = loadConfig();
-    return {
-      config: runtimeSource ?? loaded,
-      sourceConfigForSecrets: runtimeSource ?? loaded,
-    };
-  }
   if (!runtimeSource) {
-    return {
-      config,
-      sourceConfigForSecrets: config,
-    };
+    return config ?? loadConfig();
   }
-  const projected = projectConfigOntoRuntimeSourceSnapshot(config);
-  return {
-    config: projected,
-    // If projection is skipped (for example incompatible top-level shape),
-    // keep managed secret persistence anchored to the active source snapshot.
-    sourceConfigForSecrets: projected === config ? runtimeSource : projected,
-  };
+  if (!config) {
+    return runtimeSource;
+  }
+  const runtimeResolved = getRuntimeConfigSnapshot();
+  if (runtimeResolved && config === runtimeResolved) {
+    return runtimeSource;
+  }
+  return config;
 }
 
 async function withModelsJsonWriteLock<T>(targetPath: string, run: () => Promise<T>): Promise<T> {
@@ -92,8 +80,7 @@ export async function ensureOpenClawModelsJson(
   config?: OpenClawConfig,
   agentDirOverride?: string,
 ): Promise<{ agentDir: string; wrote: boolean }> {
-  const resolved = resolveModelsConfigInput(config);
-  const cfg = resolved.config;
+  const cfg = resolveModelsConfigInput(config);
   const agentDir = agentDirOverride?.trim() ? agentDirOverride.trim() : resolveOpenClawAgentDir();
   const targetPath = path.join(agentDir, "models.json");
 
@@ -104,7 +91,6 @@ export async function ensureOpenClawModelsJson(
     const existingModelsFile = await readExistingModelsFile(targetPath);
     const plan = await planOpenClawModelsJson({
       cfg,
-      sourceConfigForSecrets: resolved.sourceConfigForSecrets,
       agentDir,
       env,
       existingRaw: existingModelsFile.raw,

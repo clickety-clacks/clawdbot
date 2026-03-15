@@ -1,6 +1,6 @@
 import { Type } from "@sinclair/typebox";
 import type { GatewayMessageChannel } from "../../utils/message-channel.js";
-import { ACP_SPAWN_MODES, spawnAcpDirect } from "../acp-spawn.js";
+import { ACP_SPAWN_MODES, ACP_SPAWN_STREAM_TARGETS, spawnAcpDirect } from "../acp-spawn.js";
 import { optionalStringEnum } from "../schema/typebox.js";
 import type { SpawnedToolContext } from "../spawned-context.js";
 import { SUBAGENT_SPAWN_MODES, spawnSubagentDirect } from "../subagent-spawn.js";
@@ -9,8 +9,6 @@ import { jsonResult, readStringParam, ToolInputError } from "./common.js";
 
 const SESSIONS_SPAWN_RUNTIMES = ["subagent", "acp"] as const;
 const SESSIONS_SPAWN_SANDBOX_MODES = ["inherit", "require"] as const;
-// Keep the schema copy local so ACP tool registration does not read branch constants mid-cycle.
-const SESSIONS_SPAWN_STREAM_TARGETS = ["parent"] as const;
 const UNSUPPORTED_SESSIONS_SPAWN_PARAM_KEYS = [
   "target",
   "transport",
@@ -27,12 +25,6 @@ const SessionsSpawnToolSchema = Type.Object({
   label: Type.Optional(Type.String()),
   runtime: optionalStringEnum(SESSIONS_SPAWN_RUNTIMES),
   agentId: Type.Optional(Type.String()),
-  resumeSessionId: Type.Optional(
-    Type.String({
-      description:
-        'Resume an existing agent session by its ID (e.g. a Codex session UUID from ~/.codex/sessions/). Requires runtime="acp". The agent replays conversation history via session/load instead of starting fresh.',
-    }),
-  ),
   model: Type.Optional(Type.String()),
   thinking: Type.Optional(Type.String()),
   cwd: Type.Optional(Type.String()),
@@ -43,7 +35,7 @@ const SessionsSpawnToolSchema = Type.Object({
   mode: optionalStringEnum(SUBAGENT_SPAWN_MODES),
   cleanup: optionalStringEnum(["delete", "keep"] as const),
   sandbox: optionalStringEnum(SESSIONS_SPAWN_SANDBOX_MODES),
-  streamTo: optionalStringEnum(SESSIONS_SPAWN_STREAM_TARGETS),
+  streamTo: optionalStringEnum(ACP_SPAWN_STREAM_TARGETS),
 
   // Inline attachments (snapshot-by-value).
   // NOTE: Attachment contents are redacted from transcript persistence by sanitizeToolCallInputs.
@@ -99,7 +91,6 @@ export function createSessionsSpawnTool(
       const label = typeof params.label === "string" ? params.label.trim() : "";
       const runtime = params.runtime === "acp" ? "acp" : "subagent";
       const requestedAgentId = readStringParam(params, "agentId");
-      const resumeSessionId = readStringParam(params, "resumeSessionId");
       const modelOverride = readStringParam(params, "model");
       const thinkingOverrideRaw = readStringParam(params, "thinking");
       const cwd = readStringParam(params, "cwd");
@@ -136,13 +127,6 @@ export function createSessionsSpawnTool(
         });
       }
 
-      if (resumeSessionId && runtime !== "acp") {
-        return jsonResult({
-          status: "error",
-          error: `resumeSessionId is only supported for runtime=acp; got runtime=${runtime}`,
-        });
-      }
-
       if (runtime === "acp") {
         if (Array.isArray(attachments) && attachments.length > 0) {
           return jsonResult({
@@ -156,7 +140,6 @@ export function createSessionsSpawnTool(
             task,
             label: label || undefined,
             agentId: requestedAgentId,
-            resumeSessionId,
             cwd,
             mode: mode && ACP_SPAWN_MODES.includes(mode) ? mode : undefined,
             thread,

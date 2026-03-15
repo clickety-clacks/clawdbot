@@ -16,6 +16,7 @@ const CODEX_MODELS = [
   "gpt-5.2",
   "gpt-5.2-codex",
   "gpt-5.3-codex",
+  "gpt-5.4-codex",
   "gpt-5.3-codex-spark",
   "gpt-5.1-codex",
   "gpt-5.1-codex-mini",
@@ -81,7 +82,7 @@ export function isModernModelRef(ref: ModelRef): boolean {
     return false;
   }
 
-  if (provider === "openrouter" || provider === "opencode" || provider === "opencode-go") {
+  if (provider === "openrouter" || provider === "opencode") {
     // OpenRouter/opencode are pass-through proxies; accept any model ID
     // rather than restricting to a static prefix list.
     return true;

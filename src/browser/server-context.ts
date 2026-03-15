@@ -4,7 +4,6 @@ import type { ResolvedBrowserProfile } from "./config.js";
 import { resolveProfile } from "./config.js";
 import { BrowserProfileNotFoundError, toBrowserErrorResponse } from "./errors.js";
 import { InvalidBrowserNavigationUrlError } from "./navigation-guard.js";
-import { getBrowserProfileCapabilities } from "./profile-capabilities.js";
 import {
   refreshResolvedBrowserConfigFromDisk,
   resolveBrowserProfileWithHotReload,
@@ -160,26 +159,15 @@ export function createBrowserRouteContext(opts: ContextOptions): BrowserRouteCon
       if (!profile) {
         continue;
       }
-      const capabilities = getBrowserProfileCapabilities(profile);
 
       let tabCount = 0;
       let running = false;
-      const profileCtx = createProfileContext(opts, profile);
 
-      if (capabilities.usesChromeMcp) {
-        try {
-          running = await profileCtx.isReachable(300);
-          if (running) {
-            const tabs = await profileCtx.listTabs();
-            tabCount = tabs.filter((t) => t.type === "page").length;
-          }
-        } catch {
-          // Chrome MCP not available
-        }
-      } else if (profileState?.running) {
+      if (profileState?.running) {
         running = true;
         try {
-          const tabs = await profileCtx.listTabs();
+          const ctx = createProfileContext(opts, profile);
+          const tabs = await ctx.listTabs();
           tabCount = tabs.filter((t) => t.type === "page").length;
         } catch {
           // Browser might not be responsive
@@ -190,7 +178,8 @@ export function createBrowserRouteContext(opts: ContextOptions): BrowserRouteCon
           const reachable = await isChromeReachable(profile.cdpUrl, 200);
           if (reachable) {
             running = true;
-            const tabs = await profileCtx.listTabs().catch(() => []);
+            const ctx = createProfileContext(opts, profile);
+            const tabs = await ctx.listTabs().catch(() => []);
             tabCount = tabs.filter((t) => t.type === "page").length;
           }
         } catch {
@@ -200,11 +189,9 @@ export function createBrowserRouteContext(opts: ContextOptions): BrowserRouteCon
 
       result.push({
         name,
-        transport: capabilities.usesChromeMcp ? "chrome-mcp" : "cdp",
-        cdpPort: capabilities.usesChromeMcp ? null : profile.cdpPort,
-        cdpUrl: capabilities.usesChromeMcp ? null : profile.cdpUrl,
+        cdpPort: profile.cdpPort,
+        cdpUrl: profile.cdpUrl,
         color: profile.color,
-        driver: profile.driver,
         running,
         tabCount,
         isDefault: name === current.resolved.defaultProfile,

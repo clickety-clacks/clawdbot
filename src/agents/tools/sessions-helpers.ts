@@ -32,7 +32,6 @@ import { sanitizeUserFacingText } from "../pi-embedded-helpers.js";
 import {
   stripDowngradedToolCallText,
   stripMinimaxToolCallXml,
-  stripModelSpecialTokens,
   stripThinkingTagsFromText,
 } from "../pi-embedded-utils.js";
 
@@ -143,9 +142,7 @@ export function sanitizeTextContent(text: string): string {
   if (!text) {
     return text;
   }
-  return stripThinkingTagsFromText(
-    stripDowngradedToolCallText(stripModelSpecialTokens(stripMinimaxToolCallXml(text))),
-  );
+  return stripThinkingTagsFromText(stripDowngradedToolCallText(stripMinimaxToolCallXml(text)));
 }
 
 export function extractAssistantText(message: unknown): string | undefined {
@@ -166,9 +163,9 @@ export function extractAssistantText(message: unknown): string | undefined {
       normalizeText: (text) => text.trim(),
     }) ?? "";
   const stopReason = (message as { stopReason?: unknown }).stopReason;
-  // Gate on stopReason only — a non-error response with a stale/background errorMessage
-  // should not have its content rewritten with error templates (#13935).
-  const errorContext = stopReason === "error";
+  const errorMessage = (message as { errorMessage?: unknown }).errorMessage;
+  const errorContext =
+    stopReason === "error" || (typeof errorMessage === "string" && Boolean(errorMessage.trim()));
 
   return joined ? sanitizeUserFacingText(joined, { errorContext }) : undefined;
 }
