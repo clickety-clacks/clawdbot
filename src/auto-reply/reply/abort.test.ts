@@ -35,13 +35,21 @@ const subagentRegistryMocks = vi.hoisted(() => ({
   listSubagentRunsForRequester: vi.fn<(requesterSessionKey: string) => SubagentRunRecord[]>(
     () => [],
   ),
+  listSubagentRunsForController: vi.fn<(controllerSessionKey: string) => SubagentRunRecord[]>(
+    () => [],
+  ),
   markSubagentRunTerminated: vi.fn(() => 1),
 }));
 
 vi.mock("../../agents/subagent-registry.js", () => ({
   listSubagentRunsForRequester: subagentRegistryMocks.listSubagentRunsForRequester,
+  listSubagentRunsForController: subagentRegistryMocks.listSubagentRunsForController,
   markSubagentRunTerminated: subagentRegistryMocks.markSubagentRunTerminated,
 }));
+
+subagentRegistryMocks.listSubagentRunsForController.mockImplementation((controllerSessionKey) =>
+  subagentRegistryMocks.listSubagentRunsForRequester(controllerSessionKey),
+);
 
 const acpManagerMocks = vi.hoisted(() => ({
   resolveSession: vi.fn<
@@ -163,6 +171,13 @@ describe("abort detection", () => {
 
   afterEach(() => {
     resetAbortMemoryForTest();
+    subagentRegistryMocks.listSubagentRunsForRequester.mockReset().mockReturnValue([]);
+    subagentRegistryMocks.listSubagentRunsForController
+      .mockReset()
+      .mockImplementation((controllerSessionKey) =>
+        subagentRegistryMocks.listSubagentRunsForRequester(controllerSessionKey),
+      );
+    subagentRegistryMocks.markSubagentRunTerminated.mockReset().mockReturnValue(1);
     acpManagerMocks.resolveSession.mockReset().mockReturnValue({ kind: "none" });
     acpManagerMocks.cancelSession.mockReset().mockResolvedValue(undefined);
   });

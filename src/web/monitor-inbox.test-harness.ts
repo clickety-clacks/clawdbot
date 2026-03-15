@@ -81,14 +81,18 @@ function getPairingStoreMocks() {
 
 const sock: MockSock = createMockSock();
 
-vi.mock("../media/store.js", () => ({
-  saveMediaBuffer: vi.fn().mockResolvedValue({
-    id: "mid",
-    path: "/tmp/mid",
-    size: 1,
-    contentType: "image/jpeg",
-  }),
-}));
+vi.mock("../media/store.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../media/store.js")>();
+  return {
+    ...actual,
+    saveMediaBuffer: vi.fn().mockResolvedValue({
+      id: "mid",
+      path: "/tmp/mid",
+      size: 1,
+      contentType: "image/jpeg",
+    }),
+  };
+});
 
 vi.mock("../config/config.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../config/config.js")>();
