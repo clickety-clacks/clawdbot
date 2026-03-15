@@ -3607,17 +3607,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     60_000,
     Math.max(1_000, config.media.unreferencedUploadTtlSeconds * 250),
   );
-  const assetCleanupInterval =
-    config.media.unreferencedUploadTtlSeconds > 0
-      ? setInterval(() => {
-          cleanupUnreferencedAssets().catch((err) =>
-            logger.warn?.(`asset_cleanup_failed: ${formatError(err)}`),
-          );
-        }, maintenanceIntervalMs)
-      : null;
-  if (assetCleanupInterval && typeof assetCleanupInterval.unref === "function") {
-    assetCleanupInterval.unref();
-  }
+  let assetCleanupInterval: ReturnType<typeof setInterval> | null = null;
   let allowlistWritePending = 0;
   const allowlistWatcher: FSWatcher = watch(allowlistPath, { persistent: false }, () => {
     if (allowlistWritePending > 0) {
@@ -7257,6 +7247,16 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       if (initialized) {
         await cleanupTmpDirectory();
         await cleanupOrphanedAssetFiles();
+        if (!assetCleanupInterval && config.media.unreferencedUploadTtlSeconds > 0) {
+          assetCleanupInterval = setInterval(() => {
+            cleanupUnreferencedAssets().catch((err) =>
+              logger.warn?.(`asset_cleanup_failed: ${formatError(err)}`),
+            );
+          }, maintenanceIntervalMs);
+          if (typeof assetCleanupInterval.unref === "function") {
+            assetCleanupInterval.unref();
+          }
+        }
       }
       cleanupExpiredStreamIdempotencyRows();
       if (!streamIdempotencyCleanupInterval) {
