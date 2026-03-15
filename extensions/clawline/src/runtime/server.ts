@@ -654,25 +654,6 @@ function parseClawlineUserSessionKey(sessionKey: string): {
   return { agentId, userId, streamSuffix };
 }
 
-function parseTrackableAgentSessionKey(sessionKey: string): {
-  provider: string;
-  userId: string;
-} | null {
-  const parts = sessionKey.split(":");
-  if (parts.length !== 5) {
-    return null;
-  }
-  if ((parts[0] ?? "").trim().toLowerCase() !== "agent") {
-    return null;
-  }
-  const provider = (parts[2] ?? "").trim().toLowerCase();
-  const userId = sanitizeUserId(parts[3] ?? "").toLowerCase();
-  if (!parts[1] || !provider || !parts[4] || !userId) {
-    return null;
-  }
-  return { provider, userId };
-}
-
 function streamKindToDisplayName(kind: StreamSessionKind): string {
   if (kind === "main") {
     return "Personal";
@@ -4249,7 +4230,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         const provisionedKeys = new Set(
           streams.map((stream) => normalizeSessionKey(stream.sessionKey)),
         );
-        const normalizedUserId = sanitizeUserId(auth.userId).toLowerCase();
         const sessionStore = loadSessionStore(sessionStorePath);
         return Object.entries(sessionStore)
           .flatMap(([sessionKey, entry]): TrackableSessionApiEntry[] => {
@@ -4257,14 +4237,14 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             if (!candidateKey) {
               return [];
             }
-            if (auth.excludedSessionKeys.has(normalizeSessionKey(candidateKey))) {
+            const normalizedCandidateKey = normalizeSessionKey(candidateKey);
+            if (auth.excludedSessionKeys.has(normalizedCandidateKey)) {
               return [];
             }
-            if (provisionedKeys.has(normalizeSessionKey(candidateKey))) {
+            if (provisionedKeys.has(normalizedCandidateKey)) {
               return [];
             }
-            const parsed = parseTrackableAgentSessionKey(candidateKey);
-            if (!parsed || parsed.provider === "clawline" || parsed.userId !== normalizedUserId) {
+            if (normalizedCandidateKey.includes(":clawline:")) {
               return [];
             }
             const displayName =

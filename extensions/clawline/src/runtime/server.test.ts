@@ -1921,7 +1921,7 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
-  it("lists trackable sessions from the gateway session store with spec-aligned exclusions", async () => {
+  it("lists any non-clawline, non-provisioned session-store entry", async () => {
     const userId = "flynn";
     const deviceId = randomUUID();
     const now = Date.now();
@@ -1958,6 +1958,25 @@ describe.sequential("clawline provider server", () => {
               lastChannel: "openclaw",
               lastTo: "flynn",
             },
+            "agent:main:discord:channel:123": {
+              sessionId: "sess_discord_channel",
+              updatedAt: now - 90,
+              displayName: "Discord Channel",
+              channel: "discord",
+              lastChannel: "discord",
+            },
+            "agent:main:subagent:uuid": {
+              sessionId: "sess_subagent",
+              updatedAt: now - 110,
+              label: "Subagent Session",
+              channel: "openclaw",
+            },
+            "agent:main:main": {
+              sessionId: "sess_main",
+              updatedAt: now - 120,
+              displayName: "Main Session",
+              channel: "openclaw",
+            },
             "agent:main:openclaw:flynn:s_label_only": {
               sessionId: "sess_label_only",
               updatedAt: now - 200,
@@ -1985,7 +2004,7 @@ describe.sequential("clawline provider server", () => {
             "agent:main:openclaw:other:s_hidden": {
               sessionId: "sess_other",
               updatedAt: now - 50,
-              displayName: "Other User",
+              displayName: "Other Session",
               channel: "openclaw",
             },
           },
@@ -2038,12 +2057,37 @@ describe.sequential("clawline provider server", () => {
       };
       expect(payload.sessions).toEqual([
         {
+          sessionKey: "agent:main:openclaw:other:s_hidden",
+          displayName: "Other Session",
+          updatedAt: now - 50,
+          channel: "openclaw",
+        },
+        {
+          sessionKey: "agent:main:discord:channel:123",
+          displayName: "Discord Channel",
+          updatedAt: now - 90,
+          channel: "discord",
+          lastChannel: "discord",
+        },
+        {
           sessionKey: "agent:main:openclaw:flynn:s_trackme",
           displayName: "Research Session",
           updatedAt: now - 100,
           channel: "openclaw",
           lastChannel: "openclaw",
           lastTo: "flynn",
+        },
+        {
+          sessionKey: "agent:main:subagent:uuid",
+          displayName: "Subagent Session",
+          updatedAt: now - 110,
+          channel: "openclaw",
+        },
+        {
+          sessionKey: "agent:main:main",
+          displayName: "Main Session",
+          updatedAt: now - 120,
+          channel: "openclaw",
         },
         {
           sessionKey: "agent:main:openclaw:flynn:s_label_only",
