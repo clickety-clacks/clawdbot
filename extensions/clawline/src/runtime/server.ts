@@ -1615,7 +1615,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       return;
     }
     for (const session of sessions) {
-      applyStreamSubscriptionsToSession(session, resolvedStreams, resolvedAdoptedSessionKeys);
+      const mergedAdoptedSessionKeys = dedupeKeys([
+        ...resolvedAdoptedSessionKeys,
+        ...session.adoptedSessionKeys,
+      ]);
+      applyStreamSubscriptionsToSession(session, resolvedStreams, mergedAdoptedSessionKeys);
     }
   };
 
