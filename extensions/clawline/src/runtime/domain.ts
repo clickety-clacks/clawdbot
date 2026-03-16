@@ -37,6 +37,7 @@ export type StreamSession = {
   isBuiltIn: boolean;
   createdAt: number;
   updatedAt: number;
+  adopted: boolean;
 };
 
 export type StreamSnapshotServerMessage = {
