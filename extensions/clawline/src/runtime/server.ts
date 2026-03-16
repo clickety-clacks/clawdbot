@@ -4505,7 +4505,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
     const displayName =
       sanitizeLabel(entry.displayName) ?? sanitizeLabel(entry.label) ?? normalizedSessionKey;
-    await runPerUserTask(auth.userId, async () =>
+    const stream = await runPerUserTask(auth.userId, async () =>
       enqueueWriteTask(() => {
         const now = nowMs();
         ensureAdoptedStreamSessionForUser({
@@ -4518,11 +4518,16 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         const adoptedKeys = readAdoptedSessionKeysForUser(auth.userId);
         const streams = readStreamSessionsForUser(auth.userId);
         syncUserSessionSubscriptions(auth.userId, streams, adoptedKeys);
+        const row = loadStreamRowForUser(auth.userId, normalizedSessionKey);
+        if (!row) {
+          throw new HttpError(500, "server_error", "Created stream is missing");
+        }
+        return streamSessionFromRow(row);
       }),
     );
     res.setHeader("Content-Type", "application/json");
     res.writeHead(200);
-    res.end(JSON.stringify({ sessionKey: normalizedSessionKey }));
+    res.end(JSON.stringify({ stream }));
   }
 
   async function parseStreamsRequestBody(

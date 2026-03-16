@@ -2407,8 +2407,12 @@ describe.sequential("clawline provider server", () => {
         body: JSON.stringify({ sessionKey: adoptedSessionKey }),
       });
       expect(adoptResponse.status).toBe(200);
-      const adoptPayload = (await adoptResponse.json()) as { sessionKey: string };
-      expect(adoptPayload.sessionKey).toBe(adoptedSessionKey);
+      const adoptPayload = (await adoptResponse.json()) as {
+        stream: { sessionKey: string; displayName: string; createdAt: number };
+      };
+      expect(adoptPayload.stream.sessionKey).toBe(adoptedSessionKey);
+      expect(adoptPayload.stream.displayName).toBe("Subagent Session");
+      expect(adoptPayload.stream.createdAt).toEqual(expect.any(Number));
 
       const afterAdoptMessageId = `c_${randomUUID()}`;
       authed.ws.send(
