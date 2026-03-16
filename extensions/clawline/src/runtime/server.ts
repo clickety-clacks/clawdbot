@@ -2787,6 +2787,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           return;
         }
       }
+      if (req.method === "POST" && parsedUrl.pathname === "/api/streams/adopt") {
+        await handleAdoptSessionRequest(req, res);
+        return;
+      }
       if (parsedUrl.pathname.startsWith("/api/streams/")) {
         if (req.method === "PATCH") {
           await handleRenameStreamRequest(req, res);
@@ -2799,10 +2803,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       }
       if (req.method === "GET" && parsedUrl.pathname === "/api/trackable-sessions") {
         await handleListTrackableSessionsRequest(req, res);
-        return;
-      }
-      if (req.method === "POST" && parsedUrl.pathname === "/api/streams/adopt") {
-        await handleAdoptSessionRequest(req, res);
         return;
       }
       if (
