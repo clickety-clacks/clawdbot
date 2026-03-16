@@ -2,19 +2,20 @@ import { afterEach, expect, test, vi } from "vitest";
 import { listRunningSessions, resetProcessRegistryForTests } from "./bash-process-registry.js";
 import { createExecTool } from "./bash-tools.exec.js";
 
-const { makeSupervisor, supervisorSpawnMock } = vi.hoisted(() => ({
+const { supervisorSpawnMock } = vi.hoisted(() => ({
   supervisorSpawnMock: vi.fn(),
-  makeSupervisor: () => {
-    const noop = vi.fn();
-    return {
-      spawn: (...args: unknown[]) => supervisorSpawnMock(...args),
-      cancel: noop,
-      cancelScope: noop,
-      reconcileOrphans: noop,
-      getRecord: noop,
-    };
-  },
 }));
+
+const makeSupervisor = () => {
+  const noop = vi.fn();
+  return {
+    spawn: (...args: unknown[]) => supervisorSpawnMock(...args),
+    cancel: noop,
+    cancelScope: noop,
+    reconcileOrphans: noop,
+    getRecord: noop,
+  };
+};
 
 vi.mock("../process/supervisor/index.js", () => ({
   getProcessSupervisor: () => makeSupervisor(),

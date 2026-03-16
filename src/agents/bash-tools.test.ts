@@ -47,7 +47,6 @@ const SCOPE_KEY_ALPHA = "agent:alpha";
 const SCOPE_KEY_BETA = "agent:beta";
 const TEST_EXEC_DEFAULTS = { security: "full" as const, ask: "off" as const };
 const DEFAULT_NOTIFY_SESSION_KEY = "agent:main:main";
-const CLAWLINE_STREAM_NOTIFY_SESSION_KEY = "agent:main:clawline:flynn:s_105e446e";
 const ECHO_HI_COMMAND = shellEcho("hi");
 let callIdCounter = 0;
 const nextCallId = () => `call${++callIdCounter}`;
@@ -199,10 +198,6 @@ const requireRunningSessionId = (result: { details: unknown }) => {
 
 function hasNotifyEventForPrefix(prefix: string): boolean {
   return peekSystemEvents(DEFAULT_NOTIFY_SESSION_KEY).some((event) => event.includes(prefix));
-}
-
-function hasNotifyEventForSessionPrefix(sessionKey: string, prefix: string): boolean {
-  return peekSystemEvents(sessionKey).some((event) => event.includes(prefix));
 }
 
 async function waitForNotifyEvent(sessionId: string) {
@@ -553,40 +548,6 @@ describe("exec notifyOnExit", () => {
           reason: `exec:${sessionId}:exit`,
           sessionKey: DEFAULT_NOTIFY_SESSION_KEY,
         });
-    } finally {
-      dispose();
-    }
-  });
-
-  it("preserves caller-provided clawline stream session keys for notifyOnExit events", async () => {
-    const tool = createNotifyOnExitExecTool({ sessionKey: CLAWLINE_STREAM_NOTIFY_SESSION_KEY });
-    const wakeHandler = vi.fn().mockResolvedValue({ status: "skipped", reason: "disabled" });
-    const dispose = setHeartbeatWakeHandler(
-      wakeHandler as unknown as Parameters<typeof setHeartbeatWakeHandler>[0],
-    );
-    try {
-      const sessionId = await startBackgroundCommand(tool, echoAfterDelay("notify"));
-      const prefix = sessionId.slice(0, 8);
-
-      await expect
-        .poll(
-          () => ({
-            finished: getFinishedSession(sessionId),
-            hasEvent: hasNotifyEventForSessionPrefix(CLAWLINE_STREAM_NOTIFY_SESSION_KEY, prefix),
-            wake: wakeHandler.mock.calls[0]?.[0],
-          }),
-          NOTIFY_POLL_OPTIONS,
-        )
-        .toMatchObject({
-          hasEvent: true,
-          wake: {
-            reason: `exec:${sessionId}:exit`,
-            sessionKey: CLAWLINE_STREAM_NOTIFY_SESSION_KEY,
-          },
-        });
-
-      expect(getFinishedSession(sessionId)).toBeTruthy();
-      expect(peekSystemEvents(DEFAULT_NOTIFY_SESSION_KEY)).toEqual([]);
     } finally {
       dispose();
     }

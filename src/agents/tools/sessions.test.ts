@@ -87,10 +87,7 @@ const installRegistry = async () => {
 };
 
 function createMainSessionsListTool() {
-  return createSessionsListTool({
-    agentSessionKey: MAIN_AGENT_SESSION_KEY,
-    config: loadConfigMock() as never,
-  });
+  return createSessionsListTool({ agentSessionKey: MAIN_AGENT_SESSION_KEY });
 }
 
 async function executeMainSessionsList() {
@@ -101,7 +98,6 @@ function createMainSessionsSendTool() {
   return createSessionsSendTool({
     agentSessionKey: MAIN_AGENT_SESSION_KEY,
     agentChannel: MAIN_AGENT_CHANNEL,
-    config: loadConfigMock() as never,
   });
 }
 

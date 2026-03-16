@@ -417,13 +417,6 @@ export function resolveTelegramTransport(
   });
 
   const explicitProxyUrl = proxyFetch ? getProxyUrlFromFetch(proxyFetch) : undefined;
-  // Preserve test-level fetch stubs for probe/send suites instead of bypassing them with undici.
-  if (!proxyFetch && !explicitProxyUrl && (process.env.VITEST || process.env.NODE_ENV === "test")) {
-    const testFetch = globalThis.fetch ? resolveWrappedFetch(globalThis.fetch) : undefined;
-    if (testFetch) {
-      return { fetch: testFetch, sourceFetch: testFetch };
-    }
-  }
   const undiciSourceFetch = resolveWrappedFetch(undiciFetch as unknown as typeof fetch);
   const sourceFetch = explicitProxyUrl
     ? undiciSourceFetch

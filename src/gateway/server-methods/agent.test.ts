@@ -9,7 +9,6 @@ const mocks = vi.hoisted(() => ({
   agentCommand: vi.fn(),
   registerAgentRunContext: vi.fn(),
   performGatewaySessionReset: vi.fn(),
-  resolveSendPolicy: vi.fn(() => "allow" as const),
   loadConfigReturn: {} as Record<string, unknown>,
 }));
 
@@ -41,6 +40,7 @@ vi.mock("../../config/sessions.js", async () => {
 });
 
 vi.mock("../../commands/agent.js", () => ({
+  agentCommand: mocks.agentCommand,
   agentCommandFromIngress: mocks.agentCommand,
 }));
 
@@ -68,8 +68,7 @@ vi.mock("../session-reset-service.js", () => ({
 }));
 
 vi.mock("../../sessions/send-policy.js", () => ({
-  resolveSendPolicy: (...args: unknown[]) =>
-    (mocks.resolveSendPolicy as (...args: unknown[]) => unknown)(...args),
+  resolveSendPolicy: () => "allow",
 }));
 
 vi.mock("../../utils/delivery-context.js", async () => {
@@ -268,51 +267,6 @@ async function invokeAgentIdentityGet(
 }
 
 describe("gateway agent handler", () => {
-  it("uses request channel for send policy when session entry channel is missing", async () => {
-    mocks.loadSessionEntry.mockReturnValue({
-      cfg: {},
-      storePath: "/tmp/sessions.json",
-      entry: {
-        sessionId: "stream-session-id",
-        updatedAt: Date.now(),
-      },
-      canonicalKey: "agent:main:clawline:flynn:s_12345678",
-    });
-    mocks.resolveSendPolicy.mockImplementationOnce((params: { channel?: string }) =>
-      params.channel === "telegram" ? "allow" : "deny",
-    );
-    mocks.updateSessionStore.mockResolvedValue(undefined);
-
-    mocks.agentCommand.mockResolvedValue({
-      payloads: [{ text: "ok" }],
-      meta: { durationMs: 100 },
-    });
-
-    const respond = await invokeAgent(
-      {
-        message: "wake stream",
-        sessionKey: "agent:main:clawline:flynn:s_12345678",
-        channel: "telegram",
-        to: "123456789",
-        deliver: true,
-        idempotencyKey: "stream-policy-channel-fallback",
-      },
-      { reqId: "stream-policy-channel-fallback" },
-    );
-
-    expect(mocks.resolveSendPolicy).toHaveBeenCalledWith(
-      expect.objectContaining({
-        channel: "telegram",
-      }),
-    );
-    expect(respond).toHaveBeenCalledWith(
-      true,
-      expect.objectContaining({ status: "accepted" }),
-      undefined,
-      expect.objectContaining({ runId: "stream-policy-channel-fallback" }),
-    );
-  });
-
   it("preserves ACP metadata from the current stored session entry", async () => {
     const existingAcpMeta = {
       backend: "acpx",

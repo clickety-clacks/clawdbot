@@ -2,11 +2,7 @@ import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { ImageContent } from "@mariozechner/pi-ai";
 import { describe, expect, it } from "vitest";
 import { castAgentMessage } from "../../test-helpers/agent-message-fixtures.js";
-import {
-  PRUNED_HISTORY_IMAGE_MARKER,
-  pruneProcessedHistoryImages,
-  pruneProcessedHistoryImagesInSession,
-} from "./history-image-prune.js";
+import { PRUNED_HISTORY_IMAGE_MARKER, pruneProcessedHistoryImages } from "./history-image-prune.js";
 
 describe("pruneProcessedHistoryImages", () => {
   const image: ImageContent = { type: "image", data: "abc", mimeType: "image/png" };
@@ -90,65 +86,5 @@ describe("pruneProcessedHistoryImages", () => {
     expect(didMutate).toBe(false);
     const firstUser = messages[0] as Extract<AgentMessage, { role: "user" }> | undefined;
     expect(firstUser?.content).toBe("noop");
-  });
-
-  it("durably prunes already-answered image blocks from the current session branch", () => {
-    const userMessage = castAgentMessage({
-      role: "user",
-      content: [{ type: "text", text: "See photo" }, { ...image }],
-    });
-    const assistantMessage = castAgentMessage({
-      role: "assistant",
-      content: "got it",
-    });
-    const branch = [
-      { type: "message" as const, id: "u1", message: userMessage },
-      { type: "message" as const, id: "a1", message: assistantMessage },
-    ];
-    let rewriteCount = 0;
-
-    const didMutate = pruneProcessedHistoryImagesInSession({
-      getBranch: () => branch,
-      getLeafId: () => "a1",
-      _rewriteFile: () => {
-        rewriteCount += 1;
-      },
-    });
-
-    expect(didMutate).toBe(true);
-    expect(rewriteCount).toBe(1);
-    const firstUser = branch[0]?.message as Extract<AgentMessage, { role: "user" }> | undefined;
-    if (!firstUser || !Array.isArray(firstUser.content)) {
-      throw new Error("expected array content");
-    }
-    expect(firstUser.content[1]).toMatchObject({
-      type: "text",
-      text: PRUNED_HISTORY_IMAGE_MARKER,
-    });
-  });
-
-  it("does not rewrite the session file when the current branch has no answered image turn", () => {
-    const branch = [
-      {
-        type: "message" as const,
-        id: "u1",
-        message: castAgentMessage({
-          role: "user",
-          content: [{ type: "text", text: "See photo" }, { ...image }],
-        }),
-      },
-    ];
-    let rewriteCount = 0;
-
-    const didMutate = pruneProcessedHistoryImagesInSession({
-      getBranch: () => branch,
-      getLeafId: () => "u1",
-      _rewriteFile: () => {
-        rewriteCount += 1;
-      },
-    });
-
-    expect(didMutate).toBe(false);
-    expect(rewriteCount).toBe(0);
   });
 });

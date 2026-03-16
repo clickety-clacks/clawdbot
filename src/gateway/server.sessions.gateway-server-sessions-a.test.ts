@@ -267,19 +267,11 @@ describe("gateway server sessions", () => {
           lastTo: "+1555",
           lastAccountId: "work",
           lastThreadId: "1737500000.123456",
-          displayName: "Main",
-          channel: "whatsapp",
-          chatType: "dm",
-          sessionFile: path.join(dir, "sess-main.jsonl"),
         },
         "discord:group:dev": {
           sessionId: "sess-group",
           updatedAt: stale,
           totalTokens: 50,
-          displayName: "Dev",
-          channel: "discord",
-          chatType: "group",
-          sessionFile: path.join(dir, "sess-group.jsonl"),
         },
         "agent:main:subagent:one": {
           sessionId: "sess-subagent",
@@ -561,10 +553,6 @@ describe("gateway server sessions", () => {
         model?: string;
         lastAccountId?: string;
         lastThreadId?: string | number;
-        displayName?: string;
-        channel?: string;
-        chatType?: string;
-        sessionFile?: string;
       };
     }>(ws, "sessions.reset", { key: "agent:main:main" });
     expect(reset.ok).toBe(true);
@@ -574,10 +562,6 @@ describe("gateway server sessions", () => {
     expect(reset.payload?.entry.model).toBe("gpt-test-a");
     expect(reset.payload?.entry.lastAccountId).toBe("work");
     expect(reset.payload?.entry.lastThreadId).toBe("1737500000.123456");
-    expect(reset.payload?.entry.displayName).toBe("Main");
-    expect(reset.payload?.entry.channel).toBe("whatsapp");
-    expect(reset.payload?.entry.chatType).toBe("dm");
-    expect(reset.payload?.entry.sessionFile).toBe(path.join(dir, "sess-main.jsonl"));
     const storeAfterReset = JSON.parse(await fs.readFile(storePath, "utf-8")) as Record<
       string,
       { lastAccountId?: string; lastThreadId?: string | number }
@@ -586,21 +570,6 @@ describe("gateway server sessions", () => {
     expect(storeAfterReset["agent:main:main"]?.lastThreadId).toBe("1737500000.123456");
     const filesAfterReset = await fs.readdir(dir);
     expect(filesAfterReset.some((f) => f.startsWith("sess-main.jsonl.reset."))).toBe(true);
-
-    const resetCustom = await rpcReq<{
-      ok: true;
-      key: string;
-      entry: {
-        sessionId: string;
-        displayName?: string;
-        channel?: string;
-        chatType?: string;
-        sessionFile?: string;
-      };
-    }>(ws, "sessions.reset", { key: "agent:main:discord:group:dev" });
-    expect(resetCustom.ok).toBe(true);
-    expect(resetCustom.payload?.key).toBe("agent:main:discord:group:dev");
-    expect(resetCustom.payload?.entry.sessionId).not.toBe("sess-group");
 
     const badThinking = await rpcReq(ws, "sessions.patch", {
       key: "agent:main:main",

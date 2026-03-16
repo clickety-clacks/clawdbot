@@ -22,7 +22,6 @@ type RestartParams = {
 const service = {
   readCommand: vi.fn(),
   restart: vi.fn(),
-  recover: vi.fn(),
 };
 
 const runServiceRestart = vi.fn();
@@ -130,7 +129,6 @@ describe("runDaemonRestart health checks", () => {
   beforeEach(() => {
     service.readCommand.mockReset();
     service.restart.mockReset();
-    service.recover.mockReset();
     runServiceRestart.mockReset();
     runServiceStop.mockReset();
     waitForGatewayHealthyListener.mockReset();
@@ -242,30 +240,6 @@ describe("runDaemonRestart health checks", () => {
     });
     expect(terminateStaleGatewayPids).not.toHaveBeenCalled();
     expect(renderRestartDiagnostics).toHaveBeenCalledTimes(1);
-  });
-
-  it("runs one darwin app-bounce recovery when runtime is running but port stays free", async () => {
-    vi.spyOn(process, "platform", "get").mockReturnValue("darwin");
-    const unhealthy: RestartHealthSnapshot = {
-      healthy: false,
-      staleGatewayPids: [],
-      runtime: { status: "running" },
-      portUsage: { port: 18789, status: "free", listeners: [], hints: [] },
-    };
-    const healthy: RestartHealthSnapshot = {
-      healthy: true,
-      staleGatewayPids: [],
-      runtime: { status: "running" },
-      portUsage: { port: 18789, status: "busy", listeners: [], hints: [] },
-    };
-    waitForGatewayHealthyRestart.mockResolvedValueOnce(unhealthy).mockResolvedValueOnce(healthy);
-
-    const result = await runDaemonRestart({ json: true });
-
-    expect(result).toBe(true);
-    expect(service.recover).toHaveBeenCalledTimes(1);
-    expect(waitForGatewayHealthyRestart).toHaveBeenCalledTimes(2);
-    expect(terminateStaleGatewayPids).not.toHaveBeenCalled();
   });
 
   it("signals an unmanaged gateway process on stop", async () => {

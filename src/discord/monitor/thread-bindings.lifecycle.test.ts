@@ -52,13 +52,9 @@ vi.mock("../send.messages.js", () => ({
   createThreadDiscord: hoisted.createThreadDiscord,
 }));
 
-vi.mock("../../acp/runtime/session-meta.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../acp/runtime/session-meta.js")>();
-  return {
-    ...actual,
-    readAcpSessionEntry: hoisted.readAcpSessionEntry,
-  };
-});
+vi.mock("../../acp/runtime/session-meta.js", () => ({
+  readAcpSessionEntry: hoisted.readAcpSessionEntry,
+}));
 
 const {
   __testing,
