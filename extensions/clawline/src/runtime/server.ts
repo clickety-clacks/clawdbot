@@ -2801,7 +2801,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         await handleListTrackableSessionsRequest(req, res);
         return;
       }
-      if (req.method === "POST" && parsedUrl.pathname === "/api/adopted-sessions") {
+      if (req.method === "POST" && parsedUrl.pathname === "/api/streams/adopt") {
         await handleAdoptSessionRequest(req, res);
         return;
       }
@@ -2826,8 +2826,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       const isControlPlaneApi =
         pathName === "/api/streams" ||
         pathName.startsWith("/api/streams/") ||
-        pathName === "/api/trackable-sessions" ||
-        pathName === "/api/adopted-sessions";
+        pathName === "/api/trackable-sessions";
       if (isControlPlaneApi) {
         if (err instanceof HttpError) {
           sendStreamApiError(res, err.status, err.code, err.message);

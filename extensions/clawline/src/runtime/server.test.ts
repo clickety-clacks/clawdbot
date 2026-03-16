@@ -2398,7 +2398,7 @@ describe.sequential("clawline provider server", () => {
         code: "stream_not_found",
       });
 
-      const adoptResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/adopted-sessions`, {
+      const adoptResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams/adopt`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${token}`,
@@ -2517,7 +2517,7 @@ describe.sequential("clawline provider server", () => {
       const pair = await performPairRequest(ctx.port, deviceId);
       const token = pair.token as string;
       const { ws } = await authenticateDevice(ctx.port, deviceId, token);
-      const response = await fetch(`http://127.0.0.1:${ctx.port}/api/adopted-sessions`, {
+      const response = await fetch(`http://127.0.0.1:${ctx.port}/api/streams/adopt`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${token}`,
