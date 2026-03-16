@@ -1573,6 +1573,55 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("routes alerts to globally registered non-clawline session keys via fallback", async () => {
+    const entry = createAllowlistEntry();
+    const ctx = await setupTestServer([entry]);
+    const authHeader = await createAuthHeader(ctx, entry);
+    const globalSessionKey = "agent:codex:discord:channel:123";
+    const rootDir = path.dirname(path.dirname(ctx.allowlistPath));
+    const globalStorePath = path.join(rootDir, "agents", "codex", "sessions", "sessions.json");
+    try {
+      await fs.mkdir(path.dirname(globalStorePath), { recursive: true });
+      await fs.writeFile(
+        globalStorePath,
+        JSON.stringify(
+          {
+            [globalSessionKey]: {
+              sessionId: "sess_global_alert",
+              updatedAt: Date.now(),
+            },
+          },
+          null,
+          2,
+        ),
+      );
+
+      const response = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: authHeader },
+        body: JSON.stringify({
+          message: "Check global registered session",
+          source: "codex",
+          sessionKey: globalSessionKey,
+        }),
+      });
+      expect(response.status).toBe(200);
+      expect(enqueueAnnounceMock).toHaveBeenCalledTimes(1);
+      const call = enqueueAnnounceMock.mock.calls[0]?.[0] as {
+        key?: string;
+        item?: { sessionKey?: string; origin?: { channel?: string; to?: string } };
+      };
+      expect(call?.key).toBe(globalSessionKey);
+      expect(call?.item?.sessionKey).toBe(globalSessionKey);
+      expect(call?.item?.origin).toEqual({
+        channel: "clawline",
+        to: globalSessionKey,
+      });
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("routes alerts to main session keys without explicit channel/to", async () => {
     const entry = createAllowlistEntry();
     const ctx = await setupTestServer([entry]);

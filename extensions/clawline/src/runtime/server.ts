@@ -55,6 +55,7 @@ import { mediaKindFromMime, maxBytesForKind } from "../../../../src/media/consta
 import { hasAlphaChannel, optimizeImageToPng } from "../../../../src/media/image-ops.js";
 import { detectMime } from "../../../../src/media/mime.js";
 import { DEFAULT_ACCOUNT_ID } from "../../../../src/routing/resolve-route.js";
+import { parseAgentSessionKey } from "../../../../src/routing/session-key.js";
 import { isCronRunSessionKey } from "../../../../src/sessions/session-key-utils.js";
 import { optimizeImageToJpeg } from "../../../../src/web/media.js";
 import { clawlineAttachmentsToImages } from "./attachments.js";
@@ -3494,7 +3495,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
   async function resolveValidatedAlertSessionKey(rawSessionKey?: string): Promise<string> {
     const resolvedSessionKey = resolveAlertSessionKey(rawSessionKey);
-    if (!resolvedSessionKey.toLowerCase().startsWith("agent:main:")) {
+    const parsedAgentSessionKey = parseAgentSessionKey(resolvedSessionKey);
+    if (!parsedAgentSessionKey) {
       throw new HttpError(400, "invalid_session_key", "Invalid session key");
     }
     if (sessionKeyEq(resolvedSessionKey, mainSessionKey)) {
@@ -3502,38 +3504,78 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
 
     const parsed = parseClawlineUserSessionKey(resolvedSessionKey);
-    if (!parsed || parsed.agentId !== "main") {
-      throw new HttpError(400, "invalid_session_key", "Invalid session key");
+    if (parsed?.agentId === "main") {
+      const allowlistEntry = allowlist.entries.find(
+        (entry) => entry.userId.toLowerCase() === parsed.userId.toLowerCase(),
+      );
+      if (allowlistEntry) {
+        const normalizedSessionKey = normalizeStreamMutationSessionKeyForUser(
+          allowlistEntry.userId,
+          resolvedSessionKey,
+        );
+        if (normalizedSessionKey) {
+          const streamExists = await runPerUserTask(allowlistEntry.userId, async () =>
+            enqueueWriteTask(() => {
+              const streams = ensureStreamSessionsForUser({
+                userId: allowlistEntry.userId,
+                isAdmin: allowlistEntry.isAdmin,
+              });
+              return streams.some((stream) =>
+                sessionKeyEq(stream.sessionKey, normalizedSessionKey),
+              );
+            }),
+          );
+          if (streamExists) {
+            return normalizedSessionKey;
+          }
+        }
+      }
     }
 
-    const allowlistEntry = allowlist.entries.find(
-      (entry) => entry.userId.toLowerCase() === parsed.userId.toLowerCase(),
-    );
-    if (!allowlistEntry) {
+    const globalFallbackKey = await resolveGlobalAlertSessionKey(resolvedSessionKey);
+    if (!globalFallbackKey) {
       throw new HttpError(404, "stream_not_found", "Stream not found");
     }
+    return globalFallbackKey;
+  }
 
-    const normalizedSessionKey = normalizeStreamMutationSessionKeyForUser(
-      allowlistEntry.userId,
-      resolvedSessionKey,
-    );
-    if (!normalizedSessionKey) {
-      throw new HttpError(400, "invalid_session_key", "Invalid session key");
+  async function resolveGlobalAlertSessionKey(sessionKey: string): Promise<string> {
+    const normalized = normalizeSessionKey(sessionKey);
+    if (!normalized) {
+      return "";
     }
-
-    const streamExists = await runPerUserTask(allowlistEntry.userId, async () =>
-      enqueueWriteTask(() => {
-        const streams = ensureStreamSessionsForUser({
-          userId: allowlistEntry.userId,
-          isAdmin: allowlistEntry.isAdmin,
-        });
-        return streams.some((stream) => sessionKeyEq(stream.sessionKey, normalizedSessionKey));
-      }),
-    );
-    if (!streamExists) {
-      throw new HttpError(404, "stream_not_found", "Stream not found");
+    const agentsDir = path.join(path.dirname(config.statePath), "agents");
+    let agentEntries: fs.Dirent[] = [];
+    try {
+      agentEntries = await fs.readdir(agentsDir, { withFileTypes: true });
+    } catch (err) {
+      const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+      if (code === "ENOENT") {
+        return "";
+      }
+      throw err;
     }
-    return normalizedSessionKey;
+    for (const entry of agentEntries) {
+      if (!entry.isDirectory()) {
+        continue;
+      }
+      const storePath = path.join(agentsDir, entry.name, "sessions", "sessions.json");
+      let store: Record<string, { sessionId?: string }>;
+      try {
+        store = loadSessionStore(storePath, { skipCache: true });
+      } catch (err) {
+        const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+        if (code === "ENOENT") {
+          continue;
+        }
+        throw err;
+      }
+      const matchedKey = Object.keys(store).find((key) => sessionKeyEq(key, normalized));
+      if (matchedKey) {
+        return matchedKey;
+      }
+    }
+    return "";
   }
 
   async function wakeGatewayForAlert(text: string, sessionKey?: string) {
