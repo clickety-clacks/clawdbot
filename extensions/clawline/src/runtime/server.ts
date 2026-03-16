@@ -4348,16 +4348,37 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
   }
 
-  function collapseTrackableSessionKey(sessionKey: string): string {
-    const trimmedKey = sessionKey.trim();
-    if (!isCronRunSessionKey(trimmedKey)) {
-      return trimmedKey;
+  function buildTrackableSessionDuplicateMarker(entry: TrackableSessionApiEntry): string {
+    const sessionKey = entry.sessionKey.trim();
+    if (isCronRunSessionKey(sessionKey)) {
+      const runId = sessionKey.split(":").at(-1)?.trim() ?? "";
+      if (runId) {
+        return runId.slice(0, 8);
+      }
     }
-    const runMarkerIndex = trimmedKey.toLowerCase().lastIndexOf(":run:");
-    if (runMarkerIndex <= 0) {
-      return trimmedKey;
+    const fallbackSegment = sessionKey.split(":").filter(Boolean).at(-1)?.trim() ?? "";
+    if (fallbackSegment) {
+      return fallbackSegment.slice(0, 12);
     }
-    return trimmedKey.slice(0, runMarkerIndex);
+    return String(entry.updatedAt);
+  }
+
+  function disambiguateTrackableSessionDisplayNames(
+    sessions: TrackableSessionApiEntry[],
+  ): TrackableSessionApiEntry[] {
+    const duplicateCounts = new Map<string, number>();
+    for (const session of sessions) {
+      duplicateCounts.set(session.displayName, (duplicateCounts.get(session.displayName) ?? 0) + 1);
+    }
+    return sessions.map((session) => {
+      if ((duplicateCounts.get(session.displayName) ?? 0) < 2) {
+        return session;
+      }
+      return {
+        ...session,
+        displayName: `${session.displayName} (${buildTrackableSessionDuplicateMarker(session)})`,
+      };
+    });
   }
 
   async function loadTrackableSessionsForAuthedUser(auth: {
@@ -4372,48 +4393,36 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           streams.map((stream) => normalizeSessionKey(stream.sessionKey)),
         );
         const sessionStore = loadSessionStore(sessionStorePath);
-        const trackableSessionsByKey = new Map<string, TrackableSessionApiEntry>();
-        for (const [sessionKey, entry] of Object.entries(sessionStore)) {
-          const candidateKey = sessionKey.trim();
-          if (!candidateKey) {
-            continue;
-          }
-          const collapsedSessionKey = collapseTrackableSessionKey(candidateKey);
-          const normalizedCandidateKey = normalizeSessionKey(candidateKey);
-          const normalizedCollapsedKey = normalizeSessionKey(collapsedSessionKey);
-          if (
-            auth.excludedSessionKeys.has(normalizedCandidateKey) ||
-            auth.excludedSessionKeys.has(normalizedCollapsedKey)
-          ) {
-            continue;
-          }
-          if (
-            provisionedKeys.has(normalizedCandidateKey) ||
-            provisionedKeys.has(normalizedCollapsedKey)
-          ) {
-            continue;
-          }
-          if (
-            normalizedCandidateKey.includes(":clawline:") ||
-            normalizedCollapsedKey.includes(":clawline:")
-          ) {
-            continue;
-          }
-          const nextEntry: TrackableSessionApiEntry = {
-            sessionKey: collapsedSessionKey,
-            displayName:
-              sanitizeLabel(entry.displayName) ?? sanitizeLabel(entry.label) ?? collapsedSessionKey,
-            updatedAt: entry.updatedAt,
-            channel: typeof entry.channel === "string" ? entry.channel : undefined,
-            lastChannel: typeof entry.lastChannel === "string" ? entry.lastChannel : undefined,
-            lastTo: typeof entry.lastTo === "string" ? entry.lastTo : undefined,
-          };
-          const existingEntry = trackableSessionsByKey.get(normalizedCollapsedKey);
-          if (!existingEntry || nextEntry.updatedAt > existingEntry.updatedAt) {
-            trackableSessionsByKey.set(normalizedCollapsedKey, nextEntry);
-          }
-        }
-        return [...trackableSessionsByKey.values()].toSorted((a, b) => {
+        const sessions = Object.entries(sessionStore).flatMap(
+          ([sessionKey, entry]): TrackableSessionApiEntry[] => {
+            const candidateKey = sessionKey.trim();
+            if (!candidateKey) {
+              return [];
+            }
+            const normalizedCandidateKey = normalizeSessionKey(candidateKey);
+            if (auth.excludedSessionKeys.has(normalizedCandidateKey)) {
+              return [];
+            }
+            if (provisionedKeys.has(normalizedCandidateKey)) {
+              return [];
+            }
+            if (normalizedCandidateKey.includes(":clawline:")) {
+              return [];
+            }
+            return [
+              {
+                sessionKey: candidateKey,
+                displayName:
+                  sanitizeLabel(entry.displayName) ?? sanitizeLabel(entry.label) ?? candidateKey,
+                updatedAt: entry.updatedAt,
+                channel: typeof entry.channel === "string" ? entry.channel : undefined,
+                lastChannel: typeof entry.lastChannel === "string" ? entry.lastChannel : undefined,
+                lastTo: typeof entry.lastTo === "string" ? entry.lastTo : undefined,
+              },
+            ];
+          },
+        );
+        return disambiguateTrackableSessionDisplayNames(sessions).toSorted((a, b) => {
           if (a.updatedAt !== b.updatedAt) {
             return b.updatedAt - a.updatedAt;
           }

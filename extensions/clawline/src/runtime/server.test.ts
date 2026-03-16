@@ -2092,12 +2092,18 @@ describe.sequential("clawline provider server", () => {
           channel: "openclaw",
         },
         {
-          sessionKey: "agent:main:cron:nightly-digest",
-          displayName: "Cron: Nightly digest",
+          sessionKey: "agent:main:cron:nightly-digest:run:run-2",
+          displayName: "Cron: Nightly digest (run-2)",
           updatedAt: now - 70,
           channel: "openclaw",
           lastChannel: "openclaw",
           lastTo: "cron",
+        },
+        {
+          sessionKey: "agent:main:cron:nightly-digest:run:run-1",
+          displayName: "Cron: Nightly digest (run-1)",
+          updatedAt: now - 85,
+          channel: "openclaw",
         },
         {
           sessionKey: "agent:main:discord:channel:123",
