@@ -4884,11 +4884,16 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           );
         }
         if (existing.adopted === 1) {
-          throw new HttpError(
-            409,
-            "adopted_stream_delete_forbidden",
-            "Adopted streams cannot be deleted; untrack instead",
-          );
+          // Untrack: remove stream row + adopted_sessions row, but don't delete messages/assets
+          deleteStreamSessionStmt!.run(auth.userId, sessionKey);
+          database
+            .prepare(`DELETE FROM adopted_sessions WHERE userId = ? AND sessionKey = ?`)
+            .run(auth.userId, sessionKey);
+          broadcastStreamEvent(auth.userId, "stream_deleted", { deletedSessionKey: sessionKey });
+          res.setHeader("Content-Type", "application/json");
+          res.writeHead(200);
+          res.end(JSON.stringify({ deletedSessionKey: sessionKey }));
+          return;
         }
         if (visibleStreams.length <= 1) {
           throw new HttpError(409, "last_stream_delete_forbidden", "Cannot delete the last stream");
