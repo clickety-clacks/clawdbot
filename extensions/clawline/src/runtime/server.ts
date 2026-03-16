@@ -247,7 +247,7 @@ const EXEC_COMPLETION_ALERT_PROMPT =
 const USER_ID_MAX_LENGTH = 48;
 const COMBINING_MARKS_REGEX = /[\u0300-\u036f]/g;
 const WEBROOT_PREFIX = "/www";
-const STREAM_DB_VERSION = 3;
+const STREAM_DB_VERSION = 4;
 const STREAM_SUFFIX_REGEX = /^s_[0-9a-f]{8}$/;
 const STREAM_DISPLAY_NAME_FALLBACK = "Stream";
 const STREAM_IDEMPOTENCY_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
@@ -934,6 +934,7 @@ type StreamSessionRow = {
   kind: StreamSessionKind;
   orderIndex: number;
   isBuiltIn: number;
+  adopted: number;
   createdAt: number;
   updatedAt: number;
 };
@@ -1534,6 +1535,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     kind: row.kind,
     orderIndex: row.orderIndex,
     isBuiltIn: row.isBuiltIn === 1,
+    adopted: row.adopted === 1,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   });
@@ -1670,6 +1672,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         entry.kind,
         entry.orderIndex,
         entry.isBuiltIn,
+        0,
         params.now,
         params.now,
       );
@@ -1689,6 +1692,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           kind: "main",
           orderIndex: 0,
           isBuiltIn: true,
+          adopted: false,
           createdAt: 0,
           updatedAt: 0,
         },
@@ -1700,6 +1704,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           kind: "dm",
           orderIndex: fallback.length,
           isBuiltIn: true,
+          adopted: false,
           createdAt: 0,
           updatedAt: 0,
         });
@@ -1711,6 +1716,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           kind: "global_dm",
           orderIndex: fallback.length,
           isBuiltIn: true,
+          adopted: false,
           createdAt: 0,
           updatedAt: 0,
         });
@@ -1767,6 +1773,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           builtIn.kind,
           nextOrder,
           1,
+          0,
           now,
           now,
         );
@@ -1820,6 +1827,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         kind TEXT NOT NULL,
         orderIndex INTEGER NOT NULL,
         isBuiltIn INTEGER NOT NULL,
+        adopted INTEGER NOT NULL DEFAULT 0,
         createdAt INTEGER NOT NULL,
         updatedAt INTEGER NOT NULL,
         PRIMARY KEY (userId, sessionKey),
@@ -1850,6 +1858,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       CREATE INDEX IF NOT EXISTS idx_adopted_sessions_user_created
         ON adopted_sessions(userId, createdAt);
     `);
+    if (!tableHasColumn("stream_sessions", "adopted")) {
+      database.exec(`ALTER TABLE stream_sessions ADD COLUMN adopted INTEGER NOT NULL DEFAULT 0`);
+    }
 
     const knownUsers = new Set<string>();
     for (const entry of allowlist.entries) {
@@ -1921,8 +1932,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     );
     const insertStreamSession = database.prepare(
       `INSERT OR IGNORE INTO stream_sessions
-         (userId, sessionKey, displayName, kind, orderIndex, isBuiltIn, createdAt, updatedAt)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+         (userId, sessionKey, displayName, kind, orderIndex, isBuiltIn, adopted, createdAt, updatedAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const selectExistingStreamsForUser = database.prepare(
       `SELECT sessionKey, kind, displayName, isBuiltIn FROM stream_sessions WHERE userId = ?`,
@@ -1967,6 +1978,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           STREAM_DISPLAY_NAME_FALLBACK,
           "custom",
           maxOrder,
+          0,
           0,
           now,
           now,
@@ -2025,6 +2037,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             builtIn.kind,
             maxOrder,
             1,
+            0,
             now,
             now,
           );
@@ -2109,6 +2122,14 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       for (const [userId, discovered] of historicalByUser) {
         insertCustomStreamsForUser(userId, discovered);
       }
+    }
+
+    if (currentVersion < 4) {
+      database.exec(
+        `UPDATE stream_sessions
+         SET adopted = 1
+         WHERE sessionKey NOT LIKE '%:clawline:%'`,
+      );
     }
 
     database.pragma(`user_version = ${STREAM_DB_VERSION}`);
@@ -2222,13 +2243,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
          )`,
     );
     selectStreamSessionsByUserStmt = newDb.prepare(
-      `SELECT userId, sessionKey, displayName, kind, orderIndex, isBuiltIn, createdAt, updatedAt
+      `SELECT userId, sessionKey, displayName, kind, orderIndex, isBuiltIn, adopted, createdAt, updatedAt
        FROM stream_sessions
        WHERE userId = ?
        ORDER BY orderIndex ASC`,
     );
     selectStreamSessionByKeyStmt = newDb.prepare(
-      `SELECT userId, sessionKey, displayName, kind, orderIndex, isBuiltIn, createdAt, updatedAt
+      `SELECT userId, sessionKey, displayName, kind, orderIndex, isBuiltIn, adopted, createdAt, updatedAt
        FROM stream_sessions
        WHERE userId = ? AND sessionKey = ?`,
     );
@@ -2237,8 +2258,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     );
     insertStreamSessionStmt = newDb.prepare(
       `INSERT INTO stream_sessions
-         (userId, sessionKey, displayName, kind, orderIndex, isBuiltIn, createdAt, updatedAt)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+         (userId, sessionKey, displayName, kind, orderIndex, isBuiltIn, adopted, createdAt, updatedAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     updateStreamSessionDisplayNameStmt = newDb.prepare(
       `UPDATE stream_sessions
@@ -4117,6 +4138,14 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   function normalizeStreamMutationSessionKeyForUser(userId: string, sessionKey: string): string {
     // Mutation paths must never fall back to a default stream key.
     // If the path key is malformed, return not-found semantics.
+    const opaqueNormalized = normalizeSessionKey(sessionKey);
+    if (
+      opaqueNormalized &&
+      selectStreamSessionByKeyStmt &&
+      loadStreamRowForUser(userId, opaqueNormalized)
+    ) {
+      return opaqueNormalized;
+    }
     const normalized = normalizeStoredSessionKey(sessionKey);
     if (!normalized) {
       return "";
@@ -4290,6 +4319,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       "custom",
       nextOrder,
       0,
+      1,
       params.now,
       params.now,
     );
@@ -4654,6 +4684,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               "custom",
               nextOrder,
               0,
+              0,
               now,
               now,
             );
@@ -4808,6 +4839,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             409,
             "built_in_stream_delete_forbidden",
             "Built-in streams cannot be deleted",
+          );
+        }
+        if (existing.adopted === 1) {
+          throw new HttpError(
+            409,
+            "adopted_stream_delete_forbidden",
+            "Adopted streams cannot be deleted; untrack instead",
           );
         }
         if (visibleStreams.length <= 1) {

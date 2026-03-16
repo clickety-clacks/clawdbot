@@ -2408,11 +2408,46 @@ describe.sequential("clawline provider server", () => {
       });
       expect(adoptResponse.status).toBe(200);
       const adoptPayload = (await adoptResponse.json()) as {
-        stream: { sessionKey: string; displayName: string; createdAt: number };
+        stream: { sessionKey: string; displayName: string; adopted: boolean; createdAt: number };
       };
       expect(adoptPayload.stream.sessionKey).toBe(adoptedSessionKey);
       expect(adoptPayload.stream.displayName).toBe("Subagent Session");
+      expect(adoptPayload.stream.adopted).toBe(true);
       expect(adoptPayload.stream.createdAt).toEqual(expect.any(Number));
+
+      const streamsResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      expect(streamsResponse.status).toBe(200);
+      const streamsPayload = (await streamsResponse.json()) as {
+        streams: Array<{ sessionKey: string; adopted: boolean }>;
+      };
+      expect(streamsPayload.streams).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            sessionKey: adoptedSessionKey,
+            adopted: true,
+          }),
+        ]),
+      );
+
+      const deleteResponse = await fetch(
+        `http://127.0.0.1:${ctx.port}/api/streams/${encodeURIComponent(adoptedSessionKey)}`,
+        {
+          method: "DELETE",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "X-Clawline-User-Action": "delete_stream",
+          },
+        },
+      );
+      expect(deleteResponse.status).toBe(409);
+      expect(await deleteResponse.json()).toMatchObject({
+        error: {
+          code: "adopted_stream_delete_forbidden",
+          message: "Adopted streams cannot be deleted; untrack instead",
+        },
+      });
 
       const afterAdoptMessageId = `c_${randomUUID()}`;
       authed.ws.send(
@@ -2458,7 +2493,7 @@ describe.sequential("clawline provider server", () => {
         expect(adoptedRows).toEqual([{ userId: "flynn", sessionKey: adoptedSessionKey }]);
         const streamRows = db
           .prepare(
-            `SELECT userId, sessionKey, displayName, kind, isBuiltIn
+            `SELECT userId, sessionKey, displayName, kind, isBuiltIn, adopted
              FROM stream_sessions
              WHERE userId = ? AND sessionKey = ?`,
           )
@@ -2468,6 +2503,7 @@ describe.sequential("clawline provider server", () => {
           displayName: string;
           kind: string;
           isBuiltIn: number;
+          adopted: number;
         }>;
         expect(streamRows).toEqual([
           {
@@ -2476,6 +2512,7 @@ describe.sequential("clawline provider server", () => {
             displayName: "Subagent Session",
             kind: "custom",
             isBuiltIn: 0,
+            adopted: 1,
           },
         ]);
       } finally {
@@ -2855,6 +2892,7 @@ describe.sequential("clawline provider server", () => {
       tokenDelivered: true,
     });
     const customSessionKey = "agent:main:clawline:flynn:s_deadbeef";
+    const adoptedSessionKey = "agent:main:subagent:legacy";
     const ctx = await setupTestServer([entry], {
       seedLegacyDatabase: async (dbPath) => {
         const db = new BetterSqlite3(dbPath);
@@ -2910,6 +2948,20 @@ describe.sequential("clawline provider server", () => {
               FOREIGN KEY (assetId) REFERENCES assets(assetId) ON DELETE RESTRICT
             );
             CREATE INDEX idx_message_assets_assetId ON message_assets(assetId);
+            CREATE TABLE stream_sessions (
+              userId TEXT NOT NULL,
+              sessionKey TEXT NOT NULL,
+              displayName TEXT NOT NULL,
+              kind TEXT NOT NULL,
+              orderIndex INTEGER NOT NULL,
+              isBuiltIn INTEGER NOT NULL,
+              createdAt INTEGER NOT NULL,
+              updatedAt INTEGER NOT NULL,
+              PRIMARY KEY (userId, sessionKey),
+              UNIQUE (userId, orderIndex)
+            );
+            CREATE INDEX idx_stream_sessions_user_order
+              ON stream_sessions(userId, orderIndex);
           `);
           const payload = JSON.stringify({
             type: "message",
@@ -2933,6 +2985,11 @@ describe.sequential("clawline provider server", () => {
             Buffer.byteLength(payload, "utf8"),
             1,
           );
+          db.prepare(
+            `INSERT INTO stream_sessions
+              (userId, sessionKey, displayName, kind, orderIndex, isBuiltIn, createdAt, updatedAt)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          ).run("flynn", adoptedSessionKey, "Legacy adopted", "custom", 0, 0, 1, 1);
         } finally {
           db.close();
         }
@@ -2947,7 +3004,7 @@ describe.sequential("clawline provider server", () => {
       });
       expect(streamsResponse.status).toBe(200);
       const streamsPayload = (await streamsResponse.json()) as {
-        streams: Array<{ sessionKey: string; kind: string; displayName: string }>;
+        streams: Array<{ sessionKey: string; kind: string; displayName: string; adopted: boolean }>;
       };
       expect(streamsPayload.streams).toEqual(
         expect.arrayContaining([
@@ -2966,17 +3023,26 @@ describe.sequential("clawline provider server", () => {
           (stream) => stream.sessionKey === customSessionKey && stream.kind === "custom",
         ),
       ).toBe(true);
+      expect(
+        streamsPayload.streams.some(
+          (stream) => stream.sessionKey === adoptedSessionKey && stream.adopted,
+        ),
+      ).toBe(true);
 
       const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
       const db = new BetterSqlite3(dbPath, { readonly: true });
       try {
         const userVersion = db.pragma("user_version", { simple: true }) as number;
-        expect(userVersion).toBe(2);
+        expect(userVersion).toBe(4);
         const eventsColumns = db.prepare(`PRAGMA table_info(events)`).all() as Array<{
           name: string;
         }>;
         expect(eventsColumns.some((col) => col.name === "eventType")).toBe(true);
         expect(eventsColumns.some((col) => col.name === "sessionKey")).toBe(true);
+        const streamColumns = db.prepare(`PRAGMA table_info(stream_sessions)`).all() as Array<{
+          name: string;
+        }>;
+        expect(streamColumns.some((col) => col.name === "adopted")).toBe(true);
         const row = db
           .prepare(`SELECT sessionKey, eventType FROM events WHERE id = ?`)
           .get("s_00000000-0000-0000-0000-000000000001") as
@@ -2984,6 +3050,10 @@ describe.sequential("clawline provider server", () => {
           | undefined;
         expect(row?.sessionKey).toBe(customSessionKey);
         expect(row?.eventType).toBe("message");
+        const adoptedRow = db
+          .prepare(`SELECT adopted FROM stream_sessions WHERE userId = ? AND sessionKey = ?`)
+          .get("flynn", adoptedSessionKey) as { adopted: number } | undefined;
+        expect(adoptedRow?.adopted).toBe(1);
       } finally {
         db.close();
       }

@@ -35,6 +35,7 @@ export type StreamSession = {
   kind: StreamSessionKind;
   orderIndex: number;
   isBuiltIn: boolean;
+  adopted: boolean;
   createdAt: number;
   updatedAt: number;
 };
