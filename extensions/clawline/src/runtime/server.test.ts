@@ -1979,6 +1979,20 @@ describe.sequential("clawline provider server", () => {
               channel: "discord",
               lastChannel: "discord",
             },
+            "agent:main:cron:nightly-digest:run:run-1": {
+              sessionId: "sess_cron_run_1",
+              updatedAt: now - 85,
+              label: "Cron: Nightly digest",
+              channel: "openclaw",
+            },
+            "agent:main:cron:nightly-digest:run:run-2": {
+              sessionId: "sess_cron_run_2",
+              updatedAt: now - 70,
+              label: "Cron: Nightly digest",
+              channel: "openclaw",
+              lastChannel: "openclaw",
+              lastTo: "cron",
+            },
             "agent:main:subagent:uuid": {
               sessionId: "sess_subagent",
               updatedAt: now - 110,
@@ -2064,6 +2078,7 @@ describe.sequential("clawline provider server", () => {
         sessions: Array<{
           sessionKey: string;
           displayName: string;
+          updatedAt: number;
           channel?: string;
           lastChannel?: string;
           lastTo?: string;
@@ -2075,6 +2090,14 @@ describe.sequential("clawline provider server", () => {
           displayName: "Other Session",
           updatedAt: now - 50,
           channel: "openclaw",
+        },
+        {
+          sessionKey: "agent:main:cron:nightly-digest",
+          displayName: "Cron: Nightly digest",
+          updatedAt: now - 70,
+          channel: "openclaw",
+          lastChannel: "openclaw",
+          lastTo: "cron",
         },
         {
           sessionKey: "agent:main:discord:channel:123",

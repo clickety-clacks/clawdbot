@@ -55,6 +55,7 @@ import { mediaKindFromMime, maxBytesForKind } from "../../../../src/media/consta
 import { hasAlphaChannel, optimizeImageToPng } from "../../../../src/media/image-ops.js";
 import { detectMime } from "../../../../src/media/mime.js";
 import { DEFAULT_ACCOUNT_ID } from "../../../../src/routing/resolve-route.js";
+import { isCronRunSessionKey } from "../../../../src/sessions/session-key-utils.js";
 import { optimizeImageToJpeg } from "../../../../src/web/media.js";
 import { clawlineAttachmentsToImages } from "./attachments.js";
 import type { ClawlineAdapterOverrides } from "./config.js";
@@ -4347,6 +4348,18 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
   }
 
+  function collapseTrackableSessionKey(sessionKey: string): string {
+    const trimmedKey = sessionKey.trim();
+    if (!isCronRunSessionKey(trimmedKey)) {
+      return trimmedKey;
+    }
+    const runMarkerIndex = trimmedKey.toLowerCase().lastIndexOf(":run:");
+    if (runMarkerIndex <= 0) {
+      return trimmedKey;
+    }
+    return trimmedKey.slice(0, runMarkerIndex);
+  }
+
   async function loadTrackableSessionsForAuthedUser(auth: {
     userId: string;
     isAdmin: boolean;
@@ -4359,41 +4372,53 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           streams.map((stream) => normalizeSessionKey(stream.sessionKey)),
         );
         const sessionStore = loadSessionStore(sessionStorePath);
-        return Object.entries(sessionStore)
-          .flatMap(([sessionKey, entry]): TrackableSessionApiEntry[] => {
-            const candidateKey = sessionKey.trim();
-            if (!candidateKey) {
-              return [];
-            }
-            const normalizedCandidateKey = normalizeSessionKey(candidateKey);
-            if (auth.excludedSessionKeys.has(normalizedCandidateKey)) {
-              return [];
-            }
-            if (provisionedKeys.has(normalizedCandidateKey)) {
-              return [];
-            }
-            if (normalizedCandidateKey.includes(":clawline:")) {
-              return [];
-            }
-            const displayName =
-              sanitizeLabel(entry.displayName) ?? sanitizeLabel(entry.label) ?? candidateKey;
-            return [
-              {
-                sessionKey: candidateKey,
-                displayName,
-                updatedAt: entry.updatedAt,
-                channel: typeof entry.channel === "string" ? entry.channel : undefined,
-                lastChannel: typeof entry.lastChannel === "string" ? entry.lastChannel : undefined,
-                lastTo: typeof entry.lastTo === "string" ? entry.lastTo : undefined,
-              },
-            ];
-          })
-          .toSorted((a, b) => {
-            if (a.updatedAt !== b.updatedAt) {
-              return b.updatedAt - a.updatedAt;
-            }
-            return a.sessionKey.localeCompare(b.sessionKey);
-          });
+        const trackableSessionsByKey = new Map<string, TrackableSessionApiEntry>();
+        for (const [sessionKey, entry] of Object.entries(sessionStore)) {
+          const candidateKey = sessionKey.trim();
+          if (!candidateKey) {
+            continue;
+          }
+          const collapsedSessionKey = collapseTrackableSessionKey(candidateKey);
+          const normalizedCandidateKey = normalizeSessionKey(candidateKey);
+          const normalizedCollapsedKey = normalizeSessionKey(collapsedSessionKey);
+          if (
+            auth.excludedSessionKeys.has(normalizedCandidateKey) ||
+            auth.excludedSessionKeys.has(normalizedCollapsedKey)
+          ) {
+            continue;
+          }
+          if (
+            provisionedKeys.has(normalizedCandidateKey) ||
+            provisionedKeys.has(normalizedCollapsedKey)
+          ) {
+            continue;
+          }
+          if (
+            normalizedCandidateKey.includes(":clawline:") ||
+            normalizedCollapsedKey.includes(":clawline:")
+          ) {
+            continue;
+          }
+          const nextEntry: TrackableSessionApiEntry = {
+            sessionKey: collapsedSessionKey,
+            displayName:
+              sanitizeLabel(entry.displayName) ?? sanitizeLabel(entry.label) ?? collapsedSessionKey,
+            updatedAt: entry.updatedAt,
+            channel: typeof entry.channel === "string" ? entry.channel : undefined,
+            lastChannel: typeof entry.lastChannel === "string" ? entry.lastChannel : undefined,
+            lastTo: typeof entry.lastTo === "string" ? entry.lastTo : undefined,
+          };
+          const existingEntry = trackableSessionsByKey.get(normalizedCollapsedKey);
+          if (!existingEntry || nextEntry.updatedAt > existingEntry.updatedAt) {
+            trackableSessionsByKey.set(normalizedCollapsedKey, nextEntry);
+          }
+        }
+        return [...trackableSessionsByKey.values()].toSorted((a, b) => {
+          if (a.updatedAt !== b.updatedAt) {
+            return b.updatedAt - a.updatedAt;
+          }
+          return a.sessionKey.localeCompare(b.sessionKey);
+        });
       }),
     );
   }
