@@ -2448,10 +2448,32 @@ describe.sequential("clawline provider server", () => {
       const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
       const db = new BetterSqlite3(dbPath, { readonly: true });
       try {
-        const rows = db
+        const adoptedRows = db
           .prepare(`SELECT userId, sessionKey FROM adopted_sessions WHERE userId = ?`)
           .all("flynn") as Array<{ userId: string; sessionKey: string }>;
-        expect(rows).toEqual([{ userId: "flynn", sessionKey: adoptedSessionKey }]);
+        expect(adoptedRows).toEqual([{ userId: "flynn", sessionKey: adoptedSessionKey }]);
+        const streamRows = db
+          .prepare(
+            `SELECT userId, sessionKey, displayName, kind, isBuiltIn
+             FROM stream_sessions
+             WHERE userId = ? AND sessionKey = ?`,
+          )
+          .all("flynn", adoptedSessionKey) as Array<{
+          userId: string;
+          sessionKey: string;
+          displayName: string;
+          kind: string;
+          isBuiltIn: number;
+        }>;
+        expect(streamRows).toEqual([
+          {
+            userId: "flynn",
+            sessionKey: adoptedSessionKey,
+            displayName: "Subagent Session",
+            kind: "custom",
+            isBuiltIn: 0,
+          },
+        ]);
       } finally {
         db.close();
       }

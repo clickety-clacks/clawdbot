@@ -4269,6 +4269,33 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     return row ?? null;
   }
 
+  function ensureAdoptedStreamSessionForUser(params: {
+    userId: string;
+    sessionKey: string;
+    displayName: string;
+    now: number;
+  }) {
+    const existing = loadStreamRowForUser(params.userId, params.sessionKey);
+    if (existing) {
+      return;
+    }
+    const maxOrderRow = selectStreamMaxOrderStmt.get(params.userId) as {
+      maxOrder: number | null;
+    };
+    const nextOrder = (maxOrderRow?.maxOrder ?? -1) + 1;
+    // Adopted sessions become regular user-managed streams once Track confirms them.
+    insertStreamSessionStmt.run(
+      params.userId,
+      params.sessionKey,
+      params.displayName,
+      "custom",
+      nextOrder,
+      0,
+      params.now,
+      params.now,
+    );
+  }
+
   function cleanupExpiredStreamIdempotencyRows() {
     deleteExpiredStreamIdempotencyStmt.run(nowMs() - STREAM_IDEMPOTENCY_RETENTION_MS);
   }
@@ -4477,9 +4504,18 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     if (!entry) {
       throw new HttpError(404, "stream_not_found", "Stream not found");
     }
+    const displayName =
+      sanitizeLabel(entry.displayName) ?? sanitizeLabel(entry.label) ?? normalizedSessionKey;
     await runPerUserTask(auth.userId, async () =>
       enqueueWriteTask(() => {
-        insertAdoptedSessionStmt.run(auth.userId, normalizedSessionKey, nowMs());
+        const now = nowMs();
+        ensureAdoptedStreamSessionForUser({
+          userId: auth.userId,
+          sessionKey: normalizedSessionKey,
+          displayName,
+          now,
+        });
+        insertAdoptedSessionStmt.run(auth.userId, normalizedSessionKey, now);
         const adoptedKeys = readAdoptedSessionKeysForUser(auth.userId);
         const streams = readStreamSessionsForUser(auth.userId);
         syncUserSessionSubscriptions(auth.userId, streams, adoptedKeys);
