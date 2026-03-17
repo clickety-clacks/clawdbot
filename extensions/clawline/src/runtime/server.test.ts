@@ -2001,101 +2001,6 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
-  it("accepts websocket sends on user-owned gateway session keys from the session store", async () => {
-    const userId = "flynn";
-    const deviceId = randomUUID();
-    const now = Date.now();
-    const adoptedSessionKey = "agent:main:openclaw:flynn:s_trackme";
-    let ws: WebSocket | null = null;
-    let queue: ReturnType<typeof createMessageQueue> | null = null;
-    const ctx = await setupTestServer([
-      {
-        claimedName: "Flynn",
-        deviceInfo: { platform: "iOS", model: "iPad" },
-        userId,
-        isAdmin: false,
-        tokenDelivered: true,
-        createdAt: now - 5_000,
-        lastSeenAt: now - 2_000,
-        deviceId,
-      },
-    ]);
-    try {
-      await fs.writeFile(
-        ctx.sessionStorePath,
-        JSON.stringify(
-          {
-            [adoptedSessionKey]: {
-              sessionId: "sess_trackable",
-              updatedAt: now - 100,
-              displayName: "Research Session",
-              channel: "openclaw",
-            },
-          },
-          null,
-          2,
-        ),
-      );
-
-      const pairResult = await performPairRequest(ctx.port, deviceId);
-      const token = pairResult.token as string;
-      const authed = await authenticateDevice(ctx.port, deviceId, token);
-      ws = authed.ws;
-      queue = createMessageQueue(ws);
-      const messageId = `c_${randomUUID()}`;
-
-      ws.send(
-        JSON.stringify({
-          type: "message",
-          id: messageId,
-          content: "hello adopted",
-          sessionKey: adoptedSessionKey,
-        }),
-      );
-
-      const ack = await Promise.race([
-        queue.next(),
-        new Promise((resolve) => setTimeout(() => resolve({ type: "timeout" }), 500)),
-      ]);
-      expect(ack).toMatchObject({ type: "ack", id: messageId });
-
-      let echoedMessage: Record<string, unknown> | null = null;
-      const seenMessages: Record<string, unknown>[] = [];
-      for (let attempt = 0; attempt < 6; attempt += 1) {
-        const next = (await Promise.race([
-          queue.next(),
-          new Promise((resolve) => setTimeout(() => resolve({ type: "timeout" }), 500)),
-        ])) as Record<string, unknown>;
-        if (next.type === "timeout") {
-          break;
-        }
-        seenMessages.push(next);
-        if (next.type === "error") {
-          throw new Error(`Unexpected websocket error: ${JSON.stringify(next)}`);
-        }
-        if (next.type === "message" && next.role === "user") {
-          echoedMessage = next;
-          break;
-        }
-      }
-
-      expect(seenMessages).not.toEqual([]);
-      if (!echoedMessage) {
-        throw new Error(`No echoed user message observed: ${JSON.stringify(seenMessages)}`);
-      }
-      expect(echoedMessage).toMatchObject({
-        type: "message",
-        role: "user",
-        content: "hello adopted",
-        sessionKey: adoptedSessionKey,
-      });
-    } finally {
-      queue?.dispose();
-      ws?.terminate();
-      await ctx.cleanup();
-    }
-  });
-
   it("accepts multiply-encoded stream session keys for rename and delete", async () => {
     const deviceId = randomUUID();
     const entry = createAllowlistEntry({
@@ -2499,21 +2404,12 @@ describe.sequential("clawline provider server", () => {
       const pair = await performPairRequest(ctx.port, entry.deviceId);
       const token = pair.token as string;
       const { ws } = await authenticateDevice(ctx.port, entry.deviceId, token);
-      const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
-      const writableDb = new BetterSqlite3(dbPath);
-      try {
-        writableDb
-          .prepare(`UPDATE stream_sessions SET adopted = 1 WHERE userId = ? AND sessionKey = ?`)
-          .run("flynn", customSessionKey);
-      } finally {
-        writableDb.close();
-      }
       const streamsResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       expect(streamsResponse.status).toBe(200);
       const streamsPayload = (await streamsResponse.json()) as {
-        streams: Array<{ sessionKey: string; kind: string; displayName: string; adopted: boolean }>;
+        streams: Array<{ sessionKey: string; kind: string; displayName: string }>;
       };
       expect(streamsPayload.streams).toEqual(
         expect.arrayContaining([
@@ -2521,7 +2417,6 @@ describe.sequential("clawline provider server", () => {
             sessionKey: "agent:main:clawline:flynn:main",
             kind: "main",
             displayName: "Personal",
-            adopted: false,
           }),
         ]),
       );
@@ -2530,13 +2425,11 @@ describe.sequential("clawline provider server", () => {
       );
       expect(
         streamsPayload.streams.some(
-          (stream) =>
-            stream.sessionKey === customSessionKey &&
-            stream.kind === "custom" &&
-            stream.adopted === true,
+          (stream) => stream.sessionKey === customSessionKey && stream.kind === "custom",
         ),
       ).toBe(true);
 
+      const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
       const db = new BetterSqlite3(dbPath, { readonly: true });
       try {
         const userVersion = db.pragma("user_version", { simple: true }) as number;
@@ -2544,12 +2437,8 @@ describe.sequential("clawline provider server", () => {
         const eventsColumns = db.prepare(`PRAGMA table_info(events)`).all() as Array<{
           name: string;
         }>;
-        const streamColumns = db.prepare(`PRAGMA table_info(stream_sessions)`).all() as Array<{
-          name: string;
-        }>;
         expect(eventsColumns.some((col) => col.name === "eventType")).toBe(true);
         expect(eventsColumns.some((col) => col.name === "sessionKey")).toBe(true);
-        expect(streamColumns.some((col) => col.name === "adopted")).toBe(true);
         const row = db
           .prepare(`SELECT sessionKey, eventType FROM events WHERE id = ?`)
           .get("s_00000000-0000-0000-0000-000000000001") as

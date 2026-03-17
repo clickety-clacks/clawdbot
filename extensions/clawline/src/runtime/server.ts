@@ -919,7 +919,6 @@ type StreamSessionRow = {
   isBuiltIn: number;
   createdAt: number;
   updatedAt: number;
-  adopted: number;
 };
 
 type StreamMutationIdempotencyRecord = {
@@ -1338,80 +1337,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     };
     await sendJson(session.socket, payload).catch(() => {});
   };
-
-  const resolveGatewaySessionStoreKeyForUser = (userId: string, sessionKey: string): string => {
-    const trimmed = sessionKey.trim();
-    if (!trimmed) {
-      return "";
-    }
-    const parsed = parseUserScopedAgentSessionKey(trimmed);
-    if (!parsed || parsed.userId !== sanitizeUserId(userId).toLowerCase()) {
-      return "";
-    }
-    const normalizedCandidate = normalizeSessionKey(trimmed);
-    const sessionStore = loadSessionStore(sessionStorePath);
-    for (const storedKey of Object.keys(sessionStore)) {
-      if (normalizeSessionKey(storedKey) === normalizedCandidate) {
-        return storedKey.trim();
-      }
-    }
-    return "";
-  };
-
-  const normalizeSendSessionKeyForUser = (userId: string, sessionKey: string): string => {
-    const streamKey = normalizeStreamMutationSessionKeyForUser(userId, sessionKey);
-    if (streamKey) {
-      return streamKey;
-    }
-    return resolveGatewaySessionStoreKeyForUser(userId, sessionKey);
-  };
-
-  const canRouteSessionKeyForSocket = (session: Session, sessionKey: string): boolean => {
-    const allowedSessionKeys = session.provisionedSessionKeys?.length
-      ? session.provisionedSessionKeys
-      : [session.sessionKey];
-    if (
-      allowedSessionKeys.some(
-        (allowedKey) => normalizeSessionKey(allowedKey) === normalizeSessionKey(sessionKey),
-      )
-    ) {
-      return true;
-    }
-    return Boolean(resolveGatewaySessionStoreKeyForUser(session.userId, sessionKey));
-  };
-
-  const resolveSendStreamLabelForSession = (session: Session, sessionKey: string): string => {
-    if (sessionKeyEq(sessionKey, session.personalSessionKey)) {
-      return "main";
-    }
-    if (session.dmScope !== "main" && sessionKeyEq(sessionKey, session.dmSessionKey)) {
-      return "dm";
-    }
-    if (sessionKeyEq(sessionKey, session.globalSessionKey)) {
-      return "global";
-    }
-    const parsed = parseClawlineUserSessionKey(sessionKey);
-    const normalizedUserId = sanitizeUserId(session.userId).toLowerCase();
-    if (parsed && parsed.userId === normalizedUserId) {
-      return parsed.streamSuffix;
-    }
-    if (resolveGatewaySessionStoreKeyForUser(session.userId, sessionKey)) {
-      return "main";
-    }
-    return "";
-  };
-
-  const ensureRuntimeSessionSubscription = (session: Session, sessionKey: string) => {
-    const trimmed = sessionKey.trim();
-    if (!trimmed) {
-      return;
-    }
-    const existingKeys = resolveSubscribedSessionKeys(session);
-    if (existingKeys.some((key) => sessionKeyEq(key, trimmed))) {
-      return;
-    }
-    session.sessionKeys = [...existingKeys, trimmed];
-  };
   async function notifyGatewayOfPending(entry: PendingEntry) {
     const name = entry.claimedName ?? "New device";
     const platform = entry.deviceInfo.platform || "Unknown platform";
@@ -1574,7 +1499,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     isBuiltIn: row.isBuiltIn === 1,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
-    adopted: row.adopted === 1,
   });
 
   const streamResponseSort = (a: StreamSession, b: StreamSession) => {
@@ -1673,7 +1597,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         entry.isBuiltIn,
         params.now,
         params.now,
-        0,
       );
     }
     return readStreamSessionsForUser(params.userId);
@@ -1693,7 +1616,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           isBuiltIn: true,
           createdAt: 0,
           updatedAt: 0,
-          adopted: false,
         },
       ];
       if (dmScope !== "main") {
@@ -1705,7 +1627,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           isBuiltIn: true,
           createdAt: 0,
           updatedAt: 0,
-          adopted: false,
         });
       }
       if (params.isAdmin) {
@@ -1717,7 +1638,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           isBuiltIn: true,
           createdAt: 0,
           updatedAt: 0,
-          adopted: false,
         });
       }
       return fallback;
@@ -1774,7 +1694,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           1,
           now,
           now,
-          0,
         );
         nextOrder += 1;
         changed = true;
@@ -1817,6 +1736,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     if (!tableHasColumn("events", "sessionKey")) {
       database.exec(`ALTER TABLE events ADD COLUMN sessionKey TEXT`);
     }
+
     database.exec(`
       CREATE TABLE IF NOT EXISTS stream_sessions (
         userId TEXT NOT NULL,
@@ -1827,7 +1747,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         isBuiltIn INTEGER NOT NULL,
         createdAt INTEGER NOT NULL,
         updatedAt INTEGER NOT NULL,
-        adopted INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (userId, sessionKey),
         UNIQUE (userId, orderIndex)
       );
@@ -1848,9 +1767,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       CREATE INDEX IF NOT EXISTS idx_events_user_session_sequence
         ON events(userId, sessionKey, sequence);
     `);
-    if (!tableHasColumn("stream_sessions", "adopted")) {
-      database.exec(`ALTER TABLE stream_sessions ADD COLUMN adopted INTEGER NOT NULL DEFAULT 0`);
-    }
 
     const knownUsers = new Set<string>();
     for (const entry of allowlist.entries) {
@@ -1922,8 +1838,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     );
     const insertStreamSession = database.prepare(
       `INSERT OR IGNORE INTO stream_sessions
-         (userId, sessionKey, displayName, kind, orderIndex, isBuiltIn, createdAt, updatedAt, adopted)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (userId, sessionKey, displayName, kind, orderIndex, isBuiltIn, createdAt, updatedAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const selectExistingStreamsForUser = database.prepare(
       `SELECT sessionKey, kind, displayName, isBuiltIn FROM stream_sessions WHERE userId = ?`,
@@ -1971,7 +1887,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           0,
           now,
           now,
-          0,
         );
         existingKeys.add(normalizeSessionKey(key));
       }
@@ -2029,7 +1944,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             1,
             now,
             now,
-            0,
           );
           continue;
         }
@@ -2222,13 +2136,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
          )`,
     );
     selectStreamSessionsByUserStmt = newDb.prepare(
-      `SELECT userId, sessionKey, displayName, kind, orderIndex, isBuiltIn, createdAt, updatedAt, adopted
+      `SELECT userId, sessionKey, displayName, kind, orderIndex, isBuiltIn, createdAt, updatedAt
        FROM stream_sessions
        WHERE userId = ?
        ORDER BY orderIndex ASC`,
     );
     selectStreamSessionByKeyStmt = newDb.prepare(
-      `SELECT userId, sessionKey, displayName, kind, orderIndex, isBuiltIn, createdAt, updatedAt, adopted
+      `SELECT userId, sessionKey, displayName, kind, orderIndex, isBuiltIn, createdAt, updatedAt
        FROM stream_sessions
        WHERE userId = ? AND sessionKey = ?`,
     );
@@ -2237,8 +2151,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     );
     insertStreamSessionStmt = newDb.prepare(
       `INSERT INTO stream_sessions
-         (userId, sessionKey, displayName, kind, orderIndex, isBuiltIn, createdAt, updatedAt, adopted)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (userId, sessionKey, displayName, kind, orderIndex, isBuiltIn, createdAt, updatedAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     updateStreamSessionDisplayNameStmt = newDb.prepare(
       `UPDATE stream_sessions
@@ -4506,7 +4420,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               0,
               now,
               now,
-              0,
             );
             inserted = true;
             break;
@@ -5352,20 +5265,41 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       const payloadSessionKey =
         typeof payload.sessionKey === "string" ? payload.sessionKey.trim() : "";
       const normalizedPayloadSessionKey = payloadSessionKey
-        ? normalizeSendSessionKeyForUser(session.userId, payloadSessionKey)
+        ? normalizeStreamMutationSessionKeyForUser(session.userId, payloadSessionKey)
         : "";
       if (payloadSessionKey && !normalizedPayloadSessionKey) {
         throw new ClientMessageError("stream_not_found", "Stream not found");
       }
+      const allowedSessionKeys = session.provisionedSessionKeys?.length
+        ? session.provisionedSessionKeys
+        : [session.sessionKey];
       // Legacy clients may omit sessionKey; default to the Main stream session key.
       const resolvedSessionKey = normalizedPayloadSessionKey || session.sessionKey;
-      if (!canRouteSessionKeyForSocket(session, resolvedSessionKey)) {
+      if (
+        !allowedSessionKeys.some(
+          (sessionKey) =>
+            normalizeSessionKey(sessionKey) === normalizeSessionKey(resolvedSessionKey),
+        )
+      ) {
         throw new ClientMessageError("stream_not_found", "Stream not found");
       }
-      ensureRuntimeSessionSubscription(session, resolvedSessionKey);
-      const streamSuffix = resolveSendStreamLabelForSession(session, resolvedSessionKey);
-      if (!streamSuffix) {
-        throw new ClientMessageError("stream_not_found", "Stream not found");
+      let streamSuffix = "main";
+      if (sessionKeyEq(resolvedSessionKey, session.personalSessionKey)) {
+        streamSuffix = "main";
+      } else if (
+        session.dmScope !== "main" &&
+        sessionKeyEq(resolvedSessionKey, session.dmSessionKey)
+      ) {
+        streamSuffix = "dm";
+      } else if (sessionKeyEq(resolvedSessionKey, session.globalSessionKey)) {
+        streamSuffix = "global";
+      } else {
+        const parsed = parseClawlineUserSessionKey(resolvedSessionKey);
+        const normalizedUserId = sanitizeUserId(session.userId).toLowerCase();
+        if (!parsed || parsed.userId !== normalizedUserId) {
+          throw new ClientMessageError("stream_not_found", "Stream not found");
+        }
+        streamSuffix = parsed.streamSuffix;
       }
       markProcessStage("route_inbound_message");
       logger.info?.("[clawline] inbound message routing", {
@@ -5871,12 +5805,28 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         }
       }
 
-      if (!canRouteSessionKeyForSocket(session, resolvedSessionKey)) {
+      const allowedSessionKeys = session.provisionedSessionKeys?.length
+        ? session.provisionedSessionKeys
+        : [session.sessionKey];
+      if (
+        !allowedSessionKeys.some(
+          (sessionKey) => sessionKey.toLowerCase() === resolvedSessionKey.toLowerCase(),
+        )
+      ) {
         resolvedSessionKey = session.sessionKey;
       }
-      ensureRuntimeSessionSubscription(session, resolvedSessionKey);
 
-      const streamSuffix = resolveSendStreamLabelForSession(session, resolvedSessionKey) || "main";
+      let streamSuffix: "main" | "dm" | "global" = "main";
+      if (sessionKeyEq(resolvedSessionKey, session.personalSessionKey)) {
+        streamSuffix = "main";
+      } else if (
+        session.dmScope !== "main" &&
+        sessionKeyEq(resolvedSessionKey, session.dmSessionKey)
+      ) {
+        streamSuffix = "dm";
+      } else if (sessionKeyEq(resolvedSessionKey, session.globalSessionKey)) {
+        streamSuffix = "global";
+      }
       if (streamSuffix === "global" && !session.isAdmin) {
         throw new ClientMessageError("forbidden", "Admin channel requires admin access");
       }
