@@ -4886,14 +4886,26 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         if (existing.adopted === 1) {
           // Untrack: remove stream row + adopted_sessions row, but don't delete messages/assets
           deleteStreamSessionStmt!.run(auth.userId, sessionKey);
-          database
+          db!
             .prepare(`DELETE FROM adopted_sessions WHERE userId = ? AND sessionKey = ?`)
             .run(auth.userId, sessionKey);
-          broadcastStreamEvent(auth.userId, "stream_deleted", { deletedSessionKey: sessionKey });
-          res.setHeader("Content-Type", "application/json");
-          res.writeHead(200);
-          res.end(JSON.stringify({ deletedSessionKey: sessionKey }));
-          return;
+          const synced = ensureStreamSessionsForUser({
+            userId: auth.userId,
+            isAdmin: auth.isAdmin,
+          });
+          syncUserSessionSubscriptions(auth.userId, synced);
+          const response = { deletedSessionKey: sessionKey };
+          if (idempotencyKey) {
+            storeIdempotencyRecord({
+              userId: auth.userId,
+              idempotencyKey,
+              operation: STREAM_OPERATION_DELETE,
+              requestKey,
+              status: 200,
+              response,
+            });
+          }
+          return response;
         }
         if (visibleStreams.length <= 1) {
           throw new HttpError(409, "last_stream_delete_forbidden", "Cannot delete the last stream");

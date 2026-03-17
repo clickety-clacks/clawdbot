@@ -2480,24 +2480,6 @@ describe.sequential("clawline provider server", () => {
         ]),
       );
 
-      const deleteResponse = await fetch(
-        `http://127.0.0.1:${ctx.port}/api/streams/${encodeURIComponent(adoptedSessionKey)}`,
-        {
-          method: "DELETE",
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "X-Clawline-User-Action": "delete_stream",
-          },
-        },
-      );
-      expect(deleteResponse.status).toBe(409);
-      expect(await deleteResponse.json()).toMatchObject({
-        error: {
-          code: "adopted_stream_delete_forbidden",
-          message: "Adopted streams cannot be deleted; untrack instead",
-        },
-      });
-
       const afterAdoptMessageId = `c_${randomUUID()}`;
       authed.ws.send(
         JSON.stringify({
@@ -2570,6 +2552,85 @@ describe.sequential("clawline provider server", () => {
 
       replayQueue.dispose();
       reauthed.ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("untracks adopted sessions via DELETE without crashing", async () => {
+    const deviceId = randomUUID();
+    const adoptedSessionKey = "agent:main:subagent:uuid";
+    const entry = createAllowlistEntry({
+      deviceId,
+      userId: "flynn",
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry]);
+    try {
+      await fs.writeFile(
+        ctx.sessionStorePath,
+        JSON.stringify(
+          {
+            [adoptedSessionKey]: {
+              sessionId: "sess_subagent",
+              updatedAt: Date.now() - 100,
+              label: "Subagent Session",
+              channel: "openclaw",
+              lastChannel: "openclaw",
+              lastTo: adoptedSessionKey,
+            },
+          },
+          null,
+          2,
+        ),
+      );
+
+      const pair = await performPairRequest(ctx.port, deviceId);
+      const token = pair.token as string;
+      const authed = await authenticateDevice(ctx.port, deviceId, token);
+
+      const adoptResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams/adopt`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ sessionKey: adoptedSessionKey }),
+      });
+      expect(adoptResponse.status).toBe(200);
+
+      const deleteResponse = await fetch(
+        `http://127.0.0.1:${ctx.port}/api/streams/${encodeURIComponent(adoptedSessionKey)}`,
+        {
+          method: "DELETE",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "X-Clawline-User-Action": "delete_stream",
+          },
+        },
+      );
+      expect(deleteResponse.status).toBe(200);
+      expect(await deleteResponse.json()).toMatchObject({
+        deletedSessionKey: adoptedSessionKey,
+      });
+
+      const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
+      const db = new BetterSqlite3(dbPath, { readonly: true });
+      try {
+        const adoptedRows = db
+          .prepare(`SELECT userId, sessionKey FROM adopted_sessions WHERE userId = ?`)
+          .all("flynn") as Array<{ userId: string; sessionKey: string }>;
+        expect(adoptedRows).toEqual([]);
+        const streamRows = db
+          .prepare(`SELECT sessionKey FROM stream_sessions WHERE userId = ? AND sessionKey = ?`)
+          .all("flynn", adoptedSessionKey) as Array<{ sessionKey: string }>;
+        expect(streamRows).toEqual([]);
+      } finally {
+        db.close();
+      }
+
+      authed.ws.terminate();
     } finally {
       await ctx.cleanup();
     }
