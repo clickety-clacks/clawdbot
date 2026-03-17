@@ -3109,6 +3109,15 @@ describe.sequential("clawline provider server", () => {
       const pair = await performPairRequest(ctx.port, entry.deviceId);
       const token = pair.token as string;
       const { ws } = await authenticateDevice(ctx.port, entry.deviceId, token);
+      const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
+      const writableDb = new BetterSqlite3(dbPath);
+      try {
+        writableDb
+          .prepare(`UPDATE stream_sessions SET adopted = 1 WHERE userId = ? AND sessionKey = ?`)
+          .run("flynn", customSessionKey);
+      } finally {
+        writableDb.close();
+      }
       const streamsResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -3122,6 +3131,7 @@ describe.sequential("clawline provider server", () => {
             sessionKey: "agent:main:clawline:flynn:main",
             kind: "main",
             displayName: "Personal",
+            adopted: false,
           }),
         ]),
       );
@@ -3130,7 +3140,10 @@ describe.sequential("clawline provider server", () => {
       );
       expect(
         streamsPayload.streams.some(
-          (stream) => stream.sessionKey === customSessionKey && stream.kind === "custom",
+          (stream) =>
+            stream.sessionKey === customSessionKey &&
+            stream.kind === "custom" &&
+            stream.adopted === true,
         ),
       ).toBe(true);
       expect(
@@ -3139,7 +3152,6 @@ describe.sequential("clawline provider server", () => {
         ),
       ).toBe(true);
 
-      const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
       const db = new BetterSqlite3(dbPath, { readonly: true });
       try {
         const userVersion = db.pragma("user_version", { simple: true }) as number;
@@ -3147,11 +3159,11 @@ describe.sequential("clawline provider server", () => {
         const eventsColumns = db.prepare(`PRAGMA table_info(events)`).all() as Array<{
           name: string;
         }>;
-        expect(eventsColumns.some((col) => col.name === "eventType")).toBe(true);
-        expect(eventsColumns.some((col) => col.name === "sessionKey")).toBe(true);
         const streamColumns = db.prepare(`PRAGMA table_info(stream_sessions)`).all() as Array<{
           name: string;
         }>;
+        expect(eventsColumns.some((col) => col.name === "eventType")).toBe(true);
+        expect(eventsColumns.some((col) => col.name === "sessionKey")).toBe(true);
         expect(streamColumns.some((col) => col.name === "adopted")).toBe(true);
         const row = db
           .prepare(`SELECT sessionKey, eventType FROM events WHERE id = ?`)

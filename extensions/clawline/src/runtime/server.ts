@@ -1374,6 +1374,80 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     };
     await sendJson(session.socket, payload).catch(() => {});
   };
+
+  const resolveGatewaySessionStoreKeyForUser = (userId: string, sessionKey: string): string => {
+    const trimmed = sessionKey.trim();
+    if (!trimmed) {
+      return "";
+    }
+    const parsed = parseUserScopedAgentSessionKey(trimmed);
+    if (!parsed || parsed.userId !== sanitizeUserId(userId).toLowerCase()) {
+      return "";
+    }
+    const normalizedCandidate = normalizeSessionKey(trimmed);
+    const sessionStore = loadSessionStore(sessionStorePath);
+    for (const storedKey of Object.keys(sessionStore)) {
+      if (normalizeSessionKey(storedKey) === normalizedCandidate) {
+        return storedKey.trim();
+      }
+    }
+    return "";
+  };
+
+  const normalizeSendSessionKeyForUser = (userId: string, sessionKey: string): string => {
+    const streamKey = normalizeStreamMutationSessionKeyForUser(userId, sessionKey);
+    if (streamKey) {
+      return streamKey;
+    }
+    return resolveGatewaySessionStoreKeyForUser(userId, sessionKey);
+  };
+
+  const canRouteSessionKeyForSocket = (session: Session, sessionKey: string): boolean => {
+    const allowedSessionKeys = session.provisionedSessionKeys?.length
+      ? session.provisionedSessionKeys
+      : [session.sessionKey];
+    if (
+      allowedSessionKeys.some(
+        (allowedKey) => normalizeSessionKey(allowedKey) === normalizeSessionKey(sessionKey),
+      )
+    ) {
+      return true;
+    }
+    return Boolean(resolveGatewaySessionStoreKeyForUser(session.userId, sessionKey));
+  };
+
+  const resolveSendStreamLabelForSession = (session: Session, sessionKey: string): string => {
+    if (sessionKeyEq(sessionKey, session.personalSessionKey)) {
+      return "main";
+    }
+    if (session.dmScope !== "main" && sessionKeyEq(sessionKey, session.dmSessionKey)) {
+      return "dm";
+    }
+    if (sessionKeyEq(sessionKey, session.globalSessionKey)) {
+      return "global";
+    }
+    const parsed = parseClawlineUserSessionKey(sessionKey);
+    const normalizedUserId = sanitizeUserId(session.userId).toLowerCase();
+    if (parsed && parsed.userId === normalizedUserId) {
+      return parsed.streamSuffix;
+    }
+    if (resolveGatewaySessionStoreKeyForUser(session.userId, sessionKey)) {
+      return "main";
+    }
+    return "";
+  };
+
+  const ensureRuntimeSessionSubscription = (session: Session, sessionKey: string) => {
+    const trimmed = sessionKey.trim();
+    if (!trimmed) {
+      return;
+    }
+    const existingKeys = resolveSubscribedSessionKeys(session);
+    if (existingKeys.some((key) => sessionKeyEq(key, trimmed))) {
+      return;
+    }
+    session.sessionKeys = [...existingKeys, trimmed];
+  };
   async function notifyGatewayOfPending(entry: PendingEntry) {
     const name = entry.claimedName ?? "New device";
     const platform = entry.deviceInfo.platform || "Unknown platform";
@@ -1676,6 +1750,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         0,
         params.now,
         params.now,
+        0,
       );
     }
     return readStreamSessionsForUser(params.userId);
@@ -1819,7 +1894,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     if (!tableHasColumn("events", "sessionKey")) {
       database.exec(`ALTER TABLE events ADD COLUMN sessionKey TEXT`);
     }
-
     database.exec(`
       CREATE TABLE IF NOT EXISTS stream_sessions (
         userId TEXT NOT NULL,
@@ -6261,28 +6335,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         }
       }
 
-      const allowedSessionKeys = session.provisionedSessionKeys?.length
-        ? session.provisionedSessionKeys
-        : [session.sessionKey];
-      if (
-        !allowedSessionKeys.some(
-          (sessionKey) => sessionKey.toLowerCase() === resolvedSessionKey.toLowerCase(),
-        )
-      ) {
+      if (!canRouteSessionKeyForSocket(session, resolvedSessionKey)) {
         resolvedSessionKey = session.sessionKey;
       }
+      ensureRuntimeSessionSubscription(session, resolvedSessionKey);
 
-      let streamSuffix: "main" | "dm" | "global" = "main";
-      if (sessionKeyEq(resolvedSessionKey, session.personalSessionKey)) {
-        streamSuffix = "main";
-      } else if (
-        session.dmScope !== "main" &&
-        sessionKeyEq(resolvedSessionKey, session.dmSessionKey)
-      ) {
-        streamSuffix = "dm";
-      } else if (sessionKeyEq(resolvedSessionKey, session.globalSessionKey)) {
-        streamSuffix = "global";
-      }
+      const streamSuffix = resolveSendStreamLabelForSession(session, resolvedSessionKey) || "main";
       if (streamSuffix === "global" && !session.isAdmin) {
         throw new ClientMessageError("forbidden", "Admin channel requires admin access");
       }
