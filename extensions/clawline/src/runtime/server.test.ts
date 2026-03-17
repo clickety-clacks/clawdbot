@@ -128,6 +128,7 @@ type TestServerContext = {
   allowlistPath: string;
   pendingPath: string;
   mediaPath: string;
+  sessionStorePath: string;
   alertInstructionsPath: string;
   webRootPath: string;
   cleanup: () => Promise<void>;
@@ -268,6 +269,7 @@ async function setupTestServer(
     allowlistPath,
     pendingPath,
     mediaPath,
+    sessionStorePath,
     alertInstructionsPath,
     webRootPath,
     cleanup,
@@ -358,6 +360,20 @@ function waitForMessage(ws: WebSocket): Promise<any> {
     ws.once("error", handleError);
     ws.once("close", handleClose);
   });
+}
+
+async function waitForQueuedMessage(
+  queue: ReturnType<typeof createMessageQueue>,
+  predicate: (value: unknown) => boolean,
+  attempts = 12,
+) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const value = await queue.next();
+    if (predicate(value)) {
+      return value;
+    }
+  }
+  throw new Error(`Did not receive expected queued message within ${attempts} attempts`);
 }
 
 async function performPairRequest(
@@ -1557,6 +1573,55 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("routes alerts to globally registered non-clawline session keys via fallback", async () => {
+    const entry = createAllowlistEntry();
+    const ctx = await setupTestServer([entry]);
+    const authHeader = await createAuthHeader(ctx, entry);
+    const globalSessionKey = "agent:codex:discord:channel:123";
+    const rootDir = path.dirname(path.dirname(ctx.allowlistPath));
+    const globalStorePath = path.join(rootDir, "agents", "codex", "sessions", "sessions.json");
+    try {
+      await fs.mkdir(path.dirname(globalStorePath), { recursive: true });
+      await fs.writeFile(
+        globalStorePath,
+        JSON.stringify(
+          {
+            [globalSessionKey]: {
+              sessionId: "sess_global_alert",
+              updatedAt: Date.now(),
+            },
+          },
+          null,
+          2,
+        ),
+      );
+
+      const response = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: authHeader },
+        body: JSON.stringify({
+          message: "Check global registered session",
+          source: "codex",
+          sessionKey: globalSessionKey,
+        }),
+      });
+      expect(response.status).toBe(200);
+      expect(enqueueAnnounceMock).toHaveBeenCalledTimes(1);
+      const call = enqueueAnnounceMock.mock.calls[0]?.[0] as {
+        key?: string;
+        item?: { sessionKey?: string; origin?: { channel?: string; to?: string } };
+      };
+      expect(call?.key).toBe(globalSessionKey);
+      expect(call?.item?.sessionKey).toBe(globalSessionKey);
+      expect(call?.item?.origin).toEqual({
+        channel: "clawline",
+        to: globalSessionKey,
+      });
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("routes alerts to main session keys without explicit channel/to", async () => {
     const entry = createAllowlistEntry();
     const ctx = await setupTestServer([entry]);
@@ -1919,6 +1984,707 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("lists any non-clawline, non-provisioned session-store entry", async () => {
+    const userId = "flynn";
+    const deviceId = randomUUID();
+    const now = Date.now();
+    const excludedSessionKey = "agent:main:openclaw:flynn:s_local_adopted";
+    const provisionedSessionKey = "agent:main:openclaw:flynn:s_provisioned";
+    const ctx = await setupTestServer([
+      {
+        claimedName: "Flynn",
+        deviceInfo: { platform: "iOS", model: "iPhone" },
+        userId,
+        isAdmin: true,
+        tokenDelivered: true,
+        createdAt: now - 5_000,
+        lastSeenAt: now - 2_000,
+        deviceId,
+      },
+    ]);
+    try {
+      await fs.writeFile(
+        ctx.sessionStorePath,
+        JSON.stringify(
+          {
+            "agent:main:clawline:flynn:main": {
+              sessionId: "sess_stream",
+              updatedAt: now - 300,
+              displayName: "Personal",
+              channel: "clawline",
+            },
+            "agent:main:openclaw:flynn:s_trackme": {
+              sessionId: "sess_trackable",
+              updatedAt: now - 100,
+              displayName: "Research Session",
+              channel: "openclaw",
+              lastChannel: "openclaw",
+              lastTo: "flynn",
+            },
+            "agent:main:discord:channel:123": {
+              sessionId: "sess_discord_channel",
+              updatedAt: now - 90,
+              displayName: "Discord Channel",
+              channel: "discord",
+              lastChannel: "discord",
+            },
+            "agent:main:cron:nightly-digest:run:run-1": {
+              sessionId: "sess_cron_run_1",
+              updatedAt: now - 85,
+              label: "Cron: Nightly digest",
+              channel: "openclaw",
+            },
+            "agent:main:cron:nightly-digest:run:run-2": {
+              sessionId: "sess_cron_run_2",
+              updatedAt: now - 70,
+              label: "Cron: Nightly digest",
+              channel: "openclaw",
+              lastChannel: "openclaw",
+              lastTo: "cron",
+            },
+            "agent:main:subagent:uuid": {
+              sessionId: "sess_subagent",
+              updatedAt: now - 110,
+              label: "Subagent Session",
+              channel: "openclaw",
+            },
+            "agent:main:main": {
+              sessionId: "sess_main",
+              updatedAt: now - 120,
+              displayName: "Main Session",
+              channel: "openclaw",
+            },
+            "agent:main:openclaw:flynn:s_label_only": {
+              sessionId: "sess_label_only",
+              updatedAt: now - 200,
+              label: "Label Session",
+              channel: "openclaw",
+            },
+            [excludedSessionKey]: {
+              sessionId: "sess_excluded",
+              updatedAt: now - 50,
+              displayName: "Already Adopted",
+              channel: "openclaw",
+            },
+            [provisionedSessionKey]: {
+              sessionId: "sess_provisioned",
+              updatedAt: now - 75,
+              displayName: "Provisioned Session",
+              channel: "openclaw",
+            },
+            "agent:main:clawline:flynn:s_hidden": {
+              sessionId: "sess_native_clawline",
+              updatedAt: now - 25,
+              displayName: "Native Clawline Session",
+              channel: "clawline",
+            },
+            "agent:main:openclaw:other:s_hidden": {
+              sessionId: "sess_other",
+              updatedAt: now - 50,
+              displayName: "Other Session",
+              channel: "openclaw",
+            },
+          },
+          null,
+          2,
+        ),
+      );
+
+      const pairResult = await performPairRequest(ctx.port, deviceId);
+      const token = pairResult.token as string;
+      const { ws } = await authenticateDevice(ctx.port, deviceId, token);
+      const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
+      const db = new BetterSqlite3(dbPath);
+      try {
+        db.prepare(
+          `INSERT INTO stream_sessions
+             (userId, sessionKey, displayName, kind, orderIndex, isBuiltIn, createdAt, updatedAt)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          userId,
+          provisionedSessionKey,
+          "Provisioned Session",
+          "custom",
+          7,
+          0,
+          now - 75,
+          now - 75,
+        );
+      } finally {
+        db.close();
+      }
+
+      const response = await fetch(
+        `http://127.0.0.1:${ctx.port}/api/trackable-sessions?excludeSessionKey=${encodeURIComponent(
+          excludedSessionKey,
+        )}`,
+        {
+          headers: { Authorization: `Bearer ${token}` },
+        },
+      );
+      expect(response.status).toBe(200);
+      const payload = (await response.json()) as {
+        sessions: Array<{
+          sessionKey: string;
+          displayName: string;
+          updatedAt: number;
+          channel?: string;
+          lastChannel?: string;
+          lastTo?: string;
+        }>;
+      };
+      expect(payload.sessions).toEqual([
+        {
+          sessionKey: "agent:main:openclaw:other:s_hidden",
+          displayName: "Other Session",
+          updatedAt: now - 50,
+          channel: "openclaw",
+        },
+        {
+          sessionKey: "agent:main:cron:nightly-digest:run:run-2",
+          displayName: "Cron: Nightly digest (run-2)",
+          updatedAt: now - 70,
+          channel: "openclaw",
+          lastChannel: "openclaw",
+          lastTo: "cron",
+        },
+        {
+          sessionKey: "agent:main:cron:nightly-digest:run:run-1",
+          displayName: "Cron: Nightly digest (run-1)",
+          updatedAt: now - 85,
+          channel: "openclaw",
+        },
+        {
+          sessionKey: "agent:main:discord:channel:123",
+          displayName: "Discord Channel",
+          updatedAt: now - 90,
+          channel: "discord",
+          lastChannel: "discord",
+        },
+        {
+          sessionKey: "agent:main:openclaw:flynn:s_trackme",
+          displayName: "Research Session",
+          updatedAt: now - 100,
+          channel: "openclaw",
+          lastChannel: "openclaw",
+          lastTo: "flynn",
+        },
+        {
+          sessionKey: "agent:main:subagent:uuid",
+          displayName: "Subagent Session",
+          updatedAt: now - 110,
+          channel: "openclaw",
+        },
+        {
+          sessionKey: "agent:main:openclaw:flynn:s_label_only",
+          displayName: "Label Session",
+          updatedAt: now - 200,
+          channel: "openclaw",
+        },
+      ]);
+
+      ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("rejects trackable session listing for non-admin users", async () => {
+    const deviceId = randomUUID();
+    const entry = createAllowlistEntry({
+      deviceId,
+      userId: "flynn",
+      isAdmin: false,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry]);
+    try {
+      const pair = await performPairRequest(ctx.port, deviceId);
+      const token = pair.token as string;
+      const { ws } = await authenticateDevice(ctx.port, deviceId, token);
+      const response = await fetch(`http://127.0.0.1:${ctx.port}/api/trackable-sessions`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      expect(response.status).toBe(403);
+      expect(await response.json()).toMatchObject({
+        error: { code: "forbidden", message: "Admin access required" },
+      });
+      ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("merges auth-time adopted session keys for inbound sends without broadening session_info", async () => {
+    const deviceId = randomUUID();
+    const adoptedSessionKey = "agent:main:main";
+    let capturedCtx: Record<string, unknown> | null = null;
+    const replyResolver: typeof testReplyResolver = async (ctx) => {
+      capturedCtx = ctx as unknown as Record<string, unknown>;
+      return { text: "adopted ok" };
+    };
+    const entry = createAllowlistEntry({
+      deviceId,
+      userId: "flynn",
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry], { replyResolver });
+    try {
+      await fs.writeFile(
+        ctx.sessionStorePath,
+        JSON.stringify(
+          {
+            [adoptedSessionKey]: {
+              sessionId: "sess_adopted_main",
+              updatedAt: Date.now() - 100,
+              displayName: "Main Session",
+              channel: "openclaw",
+              lastChannel: "openclaw",
+              lastTo: "agent:main:main",
+            },
+          },
+          null,
+          2,
+        ),
+      );
+
+      const pair = await performPairRequest(ctx.port, deviceId);
+      const token = pair.token as string;
+      const { ws, auth, sessionInfo } = await authenticateDevice(ctx.port, deviceId, token, {
+        authPayload: {
+          adoptedSessionKeys: [adoptedSessionKey],
+        },
+      });
+      expect(auth.sessionKeys).toEqual(["agent:main:clawline:flynn:main", "agent:main:main"]);
+      expect((sessionInfo as { sessionKeys?: string[] } | null)?.sessionKeys).toEqual([
+        "agent:main:clawline:flynn:main",
+        "agent:main:main",
+      ]);
+
+      const queue = createMessageQueue(ws);
+      const messageId = `c_${randomUUID()}`;
+      ws.send(
+        JSON.stringify({
+          type: "message",
+          id: messageId,
+          sessionKey: adoptedSessionKey,
+          content: "hello adopted",
+        }),
+      );
+
+      const ack = await waitForQueuedMessage(queue, (value) => {
+        const typed = value as { type?: string; id?: string };
+        return typed?.type === "ack" && typed.id === messageId;
+      });
+      expect(ack).toMatchObject({ type: "ack", id: messageId });
+
+      const echoedUserMessage = (await waitForQueuedMessage(queue, (value) => {
+        const typed = value as { type?: string; role?: string; sessionKey?: string };
+        return (
+          typed?.type === "message" &&
+          typed.role === "user" &&
+          typed.sessionKey === adoptedSessionKey
+        );
+      })) as { sessionKey?: string };
+      expect(echoedUserMessage.sessionKey).toBe(adoptedSessionKey);
+
+      const assistantMessage = (await waitForQueuedMessage(queue, (value) => {
+        const typed = value as { type?: string; role?: string; sessionKey?: string };
+        return (
+          typed?.type === "message" &&
+          typed.role === "assistant" &&
+          typed.sessionKey === adoptedSessionKey
+        );
+      })) as { sessionKey?: string; content?: string };
+      expect(assistantMessage).toMatchObject({
+        sessionKey: adoptedSessionKey,
+        content: "adopted ok",
+      });
+
+      expect(capturedCtx).toMatchObject({
+        SessionKey: adoptedSessionKey,
+        Provider: "openclaw",
+        Surface: "openclaw",
+        OriginatingChannel: "openclaw",
+        OriginatingTo: "agent:main:main",
+      });
+
+      const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
+      const db = new BetterSqlite3(dbPath, { readonly: true });
+      try {
+        const rows = db
+          .prepare(`SELECT sessionKey FROM events WHERE userId = ? ORDER BY sequence ASC`)
+          .all("flynn") as Array<{ sessionKey: string | null }>;
+        expect(rows.at(-1)?.sessionKey).toBe(adoptedSessionKey);
+        expect(rows.some((row) => row.sessionKey === adoptedSessionKey)).toBe(true);
+      } finally {
+        db.close();
+      }
+
+      queue.dispose();
+      ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("ignores auth-time adopted session keys for non-admin users", async () => {
+    const deviceId = randomUUID();
+    const adoptedSessionKey = "agent:main:main";
+    const entry = createAllowlistEntry({
+      deviceId,
+      userId: "flynn",
+      isAdmin: false,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry]);
+    try {
+      await fs.writeFile(
+        ctx.sessionStorePath,
+        JSON.stringify(
+          {
+            [adoptedSessionKey]: {
+              sessionId: "sess_adopted_main",
+              updatedAt: Date.now() - 100,
+              displayName: "Main Session",
+              channel: "openclaw",
+              lastChannel: "openclaw",
+              lastTo: adoptedSessionKey,
+            },
+          },
+          null,
+          2,
+        ),
+      );
+
+      const pair = await performPairRequest(ctx.port, deviceId);
+      const token = pair.token as string;
+      const { ws, auth, sessionInfo } = await authenticateDevice(ctx.port, deviceId, token, {
+        authPayload: {
+          adoptedSessionKeys: [adoptedSessionKey],
+        },
+      });
+      expect(auth.sessionKeys).toEqual(["agent:main:clawline:flynn:main"]);
+      expect((sessionInfo as { sessionKeys?: string[] } | null)?.sessionKeys).toEqual([
+        "agent:main:clawline:flynn:main",
+      ]);
+
+      const queue = createMessageQueue(ws);
+      ws.send(
+        JSON.stringify({
+          type: "message",
+          id: `c_${randomUUID()}`,
+          sessionKey: adoptedSessionKey,
+          content: "should stay blocked",
+        }),
+      );
+      const error = await waitForQueuedMessage(queue, (value) => {
+        const typed = value as { type?: string; code?: string };
+        return typed?.type === "error" && typed.code === "stream_not_found";
+      });
+      expect(error).toMatchObject({
+        type: "error",
+        code: "stream_not_found",
+      });
+
+      queue.dispose();
+      ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("records adopted sessions via REST and rebuilds them on reconnect", async () => {
+    const deviceId = randomUUID();
+    const adoptedSessionKey = "agent:main:subagent:uuid";
+    const entry = createAllowlistEntry({
+      deviceId,
+      userId: "flynn",
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry]);
+    try {
+      await fs.writeFile(
+        ctx.sessionStorePath,
+        JSON.stringify(
+          {
+            [adoptedSessionKey]: {
+              sessionId: "sess_subagent",
+              updatedAt: Date.now() - 100,
+              label: "Subagent Session",
+              channel: "openclaw",
+              lastChannel: "openclaw",
+              lastTo: adoptedSessionKey,
+            },
+          },
+          null,
+          2,
+        ),
+      );
+
+      const pair = await performPairRequest(ctx.port, deviceId);
+      const token = pair.token as string;
+      const authed = await authenticateDevice(ctx.port, deviceId, token);
+      const queue = createMessageQueue(authed.ws);
+
+      const beforeAdoptMessageId = `c_${randomUUID()}`;
+      authed.ws.send(
+        JSON.stringify({
+          type: "message",
+          id: beforeAdoptMessageId,
+          sessionKey: adoptedSessionKey,
+          content: "blocked before adopt",
+        }),
+      );
+      const beforeAdoptError = await waitForQueuedMessage(queue, (value) => {
+        const typed = value as { type?: string; code?: string };
+        return typed?.type === "error" && typed.code === "stream_not_found";
+      });
+      expect(beforeAdoptError).toMatchObject({
+        type: "error",
+        code: "stream_not_found",
+      });
+
+      const adoptResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams/adopt`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ sessionKey: adoptedSessionKey }),
+      });
+      expect(adoptResponse.status).toBe(200);
+      const adoptPayload = (await adoptResponse.json()) as {
+        stream: { sessionKey: string; displayName: string; adopted: boolean; createdAt: number };
+      };
+      expect(adoptPayload.stream.sessionKey).toBe(adoptedSessionKey);
+      expect(adoptPayload.stream.displayName).toBe("Subagent Session");
+      expect(adoptPayload.stream.adopted).toBe(true);
+      expect(adoptPayload.stream.createdAt).toEqual(expect.any(Number));
+
+      const streamsResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      expect(streamsResponse.status).toBe(200);
+      const streamsPayload = (await streamsResponse.json()) as {
+        streams: Array<{ sessionKey: string; adopted: boolean }>;
+      };
+      expect(streamsPayload.streams).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            sessionKey: adoptedSessionKey,
+            adopted: true,
+          }),
+        ]),
+      );
+
+      const afterAdoptMessageId = `c_${randomUUID()}`;
+      authed.ws.send(
+        JSON.stringify({
+          type: "message",
+          id: afterAdoptMessageId,
+          sessionKey: adoptedSessionKey,
+          content: "allowed after adopt",
+        }),
+      );
+      const afterAdoptAck = await waitForQueuedMessage(queue, (value) => {
+        const typed = value as { type?: string; id?: string };
+        return typed?.type === "ack" && typed.id === afterAdoptMessageId;
+      });
+      expect(afterAdoptAck).toMatchObject({ type: "ack", id: afterAdoptMessageId });
+
+      queue.dispose();
+      authed.ws.terminate();
+
+      const reauthed = await authenticateDevice(ctx.port, deviceId, token);
+      const replayQueue = createMessageQueue(reauthed.ws);
+      const afterReconnectMessageId = `c_${randomUUID()}`;
+      reauthed.ws.send(
+        JSON.stringify({
+          type: "message",
+          id: afterReconnectMessageId,
+          sessionKey: adoptedSessionKey,
+          content: "still allowed after reconnect",
+        }),
+      );
+      const afterReconnectAck = await waitForQueuedMessage(replayQueue, (value) => {
+        const typed = value as { type?: string; id?: string };
+        return typed?.type === "ack" && typed.id === afterReconnectMessageId;
+      });
+      expect(afterReconnectAck).toMatchObject({ type: "ack", id: afterReconnectMessageId });
+
+      const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
+      const db = new BetterSqlite3(dbPath, { readonly: true });
+      try {
+        const adoptedRows = db
+          .prepare(`SELECT userId, sessionKey FROM adopted_sessions WHERE userId = ?`)
+          .all("flynn") as Array<{ userId: string; sessionKey: string }>;
+        expect(adoptedRows).toEqual([{ userId: "flynn", sessionKey: adoptedSessionKey }]);
+        const streamRows = db
+          .prepare(
+            `SELECT userId, sessionKey, displayName, kind, isBuiltIn, adopted
+             FROM stream_sessions
+             WHERE userId = ? AND sessionKey = ?`,
+          )
+          .all("flynn", adoptedSessionKey) as Array<{
+          userId: string;
+          sessionKey: string;
+          displayName: string;
+          kind: string;
+          isBuiltIn: number;
+          adopted: number;
+        }>;
+        expect(streamRows).toEqual([
+          {
+            userId: "flynn",
+            sessionKey: adoptedSessionKey,
+            displayName: "Subagent Session",
+            kind: "custom",
+            isBuiltIn: 0,
+            adopted: 1,
+          },
+        ]);
+      } finally {
+        db.close();
+      }
+
+      replayQueue.dispose();
+      reauthed.ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("untracks adopted sessions via DELETE without crashing", async () => {
+    const deviceId = randomUUID();
+    const adoptedSessionKey = "agent:main:subagent:uuid";
+    const entry = createAllowlistEntry({
+      deviceId,
+      userId: "flynn",
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry]);
+    try {
+      await fs.writeFile(
+        ctx.sessionStorePath,
+        JSON.stringify(
+          {
+            [adoptedSessionKey]: {
+              sessionId: "sess_subagent",
+              updatedAt: Date.now() - 100,
+              label: "Subagent Session",
+              channel: "openclaw",
+              lastChannel: "openclaw",
+              lastTo: adoptedSessionKey,
+            },
+          },
+          null,
+          2,
+        ),
+      );
+
+      const pair = await performPairRequest(ctx.port, deviceId);
+      const token = pair.token as string;
+      const authed = await authenticateDevice(ctx.port, deviceId, token);
+
+      const adoptResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams/adopt`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ sessionKey: adoptedSessionKey }),
+      });
+      expect(adoptResponse.status).toBe(200);
+
+      const deleteResponse = await fetch(
+        `http://127.0.0.1:${ctx.port}/api/streams/${encodeURIComponent(adoptedSessionKey)}`,
+        {
+          method: "DELETE",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "X-Clawline-User-Action": "delete_stream",
+          },
+        },
+      );
+      expect(deleteResponse.status).toBe(200);
+      expect(await deleteResponse.json()).toMatchObject({
+        deletedSessionKey: adoptedSessionKey,
+      });
+
+      const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
+      const db = new BetterSqlite3(dbPath, { readonly: true });
+      try {
+        const adoptedRows = db
+          .prepare(`SELECT userId, sessionKey FROM adopted_sessions WHERE userId = ?`)
+          .all("flynn") as Array<{ userId: string; sessionKey: string }>;
+        expect(adoptedRows).toEqual([]);
+        const streamRows = db
+          .prepare(`SELECT sessionKey FROM stream_sessions WHERE userId = ? AND sessionKey = ?`)
+          .all("flynn", adoptedSessionKey) as Array<{ sessionKey: string }>;
+        expect(streamRows).toEqual([]);
+      } finally {
+        db.close();
+      }
+
+      authed.ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("rejects adopted session recording for non-admin users", async () => {
+    const deviceId = randomUUID();
+    const adoptedSessionKey = "agent:main:subagent:uuid";
+    const entry = createAllowlistEntry({
+      deviceId,
+      userId: "flynn",
+      isAdmin: false,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry]);
+    try {
+      await fs.writeFile(
+        ctx.sessionStorePath,
+        JSON.stringify(
+          {
+            [adoptedSessionKey]: {
+              sessionId: "sess_subagent",
+              updatedAt: Date.now() - 100,
+              label: "Subagent Session",
+              channel: "openclaw",
+              lastChannel: "openclaw",
+              lastTo: adoptedSessionKey,
+            },
+          },
+          null,
+          2,
+        ),
+      );
+
+      const pair = await performPairRequest(ctx.port, deviceId);
+      const token = pair.token as string;
+      const { ws } = await authenticateDevice(ctx.port, deviceId, token);
+      const response = await fetch(`http://127.0.0.1:${ctx.port}/api/streams/adopt`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ sessionKey: adoptedSessionKey }),
+      });
+      expect(response.status).toBe(403);
+      expect(await response.json()).toMatchObject({
+        error: { code: "forbidden", message: "Admin access required" },
+      });
+      ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
   it("accepts multiply-encoded stream session keys for rename and delete", async () => {
     const deviceId = randomUUID();
     const entry = createAllowlistEntry({
@@ -2235,6 +3001,7 @@ describe.sequential("clawline provider server", () => {
       tokenDelivered: true,
     });
     const customSessionKey = "agent:main:clawline:flynn:s_deadbeef";
+    const adoptedSessionKey = "agent:main:subagent:legacy";
     const ctx = await setupTestServer([entry], {
       seedLegacyDatabase: async (dbPath) => {
         const db = new BetterSqlite3(dbPath);
@@ -2290,6 +3057,20 @@ describe.sequential("clawline provider server", () => {
               FOREIGN KEY (assetId) REFERENCES assets(assetId) ON DELETE RESTRICT
             );
             CREATE INDEX idx_message_assets_assetId ON message_assets(assetId);
+            CREATE TABLE stream_sessions (
+              userId TEXT NOT NULL,
+              sessionKey TEXT NOT NULL,
+              displayName TEXT NOT NULL,
+              kind TEXT NOT NULL,
+              orderIndex INTEGER NOT NULL,
+              isBuiltIn INTEGER NOT NULL,
+              createdAt INTEGER NOT NULL,
+              updatedAt INTEGER NOT NULL,
+              PRIMARY KEY (userId, sessionKey),
+              UNIQUE (userId, orderIndex)
+            );
+            CREATE INDEX idx_stream_sessions_user_order
+              ON stream_sessions(userId, orderIndex);
           `);
           const payload = JSON.stringify({
             type: "message",
@@ -2313,6 +3094,11 @@ describe.sequential("clawline provider server", () => {
             Buffer.byteLength(payload, "utf8"),
             1,
           );
+          db.prepare(
+            `INSERT INTO stream_sessions
+              (userId, sessionKey, displayName, kind, orderIndex, isBuiltIn, createdAt, updatedAt)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          ).run("flynn", adoptedSessionKey, "Legacy adopted", "custom", 0, 0, 1, 1);
         } finally {
           db.close();
         }
@@ -2346,12 +3132,17 @@ describe.sequential("clawline provider server", () => {
           (stream) => stream.sessionKey === customSessionKey && stream.kind === "custom",
         ),
       ).toBe(true);
+      expect(
+        streamsPayload.streams.some(
+          (stream) => stream.sessionKey === adoptedSessionKey && stream.adopted,
+        ),
+      ).toBe(true);
 
       const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
       const db = new BetterSqlite3(dbPath, { readonly: true });
       try {
         const userVersion = db.pragma("user_version", { simple: true }) as number;
-        expect(userVersion).toBe(2);
+        expect(userVersion).toBe(4);
         const eventsColumns = db.prepare(`PRAGMA table_info(events)`).all() as Array<{
           name: string;
         }>;
@@ -2364,6 +3155,10 @@ describe.sequential("clawline provider server", () => {
           | undefined;
         expect(row?.sessionKey).toBe(customSessionKey);
         expect(row?.eventType).toBe("message");
+        const adoptedRow = db
+          .prepare(`SELECT adopted FROM stream_sessions WHERE userId = ? AND sessionKey = ?`)
+          .get("flynn", adoptedSessionKey) as { adopted: number } | undefined;
+        expect(adoptedRow?.adopted).toBe(1);
       } finally {
         db.close();
       }
