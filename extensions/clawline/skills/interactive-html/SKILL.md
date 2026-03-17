@@ -32,6 +32,19 @@ Example call shape:
 }
 ```
 
+> **Targeting a specific stream:** Use a fully qualified session key as `target` to deliver into a specific Clawline stream rather than the user's default stream.
+>
+> ```json
+> {
+>   "action": "sendAttachment",
+>   "target": "agent:main:clawline:flynn:s_4a2b448d",
+>   "contentType": "application/vnd.clawline.interactive-html+json",
+>   "buffer": "<base64({\"version\":1,\"html\":\"<html>...</html>\"})>"
+> }
+> ```
+>
+> Using `target: "flynn"` or `target: "user:<id>"` routes to the user's **default/personal stream**. To keep attachments in the current session, pass the full session key (available from `session_status`).
+
 ## HTML Requirements
 
 - Must include viewport meta tag:
