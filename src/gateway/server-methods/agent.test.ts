@@ -8,8 +8,7 @@ const mocks = vi.hoisted(() => ({
   updateSessionStore: vi.fn(),
   agentCommand: vi.fn(),
   registerAgentRunContext: vi.fn(),
-  sessionsResetHandler: vi.fn(),
-  resolveSendPolicy: vi.fn(() => "allow" as const),
+  performGatewaySessionReset: vi.fn(),
   loadConfigReturn: {} as Record<string, unknown>,
 }));
 
@@ -41,6 +40,7 @@ vi.mock("../../config/sessions.js", async () => {
 });
 
 vi.mock("../../commands/agent.js", () => ({
+  agentCommand: mocks.agentCommand,
   agentCommandFromIngress: mocks.agentCommand,
 }));
 
@@ -62,16 +62,13 @@ vi.mock("../../infra/agent-events.js", () => ({
   onAgentEvent: vi.fn(),
 }));
 
-vi.mock("./sessions.js", () => ({
-  sessionsHandlers: {
-    "sessions.reset": (...args: unknown[]) =>
-      (mocks.sessionsResetHandler as (...args: unknown[]) => unknown)(...args),
-  },
+vi.mock("../session-reset-service.js", () => ({
+  performGatewaySessionReset: (...args: unknown[]) =>
+    (mocks.performGatewaySessionReset as (...args: unknown[]) => unknown)(...args),
 }));
 
 vi.mock("../../sessions/send-policy.js", () => ({
-  resolveSendPolicy: (...args: unknown[]) =>
-    (mocks.resolveSendPolicy as (...args: unknown[]) => unknown)(...args),
+  resolveSendPolicy: () => "allow",
 }));
 
 vi.mock("../../utils/delivery-context.js", async () => {
@@ -159,7 +156,7 @@ function resetTimeConfig() {
 
 async function expectResetCall(expectedMessage: string) {
   await vi.waitFor(() => expect(mocks.agentCommand).toHaveBeenCalled());
-  expect(mocks.sessionsResetHandler).toHaveBeenCalledTimes(1);
+  expect(mocks.performGatewaySessionReset).toHaveBeenCalledTimes(1);
   const call = readLastAgentCommandCall();
   expect(call?.message).toBe(expectedMessage);
   return call;
@@ -209,18 +206,16 @@ function mockSessionResetSuccess(params: {
 }) {
   const key = params.key ?? "agent:main:main";
   const sessionId = params.sessionId ?? "reset-session-id";
-  mocks.sessionsResetHandler.mockImplementation(
-    async (opts: {
-      params: { key: string; reason: string };
-      respond: (ok: boolean, payload?: unknown) => void;
-    }) => {
-      expect(opts.params.key).toBe(key);
-      expect(opts.params.reason).toBe(params.reason);
-      opts.respond(true, {
+  mocks.performGatewaySessionReset.mockImplementation(
+    async (opts: { key: string; reason: string; commandSource: string }) => {
+      expect(opts.key).toBe(key);
+      expect(opts.reason).toBe(params.reason);
+      expect(opts.commandSource).toBe("gateway:agent");
+      return {
         ok: true,
         key,
         entry: { sessionId },
-      });
+      };
     },
   );
 }
@@ -272,51 +267,6 @@ async function invokeAgentIdentityGet(
 }
 
 describe("gateway agent handler", () => {
-  it("uses request channel for send policy when session entry channel is missing", async () => {
-    mocks.loadSessionEntry.mockReturnValue({
-      cfg: {},
-      storePath: "/tmp/sessions.json",
-      entry: {
-        sessionId: "stream-session-id",
-        updatedAt: Date.now(),
-      },
-      canonicalKey: "agent:main:clawline:flynn:s_12345678",
-    });
-    mocks.resolveSendPolicy.mockImplementationOnce((params: { channel?: string }) =>
-      params.channel === "telegram" ? "allow" : "deny",
-    );
-    mocks.updateSessionStore.mockResolvedValue(undefined);
-
-    mocks.agentCommand.mockResolvedValue({
-      payloads: [{ text: "ok" }],
-      meta: { durationMs: 100 },
-    });
-
-    const respond = await invokeAgent(
-      {
-        message: "wake stream",
-        sessionKey: "agent:main:clawline:flynn:s_12345678",
-        channel: "telegram",
-        to: "123456789",
-        deliver: true,
-        idempotencyKey: "stream-policy-channel-fallback",
-      },
-      { reqId: "stream-policy-channel-fallback" },
-    );
-
-    expect(mocks.resolveSendPolicy).toHaveBeenCalledWith(
-      expect.objectContaining({
-        channel: "telegram",
-      }),
-    );
-    expect(respond).toHaveBeenCalledWith(
-      true,
-      expect.objectContaining({ status: "accepted" }),
-      undefined,
-      expect.objectContaining({ runId: "stream-policy-channel-fallback" }),
-    );
-  });
-
   it("preserves ACP metadata from the current stored session entry", async () => {
     const existingAcpMeta = {
       backend: "acpx",
@@ -455,30 +405,53 @@ describe("gateway agent handler", () => {
     expect(callArgs.bestEffortDeliver).toBe(false);
   });
 
-  it("only forwards workspaceDir for spawned subagent runs", async () => {
+  it("rejects public spawned-run metadata fields", async () => {
     primeMainAgentRun();
     mocks.agentCommand.mockClear();
-
-    await invokeAgent(
-      {
-        message: "normal run",
-        sessionKey: "agent:main:main",
-        workspaceDir: "/tmp/ignored",
-        idempotencyKey: "workspace-ignored",
-      },
-      { reqId: "workspace-ignored-1" },
-    );
-    await vi.waitFor(() => expect(mocks.agentCommand).toHaveBeenCalled());
-    const normalCall = mocks.agentCommand.mock.calls.at(-1)?.[0] as { workspaceDir?: string };
-    expect(normalCall.workspaceDir).toBeUndefined();
-    mocks.agentCommand.mockClear();
+    const respond = vi.fn();
 
     await invokeAgent(
       {
         message: "spawned run",
         sessionKey: "agent:main:main",
         spawnedBy: "agent:main:subagent:parent",
-        workspaceDir: "/tmp/inherited",
+        workspaceDir: "/tmp/injected",
+        idempotencyKey: "workspace-rejected",
+      } as AgentParams,
+      { reqId: "workspace-rejected-1", respond },
+    );
+
+    expect(mocks.agentCommand).not.toHaveBeenCalled();
+    expect(respond).toHaveBeenCalledWith(
+      false,
+      undefined,
+      expect.objectContaining({
+        message: expect.stringContaining("invalid agent params"),
+      }),
+    );
+  });
+
+  it("only forwards workspaceDir for spawned sessions with stored workspace inheritance", async () => {
+    primeMainAgentRun();
+    mockMainSessionEntry({
+      spawnedBy: "agent:main:subagent:parent",
+      spawnedWorkspaceDir: "/tmp/inherited",
+    });
+    mocks.updateSessionStore.mockImplementation(async (_path, updater) => {
+      const store: Record<string, unknown> = {
+        "agent:main:main": buildExistingMainStoreEntry({
+          spawnedBy: "agent:main:subagent:parent",
+          spawnedWorkspaceDir: "/tmp/inherited",
+        }),
+      };
+      return await updater(store);
+    });
+    mocks.agentCommand.mockClear();
+
+    await invokeAgent(
+      {
+        message: "spawned run",
+        sessionKey: "agent:main:main",
         idempotencyKey: "workspace-forwarded",
       },
       { reqId: "workspace-forwarded-1" },
@@ -606,10 +579,10 @@ describe("gateway agent handler", () => {
     );
 
     await vi.waitFor(() => expect(mocks.agentCommand).toHaveBeenCalled());
-    expect(mocks.sessionsResetHandler).toHaveBeenCalledTimes(1);
+    expect(mocks.performGatewaySessionReset).toHaveBeenCalledTimes(1);
     const call = readLastAgentCommandCall();
     // Message is now dynamically built with current date — check key substrings
-    expect(call?.message).toContain("Execute your Session Startup sequence now");
+    expect(call?.message).toContain("Run your Session Startup sequence");
     expect(call?.message).toContain("Current time:");
     expect(call?.message).not.toBe(BARE_SESSION_RESET_PROMPT);
     expect(call?.sessionId).toBe("reset-session-id");
@@ -618,7 +591,7 @@ describe("gateway agent handler", () => {
   it("uses /reset suffix as the post-reset message and still injects timestamp", async () => {
     setupNewYorkTimeConfig("2026-01-29T01:30:00.000Z");
     mockSessionResetSuccess({ reason: "reset" });
-    mocks.sessionsResetHandler.mockClear();
+    mocks.performGatewaySessionReset.mockClear();
     primeMainAgentRun({
       sessionId: "reset-session-id",
       cfg: mocks.loadConfigReturn,

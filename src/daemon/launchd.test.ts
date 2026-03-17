@@ -9,22 +9,46 @@ import {
   isLaunchAgentListed,
   parseLaunchctlPrint,
   repairLaunchAgentBootstrap,
-  recoverLaunchAgentWithAppBounce,
   restartLaunchAgent,
   resolveLaunchAgentPlistPath,
 } from "./launchd.js";
 
 const state = vi.hoisted(() => ({
   launchctlCalls: [] as string[][],
-  rawExecCalls: [] as Array<{ file: string; args: string[] }>,
   listOutput: "",
   printOutput: "",
-  printOutputs: [] as string[],
   bootstrapError: "",
+  kickstartError: "",
+  kickstartFailuresRemaining: 0,
   dirs: new Set<string>(),
+  dirModes: new Map<string, number>(),
   files: new Map<string, string>(),
+  fileModes: new Map<string, number>(),
+}));
+const launchdRestartHandoffState = vi.hoisted(() => ({
+  isCurrentProcessLaunchdServiceLabel: vi.fn<(label: string) => boolean>(() => false),
+  scheduleDetachedLaunchdRestartHandoff: vi.fn((_params: unknown) => ({ ok: true, pid: 7331 })),
 }));
 const defaultProgramArguments = ["node", "-e", "process.exit(0)"];
+
+function expectLaunchctlEnableBootstrapOrder(env: Record<string, string | undefined>) {
+  const domain = typeof process.getuid === "function" ? `gui/${process.getuid()}` : "gui/501";
+  const label = "ai.openclaw.gateway";
+  const plistPath = resolveLaunchAgentPlistPath(env);
+  const serviceId = `${domain}/${label}`;
+  const enableIndex = state.launchctlCalls.findIndex(
+    (c) => c[0] === "enable" && c[1] === serviceId,
+  );
+  const bootstrapIndex = state.launchctlCalls.findIndex(
+    (c) => c[0] === "bootstrap" && c[1] === domain && c[2] === plistPath,
+  );
+
+  expect(enableIndex).toBeGreaterThanOrEqual(0);
+  expect(bootstrapIndex).toBeGreaterThanOrEqual(0);
+  expect(enableIndex).toBeLessThan(bootstrapIndex);
+
+  return { domain, label, serviceId, bootstrapIndex };
+}
 
 function normalizeLaunchctlArgs(file: string, args: string[]): string[] {
   if (file === "launchctl") {
@@ -39,22 +63,30 @@ function normalizeLaunchctlArgs(file: string, args: string[]): string[] {
 
 vi.mock("./exec-file.js", () => ({
   execFileUtf8: vi.fn(async (file: string, args: string[]) => {
-    state.rawExecCalls.push({ file, args });
     const call = normalizeLaunchctlArgs(file, args);
     state.launchctlCalls.push(call);
     if (call[0] === "list") {
       return { stdout: state.listOutput, stderr: "", code: 0 };
     }
     if (call[0] === "print") {
-      const stdout =
-        state.printOutputs.length > 0 ? (state.printOutputs.shift() ?? "") : state.printOutput;
-      return { stdout, stderr: "", code: 0 };
+      return { stdout: state.printOutput, stderr: "", code: 0 };
     }
     if (call[0] === "bootstrap" && state.bootstrapError) {
       return { stdout: "", stderr: state.bootstrapError, code: 1 };
     }
+    if (call[0] === "kickstart" && state.kickstartError && state.kickstartFailuresRemaining > 0) {
+      state.kickstartFailuresRemaining -= 1;
+      return { stdout: "", stderr: state.kickstartError, code: 1 };
+    }
     return { stdout: "", stderr: "", code: 0 };
   }),
+}));
+
+vi.mock("./launchd-restart-handoff.js", () => ({
+  isCurrentProcessLaunchdServiceLabel: (label: string) =>
+    launchdRestartHandoffState.isCurrentProcessLaunchdServiceLabel(label),
+  scheduleDetachedLaunchdRestartHandoff: (params: unknown) =>
+    launchdRestartHandoffState.scheduleDetachedLaunchdRestartHandoff(params),
 }));
 
 vi.mock("node:fs/promises", async (importOriginal) => {
@@ -68,16 +100,41 @@ vi.mock("node:fs/promises", async (importOriginal) => {
       }
       throw new Error(`ENOENT: no such file or directory, access '${key}'`);
     }),
-    mkdir: vi.fn(async (p: string) => {
-      state.dirs.add(String(p));
+    mkdir: vi.fn(async (p: string, opts?: { mode?: number }) => {
+      const key = String(p);
+      state.dirs.add(key);
+      state.dirModes.set(key, opts?.mode ?? 0o777);
+    }),
+    stat: vi.fn(async (p: string) => {
+      const key = String(p);
+      if (state.dirs.has(key)) {
+        return { mode: state.dirModes.get(key) ?? 0o777 };
+      }
+      if (state.files.has(key)) {
+        return { mode: state.fileModes.get(key) ?? 0o666 };
+      }
+      throw new Error(`ENOENT: no such file or directory, stat '${key}'`);
+    }),
+    chmod: vi.fn(async (p: string, mode: number) => {
+      const key = String(p);
+      if (state.dirs.has(key)) {
+        state.dirModes.set(key, mode);
+        return;
+      }
+      if (state.files.has(key)) {
+        state.fileModes.set(key, mode);
+        return;
+      }
+      throw new Error(`ENOENT: no such file or directory, chmod '${key}'`);
     }),
     unlink: vi.fn(async (p: string) => {
       state.files.delete(String(p));
     }),
-    writeFile: vi.fn(async (p: string, data: string) => {
+    writeFile: vi.fn(async (p: string, data: string, opts?: { mode?: number }) => {
       const key = String(p);
       state.files.set(key, data);
       state.dirs.add(String(key.split("/").slice(0, -1).join("/")));
+      state.fileModes.set(key, opts?.mode ?? 0o666);
     }),
   };
   return { ...wrapped, default: wrapped };
@@ -85,13 +142,22 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 
 beforeEach(() => {
   state.launchctlCalls.length = 0;
-  state.rawExecCalls.length = 0;
   state.listOutput = "";
   state.printOutput = "";
-  state.printOutputs.length = 0;
   state.bootstrapError = "";
+  state.kickstartError = "";
+  state.kickstartFailuresRemaining = 0;
   state.dirs.clear();
+  state.dirModes.clear();
   state.files.clear();
+  state.fileModes.clear();
+  launchdRestartHandoffState.isCurrentProcessLaunchdServiceLabel.mockReset();
+  launchdRestartHandoffState.isCurrentProcessLaunchdServiceLabel.mockReturnValue(false);
+  launchdRestartHandoffState.scheduleDetachedLaunchdRestartHandoff.mockReset();
+  launchdRestartHandoffState.scheduleDetachedLaunchdRestartHandoff.mockReturnValue({
+    ok: true,
+    pid: 7331,
+  });
   vi.clearAllMocks();
 });
 
@@ -164,7 +230,7 @@ describe("launchctl list detection", () => {
 });
 
 describe("launchd bootstrap repair", () => {
-  it("enables, bootstraps, and only non-destructively kickstarts the resolved label", async () => {
+  it("enables, bootstraps, and kickstarts the resolved label", async () => {
     const env: Record<string, string | undefined> = {
       HOME: "/Users/test",
       OPENCLAW_PROFILE: "default",
@@ -172,27 +238,13 @@ describe("launchd bootstrap repair", () => {
     const repair = await repairLaunchAgentBootstrap({ env });
     expect(repair.ok).toBe(true);
 
-    const domain = typeof process.getuid === "function" ? `gui/${process.getuid()}` : "gui/501";
-    const label = "ai.openclaw.gateway";
-    const plistPath = resolveLaunchAgentPlistPath(env);
-    const serviceId = `${domain}/${label}`;
-
-    const enableIndex = state.launchctlCalls.findIndex(
-      (c) => c[0] === "enable" && c[1] === serviceId,
-    );
-    const bootstrapIndex = state.launchctlCalls.findIndex(
-      (c) => c[0] === "bootstrap" && c[1] === domain && c[2] === plistPath,
-    );
+    const { serviceId, bootstrapIndex } = expectLaunchctlEnableBootstrapOrder(env);
     const kickstartIndex = state.launchctlCalls.findIndex(
-      (c) => c[0] === "kickstart" && c[1] === serviceId,
+      (c) => c[0] === "kickstart" && c[1] === "-k" && c[2] === serviceId,
     );
 
-    expect(enableIndex).toBeGreaterThanOrEqual(0);
-    expect(bootstrapIndex).toBeGreaterThanOrEqual(0);
     expect(kickstartIndex).toBeGreaterThanOrEqual(0);
-    expect(enableIndex).toBeLessThan(bootstrapIndex);
     expect(bootstrapIndex).toBeLessThan(kickstartIndex);
-    expect(state.launchctlCalls).not.toContainEqual(["kickstart", "-k", serviceId]);
   });
 });
 
@@ -204,7 +256,7 @@ describe("launchd install", () => {
     };
   }
 
-  it("enables service before bootstrap (clears persisted disabled state)", async () => {
+  it("enables service before bootstrap without self-restarting the fresh agent", async () => {
     const env = createDefaultLaunchdEnv();
     await installLaunchAgent({
       env,
@@ -212,20 +264,11 @@ describe("launchd install", () => {
       programArguments: defaultProgramArguments,
     });
 
-    const domain = typeof process.getuid === "function" ? `gui/${process.getuid()}` : "gui/501";
-    const label = "ai.openclaw.gateway";
-    const plistPath = resolveLaunchAgentPlistPath(env);
-    const serviceId = `${domain}/${label}`;
-
-    const enableIndex = state.launchctlCalls.findIndex(
-      (c) => c[0] === "enable" && c[1] === serviceId,
+    const { serviceId } = expectLaunchctlEnableBootstrapOrder(env);
+    const installKickstartIndex = state.launchctlCalls.findIndex(
+      (c) => c[0] === "kickstart" && c[2] === serviceId,
     );
-    const bootstrapIndex = state.launchctlCalls.findIndex(
-      (c) => c[0] === "bootstrap" && c[1] === domain && c[2] === plistPath,
-    );
-    expect(enableIndex).toBeGreaterThanOrEqual(0);
-    expect(bootstrapIndex).toBeGreaterThanOrEqual(0);
-    expect(enableIndex).toBeLessThan(bootstrapIndex);
+    expect(installKickstartIndex).toBe(-1);
   });
 
   it("writes TMPDIR to LaunchAgent environment when provided", async () => {
@@ -264,128 +307,94 @@ describe("launchd install", () => {
     expect(plist).toContain(`<integer>${LAUNCH_AGENT_THROTTLE_INTERVAL_SECONDS}</integer>`);
   });
 
-  it("restarts LaunchAgent with bootout-enable-bootstrap-kickstart order", async () => {
+  it("tightens writable bits on launch agent dirs and plist", async () => {
     const env = createDefaultLaunchdEnv();
-    await restartLaunchAgent({
+    state.dirs.add(env.HOME!);
+    state.dirModes.set(env.HOME!, 0o777);
+    state.dirs.add("/Users/test/Library");
+    state.dirModes.set("/Users/test/Library", 0o777);
+
+    await installLaunchAgent({
+      env,
+      stdout: new PassThrough(),
+      programArguments: defaultProgramArguments,
+    });
+
+    const plistPath = resolveLaunchAgentPlistPath(env);
+    expect(state.dirModes.get(env.HOME!)).toBe(0o755);
+    expect(state.dirModes.get("/Users/test/Library")).toBe(0o755);
+    expect(state.dirModes.get("/Users/test/Library/LaunchAgents")).toBe(0o755);
+    expect(state.fileModes.get(plistPath)).toBe(0o644);
+  });
+
+  it("restarts LaunchAgent with kickstart and no bootout", async () => {
+    const env = createDefaultLaunchdEnv();
+    const result = await restartLaunchAgent({
       env,
       stdout: new PassThrough(),
     });
 
     const domain = typeof process.getuid === "function" ? `gui/${process.getuid()}` : "gui/501";
     const label = "ai.openclaw.gateway";
-    const plistPath = resolveLaunchAgentPlistPath(env);
     const serviceId = `${domain}/${label}`;
-    const bootoutIndex = state.launchctlCalls.findIndex(
-      (c) => c[0] === "bootout" && c[1] === serviceId,
-    );
-    const enableIndex = state.launchctlCalls.findIndex(
-      (c) => c[0] === "enable" && c[1] === serviceId,
-    );
-    const bootstrapIndex = state.launchctlCalls.findIndex(
-      (c) => c[0] === "bootstrap" && c[1] === domain && c[2] === plistPath,
-    );
-    const kickstartIndex = state.launchctlCalls.findIndex(
-      (c) => c[0] === "kickstart" && c[1] === serviceId,
-    );
-
-    expect(bootoutIndex).toBeGreaterThanOrEqual(0);
-    expect(enableIndex).toBeGreaterThanOrEqual(0);
-    expect(bootstrapIndex).toBeGreaterThanOrEqual(0);
-    expect(kickstartIndex).toBeGreaterThanOrEqual(0);
-    expect(bootoutIndex).toBeLessThan(enableIndex);
-    expect(enableIndex).toBeLessThan(bootstrapIndex);
-    expect(bootstrapIndex).toBeLessThan(kickstartIndex);
-    expect(state.launchctlCalls).not.toContainEqual(["kickstart", "-k", serviceId]);
+    expect(result).toEqual({ outcome: "completed" });
+    expect(state.launchctlCalls).toContainEqual(["kickstart", "-k", serviceId]);
+    expect(state.launchctlCalls.some((call) => call[0] === "bootout")).toBe(false);
+    expect(state.launchctlCalls.some((call) => call[0] === "bootstrap")).toBe(false);
   });
 
-  it("waits for previous launchd pid to exit before bootstrapping", async () => {
+  it("falls back to bootstrap when kickstart cannot find the service", async () => {
     const env = createDefaultLaunchdEnv();
-    state.printOutput = ["state = running", "pid = 4242"].join("\n");
-    const killSpy = vi.spyOn(process, "kill");
-    killSpy
-      .mockImplementationOnce(() => true)
-      .mockImplementationOnce(() => {
-        const err = new Error("no such process") as NodeJS.ErrnoException;
-        err.code = "ESRCH";
-        throw err;
-      });
+    state.kickstartError = "Could not find service";
+    state.kickstartFailuresRemaining = 1;
 
-    vi.useFakeTimers();
-    try {
-      const restartPromise = restartLaunchAgent({
+    const result = await restartLaunchAgent({
+      env,
+      stdout: new PassThrough(),
+    });
+
+    const { serviceId } = expectLaunchctlEnableBootstrapOrder(env);
+    const kickstartCalls = state.launchctlCalls.filter(
+      (c) => c[0] === "kickstart" && c[1] === "-k" && c[2] === serviceId,
+    );
+
+    expect(result).toEqual({ outcome: "completed" });
+    expect(kickstartCalls).toHaveLength(2);
+    expect(state.launchctlCalls.some((call) => call[0] === "bootout")).toBe(false);
+  });
+
+  it("surfaces the original kickstart failure when the service is still loaded", async () => {
+    const env = createDefaultLaunchdEnv();
+    state.kickstartError = "Input/output error";
+    state.kickstartFailuresRemaining = 1;
+
+    await expect(
+      restartLaunchAgent({
         env,
         stdout: new PassThrough(),
-      });
-      await vi.advanceTimersByTimeAsync(250);
-      await restartPromise;
-      expect(killSpy).toHaveBeenCalledWith(4242, 0);
-      const domain = typeof process.getuid === "function" ? `gui/${process.getuid()}` : "gui/501";
-      const label = "ai.openclaw.gateway";
-      const bootoutIndex = state.launchctlCalls.findIndex(
-        (c) => c[0] === "bootout" && c[1] === `${domain}/${label}`,
-      );
-      const bootstrapIndex = state.launchctlCalls.findIndex((c) => c[0] === "bootstrap");
-      expect(bootoutIndex).toBeGreaterThanOrEqual(0);
-      expect(bootstrapIndex).toBeGreaterThanOrEqual(0);
-      expect(bootoutIndex).toBeLessThan(bootstrapIndex);
-    } finally {
-      vi.useRealTimers();
-      killSpy.mockRestore();
-    }
+      }),
+    ).rejects.toThrow("launchctl kickstart failed: Input/output error");
+
+    expect(state.launchctlCalls.some((call) => call[0] === "enable")).toBe(false);
+    expect(state.launchctlCalls.some((call) => call[0] === "bootstrap")).toBe(false);
   });
 
-  it("recovers via app bounce and re-bootstraps the gateway without kill kickstart", async () => {
+  it("hands restart off to a detached helper when invoked from the current LaunchAgent", async () => {
     const env = createDefaultLaunchdEnv();
-    state.dirs.add("/Applications/OpenClaw.app");
-    state.printOutputs.push(
-      ["state = running", "pid = 4242"].join("\n"),
-      ["state = running", "pid = 9001"].join("\n"),
-    );
-    const killSpy = vi.spyOn(process, "kill");
-    killSpy
-      .mockImplementationOnce(() => true)
-      .mockImplementationOnce(() => {
-        const err = new Error("no such process") as NodeJS.ErrnoException;
-        err.code = "ESRCH";
-        throw err;
-      })
-      .mockImplementationOnce(() => true)
-      .mockImplementationOnce(() => {
-        const err = new Error("no such process") as NodeJS.ErrnoException;
-        err.code = "ESRCH";
-        throw err;
-      });
+    launchdRestartHandoffState.isCurrentProcessLaunchdServiceLabel.mockReturnValue(true);
 
-    vi.useFakeTimers();
-    try {
-      const stdout = new PassThrough();
-      const recoverPromise = recoverLaunchAgentWithAppBounce({ env, stdout });
-      await vi.advanceTimersByTimeAsync(1_000);
-      await recoverPromise;
-      const domain = typeof process.getuid === "function" ? `gui/${process.getuid()}` : "gui/501";
-      const gatewayServiceId = `${domain}/ai.openclaw.gateway`;
-      const appServiceId = `${domain}/ai.openclaw.mac`;
-      const gatewayPlistPath = resolveLaunchAgentPlistPath(env);
-      expect(killSpy).toHaveBeenCalledWith(4242, 0);
-      expect(killSpy).toHaveBeenCalledWith(9001, 0);
-      expect(state.launchctlCalls).toContainEqual(["bootout", gatewayServiceId]);
-      expect(state.launchctlCalls).toContainEqual(["bootout", appServiceId]);
-      expect(state.launchctlCalls).toContainEqual(["enable", gatewayServiceId]);
-      expect(state.launchctlCalls).toContainEqual(["bootstrap", domain, gatewayPlistPath]);
-      expect(state.launchctlCalls).toContainEqual(["kickstart", gatewayServiceId]);
-      expect(state.launchctlCalls).not.toContainEqual(["kickstart", "-k", gatewayServiceId]);
-      expect(state.rawExecCalls).toContainEqual({
-        file: "/usr/bin/pkill",
-        args: ["-x", "OpenClaw"],
-      });
-      expect(state.rawExecCalls).toContainEqual({
-        file: "/usr/bin/open",
-        args: ["-g", "-a", "/Applications/OpenClaw.app"],
-      });
-    } finally {
-      vi.useRealTimers();
-      killSpy.mockRestore();
-    }
+    const result = await restartLaunchAgent({
+      env,
+      stdout: new PassThrough(),
+    });
+
+    expect(result).toEqual({ outcome: "scheduled" });
+    expect(launchdRestartHandoffState.scheduleDetachedLaunchdRestartHandoff).toHaveBeenCalledWith({
+      env,
+      mode: "kickstart",
+      waitForPid: process.pid,
+    });
+    expect(state.launchctlCalls).toEqual([]);
   });
 
   it("shows actionable guidance when launchctl gui domain does not support bootstrap", async () => {

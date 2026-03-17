@@ -122,5 +122,5 @@ export const clawlinePlugin: ChannelPlugin<ResolvedClawlineAccount> = {
       },
     }),
   },
-  outbound: clawlineOutbound,
+  outbound: { ...clawlineOutbound },
 };

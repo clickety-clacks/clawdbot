@@ -266,19 +266,12 @@ describe("gateway server sessions", () => {
           lastChannel: "whatsapp",
           lastTo: "+1555",
           lastAccountId: "work",
-          displayName: "Main",
-          channel: "whatsapp",
-          chatType: "dm",
-          sessionFile: path.join(dir, "sess-main.jsonl"),
+          lastThreadId: "1737500000.123456",
         },
         "discord:group:dev": {
           sessionId: "sess-group",
           updatedAt: stale,
           totalTokens: 50,
-          displayName: "Dev",
-          channel: "discord",
-          chatType: "group",
-          sessionFile: path.join(dir, "sess-group.jsonl"),
         },
         "agent:main:subagent:one": {
           sessionId: "sess-subagent",
@@ -344,6 +337,7 @@ describe("gateway server sessions", () => {
       channel: "whatsapp",
       to: "+1555",
       accountId: "work",
+      threadId: "1737500000.123456",
     });
 
     const active = await rpcReq<{
@@ -471,6 +465,18 @@ describe("gateway server sessions", () => {
     expect(spawnedPatched.ok).toBe(true);
     expect(spawnedPatched.payload?.entry.spawnedBy).toBe("agent:main:main");
 
+    const acpPatched = await rpcReq<{
+      ok: true;
+      entry: { spawnedBy?: string; spawnDepth?: number };
+    }>(ws, "sessions.patch", {
+      key: "agent:main:acp:child",
+      spawnedBy: "agent:main:main",
+      spawnDepth: 1,
+    });
+    expect(acpPatched.ok).toBe(true);
+    expect(acpPatched.payload?.entry.spawnedBy).toBe("agent:main:main");
+    expect(acpPatched.payload?.entry.spawnDepth).toBe(1);
+
     const spawnedPatchedInvalidKey = await rpcReq(ws, "sessions.patch", {
       key: "agent:main:main",
       spawnedBy: "agent:main:main",
@@ -545,10 +551,8 @@ describe("gateway server sessions", () => {
         sessionId: string;
         modelProvider?: string;
         model?: string;
-        displayName?: string;
-        channel?: string;
-        chatType?: string;
-        sessionFile?: string;
+        lastAccountId?: string;
+        lastThreadId?: string | number;
       };
     }>(ws, "sessions.reset", { key: "agent:main:main" });
     expect(reset.ok).toBe(true);
@@ -556,27 +560,16 @@ describe("gateway server sessions", () => {
     expect(reset.payload?.entry.sessionId).not.toBe("sess-main");
     expect(reset.payload?.entry.modelProvider).toBe("openai");
     expect(reset.payload?.entry.model).toBe("gpt-test-a");
-    expect(reset.payload?.entry.displayName).toBe("Main");
-    expect(reset.payload?.entry.channel).toBe("whatsapp");
-    expect(reset.payload?.entry.chatType).toBe("dm");
-    expect(reset.payload?.entry.sessionFile).toBe(path.join(dir, "sess-main.jsonl"));
+    expect(reset.payload?.entry.lastAccountId).toBe("work");
+    expect(reset.payload?.entry.lastThreadId).toBe("1737500000.123456");
+    const storeAfterReset = JSON.parse(await fs.readFile(storePath, "utf-8")) as Record<
+      string,
+      { lastAccountId?: string; lastThreadId?: string | number }
+    >;
+    expect(storeAfterReset["agent:main:main"]?.lastAccountId).toBe("work");
+    expect(storeAfterReset["agent:main:main"]?.lastThreadId).toBe("1737500000.123456");
     const filesAfterReset = await fs.readdir(dir);
     expect(filesAfterReset.some((f) => f.startsWith("sess-main.jsonl.reset."))).toBe(true);
-
-    const resetCustom = await rpcReq<{
-      ok: true;
-      key: string;
-      entry: {
-        sessionId: string;
-        displayName?: string;
-        channel?: string;
-        chatType?: string;
-        sessionFile?: string;
-      };
-    }>(ws, "sessions.reset", { key: "agent:main:discord:group:dev" });
-    expect(resetCustom.ok).toBe(true);
-    expect(resetCustom.payload?.key).toBe("agent:main:discord:group:dev");
-    expect(resetCustom.payload?.entry.sessionId).not.toBe("sess-group");
 
     const badThinking = await rpcReq(ws, "sessions.patch", {
       key: "agent:main:main",
@@ -610,6 +603,43 @@ describe("gateway server sessions", () => {
     const entry = await getMainPreviewEntry(ws);
     expect(entry?.items.map((item) => item.role)).toEqual(["assistant", "tool", "assistant"]);
     expect(entry?.items[1]?.text).toContain("call weather");
+
+    ws.close();
+  });
+
+  test("sessions.reset recomputes model from defaults instead of stale runtime model", async () => {
+    await createSessionStoreDir();
+    testState.agentConfig = {
+      model: {
+        primary: "openai/gpt-test-a",
+      },
+    };
+
+    await writeSessionStore({
+      entries: {
+        main: {
+          sessionId: "sess-stale-model",
+          updatedAt: Date.now(),
+          modelProvider: "qwencode",
+          model: "qwen3.5-plus-2026-02-15",
+          contextTokens: 123456,
+        },
+      },
+    });
+
+    const { ws } = await openClient();
+    const reset = await rpcReq<{
+      ok: true;
+      key: string;
+      entry: { sessionId: string; modelProvider?: string; model?: string; contextTokens?: number };
+    }>(ws, "sessions.reset", { key: "main" });
+
+    expect(reset.ok).toBe(true);
+    expect(reset.payload?.key).toBe("agent:main:main");
+    expect(reset.payload?.entry.sessionId).not.toBe("sess-stale-model");
+    expect(reset.payload?.entry.modelProvider).toBe("openai");
+    expect(reset.payload?.entry.model).toBe("gpt-test-a");
+    expect(reset.payload?.entry.contextTokens).toBeUndefined();
 
     ws.close();
   });

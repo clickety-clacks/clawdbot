@@ -927,7 +927,6 @@ type AdoptedSessionRow = {
   sessionKey: string;
   createdAt: number;
 };
-
 type StreamSessionRow = {
   userId: string;
   sessionKey: string;
@@ -1374,80 +1373,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     };
     await sendJson(session.socket, payload).catch(() => {});
   };
-
-  const resolveGatewaySessionStoreKeyForUser = (userId: string, sessionKey: string): string => {
-    const trimmed = sessionKey.trim();
-    if (!trimmed) {
-      return "";
-    }
-    const parsed = parseUserScopedAgentSessionKey(trimmed);
-    if (!parsed || parsed.userId !== sanitizeUserId(userId).toLowerCase()) {
-      return "";
-    }
-    const normalizedCandidate = normalizeSessionKey(trimmed);
-    const sessionStore = loadSessionStore(sessionStorePath);
-    for (const storedKey of Object.keys(sessionStore)) {
-      if (normalizeSessionKey(storedKey) === normalizedCandidate) {
-        return storedKey.trim();
-      }
-    }
-    return "";
-  };
-
-  const normalizeSendSessionKeyForUser = (userId: string, sessionKey: string): string => {
-    const streamKey = normalizeStreamMutationSessionKeyForUser(userId, sessionKey);
-    if (streamKey) {
-      return streamKey;
-    }
-    return resolveGatewaySessionStoreKeyForUser(userId, sessionKey);
-  };
-
-  const canRouteSessionKeyForSocket = (session: Session, sessionKey: string): boolean => {
-    const allowedSessionKeys = session.provisionedSessionKeys?.length
-      ? session.provisionedSessionKeys
-      : [session.sessionKey];
-    if (
-      allowedSessionKeys.some(
-        (allowedKey) => normalizeSessionKey(allowedKey) === normalizeSessionKey(sessionKey),
-      )
-    ) {
-      return true;
-    }
-    return Boolean(resolveGatewaySessionStoreKeyForUser(session.userId, sessionKey));
-  };
-
-  const resolveSendStreamLabelForSession = (session: Session, sessionKey: string): string => {
-    if (sessionKeyEq(sessionKey, session.personalSessionKey)) {
-      return "main";
-    }
-    if (session.dmScope !== "main" && sessionKeyEq(sessionKey, session.dmSessionKey)) {
-      return "dm";
-    }
-    if (sessionKeyEq(sessionKey, session.globalSessionKey)) {
-      return "global";
-    }
-    const parsed = parseClawlineUserSessionKey(sessionKey);
-    const normalizedUserId = sanitizeUserId(session.userId).toLowerCase();
-    if (parsed && parsed.userId === normalizedUserId) {
-      return parsed.streamSuffix;
-    }
-    if (resolveGatewaySessionStoreKeyForUser(session.userId, sessionKey)) {
-      return "main";
-    }
-    return "";
-  };
-
-  const ensureRuntimeSessionSubscription = (session: Session, sessionKey: string) => {
-    const trimmed = sessionKey.trim();
-    if (!trimmed) {
-      return;
-    }
-    const existingKeys = resolveSubscribedSessionKeys(session);
-    if (existingKeys.some((key) => sessionKeyEq(key, trimmed))) {
-      return;
-    }
-    session.sessionKeys = [...existingKeys, trimmed];
-  };
   async function notifyGatewayOfPending(entry: PendingEntry) {
     const name = entry.claimedName ?? "New device";
     const platform = entry.deviceInfo.platform || "Unknown platform";
@@ -1750,7 +1675,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         0,
         params.now,
         params.now,
-        0,
       );
     }
     return readStreamSessionsForUser(params.userId);
@@ -1894,6 +1818,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     if (!tableHasColumn("events", "sessionKey")) {
       database.exec(`ALTER TABLE events ADD COLUMN sessionKey TEXT`);
     }
+
     database.exec(`
       CREATE TABLE IF NOT EXISTS stream_sessions (
         userId TEXT NOT NULL,
@@ -1936,6 +1861,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     if (!tableHasColumn("stream_sessions", "adopted")) {
       database.exec(`ALTER TABLE stream_sessions ADD COLUMN adopted INTEGER NOT NULL DEFAULT 0`);
     }
+    database.exec(
+      `UPDATE stream_sessions SET adopted = 1 WHERE sessionKey NOT LIKE '%:clawline:%'`,
+    );
 
     const knownUsers = new Set<string>();
     for (const entry of allowlist.entries) {
@@ -2873,6 +2801,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         logHttpRequest("download_complete", { assetId });
         return;
       }
+      if (req.method === "GET" && parsedUrl.pathname === "/api/trackable-sessions") {
+        await handleListTrackableSessionsRequest(req, res);
+        return;
+      }
       if (parsedUrl.pathname === "/api/streams") {
         if (req.method === "GET") {
           await handleListStreamsRequest(req, res);
@@ -2897,10 +2829,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           return;
         }
       }
-      if (req.method === "GET" && parsedUrl.pathname === "/api/trackable-sessions") {
-        await handleListTrackableSessionsRequest(req, res);
-        return;
-      }
       if (
         parsedUrl.pathname === WEBROOT_PREFIX ||
         parsedUrl.pathname.startsWith(`${WEBROOT_PREFIX}/`)
@@ -2919,11 +2847,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       res.writeHead(404).end();
     } catch (err) {
       const pathName = req.url ? new URL(req.url, "http://localhost").pathname : "";
-      const isControlPlaneApi =
+      const isStreamApi =
         pathName === "/api/streams" ||
         pathName.startsWith("/api/streams/") ||
         pathName === "/api/trackable-sessions";
-      if (isControlPlaneApi) {
+      if (isStreamApi) {
         if (err instanceof HttpError) {
           sendStreamApiError(res, err.status, err.code, err.message);
         } else {
@@ -4675,7 +4603,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     res.writeHead(200);
     res.end(JSON.stringify({ stream }));
   }
-
   async function parseStreamsRequestBody(
     req: http.IncomingMessage,
   ): Promise<Record<string, unknown>> {
@@ -6335,12 +6262,28 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         }
       }
 
-      if (!canRouteSessionKeyForSocket(session, resolvedSessionKey)) {
+      const allowedSessionKeys = session.provisionedSessionKeys?.length
+        ? session.provisionedSessionKeys
+        : [session.sessionKey];
+      if (
+        !allowedSessionKeys.some(
+          (sessionKey) => sessionKey.toLowerCase() === resolvedSessionKey.toLowerCase(),
+        )
+      ) {
         resolvedSessionKey = session.sessionKey;
       }
-      ensureRuntimeSessionSubscription(session, resolvedSessionKey);
 
-      const streamSuffix = resolveSendStreamLabelForSession(session, resolvedSessionKey) || "main";
+      let streamSuffix: "main" | "dm" | "global" = "main";
+      if (sessionKeyEq(resolvedSessionKey, session.personalSessionKey)) {
+        streamSuffix = "main";
+      } else if (
+        session.dmScope !== "main" &&
+        sessionKeyEq(resolvedSessionKey, session.dmSessionKey)
+      ) {
+        streamSuffix = "dm";
+      } else if (sessionKeyEq(resolvedSessionKey, session.globalSessionKey)) {
+        streamSuffix = "global";
+      }
       if (streamSuffix === "global" && !session.isAdmin) {
         throw new ClientMessageError("forbidden", "Admin channel requires admin access");
       }

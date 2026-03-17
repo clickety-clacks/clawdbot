@@ -1,4 +1,5 @@
 import { ensureAuthProfileStore } from "../agents/auth-profiles.js";
+import { resolveDefaultAgentWorkspaceDir } from "../agents/workspace.js";
 import type { OpenClawConfig, GatewayAuthConfig } from "../config/config.js";
 import { isSecretRef, type SecretInput } from "../config/types.secrets.js";
 import type { RuntimeEnv } from "../runtime.js";
@@ -32,7 +33,6 @@ function sanitizeTokenValue(value: unknown): string | undefined {
 const ANTHROPIC_OAUTH_MODEL_KEYS = [
   "anthropic/claude-sonnet-4-6",
   "anthropic/claude-opus-4-6",
-  "anthropic/claude-sonnet-4-6",
   "anthropic/claude-opus-4-5",
   "anthropic/claude-sonnet-4-5",
   "anthropic/claude-haiku-4-5",
@@ -87,6 +87,7 @@ export async function promptAuthConfig(
       allowKeychainPrompt: false,
     }),
     includeSkip: true,
+    config: cfg,
   });
 
   let next = cfg;
@@ -108,7 +109,13 @@ export async function promptAuthConfig(
       prompter,
       allowKeep: true,
       ignoreAllowlist: true,
-      preferredProvider: resolvePreferredProviderForAuthChoice(authChoice),
+      includeProviderPluginSetups: true,
+      preferredProvider: resolvePreferredProviderForAuthChoice({
+        choice: authChoice,
+        config: next,
+      }),
+      workspaceDir: resolveDefaultAgentWorkspaceDir(),
+      runtime,
     });
     if (modelSelection.config) {
       next = modelSelection.config;

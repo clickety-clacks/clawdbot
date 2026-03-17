@@ -128,9 +128,9 @@ type TestServerContext = {
   allowlistPath: string;
   pendingPath: string;
   mediaPath: string;
+  sessionStorePath: string;
   alertInstructionsPath: string;
   webRootPath: string;
-  sessionStorePath: string;
   cleanup: () => Promise<void>;
 };
 
@@ -269,9 +269,9 @@ async function setupTestServer(
     allowlistPath,
     pendingPath,
     mediaPath,
+    sessionStorePath,
     alertInstructionsPath,
     webRootPath,
-    sessionStorePath,
     cleanup,
   };
 }
@@ -2685,7 +2685,6 @@ describe.sequential("clawline provider server", () => {
       await ctx.cleanup();
     }
   });
-
   it("accepts multiply-encoded stream session keys for rename and delete", async () => {
     const deviceId = randomUUID();
     const entry = createAllowlistEntry({
@@ -3109,21 +3108,12 @@ describe.sequential("clawline provider server", () => {
       const pair = await performPairRequest(ctx.port, entry.deviceId);
       const token = pair.token as string;
       const { ws } = await authenticateDevice(ctx.port, entry.deviceId, token);
-      const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
-      const writableDb = new BetterSqlite3(dbPath);
-      try {
-        writableDb
-          .prepare(`UPDATE stream_sessions SET adopted = 1 WHERE userId = ? AND sessionKey = ?`)
-          .run("flynn", customSessionKey);
-      } finally {
-        writableDb.close();
-      }
       const streamsResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       expect(streamsResponse.status).toBe(200);
       const streamsPayload = (await streamsResponse.json()) as {
-        streams: Array<{ sessionKey: string; kind: string; displayName: string; adopted: boolean }>;
+        streams: Array<{ sessionKey: string; kind: string; displayName: string }>;
       };
       expect(streamsPayload.streams).toEqual(
         expect.arrayContaining([
@@ -3131,7 +3121,6 @@ describe.sequential("clawline provider server", () => {
             sessionKey: "agent:main:clawline:flynn:main",
             kind: "main",
             displayName: "Personal",
-            adopted: false,
           }),
         ]),
       );
@@ -3140,10 +3129,7 @@ describe.sequential("clawline provider server", () => {
       );
       expect(
         streamsPayload.streams.some(
-          (stream) =>
-            stream.sessionKey === customSessionKey &&
-            stream.kind === "custom" &&
-            stream.adopted === true,
+          (stream) => stream.sessionKey === customSessionKey && stream.kind === "custom",
         ),
       ).toBe(true);
       expect(
@@ -3152,6 +3138,7 @@ describe.sequential("clawline provider server", () => {
         ),
       ).toBe(true);
 
+      const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
       const db = new BetterSqlite3(dbPath, { readonly: true });
       try {
         const userVersion = db.pragma("user_version", { simple: true }) as number;
@@ -3159,12 +3146,8 @@ describe.sequential("clawline provider server", () => {
         const eventsColumns = db.prepare(`PRAGMA table_info(events)`).all() as Array<{
           name: string;
         }>;
-        const streamColumns = db.prepare(`PRAGMA table_info(stream_sessions)`).all() as Array<{
-          name: string;
-        }>;
         expect(eventsColumns.some((col) => col.name === "eventType")).toBe(true);
         expect(eventsColumns.some((col) => col.name === "sessionKey")).toBe(true);
-        expect(streamColumns.some((col) => col.name === "adopted")).toBe(true);
         const row = db
           .prepare(`SELECT sessionKey, eventType FROM events WHERE id = ?`)
           .get("s_00000000-0000-0000-0000-000000000001") as
