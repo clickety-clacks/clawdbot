@@ -1816,6 +1816,145 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("reorders streams over batch PATCH and broadcasts stream_snapshot", async () => {
+    const deviceId1 = randomUUID();
+    const deviceId2 = randomUUID();
+    const entry1 = createAllowlistEntry({
+      deviceId: deviceId1,
+      userId: "flynn",
+      isAdmin: false,
+      tokenDelivered: true,
+    });
+    const entry2 = createAllowlistEntry({
+      deviceId: deviceId2,
+      userId: "flynn",
+      isAdmin: false,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry1, entry2]);
+    try {
+      const pair1 = await performPairRequest(ctx.port, deviceId1);
+      const pair2 = await performPairRequest(ctx.port, deviceId2);
+      const token1 = pair1.token as string;
+      const token2 = pair2.token as string;
+      const { ws: ws1 } = await authenticateDevice(ctx.port, deviceId1, token1);
+      const { ws: ws2 } = await authenticateDevice(ctx.port, deviceId2, token2);
+      const queue1 = createMessageQueue(ws1);
+      const queue2 = createMessageQueue(ws2);
+
+      const initialListResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
+        headers: { Authorization: `Bearer ${token1}` },
+      });
+      expect(initialListResponse.status).toBe(200);
+      const initialListPayload = (await initialListResponse.json()) as {
+        streams: Array<{ sessionKey: string }>;
+      };
+      const mainKey = initialListPayload.streams[0]?.sessionKey;
+      expect(mainKey).toBe("agent:main:clawline:flynn:main");
+
+      const createAlpha = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token1}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          idempotencyKey: "req_create_alpha",
+          displayName: "Alpha",
+        }),
+      });
+      expect(createAlpha.status).toBe(201);
+      const alphaPayload = (await createAlpha.json()) as { stream: { sessionKey: string } };
+      expect(await queue1.next()).toMatchObject({
+        type: "stream_created",
+        stream: { sessionKey: alphaPayload.stream.sessionKey },
+      });
+      expect(await queue2.next()).toMatchObject({
+        type: "stream_created",
+        stream: { sessionKey: alphaPayload.stream.sessionKey },
+      });
+
+      const createBravo = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token1}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          idempotencyKey: "req_create_bravo",
+          displayName: "Bravo",
+        }),
+      });
+      expect(createBravo.status).toBe(201);
+      const bravoPayload = (await createBravo.json()) as { stream: { sessionKey: string } };
+      expect(await queue1.next()).toMatchObject({
+        type: "stream_created",
+        stream: { sessionKey: bravoPayload.stream.sessionKey },
+      });
+      expect(await queue2.next()).toMatchObject({
+        type: "stream_created",
+        stream: { sessionKey: bravoPayload.stream.sessionKey },
+      });
+
+      const reorderResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${token1}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          sessionKeys: [bravoPayload.stream.sessionKey, mainKey, alphaPayload.stream.sessionKey],
+        }),
+      });
+      expect(reorderResponse.status).toBe(200);
+      const reorderedPayload = (await reorderResponse.json()) as {
+        streams: Array<{ sessionKey: string; orderIndex: number }>;
+      };
+      expect(reorderedPayload.streams).toMatchObject([
+        { sessionKey: bravoPayload.stream.sessionKey, orderIndex: 0 },
+        { sessionKey: mainKey, orderIndex: 1 },
+        { sessionKey: alphaPayload.stream.sessionKey, orderIndex: 2 },
+      ]);
+
+      expect(await queue1.next()).toMatchObject({
+        type: "stream_snapshot",
+        streams: [
+          { sessionKey: bravoPayload.stream.sessionKey, orderIndex: 0 },
+          { sessionKey: mainKey, orderIndex: 1 },
+          { sessionKey: alphaPayload.stream.sessionKey, orderIndex: 2 },
+        ],
+      });
+      expect(await queue2.next()).toMatchObject({
+        type: "stream_snapshot",
+        streams: [
+          { sessionKey: bravoPayload.stream.sessionKey, orderIndex: 0 },
+          { sessionKey: mainKey, orderIndex: 1 },
+          { sessionKey: alphaPayload.stream.sessionKey, orderIndex: 2 },
+        ],
+      });
+
+      const finalListResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
+        headers: { Authorization: `Bearer ${token1}` },
+      });
+      expect(finalListResponse.status).toBe(200);
+      const finalListPayload = (await finalListResponse.json()) as {
+        streams: Array<{ sessionKey: string }>;
+      };
+      expect(finalListPayload.streams.map((stream) => stream.sessionKey)).toEqual([
+        bravoPayload.stream.sessionKey,
+        mainKey,
+        alphaPayload.stream.sessionKey,
+      ]);
+
+      queue1.dispose();
+      queue2.dispose();
+      ws1.terminate();
+      ws2.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("sends stream_snapshot after auth_result and before replay", async () => {
     const deviceId = randomUUID();
     const entry = createAllowlistEntry({

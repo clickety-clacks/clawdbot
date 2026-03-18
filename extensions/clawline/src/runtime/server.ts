@@ -1459,6 +1459,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   let selectStreamMaxOrderStmt!: SqliteStatement;
   let insertStreamSessionStmt!: SqliteStatement;
   let updateStreamSessionDisplayNameStmt!: SqliteStatement;
+  let updateStreamSessionOrderStmt!: SqliteStatement;
   let updateStreamSessionBuiltInMetadataStmt!: SqliteStatement;
   let deleteStreamSessionStmt!: SqliteStatement;
   let selectStreamIdempotencyStmt!: SqliteStatement;
@@ -1474,6 +1475,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   let insertUserMessageTx!: ReturnType<SqliteDatabase["transaction"]>;
   let insertEventTx!: ReturnType<SqliteDatabase["transaction"]>;
   let deleteStreamDataTx!: ReturnType<SqliteDatabase["transaction"]>;
+  let reorderStreamSessionsTx!: ReturnType<SqliteDatabase["transaction"]>;
   let handleUpload!: AssetHandlers["handleUpload"];
   let handleDownload!: AssetHandlers["handleDownload"];
   let cleanupTmpDirectory!: AssetHandlers["cleanupTmpDirectory"];
@@ -2269,6 +2271,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
        SET displayName = ?, updatedAt = ?
        WHERE userId = ? AND sessionKey = ?`,
     );
+    updateStreamSessionOrderStmt = newDb.prepare(
+      `UPDATE stream_sessions
+       SET orderIndex = ?, updatedAt = ?
+       WHERE userId = ? AND sessionKey = ?`,
+    );
     updateStreamSessionBuiltInMetadataStmt = newDb.prepare(
       `UPDATE stream_sessions
        SET displayName = ?, kind = ?, isBuiltIn = 1, updatedAt = ?
@@ -2502,6 +2509,23 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       }
       return deletedAssetIds;
     });
+
+    reorderStreamSessionsTx = newDb.transaction(
+      (params: {
+        userId: string;
+        orderedSessionKeys: string[];
+        hiddenSessionKeys: string[];
+        now: number;
+      }) => {
+        const finalOrder = [...params.orderedSessionKeys, ...params.hiddenSessionKeys];
+        for (const [index, sessionKey] of finalOrder.entries()) {
+          updateStreamSessionOrderStmt.run(-(index + 1), params.now, params.userId, sessionKey);
+        }
+        for (const [index, sessionKey] of finalOrder.entries()) {
+          updateStreamSessionOrderStmt.run(index, params.now, params.userId, sessionKey);
+        }
+      },
+    );
 
     deleteExpiredStreamIdempotencyStmt.run(nowMs() - STREAM_IDEMPOTENCY_RETENTION_MS);
 
@@ -2808,6 +2832,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       if (parsedUrl.pathname === "/api/streams") {
         if (req.method === "GET") {
           await handleListStreamsRequest(req, res);
+          return;
+        }
+        if (req.method === "PATCH") {
+          await handleReorderStreamsRequest(req, res);
           return;
         }
         if (req.method === "POST") {
@@ -4775,6 +4803,77 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     res.setHeader("Content-Type", "application/json");
     res.writeHead(201);
     res.end(JSON.stringify(responseBody));
+  }
+
+  async function handleReorderStreamsRequest(req: http.IncomingMessage, res: http.ServerResponse) {
+    const auth = authenticateStreamHttpRequest(req);
+    const body = await parseStreamsRequestBody(req);
+    const rawSessionKeys = body.sessionKeys;
+    if (!Array.isArray(rawSessionKeys) || rawSessionKeys.length === 0) {
+      throw new HttpError(400, "invalid_request", "sessionKeys is required");
+    }
+    const requestedSessionKeys: string[] = [];
+    const seenSessionKeys = new Set<string>();
+    for (const rawSessionKey of rawSessionKeys) {
+      if (typeof rawSessionKey !== "string") {
+        throw new HttpError(400, "invalid_request", "sessionKeys must contain strings");
+      }
+      const normalizedSessionKey = normalizeStreamMutationSessionKeyForUser(
+        auth.userId,
+        rawSessionKey,
+      );
+      if (!normalizedSessionKey) {
+        throw new HttpError(404, "stream_not_found", "Stream not found");
+      }
+      if (seenSessionKeys.has(normalizedSessionKey)) {
+        throw new HttpError(400, "invalid_request", "sessionKeys must not contain duplicates");
+      }
+      seenSessionKeys.add(normalizedSessionKey);
+      requestedSessionKeys.push(normalizedSessionKey);
+    }
+    const streams = await runPerUserTask(auth.userId, async () =>
+      enqueueWriteTask(() => {
+        const currentStreams = ensureStreamSessionsForUser({
+          userId: auth.userId,
+          isAdmin: auth.isAdmin,
+        });
+        syncUserSessionSubscriptions(auth.userId, currentStreams);
+        const visibleStreams = filterStreamAccess(currentStreams, auth.isAdmin);
+        const visibleSessionKeys = visibleStreams.map((stream) => stream.sessionKey);
+        if (requestedSessionKeys.length !== visibleSessionKeys.length) {
+          throw new HttpError(
+            400,
+            "stream_reorder_requires_full_list",
+            "sessionKeys must include every visible stream exactly once",
+          );
+        }
+        const visibleSessionKeySet = new Set(visibleSessionKeys);
+        for (const sessionKey of requestedSessionKeys) {
+          if (!visibleSessionKeySet.has(sessionKey)) {
+            throw new HttpError(404, "stream_not_found", "Stream not found");
+          }
+        }
+        const hiddenSessionKeys = currentStreams
+          .map((stream) => stream.sessionKey)
+          .filter((sessionKey) => !visibleSessionKeySet.has(sessionKey));
+        reorderStreamSessionsTx({
+          userId: auth.userId,
+          orderedSessionKeys: requestedSessionKeys,
+          hiddenSessionKeys,
+          now: nowMs(),
+        });
+        const reorderedStreams = ensureStreamSessionsForUser({
+          userId: auth.userId,
+          isAdmin: auth.isAdmin,
+        });
+        syncUserSessionSubscriptions(auth.userId, reorderedStreams);
+        return filterStreamAccess(reorderedStreams, auth.isAdmin);
+      }),
+    );
+    await broadcastStreamEvent(auth.userId, { type: "stream_snapshot", streams });
+    res.setHeader("Content-Type", "application/json");
+    res.writeHead(200);
+    res.end(JSON.stringify({ streams }));
   }
 
   async function handleRenameStreamRequest(req: http.IncomingMessage, res: http.ServerResponse) {
