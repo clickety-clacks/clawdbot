@@ -206,10 +206,25 @@ export async function acquireGatewayLock(
         payload.startTime = startTime;
       }
       await handle.writeFile(JSON.stringify(payload), "utf8");
+
+      // Synchronous exit safety net: when process.exit() is called (e.g. from
+      // the unhandled-rejection handler), async release() never completes.
+      // This sync handler ensures the lock file is always removed on exit,
+      // preventing stale-lock restart loops under launchd/systemd.
+      const syncCleanup = () => {
+        try {
+          fsSync.rmSync(lockPath, { force: true });
+        } catch {
+          // best-effort; process is exiting
+        }
+      };
+      process.on("exit", syncCleanup);
+
       return {
         lockPath,
         configPath,
         release: async () => {
+          process.off("exit", syncCleanup);
           await handle.close().catch(() => undefined);
           await fs.rm(lockPath, { force: true });
         },
