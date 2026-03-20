@@ -2557,6 +2557,124 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("adopts arbitrary session keys without preexisting session metadata", async () => {
+    const deviceId = randomUUID();
+    const adoptedSessionKey = "agent:heimdal:main";
+    let capturedCtx: Record<string, unknown> | null = null;
+    const replyResolver: typeof testReplyResolver = async (ctx) => {
+      capturedCtx = ctx as unknown as Record<string, unknown>;
+      return { text: "arbitrary adopted ok" };
+    };
+    const entry = createAllowlistEntry({
+      deviceId,
+      userId: "flynn",
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry], { replyResolver });
+    try {
+      const pair = await performPairRequest(ctx.port, deviceId);
+      const token = pair.token as string;
+      const authed = await authenticateDevice(ctx.port, deviceId, token);
+      const queue = createMessageQueue(authed.ws);
+
+      const adoptResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams/adopt`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ sessionKey: adoptedSessionKey }),
+      });
+      expect(adoptResponse.status).toBe(200);
+      const adoptPayload = (await adoptResponse.json()) as {
+        stream: { sessionKey: string; displayName: string; adopted: boolean };
+      };
+      expect(adoptPayload.stream).toMatchObject({
+        sessionKey: adoptedSessionKey,
+        displayName: adoptedSessionKey,
+        adopted: true,
+      });
+
+      const messageId = `c_${randomUUID()}`;
+      authed.ws.send(
+        JSON.stringify({
+          type: "message",
+          id: messageId,
+          sessionKey: adoptedSessionKey,
+          content: "hello arbitrary adopted",
+        }),
+      );
+
+      const ack = await waitForQueuedMessage(queue, (value) => {
+        const typed = value as { type?: string; id?: string };
+        return typed?.type === "ack" && typed.id === messageId;
+      });
+      expect(ack).toMatchObject({ type: "ack", id: messageId });
+
+      const assistantMessage = (await waitForQueuedMessage(queue, (value) => {
+        const typed = value as { type?: string; role?: string; sessionKey?: string };
+        return (
+          typed?.type === "message" &&
+          typed.role === "assistant" &&
+          typed.sessionKey === adoptedSessionKey
+        );
+      })) as { sessionKey?: string; content?: string };
+      expect(assistantMessage).toMatchObject({
+        sessionKey: adoptedSessionKey,
+        content: "arbitrary adopted ok",
+      });
+
+      expect(capturedCtx).toMatchObject({
+        SessionKey: adoptedSessionKey,
+        Provider: "openclaw",
+        Surface: "openclaw",
+        OriginatingChannel: "openclaw",
+        OriginatingTo: adoptedSessionKey,
+      });
+
+      const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
+      const db = new BetterSqlite3(dbPath, { readonly: true });
+      try {
+        const adoptedRows = db
+          .prepare(`SELECT userId, sessionKey FROM adopted_sessions WHERE userId = ?`)
+          .all("flynn") as Array<{ userId: string; sessionKey: string }>;
+        expect(adoptedRows).toEqual([{ userId: "flynn", sessionKey: adoptedSessionKey }]);
+        const streamRows = db
+          .prepare(
+            `SELECT userId, sessionKey, displayName, kind, isBuiltIn, adopted
+             FROM stream_sessions
+             WHERE userId = ? AND sessionKey = ?`,
+          )
+          .all("flynn", adoptedSessionKey) as Array<{
+          userId: string;
+          sessionKey: string;
+          displayName: string;
+          kind: string;
+          isBuiltIn: number;
+          adopted: number;
+        }>;
+        expect(streamRows).toEqual([
+          {
+            userId: "flynn",
+            sessionKey: adoptedSessionKey,
+            displayName: adoptedSessionKey,
+            kind: "custom",
+            isBuiltIn: 0,
+            adopted: 1,
+          },
+        ]);
+      } finally {
+        db.close();
+      }
+
+      queue.dispose();
+      authed.ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("untracks adopted sessions via DELETE without crashing", async () => {
     const deviceId = randomUUID();
     const adoptedSessionKey = "agent:main:subagent:uuid";
