@@ -38,8 +38,10 @@ import { recordInboundSession } from "../../../../src/channels/session.js";
 import {
   resolveAgentIdFromSessionKey,
   loadSessionStore,
+  resolveAgentsDirFromSessionStorePath,
   resolveSessionStoreEntry,
   resolveSessionTranscriptPath,
+  type SessionEntry,
 } from "../../../../src/config/sessions.js";
 import { callGateway } from "../../../../src/gateway/call.js";
 import { ADMIN_SCOPE } from "../../../../src/gateway/method-scopes.js";
@@ -4481,18 +4483,47 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     });
   }
 
+  async function loadMergedSessionStoreForClawline(): Promise<Record<string, SessionEntry>> {
+    const mergedStore: Record<string, SessionEntry> = {};
+    const storePaths = new Set<string>([sessionStorePath]);
+    const agentsDir = resolveAgentsDirFromSessionStorePath(sessionStorePath);
+    if (agentsDir) {
+      try {
+        const agentDirs = await fs.readdir(agentsDir, { withFileTypes: true });
+        for (const agentDir of agentDirs) {
+          if (!agentDir.isDirectory()) {
+            continue;
+          }
+          storePaths.add(path.join(agentsDir, agentDir.name, "sessions", "sessions.json"));
+        }
+      } catch {
+        // Keep discovery/routing alive if the agents directory is unavailable.
+      }
+    }
+    for (const storePath of storePaths) {
+      const store = loadSessionStore(storePath);
+      for (const [sessionKey, entry] of Object.entries(store)) {
+        const existing = mergedStore[sessionKey];
+        if (!existing || (entry.updatedAt ?? 0) >= (existing.updatedAt ?? 0)) {
+          mergedStore[sessionKey] = entry;
+        }
+      }
+    }
+    return mergedStore;
+  }
+
   async function loadTrackableSessionsForAuthedUser(auth: {
     userId: string;
     isAdmin: boolean;
     excludedSessionKeys: Set<string>;
   }): Promise<TrackableSessionApiEntry[]> {
     return runPerUserTask(auth.userId, async () =>
-      enqueueWriteTask(() => {
+      enqueueWriteTask(async () => {
         const streams = readStreamSessionsForUser(auth.userId);
         const provisionedKeys = new Set(
           streams.map((stream) => normalizeSessionKey(stream.sessionKey)),
         );
-        const sessionStore = loadSessionStore(sessionStorePath);
+        const sessionStore = await loadMergedSessionStoreForClawline();
         const sessions = Object.entries(sessionStore).flatMap(
           ([sessionKey, entry]): TrackableSessionApiEntry[] => {
             const candidateKey = sessionKey.trim();
@@ -4553,11 +4584,26 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     res.end(JSON.stringify({ sessions }));
   }
 
-  function loadSessionStoreEntryForKey(sessionKey: string): {
-    normalizedSessionKey: string;
-    entry: ReturnType<typeof resolveSessionStoreEntry>["existing"];
-  } {
-    const store = loadSessionStore(sessionStorePath);
+  function loadSessionStoreEntryForKey(sessionKey: string):
+    | {
+        normalizedSessionKey: string;
+        entry: ReturnType<typeof resolveSessionStoreEntry>["existing"];
+      }
+    | Promise<{
+        normalizedSessionKey: string;
+        entry: ReturnType<typeof resolveSessionStoreEntry>["existing"];
+      }> {
+    const storePromise = loadMergedSessionStoreForClawline();
+    if (storePromise instanceof Promise) {
+      return storePromise.then((store) => {
+        const resolved = resolveSessionStoreEntry({ store, sessionKey });
+        return {
+          normalizedSessionKey: resolved.normalizedKey,
+          entry: resolved.existing,
+        };
+      });
+    }
+    const store = storePromise;
     const resolved = resolveSessionStoreEntry({ store, sessionKey });
     return {
       normalizedSessionKey: resolved.normalizedKey,
@@ -4573,7 +4619,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     if (!requestedSessionKey) {
       throw new HttpError(400, "invalid_session_key", "Invalid session key");
     }
-    const { normalizedSessionKey, entry } = loadSessionStoreEntryForKey(requestedSessionKey);
+    const { normalizedSessionKey, entry } = await loadSessionStoreEntryForKey(requestedSessionKey);
     if (!entry) {
       throw new HttpError(404, "stream_not_found", "Stream not found");
     }
@@ -5627,7 +5673,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   };
 
   const resolveAdoptedSessionTarget = (resolvedSessionKey: string): InboundMessageTarget => {
-    const { normalizedSessionKey, entry } = loadSessionStoreEntryForKey(resolvedSessionKey);
+    throw new Error("resolveAdoptedSessionTarget must not be called synchronously");
+  };
+
+  const resolveAdoptedSessionTargetAsync = async (
+    resolvedSessionKey: string,
+  ): Promise<InboundMessageTarget> => {
+    const { normalizedSessionKey, entry } = await loadSessionStoreEntryForKey(resolvedSessionKey);
     if (!entry) {
       throw new ClientMessageError("stream_not_found", "Stream not found");
     }
@@ -5652,10 +5704,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     };
   };
 
-  const resolveInboundMessageTarget = (
+  const resolveInboundMessageTarget = async (
     session: Session,
     resolvedSessionKey: string,
-  ): InboundMessageTarget => {
+  ): Promise<InboundMessageTarget> => {
     const isAdoptedSessionKey = session.adoptedSessionKeys.some((sessionKey) =>
       sessionKeyEq(sessionKey, resolvedSessionKey),
     );
@@ -5670,11 +5722,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     } else if (isAdoptedSessionKey) {
       // Adopted keys are treated as opaque provider sessions, even if the literal
       // session key overlaps the admin/global built-in key (for example agent:main:main).
-      return resolveAdoptedSessionTarget(resolvedSessionKey);
+      return await resolveAdoptedSessionTargetAsync(resolvedSessionKey);
     } else if (sessionKeyEq(resolvedSessionKey, session.globalSessionKey)) {
       streamSuffix = "global";
     } else if (!normalizeSessionKey(resolvedSessionKey).includes(":clawline:")) {
-      return resolveAdoptedSessionTarget(resolvedSessionKey);
+      return await resolveAdoptedSessionTargetAsync(resolvedSessionKey);
     } else {
       const parsed = parseClawlineUserSessionKey(resolvedSessionKey);
       const normalizedUserId = sanitizeUserId(session.userId).toLowerCase();
@@ -5764,7 +5816,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       ) {
         throw new ClientMessageError("stream_not_found", "Stream not found");
       }
-      const inboundTarget = resolveInboundMessageTarget(session, resolvedSessionKey);
+      const inboundTarget = await resolveInboundMessageTarget(session, resolvedSessionKey);
       markProcessStage("route_inbound_message");
       logger.info?.("[clawline] inbound message routing", {
         messageId: payload.id,

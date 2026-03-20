@@ -173,6 +173,7 @@ async function setupTestServer(
   initialAllowlist: AllowlistEntry[] = [],
   options: {
     alertInstructionsText?: string | null;
+    sessionStorePathRelative?: string;
     webRootFollowSymlinks?: boolean;
     webRootPathRelative?: string;
     seedLegacyDatabase?: (dbPath: string) => Promise<void>;
@@ -199,9 +200,10 @@ async function setupTestServer(
   await fs.writeFile(path.join(webRootPath, "index.html"), "<html><body>root index</body></html>");
   await fs.mkdir(path.join(mediaPath, "assets"), { recursive: true });
   await fs.mkdir(path.join(mediaPath, "tmp"), { recursive: true });
-  const sessionStoreDir = path.join(root, "sessions");
-  await fs.mkdir(sessionStoreDir, { recursive: true });
-  const sessionStorePath = path.join(sessionStoreDir, "sessions.json");
+  const sessionStorePathRelative =
+    options.sessionStorePathRelative ?? path.join("sessions", "sessions.json");
+  const sessionStorePath = path.join(root, sessionStorePathRelative);
+  await fs.mkdir(path.dirname(sessionStorePath), { recursive: true });
   const allowlistPath = path.join(statePath, "allowlist.json");
   await fs.writeFile(
     allowlistPath,
@@ -1984,24 +1986,27 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
-  it("lists any non-clawline, non-provisioned session-store entry", async () => {
+  it("lists any non-clawline, non-provisioned session-store entry across agent stores", async () => {
     const userId = "flynn";
     const deviceId = randomUUID();
     const now = Date.now();
     const excludedSessionKey = "agent:main:openclaw:flynn:s_local_adopted";
     const provisionedSessionKey = "agent:main:openclaw:flynn:s_provisioned";
-    const ctx = await setupTestServer([
-      {
-        claimedName: "Flynn",
-        deviceInfo: { platform: "iOS", model: "iPhone" },
-        userId,
-        isAdmin: true,
-        tokenDelivered: true,
-        createdAt: now - 5_000,
-        lastSeenAt: now - 2_000,
-        deviceId,
-      },
-    ]);
+    const ctx = await setupTestServer(
+      [
+        {
+          claimedName: "Flynn",
+          deviceInfo: { platform: "iOS", model: "iPhone" },
+          userId,
+          isAdmin: true,
+          tokenDelivered: true,
+          createdAt: now - 5_000,
+          lastSeenAt: now - 2_000,
+          deviceId,
+        },
+      ],
+      { sessionStorePathRelative: path.join("agents", "main", "sessions", "sessions.json") },
+    );
     try {
       await fs.writeFile(
         ctx.sessionStorePath,
@@ -2089,6 +2094,30 @@ describe.sequential("clawline provider server", () => {
           2,
         ),
       );
+      const heimdalSessionStorePath = path.join(
+        path.dirname(path.dirname(path.dirname(ctx.sessionStorePath))),
+        "heimdal",
+        "sessions",
+        "sessions.json",
+      );
+      await fs.mkdir(path.dirname(heimdalSessionStorePath), { recursive: true });
+      await fs.writeFile(
+        heimdalSessionStorePath,
+        JSON.stringify(
+          {
+            "agent:heimdal:main": {
+              sessionId: "sess_heimdal_main",
+              updatedAt: now - 60,
+              displayName: "Heimdal Main",
+              channel: "openclaw",
+              lastChannel: "openclaw",
+              lastTo: "agent:heimdal:main",
+            },
+          },
+          null,
+          2,
+        ),
+      );
 
       const pairResult = await performPairRequest(ctx.port, deviceId);
       const token = pairResult.token as string;
@@ -2141,6 +2170,14 @@ describe.sequential("clawline provider server", () => {
           channel: "openclaw",
         },
         {
+          sessionKey: "agent:heimdal:main",
+          displayName: "Heimdal Main",
+          updatedAt: now - 60,
+          channel: "openclaw",
+          lastChannel: "openclaw",
+          lastTo: "agent:heimdal:main",
+        },
+        {
           sessionKey: "agent:main:cron:nightly-digest:run:run-2",
           displayName: "Cron: Nightly digest (run-2)",
           updatedAt: now - 70,
@@ -2184,6 +2221,117 @@ describe.sequential("clawline provider server", () => {
       ]);
 
       ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("adopts and routes cross-agent sessions from merged session stores", async () => {
+    const deviceId = randomUUID();
+    const adoptedSessionKey = "agent:heimdal:main";
+    let capturedCtx: Record<string, unknown> | null = null;
+    const replyResolver: typeof testReplyResolver = async (ctx) => {
+      capturedCtx = ctx as unknown as Record<string, unknown>;
+      return { text: "heimdal adopted ok" };
+    };
+    const entry = createAllowlistEntry({
+      deviceId,
+      userId: "flynn",
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry], {
+      replyResolver,
+      sessionStorePathRelative: path.join("agents", "main", "sessions", "sessions.json"),
+    });
+    try {
+      const heimdalSessionStorePath = path.join(
+        path.dirname(path.dirname(path.dirname(ctx.sessionStorePath))),
+        "heimdal",
+        "sessions",
+        "sessions.json",
+      );
+      await fs.mkdir(path.dirname(heimdalSessionStorePath), { recursive: true });
+      await fs.writeFile(
+        heimdalSessionStorePath,
+        JSON.stringify(
+          {
+            [adoptedSessionKey]: {
+              sessionId: "sess_heimdal_main",
+              updatedAt: Date.now() - 100,
+              displayName: "Heimdal Main",
+              channel: "openclaw",
+              lastChannel: "openclaw",
+              lastTo: adoptedSessionKey,
+            },
+          },
+          null,
+          2,
+        ),
+      );
+
+      const pair = await performPairRequest(ctx.port, deviceId);
+      const token = pair.token as string;
+      const authed = await authenticateDevice(ctx.port, deviceId, token);
+      const queue = createMessageQueue(authed.ws);
+
+      const adoptResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams/adopt`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ sessionKey: adoptedSessionKey }),
+      });
+      expect(adoptResponse.status).toBe(200);
+      const adoptPayload = (await adoptResponse.json()) as {
+        stream: { sessionKey: string; displayName: string; adopted: boolean };
+      };
+      expect(adoptPayload.stream).toMatchObject({
+        sessionKey: adoptedSessionKey,
+        displayName: "Heimdal Main",
+        adopted: true,
+      });
+
+      const messageId = `c_${randomUUID()}`;
+      authed.ws.send(
+        JSON.stringify({
+          type: "message",
+          id: messageId,
+          sessionKey: adoptedSessionKey,
+          content: "hello heimdal adopted",
+        }),
+      );
+
+      const ack = await waitForQueuedMessage(queue, (value) => {
+        const typed = value as { type?: string; id?: string };
+        return typed?.type === "ack" && typed.id === messageId;
+      });
+      expect(ack).toMatchObject({ type: "ack", id: messageId });
+
+      const assistantMessage = (await waitForQueuedMessage(queue, (value) => {
+        const typed = value as { type?: string; role?: string; sessionKey?: string };
+        return (
+          typed?.type === "message" &&
+          typed.role === "assistant" &&
+          typed.sessionKey === adoptedSessionKey
+        );
+      })) as { sessionKey?: string; content?: string };
+      expect(assistantMessage).toMatchObject({
+        sessionKey: adoptedSessionKey,
+        content: "heimdal adopted ok",
+      });
+
+      expect(capturedCtx).toMatchObject({
+        SessionKey: adoptedSessionKey,
+        Provider: "openclaw",
+        Surface: "openclaw",
+        OriginatingChannel: "openclaw",
+        OriginatingTo: adoptedSessionKey,
+      });
+
+      queue.dispose();
+      authed.ws.terminate();
     } finally {
       await ctx.cleanup();
     }
