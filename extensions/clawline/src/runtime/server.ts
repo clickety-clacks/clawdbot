@@ -4485,6 +4485,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
   function loadMergedSessionStoreForClawline(): Record<string, SessionEntry> {
     const mergedStore: Record<string, SessionEntry> = {};
+    const storePaths = new Set<string>([sessionStorePath]);
     const clawlineSessionDiscoveryCfg = {
       ...openClawCfg,
       session: {
@@ -4493,7 +4494,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       },
     };
     for (const target of resolveAllAgentSessionStoreTargetsSync(clawlineSessionDiscoveryCfg)) {
-      const store = loadSessionStore(target.storePath);
+      storePaths.add(target.storePath);
+    }
+    for (const storePath of storePaths) {
+      const store = loadSessionStore(storePath);
       for (const [sessionKey, entry] of Object.entries(store)) {
         const existing = mergedStore[sessionKey];
         if (!existing || (entry.updatedAt ?? 0) >= (existing.updatedAt ?? 0)) {
