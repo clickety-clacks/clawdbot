@@ -4574,8 +4574,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       throw new HttpError(400, "invalid_session_key", "Invalid session key");
     }
     const { normalizedSessionKey, entry } = loadSessionStoreEntryForKey(requestedSessionKey);
+    if (!entry) {
+      throw new HttpError(404, "stream_not_found", "Stream not found");
+    }
     const displayName =
-      sanitizeLabel(entry?.displayName) ?? sanitizeLabel(entry?.label) ?? normalizedSessionKey;
+      sanitizeLabel(entry.displayName) ?? sanitizeLabel(entry.label) ?? normalizedSessionKey;
     const stream = await runPerUserTask(auth.userId, async () =>
       enqueueWriteTask(() => {
         const now = nowMs();
@@ -5625,12 +5628,16 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
   const resolveAdoptedSessionTarget = (resolvedSessionKey: string): InboundMessageTarget => {
     const { normalizedSessionKey, entry } = loadSessionStoreEntryForKey(resolvedSessionKey);
+    if (!entry) {
+      throw new ClientMessageError("stream_not_found", "Stream not found");
+    }
     const channelLabel =
-      normalizeChannelLabel(entry?.lastChannel) ||
-      normalizeChannelLabel(entry?.channel) ||
-      "openclaw";
+      normalizeChannelLabel(entry.lastChannel) || normalizeChannelLabel(entry.channel);
+    if (!channelLabel) {
+      throw new ClientMessageError("stream_not_found", "Stream not found");
+    }
     const originatingTo =
-      typeof entry?.lastTo === "string" && entry.lastTo.trim().length > 0
+      typeof entry.lastTo === "string" && entry.lastTo.trim().length > 0
         ? entry.lastTo.trim()
         : normalizedSessionKey;
     return {
