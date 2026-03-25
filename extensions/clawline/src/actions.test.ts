@@ -10,6 +10,22 @@ vi.mock("./runtime/outbound.js", () => {
 import { clawlineMessageActions } from "./actions.js";
 import { sendClawlineOutboundMessage } from "./runtime/outbound.js";
 
+type ClawlineHandleAction = NonNullable<typeof clawlineMessageActions.handleAction>;
+type ClawlineActionContext = Parameters<ClawlineHandleAction>[0];
+
+async function runClawlineAction(
+  ctx: Omit<ClawlineActionContext, "channel">,
+): ReturnType<ClawlineHandleAction> {
+  const handleAction = clawlineMessageActions.handleAction;
+  if (!handleAction) {
+    throw new Error("Clawline handleAction is not registered");
+  }
+  return await handleAction({
+    channel: "clawline",
+    ...ctx,
+  });
+}
+
 describe("clawlineMessageActions", () => {
   const fetchMock = vi.fn<typeof fetch>();
 
@@ -23,9 +39,9 @@ describe("clawlineMessageActions", () => {
     vi.unstubAllGlobals();
   });
 
-  it("lists stream actions when clawline is enabled", () => {
+  it("describes stream actions when clawline is enabled", () => {
     const cfg: OpenClawConfig = { channels: { clawline: { enabled: true } } };
-    expect(clawlineMessageActions.listActions({ cfg })).toEqual(
+    expect(clawlineMessageActions.describeMessageTool({ cfg })?.actions).toEqual(
       expect.arrayContaining([
         "sendAttachment",
         "channel-list",
@@ -53,7 +69,7 @@ describe("clawlineMessageActions", () => {
       assetIds: [],
     });
 
-    const result = await clawlineMessageActions.handleAction({
+    const result = await runClawlineAction({
       action: "sendAttachment",
       params: {
         target: "flynn:main",
@@ -95,7 +111,7 @@ describe("clawlineMessageActions", () => {
       const cfg: OpenClawConfig = { channels: { clawline: { enabled: true } } };
       vi.mocked(sendClawlineOutboundMessage).mockImplementationOnce(() => new Promise(() => {}));
 
-      const promise = clawlineMessageActions.handleAction({
+      const promise = runClawlineAction({
         action: "sendAttachment",
         params: {
           target: "flynn:main",
@@ -137,7 +153,7 @@ describe("clawlineMessageActions", () => {
       ),
     );
 
-    const result = await clawlineMessageActions.handleAction({
+    const result = await runClawlineAction({
       action: "channel-list",
       params: { userId: "flynn" },
       cfg,
@@ -206,7 +222,7 @@ describe("clawlineMessageActions", () => {
         ),
       );
 
-    const created = await clawlineMessageActions.handleAction({
+    const created = await runClawlineAction({
       action: "channel-create",
       params: {
         userId: "flynn",
@@ -217,7 +233,7 @@ describe("clawlineMessageActions", () => {
       accountId: null,
     });
     const sessionKey = "agent:main:clawline:flynn:s_deadbeef";
-    const renamed = await clawlineMessageActions.handleAction({
+    const renamed = await runClawlineAction({
       action: "channel-edit",
       params: {
         userId: "flynn",
@@ -227,7 +243,7 @@ describe("clawlineMessageActions", () => {
       cfg,
       accountId: null,
     });
-    const deleted = await clawlineMessageActions.handleAction({
+    const deleted = await runClawlineAction({
       action: "channel-delete",
       params: {
         userId: "flynn",
@@ -305,7 +321,7 @@ describe("clawlineMessageActions", () => {
       ),
     );
 
-    const result = await clawlineMessageActions.handleAction({
+    const result = await runClawlineAction({
       action: "channel-edit",
       params: {
         userId: "flynn",
@@ -328,7 +344,7 @@ describe("clawlineMessageActions", () => {
     const cfg: OpenClawConfig = { channels: { clawline: { enabled: true } } };
 
     await expect(
-      clawlineMessageActions.handleAction({
+      runClawlineAction({
         action: "channel-list",
         params: { userId: "flynn", token: "legacy-token" },
         cfg,
@@ -343,7 +359,7 @@ describe("clawlineMessageActions", () => {
     } as OpenClawConfig;
 
     await expect(
-      clawlineMessageActions.handleAction({
+      runClawlineAction({
         action: "channel-create",
         params: { displayName: "Research" },
         cfg,

@@ -6,8 +6,10 @@ import type { ChannelId } from "../channels/plugins/types.js";
 import type { OpenClawConfig } from "../config/config.js";
 import { readJsonBodyWithLimit, requestBodyErrorToText } from "../infra/http-body.js";
 import { normalizeAgentId, parseAgentSessionKey } from "../routing/session-key.js";
+import type { HookExternalContentSource } from "../security/external-content.js";
 import { normalizeMessageChannel } from "../utils/message-channel.js";
 import { type HookMappingResolved, resolveHookMappings } from "./hooks-mapping.js";
+import { resolveAllowedAgentIds } from "./hooks-policy.js";
 
 const DEFAULT_HOOKS_PATH = "/hooks";
 const DEFAULT_HOOKS_MAX_BODY_BYTES = 256 * 1024;
@@ -17,7 +19,6 @@ export type HooksConfigResolved = {
   basePath: string;
   token: string;
   maxBodyBytes: number;
-  wakeOverlayPath?: string;
   mappings: HookMappingResolved[];
   agentPolicy: HookAgentPolicyResolved;
   sessionPolicy: HookSessionPolicyResolved;
@@ -53,7 +54,6 @@ export function resolveHooksConfig(cfg: OpenClawConfig): HooksConfigResolved | n
     cfg.hooks?.maxBodyBytes && cfg.hooks.maxBodyBytes > 0
       ? cfg.hooks.maxBodyBytes
       : DEFAULT_HOOKS_MAX_BODY_BYTES;
-  const wakeOverlayPath = resolveWakeOverlayPath(cfg.hooks?.wakeOverlayPath);
   const mappings = resolveHookMappings(cfg.hooks);
   const defaultAgentId = resolveDefaultAgentId(cfg);
   const knownAgentIds = resolveKnownAgentIds(cfg, defaultAgentId);
@@ -82,7 +82,6 @@ export function resolveHooksConfig(cfg: OpenClawConfig): HooksConfigResolved | n
     basePath: trimmed,
     token,
     maxBodyBytes,
-    wakeOverlayPath,
     mappings,
     agentPolicy: {
       defaultAgentId,
@@ -103,35 +102,7 @@ function resolveKnownAgentIds(cfg: OpenClawConfig, defaultAgentId: string): Set<
   return known;
 }
 
-export function resolveAllowedAgentIds(raw: string[] | undefined): Set<string> | undefined {
-  if (!Array.isArray(raw)) {
-    return undefined;
-  }
-  const allowed = new Set<string>();
-  let hasWildcard = false;
-  for (const entry of raw) {
-    const trimmed = entry.trim();
-    if (!trimmed) {
-      continue;
-    }
-    if (trimmed === "*") {
-      hasWildcard = true;
-      break;
-    }
-    allowed.add(normalizeAgentId(trimmed));
-  }
-  if (hasWildcard) {
-    return undefined;
-  }
-  return allowed;
-}
-
 function resolveSessionKey(raw: string | undefined): string | undefined {
-  const value = raw?.trim();
-  return value ? value : undefined;
-}
-
-function resolveWakeOverlayPath(raw: string | undefined): string | undefined {
   const value = raw?.trim();
   return value ? value : undefined;
 }
@@ -246,6 +217,7 @@ export type HookAgentPayload = {
 export type HookAgentDispatchPayload = Omit<HookAgentPayload, "sessionKey"> & {
   sessionKey: string;
   allowUnsafeExternalContent?: boolean;
+  externalContentSource?: HookExternalContentSource;
 };
 
 const listHookChannelValues = () => ["last", ...listChannelPlugins().map((plugin) => plugin.id)];

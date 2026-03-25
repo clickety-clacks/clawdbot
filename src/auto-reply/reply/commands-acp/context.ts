@@ -1,13 +1,76 @@
 import {
+  buildFeishuConversationId,
+  parseFeishuDirectConversationId,
+  parseFeishuTargetId,
+} from "../../../../extensions/feishu/api.js";
+import {
   buildTelegramTopicConversationId,
   normalizeConversationText,
   parseTelegramChatIdFromTarget,
 } from "../../../acp/conversation-id.js";
 import { DISCORD_THREAD_BINDING_CHANNEL } from "../../../channels/thread-bindings-policy.js";
 import { resolveConversationIdFromTargets } from "../../../infra/outbound/conversation-id.js";
+import { getSessionBindingService } from "../../../infra/outbound/session-binding-service.js";
+import { parseAgentSessionKey } from "../../../routing/session-key.js";
 import type { HandleCommandsParams } from "../commands-types.js";
 import { parseDiscordParentChannelFromSessionKey } from "../discord-parent-channel.js";
+import {
+  resolveMatrixConversationId,
+  resolveMatrixParentConversationId,
+} from "../matrix-context.js";
 import { resolveTelegramConversationId } from "../telegram-context.js";
+
+function resolveFeishuSenderScopedConversationId(params: {
+  accountId: string;
+  parentConversationId?: string;
+  threadId?: string;
+  senderId?: string;
+  sessionKey?: string;
+  parentSessionKey?: string;
+}): string | undefined {
+  const parentConversationId = normalizeConversationText(params.parentConversationId);
+  const threadId = normalizeConversationText(params.threadId);
+  const senderId = normalizeConversationText(params.senderId);
+  const expectedScopePrefix = `feishu:group:${parentConversationId?.toLowerCase()}:topic:${threadId?.toLowerCase()}:sender:`;
+  const isSenderScopedSession = [params.sessionKey, params.parentSessionKey].some((candidate) => {
+    const scopedRest = parseAgentSessionKey(candidate)?.rest?.trim().toLowerCase() ?? "";
+    return Boolean(scopedRest && expectedScopePrefix && scopedRest.startsWith(expectedScopePrefix));
+  });
+  if (!parentConversationId || !threadId || !senderId) {
+    return undefined;
+  }
+  if (!isSenderScopedSession && params.sessionKey?.trim()) {
+    const boundConversation = getSessionBindingService()
+      .listBySession(params.sessionKey)
+      .find((binding) => {
+        if (
+          binding.conversation.channel !== "feishu" ||
+          binding.conversation.accountId !== params.accountId
+        ) {
+          return false;
+        }
+        return (
+          binding.conversation.conversationId ===
+          buildFeishuConversationId({
+            chatId: parentConversationId,
+            scope: "group_topic_sender",
+            topicId: threadId,
+            senderOpenId: senderId,
+          })
+        );
+      });
+    if (boundConversation) {
+      return boundConversation.conversation.conversationId;
+    }
+    return undefined;
+  }
+  return buildFeishuConversationId({
+    chatId: parentConversationId,
+    scope: "group_topic_sender",
+    topicId: threadId,
+    senderOpenId: senderId,
+  });
+}
 
 export function resolveAcpCommandChannel(params: HandleCommandsParams): string {
   const raw =
@@ -33,6 +96,18 @@ export function resolveAcpCommandThreadId(params: HandleCommandsParams): string 
 
 export function resolveAcpCommandConversationId(params: HandleCommandsParams): string | undefined {
   const channel = resolveAcpCommandChannel(params);
+  if (channel === "matrix") {
+    return resolveMatrixConversationId({
+      ctx: {
+        MessageThreadId: params.ctx.MessageThreadId,
+        OriginatingTo: params.ctx.OriginatingTo,
+        To: params.ctx.To,
+      },
+      command: {
+        to: params.command.to,
+      },
+    });
+  }
   if (channel === "telegram") {
     const telegramConversationId = resolveTelegramConversationId({
       ctx: {
@@ -58,6 +133,33 @@ export function resolveAcpCommandConversationId(params: HandleCommandsParams): s
       );
     }
   }
+  if (channel === "feishu") {
+    const threadId = resolveAcpCommandThreadId(params);
+    const parentConversationId = resolveAcpCommandParentConversationId(params);
+    if (threadId && parentConversationId) {
+      const senderScopedConversationId = resolveFeishuSenderScopedConversationId({
+        accountId: resolveAcpCommandAccountId(params),
+        parentConversationId,
+        threadId,
+        senderId: params.command.senderId ?? params.ctx.SenderId,
+        sessionKey: params.sessionKey,
+        parentSessionKey: params.ctx.ParentSessionKey,
+      });
+      return (
+        senderScopedConversationId ??
+        buildFeishuConversationId({
+          chatId: parentConversationId,
+          scope: "group_topic",
+          topicId: threadId,
+        })
+      );
+    }
+    return (
+      parseFeishuDirectConversationId(params.ctx.OriginatingTo) ??
+      parseFeishuDirectConversationId(params.command.to) ??
+      parseFeishuDirectConversationId(params.ctx.To)
+    );
+  }
   return resolveConversationIdFromTargets({
     threadId: params.ctx.MessageThreadId,
     targets: [params.ctx.OriginatingTo, params.command.to, params.ctx.To],
@@ -76,11 +178,34 @@ export function resolveAcpCommandParentConversationId(
   params: HandleCommandsParams,
 ): string | undefined {
   const channel = resolveAcpCommandChannel(params);
+  if (channel === "matrix") {
+    return resolveMatrixParentConversationId({
+      ctx: {
+        MessageThreadId: params.ctx.MessageThreadId,
+        OriginatingTo: params.ctx.OriginatingTo,
+        To: params.ctx.To,
+      },
+      command: {
+        to: params.command.to,
+      },
+    });
+  }
   if (channel === "telegram") {
     return (
       parseTelegramChatIdFromTarget(params.ctx.OriginatingTo) ??
       parseTelegramChatIdFromTarget(params.command.to) ??
       parseTelegramChatIdFromTarget(params.ctx.To)
+    );
+  }
+  if (channel === "feishu") {
+    const threadId = resolveAcpCommandThreadId(params);
+    if (!threadId) {
+      return undefined;
+    }
+    return (
+      parseFeishuTargetId(params.ctx.OriginatingTo) ??
+      parseFeishuTargetId(params.command.to) ??
+      parseFeishuTargetId(params.ctx.To)
     );
   }
   if (channel === DISCORD_THREAD_BINDING_CHANNEL) {

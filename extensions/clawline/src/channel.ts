@@ -1,8 +1,9 @@
 import type { ChannelPlugin, OpenClawConfig } from "openclaw/plugin-sdk";
-import { buildChannelConfigSchema, DEFAULT_ACCOUNT_ID } from "openclaw/plugin-sdk";
+import { DEFAULT_ACCOUNT_ID } from "openclaw/plugin-sdk/account-id";
+import { buildChannelConfigSchema } from "openclaw/plugin-sdk/channel-config-schema";
 import { clawlineMessageActions } from "./actions.js";
 import { ClawlineConfigSchema } from "./config-schema.js";
-import { clawlineOnboardingAdapter } from "./onboarding.js";
+import { clawlineSetupAdapter, clawlineSetupWizard } from "./onboarding.js";
 import { clawlineOutbound } from "./outbound.js";
 import { ClawlineDeliveryTarget } from "./runtime/routing.js";
 
@@ -36,7 +37,7 @@ const meta = {
   blurb: "first-party local gateway; enable via config/onboarding.",
   aliases: ["clawline-dm"],
   order: 10,
-} as const;
+};
 
 function resolveClawlineAccount(params: {
   cfg: OpenClawConfig;
@@ -56,8 +57,10 @@ export const clawlinePlugin: ChannelPlugin<ResolvedClawlineAccount> = {
   meta: {
     ...meta,
     showConfigured: false,
+    aliases: [...meta.aliases],
   },
-  onboarding: clawlineOnboardingAdapter,
+  setupWizard: clawlineSetupWizard,
+  setup: clawlineSetupAdapter,
   capabilities: {
     chatTypes: ["direct"],
     media: true,
@@ -85,12 +88,13 @@ export const clawlinePlugin: ChannelPlugin<ResolvedClawlineAccount> = {
   },
   threading: {
     buildToolContext: ({ context, hasRepliedRef }) => {
-      if (!context.OriginatingTo) {
+      const currentTarget = context.NativeChannelId?.trim() || context.To?.trim();
+      if (!currentTarget) {
         return undefined;
       }
       let target: ClawlineDeliveryTarget;
       try {
-        target = ClawlineDeliveryTarget.fromString(context.OriginatingTo);
+        target = ClawlineDeliveryTarget.fromString(currentTarget);
       } catch {
         return undefined;
       }

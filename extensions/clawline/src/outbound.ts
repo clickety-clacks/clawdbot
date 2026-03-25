@@ -1,4 +1,5 @@
-import { loadWebMedia, type ChannelOutboundAdapter } from "openclaw/plugin-sdk";
+import type { ChannelOutboundAdapter } from "openclaw/plugin-sdk/channel-send-result";
+import { loadWebMedia } from "openclaw/plugin-sdk/web-media";
 import { sendClawlineOutboundMessage } from "./runtime/outbound.js";
 
 function chunkTextForClawline(text: string, limit: number): string[] {

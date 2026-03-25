@@ -1,14 +1,14 @@
 import { randomBytes } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
+import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import BetterSqlite3 from "better-sqlite3";
 import type {
-  AgentToolResult,
   ChannelMessageActionAdapter,
   ChannelMessageActionName,
   OpenClawConfig,
 } from "openclaw/plugin-sdk";
-import { jsonResult } from "openclaw/plugin-sdk";
+import { jsonResult } from "openclaw/plugin-sdk/agent-runtime";
 import { sendClawlineOutboundMessage } from "./runtime/outbound.js";
 
 const DEFAULT_CLAWLINE_PORT = 18800;
@@ -331,7 +331,7 @@ async function readClawlineMessages(params: {
   const dbPath = resolveClawlineDbPath(cfg);
   const normalizedSessionKey = params.sessionKey?.trim().toLowerCase();
 
-  let db: BetterSqlite3.Database | null = null;
+  let db: import("better-sqlite3").Database | null = null;
   try {
     db = new BetterSqlite3(dbPath, { readonly: true, fileMustExist: true, timeout: 5000 });
 
@@ -401,54 +401,25 @@ async function readClawlineMessages(params: {
   }
 }
 
-async function listClawlineUsers(params: {
-  cfg: OpenClawConfig;
-}): Promise<{ ok: boolean; users: { userId: string; messageCount: number }[]; error?: string }> {
-  const { cfg } = params;
-  const dbPath = resolveClawlineDbPath(cfg);
-
-  let db: BetterSqlite3.Database | null = null;
-  try {
-    db = new BetterSqlite3(dbPath, { readonly: true, fileMustExist: true, timeout: 5000 });
-
-    const stmt = db.prepare(`
-      SELECT userId, COUNT(*) as messageCount
-      FROM events
-      GROUP BY userId
-      ORDER BY MAX(timestamp) DESC
-    `);
-    const rows = stmt.all() as { userId: string; messageCount: number }[];
-
-    return { ok: true, users: rows };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return { ok: false, users: [], error: message };
-  } finally {
-    db?.close();
-  }
-}
-
 export const clawlineMessageActions: ChannelMessageActionAdapter = {
-  listActions: ({ cfg }) => {
+  describeMessageTool: ({ cfg }) => {
     if (!cfg.channels?.clawline?.enabled) {
-      return [];
+      return null;
     }
     const actions: ChannelMessageActionName[] = [
       "send",
       "sendAttachment",
       "read",
-      "list-users",
       "channel-list",
       "channel-create",
       "channel-edit",
       "channel-delete",
     ];
-    return actions;
+    return { actions };
   },
   supportsAction: ({ action }) =>
     action === "sendAttachment" ||
     action === "read" ||
-    action === "list-users" ||
     action === "channel-list" ||
     action === "channel-create" ||
     action === "channel-edit" ||
@@ -500,11 +471,6 @@ export const clawlineMessageActions: ChannelMessageActionAdapter = {
           : 20;
 
       const result = await readClawlineMessages({ cfg, userId, limit, channelType, sessionKey });
-      return jsonResult(result);
-    }
-
-    if (action === "list-users") {
-      const result = await listClawlineUsers({ cfg });
       return jsonResult(result);
     }
 
