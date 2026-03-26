@@ -398,11 +398,16 @@ export const GENERATED_BUNDLED_PLUGIN_METADATA = [
       source: "./index.ts",
       built: "index.js",
     },
+    setupSource: {
+      source: "./setup-entry.ts",
+      built: "setup-entry.js",
+    },
     packageName: "@openclaw/clawline",
     packageVersion: "2026.3.8",
     packageDescription: "OpenClaw Clawline channel plugin",
     packageManifest: {
       extensions: ["./index.ts"],
+      setupEntry: "./setup-entry.ts",
       channel: {
         id: "clawline",
         label: "Clawline",

@@ -90,15 +90,14 @@ const clawlinePluginBase = createChannelPluginBase({
       }),
   },
   setup: clawlineSetupAdapter,
-});
+}) as ReturnType<typeof createChannelPluginBase<ResolvedClawlineAccount>> &
+  Pick<
+    ChannelPlugin<ResolvedClawlineAccount>,
+    "setupWizard" | "capabilities" | "reload" | "configSchema" | "config"
+  >;
 
-export const clawlinePlugin: ChannelPlugin<ResolvedClawlineAccount> = {
+export const clawlinePlugin = {
   ...clawlinePluginBase,
-  setupWizard: clawlinePluginBase.setupWizard!,
-  capabilities: clawlinePluginBase.capabilities!,
-  reload: clawlinePluginBase.reload!,
-  configSchema: clawlinePluginBase.configSchema!,
-  config: clawlinePluginBase.config!,
   // Clawline runs as a plugin service, not a channel gateway startAccount loop.
   // Mark runtime as running so gateway health-monitor does not treat it as stopped.
   status: {
@@ -136,5 +135,5 @@ export const clawlinePlugin: ChannelPlugin<ResolvedClawlineAccount> = {
       };
     },
   },
-  outbound: { ...clawlineOutbound },
-};
+  outbound: clawlineOutbound,
+} satisfies ChannelPlugin<ResolvedClawlineAccount>;
