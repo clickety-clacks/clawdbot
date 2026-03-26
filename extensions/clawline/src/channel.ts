@@ -81,6 +81,7 @@ const clawlinePluginBase = createChannelPluginBase({
   configSchema: buildChannelConfigSchema(ClawlineConfigSchema),
   config: {
     ...clawlineConfigAdapter,
+    deleteAccount: undefined,
     isConfigured: (account) => account.configured,
     describeAccount: (account) =>
       describeAccountSnapshot({
