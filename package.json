@@ -157,6 +157,10 @@
       "types": "./dist/plugin-sdk/text-runtime.d.ts",
       "default": "./dist/plugin-sdk/text-runtime.js"
     },
+    "./plugin-sdk/text-chunking": {
+      "types": "./dist/plugin-sdk/text-chunking.d.ts",
+      "default": "./dist/plugin-sdk/text-chunking.js"
+    },
     "./plugin-sdk/agent-runtime": {
       "types": "./dist/plugin-sdk/agent-runtime.d.ts",
       "default": "./dist/plugin-sdk/agent-runtime.js"

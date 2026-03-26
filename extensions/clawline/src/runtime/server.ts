@@ -15,51 +15,45 @@ import jwt from "jsonwebtoken";
 import { type Dispatcher } from "undici";
 import WebSocket, { WebSocketServer } from "ws";
 import {
+  ADMIN_SCOPE,
+  DEFAULT_ACCOUNT_ID,
+  DEFAULT_AGENT_WORKSPACE_DIR,
+  callGateway,
+  closeDispatcher,
+  createPinnedDispatcher,
+  createReplyDispatcherWithTyping,
+  detectMime,
+  dispatchReplyFromConfig,
+  enqueueAnnounce,
+  extractShortModelName,
+  finalizeInboundContext,
+  getFollowupQueueDepth,
+  hasAlphaChannel,
+  isCronRunSessionKey,
+  loadSessionStore,
+  loadGatewayTlsRuntime,
+  maxBytesForKind,
+  mediaKindFromMime,
+  optimizeImageToJpeg,
+  optimizeImageToPng,
+  parseAgentSessionKey,
+  rawDataToString,
+  recordInboundSession,
+  resolveAgentIdFromSessionKey,
+  resolveAllAgentSessionStoreTargetsSync,
   resolveEffectiveMessagesConfig,
   resolveHumanDelayConfig,
   resolveIdentityName,
-} from "../../../../src/agents/identity.js";
-import {
-  type AnnounceQueueItem,
-  enqueueAnnounce,
-} from "../../../../src/agents/subagent-announce-queue.js";
-import { DEFAULT_AGENT_WORKSPACE_DIR } from "../../../../src/agents/workspace.js";
-import { dispatchReplyFromConfig } from "../../../../src/auto-reply/reply/dispatch-from-config.js";
-import { finalizeInboundContext } from "../../../../src/auto-reply/reply/inbound-context.js";
-import {
-  getFollowupQueueDepth,
   resolveQueueSettings,
-} from "../../../../src/auto-reply/reply/queue.js";
-import { createReplyDispatcherWithTyping } from "../../../../src/auto-reply/reply/reply-dispatcher.js";
-import type { ResponsePrefixContext } from "../../../../src/auto-reply/reply/response-prefix-template.js";
-import { extractShortModelName } from "../../../../src/auto-reply/reply/response-prefix-template.js";
-import type { ReplyPayload } from "../../../../src/auto-reply/types.js";
-import { recordInboundSession } from "../../../../src/channels/session.js";
-import {
-  resolveAgentIdFromSessionKey,
-  loadSessionStore,
-  resolveAllAgentSessionStoreTargetsSync,
-  resolveSessionStoreEntry,
   resolveSessionTranscriptPath,
-  type SessionEntry,
-} from "../../../../src/config/sessions.js";
-import { callGateway } from "../../../../src/gateway/call.js";
-import { ADMIN_SCOPE } from "../../../../src/gateway/method-scopes.js";
-import {
-  createPinnedDispatcher,
+  resolveSessionStoreEntry,
   resolvePinnedHostname,
-  closeDispatcher,
+  type AnnounceQueueItem,
   type PinnedHostname,
-} from "../../../../src/infra/net/ssrf.js";
-import { loadGatewayTlsRuntime } from "../../../../src/infra/tls/gateway.js";
-import { rawDataToString } from "../../../../src/infra/ws.js";
-import { mediaKindFromMime, maxBytesForKind } from "../../../../src/media/constants.js";
-import { hasAlphaChannel, optimizeImageToPng } from "../../../../src/media/image-ops.js";
-import { detectMime } from "../../../../src/media/mime.js";
-import { optimizeImageToJpeg } from "../../../../src/media/web-media.js";
-import { DEFAULT_ACCOUNT_ID } from "../../../../src/routing/resolve-route.js";
-import { parseAgentSessionKey } from "../../../../src/routing/session-key.js";
-import { isCronRunSessionKey } from "../../../../src/sessions/session-key-utils.js";
+  type ReplyPayload,
+  type ResponsePrefixContext,
+  type SessionEntry,
+} from "../runtime-api.js";
 import { clawlineAttachmentsToImages } from "./attachments.js";
 import type { ClawlineAdapterOverrides } from "./config.js";
 import type {

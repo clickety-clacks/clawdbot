@@ -1,5 +1,1 @@
-export {
-  enqueueSystemEvent,
-  peekSystemEvents,
-  resetSystemEventsForTest,
-} from "../../../../src/infra/system-events.js";
+export { enqueueSystemEvent, peekSystemEvents, resetSystemEventsForTest } from "../runtime-api.js";

@@ -1269,7 +1269,7 @@
           }
         },
         {
-          "declaration": "export type ReplyPrefixContext = import(\"src/auto-reply/reply/response-prefix-template\").ResponsePrefixContext;",
+          "declaration": "export type ReplyPrefixContext = import(\"src/plugin-sdk/reply-runtime\").ResponsePrefixContext;",
           "exportName": "ReplyPrefixContext",
           "kind": "type",
           "source": {

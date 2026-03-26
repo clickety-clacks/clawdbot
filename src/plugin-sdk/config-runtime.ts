@@ -78,12 +78,19 @@ export type {
 } from "../config/types.js";
 export {
   loadSessionStore,
+  mergeSessionEntry,
   readSessionUpdatedAt,
   recordSessionMetaFromInbound,
+  resolveAllAgentSessionStoreTargetsSync,
+  resolveMainSessionKey,
   resolveSessionKey,
+  resolveSessionTranscriptPath,
+  resolveSessionTranscriptsDirForAgent,
   resolveStorePath,
   updateLastRoute,
   updateSessionStore,
+  type SessionChannelId,
+  type SessionEntry,
   type SessionResetMode,
   type SessionScope,
 } from "../config/sessions.js";

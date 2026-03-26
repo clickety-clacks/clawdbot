@@ -29,6 +29,7 @@
   "matrix-runtime-shared",
   "thread-bindings-runtime",
   "text-runtime",
+  "text-chunking",
   "agent-runtime",
   "speech-runtime",
   "speech-core",

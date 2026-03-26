@@ -392,6 +392,44 @@ export const GENERATED_BUNDLED_PLUGIN_METADATA = [
     },
   },
   {
+    dirName: "clawline",
+    idHint: "clawline",
+    source: {
+      source: "./index.ts",
+      built: "index.js",
+    },
+    packageName: "@openclaw/clawline",
+    packageVersion: "2026.3.8",
+    packageDescription: "OpenClaw Clawline channel plugin",
+    packageManifest: {
+      extensions: ["./index.ts"],
+      channel: {
+        id: "clawline",
+        label: "Clawline",
+        selectionLabel: "Clawline (local devices)",
+        docsPath: "/providers/clawline",
+        docsLabel: "clawline",
+        blurb: "first-party local gateway; enable via config/onboarding.",
+        order: 10,
+      },
+      install: {
+        npmSpec: "@openclaw/clawline",
+        localPath: "extensions/clawline",
+        defaultChoice: "local",
+      },
+    },
+    manifest: {
+      id: "clawline",
+      configSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {},
+      },
+      channels: ["clawline"],
+      skills: ["./skills"],
+    },
+  },
+  {
     dirName: "cloudflare-ai-gateway",
     idHint: "cloudflare-ai-gateway",
     source: {

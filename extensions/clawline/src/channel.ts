@@ -1,6 +1,12 @@
-import type { ChannelPlugin, OpenClawConfig } from "openclaw/plugin-sdk";
+import { describeAccountSnapshot } from "openclaw/plugin-sdk/account-helpers";
 import { DEFAULT_ACCOUNT_ID } from "openclaw/plugin-sdk/account-id";
+import { createTopLevelChannelConfigAdapter } from "openclaw/plugin-sdk/channel-config-helpers";
 import { buildChannelConfigSchema } from "openclaw/plugin-sdk/channel-config-schema";
+import {
+  createChannelPluginBase,
+  type ChannelPlugin,
+  type OpenClawConfig,
+} from "openclaw/plugin-sdk/core";
 import { clawlineMessageActions } from "./actions.js";
 import { ClawlineConfigSchema } from "./config-schema.js";
 import { clawlineSetupAdapter, clawlineSetupWizard } from "./onboarding.js";
@@ -52,7 +58,14 @@ function resolveClawlineAccount(params: {
   };
 }
 
-export const clawlinePlugin: ChannelPlugin<ResolvedClawlineAccount> = {
+const clawlineConfigAdapter = createTopLevelChannelConfigAdapter<ResolvedClawlineAccount>({
+  sectionKey: "clawline",
+  resolveAccount: (cfg) => resolveClawlineAccount({ cfg }),
+  resolveAllowFrom: () => undefined,
+  formatAllowFrom: () => [],
+});
+
+const clawlinePluginBase = createChannelPluginBase({
   id: "clawline",
   meta: {
     ...meta,
@@ -60,13 +73,31 @@ export const clawlinePlugin: ChannelPlugin<ResolvedClawlineAccount> = {
     aliases: [...meta.aliases],
   },
   setupWizard: clawlineSetupWizard,
-  setup: clawlineSetupAdapter,
   capabilities: {
     chatTypes: ["direct"],
     media: true,
   },
   reload: { configPrefixes: ["channels.clawline"] },
   configSchema: buildChannelConfigSchema(ClawlineConfigSchema),
+  config: {
+    ...clawlineConfigAdapter,
+    isConfigured: (account) => account.configured,
+    describeAccount: (account) =>
+      describeAccountSnapshot({
+        account,
+        configured: account.configured,
+      }),
+  },
+  setup: clawlineSetupAdapter,
+});
+
+export const clawlinePlugin: ChannelPlugin<ResolvedClawlineAccount> = {
+  ...clawlinePluginBase,
+  setupWizard: clawlinePluginBase.setupWizard!,
+  capabilities: clawlinePluginBase.capabilities!,
+  reload: clawlinePluginBase.reload!,
+  configSchema: clawlinePluginBase.configSchema!,
+  config: clawlinePluginBase.config!,
   // Clawline runs as a plugin service, not a channel gateway startAccount loop.
   // Mark runtime as running so gateway health-monitor does not treat it as stopped.
   status: {
@@ -103,28 +134,6 @@ export const clawlinePlugin: ChannelPlugin<ResolvedClawlineAccount> = {
         hasRepliedRef,
       };
     },
-  },
-  config: {
-    listAccountIds: () => [DEFAULT_ACCOUNT_ID],
-    resolveAccount: (cfg, accountId) => resolveClawlineAccount({ cfg, accountId }),
-    defaultAccountId: () => DEFAULT_ACCOUNT_ID,
-    isConfigured: (account, cfg) =>
-      Boolean(cfg.channels?.clawline?.enabled === true && account.enabled === true),
-    describeAccount: (account) => ({
-      accountId: account.accountId,
-      enabled: account.enabled,
-      configured: account.configured,
-    }),
-    setAccountEnabled: ({ cfg, enabled }) => ({
-      ...cfg,
-      channels: {
-        ...cfg.channels,
-        clawline: {
-          ...cfg.channels?.clawline,
-          enabled,
-        },
-      },
-    }),
   },
   outbound: { ...clawlineOutbound },
 };

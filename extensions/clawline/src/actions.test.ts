@@ -1,4 +1,4 @@
-import type { OpenClawConfig } from "openclaw/plugin-sdk";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("./runtime/outbound.js", () => {

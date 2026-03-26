@@ -3,12 +3,12 @@ import os from "node:os";
 import path from "node:path";
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import BetterSqlite3 from "better-sqlite3";
+import { jsonResult } from "openclaw/plugin-sdk/agent-runtime";
 import type {
   ChannelMessageActionAdapter,
   ChannelMessageActionName,
-  OpenClawConfig,
-} from "openclaw/plugin-sdk";
-import { jsonResult } from "openclaw/plugin-sdk/agent-runtime";
+} from "openclaw/plugin-sdk/channel-contract";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/core";
 import { sendClawlineOutboundMessage } from "./runtime/outbound.js";
 
 const DEFAULT_CLAWLINE_PORT = 18800;

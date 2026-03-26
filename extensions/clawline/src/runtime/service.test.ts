@@ -7,11 +7,15 @@ const resolveAgentIdFromSessionKeyMock = vi.hoisted(() => vi.fn(() => "main"));
 const resolveClawlineConfigMock = vi.hoisted(() => vi.fn());
 const createProviderServerMock = vi.hoisted(() => vi.fn<() => Promise<ProviderServer>>());
 
-vi.mock("../../../../src/config/sessions.js", () => ({
-  resolveStorePath: resolveStorePathMock,
-  resolveMainSessionKey: resolveMainSessionKeyMock,
-  resolveAgentIdFromSessionKey: resolveAgentIdFromSessionKeyMock,
-}));
+vi.mock("../runtime-api.js", async () => {
+  const actual = await vi.importActual("../runtime-api.js");
+  return {
+    ...actual,
+    resolveStorePath: resolveStorePathMock,
+    resolveMainSessionKey: resolveMainSessionKeyMock,
+    resolveAgentIdFromSessionKey: resolveAgentIdFromSessionKeyMock,
+  };
+});
 
 vi.mock("./config.js", () => ({
   resolveClawlineConfig: resolveClawlineConfigMock,
