@@ -171,7 +171,7 @@ function createTerminalTmuxBackend(config: ProviderConfig, logger: Logger): Term
       }
       // Build a single quoted shell command so special chars (e.g. `#` in tmux format
       // strings like `#{pane_id}`) are not misinterpreted by the remote shell.
-      const remoteCmd = ["tmux", ...args].map(shellQuoteArg).join(" ");
+      const remoteCmd = ["LANG=en_US.UTF-8", "tmux", ...args].map(shellQuoteArg).join(" ");
       return execFile("ssh", [...sshBaseArgs, sshTarget, remoteCmd], options);
     },
     async spawnAttachPty(params: { sessionName: string; cols: number; rows: number }) {
@@ -192,6 +192,7 @@ function createTerminalTmuxBackend(config: ProviderConfig, logger: Logger): Term
         "-tt",
         ...sshBaseArgs,
         sshTarget,
+        "LANG=en_US.UTF-8",
         "--",
         "tmux",
         "attach-session",
