@@ -3023,7 +3023,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         text = await applyAlertInstructions(text);
       }
       text = applyMainSessionAlertRequirement(text, alertResolvedKey);
-      await wakeGatewayForAlert(text, alertResolvedKey);
+      await wakeGatewayForAlert(text, alertResolvedKey, payload.attachments);
       res.setHeader("Content-Type", "application/json");
       res.writeHead(200);
       res.end(JSON.stringify({ ok: true }));
@@ -3040,6 +3040,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   }
 
   async function parseAlertPayload(req: http.IncomingMessage): Promise<{
+    attachments?: unknown[];
     raw: string;
     message: string;
     source?: string;
@@ -3065,10 +3066,19 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     const source = typeof obj.source === "string" ? obj.source : undefined;
     const sessionKey = typeof obj.sessionKey === "string" ? obj.sessionKey : undefined;
     const noOverlay = typeof obj.noOverlay === "boolean" ? obj.noOverlay : undefined;
+    const attachments =
+      obj.attachments === undefined
+        ? undefined
+        : Array.isArray(obj.attachments)
+          ? obj.attachments
+          : null;
     if (!message.trim()) {
       throw new HttpError(400, "invalid_message", "Alert message is required");
     }
-    return { raw: rawText, message, source, sessionKey, noOverlay };
+    if (attachments === null) {
+      throw new HttpError(400, "invalid_request", "Alert attachments must be an array");
+    }
+    return { attachments, raw: rawText, message, source, sessionKey, noOverlay };
   }
 
   async function readRequestBody(
@@ -3591,7 +3601,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     return "";
   }
 
-  async function wakeGatewayForAlert(text: string, sessionKey?: string) {
+  async function wakeGatewayForAlert(text: string, sessionKey?: string, attachments?: unknown[]) {
     try {
       const resolvedSessionKey = resolveAlertSessionKey(sessionKey);
       const gatewayToken =
@@ -3632,6 +3642,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               to: origin?.to,
               threadId,
               deliver: true,
+              attachments: item.attachments,
               idempotencyKey: correlatedRunId,
             },
             expectFinal: true,
@@ -3672,6 +3683,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         key: resolvedSessionKey,
         item: {
           announceId: alertRunId,
+          attachments,
           prompt: text,
           summaryLine: "System Alert",
           enqueuedAt: Date.now(),

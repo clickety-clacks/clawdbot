@@ -1372,6 +1372,55 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("forwards alert attachments through the wake queue to the gateway", async () => {
+    const entry = createAllowlistEntry();
+    const ctx = await setupTestServer([entry]);
+    const authHeader = await createAuthHeader(ctx, entry);
+    const attachment = {
+      type: "file",
+      mimeType: "image/png",
+      fileName: "surf-ace-alert.png",
+      content: "Zm9v",
+    };
+    gatewayCallMock.mockResolvedValueOnce({
+      runId: "ignored",
+      status: "ok",
+      result: { payloads: [] },
+    });
+    try {
+      const response = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: authHeader },
+        body: JSON.stringify({
+          attachments: [attachment],
+          message: "Check the annotation",
+          source: "surf-ace",
+          sessionKey: "agent:main:clawline:flynn:main",
+        }),
+      });
+      expect(response.status).toBe(200);
+      const queued = enqueueAnnounceMock.mock.calls[0]?.[0] as
+        | {
+            item?: { attachments?: unknown[] };
+            send?: (item: unknown) => Promise<void>;
+          }
+        | undefined;
+      expect(queued?.item?.attachments).toEqual([attachment]);
+      await queued?.send?.(queued.item);
+      expect(gatewayCallMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          method: "agent",
+          params: expect.objectContaining({
+            attachments: [attachment],
+            sessionKey: "agent:main:clawline:flynn:main",
+          }),
+        }),
+      );
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("logs correlated alert phases for replied main-session alerts", async () => {
     const entry = createAllowlistEntry();
     const info = vi.fn();
