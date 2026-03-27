@@ -1,8 +1,10 @@
 import os from "node:os";
 import path from "node:path";
-import { DEFAULT_AGENT_WORKSPACE_DIR } from "../../../../src/agents/workspace.js";
-import type { OpenClawConfig } from "../../../../src/config/config.js";
-import { resolveUserPath } from "../../../../src/utils.js";
+import {
+  DEFAULT_AGENT_WORKSPACE_DIR,
+  type OpenClawConfig,
+  resolveUserPath,
+} from "../runtime-api.js";
 import type { ProviderConfig } from "./domain.js";
 import { deepMerge } from "./utils/deep-merge.js";
 

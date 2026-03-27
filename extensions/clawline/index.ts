@@ -1,18 +1,16 @@
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
+import { defineChannelPluginEntry } from "openclaw/plugin-sdk/core";
 import { clawlinePlugin } from "./src/channel.js";
 import { startClawlineService } from "./src/runtime/service.js";
 
 let serviceHandle: Awaited<ReturnType<typeof startClawlineService>> = null;
 let serviceStart: Promise<void> | null = null;
 
-const plugin = {
+export default defineChannelPluginEntry({
   id: "clawline",
   name: "Clawline",
   description: "Clawline channel plugin",
-  configSchema: emptyPluginConfigSchema(),
-  register(api: OpenClawPluginApi) {
-    api.registerChannel({ plugin: clawlinePlugin });
+  plugin: clawlinePlugin,
+  registerFull(api) {
     api.registerService({
       id: "clawline",
       start: async ({ config, logger }) => {
@@ -51,6 +49,4 @@ const plugin = {
       },
     });
   },
-};
-
-export default plugin;
+});

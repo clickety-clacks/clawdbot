@@ -1,6 +1,6 @@
 import { execFile as execFileCb } from "node:child_process";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import type { Stats } from "node:fs";
+import type { Dirent, Stats } from "node:fs";
 import { watch, type FSWatcher, createReadStream } from "node:fs";
 import fs from "node:fs/promises";
 import http from "node:http";
@@ -15,51 +15,45 @@ import jwt from "jsonwebtoken";
 import { type Dispatcher } from "undici";
 import WebSocket, { WebSocketServer } from "ws";
 import {
+  ADMIN_SCOPE,
+  DEFAULT_ACCOUNT_ID,
+  DEFAULT_AGENT_WORKSPACE_DIR,
+  callGateway,
+  closeDispatcher,
+  createPinnedDispatcher,
+  createReplyDispatcherWithTyping,
+  detectMime,
+  dispatchReplyFromConfig,
+  enqueueAnnounce,
+  extractShortModelName,
+  finalizeInboundContext,
+  getFollowupQueueDepth,
+  hasAlphaChannel,
+  isCronRunSessionKey,
+  loadSessionStore,
+  loadGatewayTlsRuntime,
+  maxBytesForKind,
+  mediaKindFromMime,
+  optimizeImageToJpeg,
+  optimizeImageToPng,
+  parseAgentSessionKey,
+  rawDataToString,
+  recordInboundSession,
+  resolveAgentIdFromSessionKey,
+  resolveAllAgentSessionStoreTargetsSync,
   resolveEffectiveMessagesConfig,
   resolveHumanDelayConfig,
   resolveIdentityName,
-} from "../../../../src/agents/identity.js";
-import {
-  type AnnounceQueueItem,
-  enqueueAnnounce,
-} from "../../../../src/agents/subagent-announce-queue.js";
-import { DEFAULT_AGENT_WORKSPACE_DIR } from "../../../../src/agents/workspace.js";
-import { dispatchReplyFromConfig } from "../../../../src/auto-reply/reply/dispatch-from-config.js";
-import { finalizeInboundContext } from "../../../../src/auto-reply/reply/inbound-context.js";
-import {
-  getFollowupQueueDepth,
   resolveQueueSettings,
-} from "../../../../src/auto-reply/reply/queue.js";
-import { createReplyDispatcherWithTyping } from "../../../../src/auto-reply/reply/reply-dispatcher.js";
-import type { ResponsePrefixContext } from "../../../../src/auto-reply/reply/response-prefix-template.js";
-import { extractShortModelName } from "../../../../src/auto-reply/reply/response-prefix-template.js";
-import type { ReplyPayload } from "../../../../src/auto-reply/types.js";
-import { recordInboundSession } from "../../../../src/channels/session.js";
-import {
-  resolveAgentIdFromSessionKey,
-  loadSessionStore,
-  resolveAllAgentSessionStoreTargetsSync,
-  resolveSessionStoreEntry,
   resolveSessionTranscriptPath,
-  type SessionEntry,
-} from "../../../../src/config/sessions.js";
-import { callGateway } from "../../../../src/gateway/call.js";
-import { ADMIN_SCOPE } from "../../../../src/gateway/method-scopes.js";
-import {
-  createPinnedDispatcher,
+  resolveSessionStoreEntry,
   resolvePinnedHostname,
-  closeDispatcher,
+  type AnnounceQueueItem,
   type PinnedHostname,
-} from "../../../../src/infra/net/ssrf.js";
-import { loadGatewayTlsRuntime } from "../../../../src/infra/tls/gateway.js";
-import { rawDataToString } from "../../../../src/infra/ws.js";
-import { mediaKindFromMime, maxBytesForKind } from "../../../../src/media/constants.js";
-import { hasAlphaChannel, optimizeImageToPng } from "../../../../src/media/image-ops.js";
-import { detectMime } from "../../../../src/media/mime.js";
-import { DEFAULT_ACCOUNT_ID } from "../../../../src/routing/resolve-route.js";
-import { parseAgentSessionKey } from "../../../../src/routing/session-key.js";
-import { isCronRunSessionKey } from "../../../../src/sessions/session-key-utils.js";
-import { optimizeImageToJpeg } from "../../../../src/web/media.js";
+  type ReplyPayload,
+  type ResponsePrefixContext,
+  type SessionEntry,
+} from "../runtime-api.js";
 import { clawlineAttachmentsToImages } from "./attachments.js";
 import type { ClawlineAdapterOverrides } from "./config.js";
 import type {
@@ -1473,9 +1467,24 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   let deleteEventsBySessionStmt!: SqliteStatement;
   let selectOrphanedAssetsForUserStmt!: SqliteStatement;
   let deleteOrphanedAssetByIdStmt!: SqliteStatement;
-  let insertUserMessageTx!: ReturnType<SqliteDatabase["transaction"]>;
-  let insertEventTx!: ReturnType<SqliteDatabase["transaction"]>;
-  let deleteStreamDataTx!: ReturnType<SqliteDatabase["transaction"]>;
+  let insertUserMessageTx!: (
+    session: Session,
+    targetUserId: string,
+    messageId: string,
+    content: string,
+    timestamp: number,
+    attachments: NormalizedAttachment[],
+    attachmentsHash: string,
+    assetIds: string[],
+    sessionKey: string,
+  ) => { event: ServerMessage; sequence: number };
+  let insertEventTx!: (
+    event: ServerMessage,
+    userId: string,
+    originatingDeviceId?: string,
+    preserveOpaqueSessionKey?: unknown,
+  ) => number;
+  let deleteStreamDataTx!: (params: { userId: string; sessionKey: string }) => string[];
   let handleUpload!: AssetHandlers["handleUpload"];
   let handleDownload!: AssetHandlers["handleDownload"];
   let cleanupTmpDirectory!: AssetHandlers["cleanupTmpDirectory"];
@@ -3549,7 +3558,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       return "";
     }
     const agentsDir = path.join(path.dirname(config.statePath), "agents");
-    let agentEntries: fs.Dirent[] = [];
+    let agentEntries: Dirent[] = [];
     try {
       agentEntries = await fs.readdir(agentsDir, { withFileTypes: true });
     } catch (err) {
@@ -3586,8 +3595,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     try {
       const resolvedSessionKey = resolveAlertSessionKey(sessionKey);
       const gatewayToken =
-        openClawCfg.gateway?.auth?.token ||
-        (openClawCfg.gateway as { token?: string } | undefined)?.token;
+        (typeof openClawCfg.gateway?.auth?.token === "string"
+          ? openClawCfg.gateway.auth.token
+          : undefined) ||
+        (typeof (openClawCfg.gateway as { token?: unknown } | undefined)?.token === "string"
+          ? (openClawCfg.gateway as { token?: string }).token
+          : undefined);
 
       logger.info?.(`[clawline] alert_wake_start sessionKey=${resolvedSessionKey}`);
 
@@ -5944,6 +5957,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             SenderId: session.userId,
             Provider: inboundTarget.channelLabel,
             Surface: inboundTarget.channelLabel,
+            NativeChannelId: inboundTarget.originatingTo,
             OriginatingChannel: inboundTarget.originatingChannel,
             OriginatingTo: inboundTarget.originatingTo,
             GroupSystemPrompt: groupSystemPrompt,
@@ -6399,6 +6413,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             SenderId: session.userId,
             Provider: "clawline",
             Surface: channelLabel,
+            NativeChannelId: deliveryTarget.toString(),
             OriginatingChannel: channelLabel,
             OriginatingTo: deliveryTarget.toString(),
             GroupSystemPrompt: groupSystemPrompt,

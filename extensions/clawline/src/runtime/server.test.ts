@@ -14,14 +14,15 @@ import type { AllowlistEntry, Logger, ProviderServer } from "./domain.js";
 import { enqueueSystemEvent, resetSystemEventsForTest } from "./system-events.js";
 
 const gatewayCallMock = vi.fn();
-vi.mock("../../../../src/gateway/call.js", () => ({
-  callGateway: (...args: unknown[]) => gatewayCallMock(...args),
-}));
-
 const enqueueAnnounceMock = vi.fn();
-vi.mock("../../../../src/agents/subagent-announce-queue.js", () => ({
-  enqueueAnnounce: (...args: unknown[]) => enqueueAnnounceMock(...args),
-}));
+vi.mock("../runtime-api.js", async () => {
+  const actual = await vi.importActual("../runtime-api.js");
+  return {
+    ...actual,
+    callGateway: (...args: unknown[]) => gatewayCallMock(...args),
+    enqueueAnnounce: (...args: unknown[]) => enqueueAnnounceMock(...args),
+  };
+});
 
 const sendMessageMock = vi.fn();
 vi.mock("../infra/outbound/message.js", () => ({
@@ -226,7 +227,12 @@ async function setupTestServer(
     config: {
       port: 0,
       statePath,
-      media: { storagePath: mediaPath },
+      media: {
+        storagePath: mediaPath,
+        maxInlineBytes: 256_000,
+        maxUploadBytes: 8_000_000,
+        unreferencedUploadTtlSeconds: 86_400,
+      },
       alertInstructionsPath,
       webRootPath,
       webRoot: { followSymlinks: options.webRootFollowSymlinks === true },
@@ -397,7 +403,7 @@ async function performPairRequest(
 
 async function uploadAsset(port: number, token: string, data: Buffer, mimeType: string) {
   const form = new FormData();
-  form.set("file", new Blob([data], { type: mimeType }), "upload.bin");
+  form.set("file", new Blob([new Uint8Array(data)], { type: mimeType }), "upload.bin");
   const response = await fetch(`http://127.0.0.1:${port}/upload`, {
     method: "POST",
     headers: {
@@ -1170,11 +1176,13 @@ describe.sequential("clawline provider server", () => {
       expect(userAuth.isAdmin).toBe(false);
       expect(adminAuth.features).toContain("session_info");
       expect(userAuth.features).toContain("session_info");
-      expect(adminSessionInfo?.sessionKeys).toEqual([
+      expect((adminSessionInfo as { sessionKeys?: string[] } | null)?.sessionKeys).toEqual([
         "agent:main:clawline:flynn:main",
         "agent:main:main",
       ]);
-      expect(userSessionInfo?.sessionKeys).toEqual(["agent:main:clawline:qa_sim:main"]);
+      expect((userSessionInfo as { sessionKeys?: string[] } | null)?.sessionKeys).toEqual([
+        "agent:main:clawline:qa_sim:main",
+      ]);
       expect(adminStreamSnapshot.streams).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
@@ -1316,14 +1324,14 @@ describe.sequential("clawline provider server", () => {
 
       expect(
         withFeatureAttachments.some(
-          (attachment) =>
+          (attachment: { type?: string; mimeType?: string } | undefined) =>
             attachment?.type === "document" &&
             attachment?.mimeType === "application/vnd.clawline.terminal-session+json",
         ),
       ).toBe(true);
       expect(
         noFeatureAttachments.some(
-          (attachment) =>
+          (attachment: { type?: string; mimeType?: string } | undefined) =>
             attachment?.type === "document" &&
             attachment?.mimeType === "application/vnd.clawline.terminal-session+json",
         ),
@@ -3282,7 +3290,8 @@ describe.sequential("clawline provider server", () => {
       ).toBe(true);
       expect(
         streamsPayload.streams.some(
-          (stream) => stream.sessionKey === adoptedSessionKey && stream.adopted,
+          (stream: { sessionKey: string; adopted?: boolean }) =>
+            stream.sessionKey === adoptedSessionKey && stream.adopted === true,
         ),
       ).toBe(true);
 

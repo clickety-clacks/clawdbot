@@ -1,20 +1,16 @@
-import { randomBytes } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
+import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import BetterSqlite3 from "better-sqlite3";
+import { jsonResult } from "openclaw/plugin-sdk/agent-runtime";
 import type {
-  AgentToolResult,
   ChannelMessageActionAdapter,
   ChannelMessageActionName,
-  OpenClawConfig,
-} from "openclaw/plugin-sdk";
-import { jsonResult } from "openclaw/plugin-sdk";
+} from "openclaw/plugin-sdk/channel-contract";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/core";
 import { sendClawlineOutboundMessage } from "./runtime/outbound.js";
 
 const DEFAULT_CLAWLINE_PORT = 18800;
-const STREAM_API_TIMEOUT_MS = 15_000;
-const STREAM_DELETE_USER_ACTION = "delete_stream";
-const CLU_SECRET_HEADER = "X-CLU-Secret";
 
 type EventRow = {
   id: string;
@@ -39,22 +35,6 @@ type ParsedMessage = {
   channelType?: string;
   sessionKey?: string;
 };
-
-type StreamApiCallResult =
-  | {
-      ok: true;
-      status: number;
-      body: Record<string, unknown>;
-    }
-  | {
-      ok: false;
-      status: number;
-      error: {
-        code: string;
-        message: string;
-      };
-      body?: Record<string, unknown>;
-    };
 
 function resolveClawlineDbPath(cfg: OpenClawConfig): string {
   const clawlineStatePath = cfg.channels?.clawline?.statePath;
@@ -133,161 +113,6 @@ function readStringParam(params: Record<string, unknown>, keys: string[]): strin
   return undefined;
 }
 
-function normalizeHttpHost(raw: string | undefined): string {
-  const trimmed = (raw ?? "").trim();
-  if (!trimmed || trimmed === "0.0.0.0" || trimmed === "::" || trimmed === "[::]") {
-    return "127.0.0.1";
-  }
-  return trimmed.replace(/^\[|\]$/g, "");
-}
-
-function hostToUrlHost(host: string): string {
-  return host.includes(":") ? `[${host}]` : host;
-}
-
-function resolveClawlineApiBaseUrl(cfg: OpenClawConfig, params: Record<string, unknown>): string {
-  const explicitBaseUrl = readStringParam(params, ["baseUrl", "apiBaseUrl", "gatewayUrl"]);
-  if (explicitBaseUrl) {
-    try {
-      return new URL(explicitBaseUrl).origin;
-    } catch {
-      throw new Error("Clawline stream actions require an absolute baseUrl when provided");
-    }
-  }
-  const bindAddress = normalizeHttpHost(cfg.channels?.clawline?.network?.bindAddress);
-  const port = cfg.channels?.clawline?.port ?? DEFAULT_CLAWLINE_PORT;
-  return `http://${hostToUrlHost(bindAddress)}:${port}`;
-}
-
-function toObject(value: unknown): Record<string, unknown> {
-  if (value && typeof value === "object" && !Array.isArray(value)) {
-    return value as Record<string, unknown>;
-  }
-  return {};
-}
-
-async function parseJsonObject(response: Response): Promise<Record<string, unknown>> {
-  const text = await response.text();
-  if (!text.trim()) {
-    return {};
-  }
-  try {
-    const parsed = JSON.parse(text);
-    return toObject(parsed);
-  } catch {
-    return {};
-  }
-}
-
-function parseStreamApiError(
-  body: Record<string, unknown>,
-  status: number,
-): {
-  code: string;
-  message: string;
-} {
-  const rawError = body.error;
-  if (rawError && typeof rawError === "object" && !Array.isArray(rawError)) {
-    const parsed = rawError as Record<string, unknown>;
-    const code = typeof parsed.code === "string" ? parsed.code : "stream_api_error";
-    const message =
-      typeof parsed.message === "string"
-        ? parsed.message
-        : `Clawline stream API request failed (${status})`;
-    return { code, message };
-  }
-  return {
-    code: "stream_api_error",
-    message: `Clawline stream API request failed (${status})`,
-  };
-}
-
-/**
- * Resolve the CLU server secret from config for stream lifecycle endpoints.
- */
-function resolveCluSecret(cfg: OpenClawConfig): string | undefined {
-  const secret = (cfg.channels?.clawline as Record<string, unknown> | undefined)?.server;
-  if (secret && typeof secret === "object" && !Array.isArray(secret)) {
-    const cluSecret = (secret as Record<string, unknown>).cluSecret;
-    if (typeof cluSecret === "string" && cluSecret.trim().length > 0) {
-      return cluSecret.trim();
-    }
-  }
-  return undefined;
-}
-
-async function callStreamApi(params: {
-  cfg: OpenClawConfig;
-  actionParams: Record<string, unknown>;
-  path: string;
-  method: "GET" | "POST" | "PATCH" | "DELETE";
-  body?: Record<string, unknown>;
-  extraHeaders?: Record<string, string>;
-}): Promise<StreamApiCallResult> {
-  const cluSecret = resolveCluSecret(params.cfg);
-  if (!cluSecret) {
-    throw new Error("Clawline stream lifecycle requires channels.clawline.server.cluSecret");
-  }
-
-  const baseUrl = resolveClawlineApiBaseUrl(params.cfg, params.actionParams);
-  const requestUrl = new URL(params.path, `${baseUrl}/`);
-  const headers: Record<string, string> = {
-    [CLU_SECRET_HEADER]: cluSecret,
-    ...params.extraHeaders,
-  };
-  if (params.body) {
-    headers["Content-Type"] = "application/json";
-  }
-  try {
-    const response = await promiseWithTimeout(
-      fetch(requestUrl, {
-        method: params.method,
-        headers,
-        body: params.body ? JSON.stringify(params.body) : undefined,
-      }),
-      STREAM_API_TIMEOUT_MS,
-      `Clawline ${params.method} ${params.path}`,
-    );
-    const body = await parseJsonObject(response);
-    if (response.ok) {
-      return { ok: true, status: response.status, body };
-    }
-    return {
-      ok: false,
-      status: response.status,
-      error: parseStreamApiError(body, response.status),
-      body,
-    };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return {
-      ok: false,
-      status: 0,
-      error: { code: "stream_api_unreachable", message },
-    };
-  }
-}
-
-function buildIdempotencyKey(actionParams: Record<string, unknown>): string {
-  const existing = readStringParam(actionParams, ["idempotencyKey", "requestId"]);
-  if (existing) {
-    return existing;
-  }
-  return `req_${randomBytes(4).toString("hex")}`;
-}
-
-function readLifecycleUserId(actionParams: Record<string, unknown>): string {
-  const userId = readStringParam(actionParams, ["userId"]);
-  if (!userId) {
-    throw new Error("Clawline stream lifecycle actions require userId");
-  }
-  return userId;
-}
-
-function buildServerStreamsBasePath(userId: string): string {
-  return `/api/server/users/${encodeURIComponent(userId)}/streams`;
-}
-
 function summarizeOutboundResult(result: Awaited<ReturnType<typeof sendClawlineOutboundMessage>>) {
   // Never echo base64 attachment payloads back to the agent/tool output. They can be large and
   // can cause tool delivery to stall.
@@ -331,7 +156,7 @@ async function readClawlineMessages(params: {
   const dbPath = resolveClawlineDbPath(cfg);
   const normalizedSessionKey = params.sessionKey?.trim().toLowerCase();
 
-  let db: BetterSqlite3.Database | null = null;
+  let db: import("better-sqlite3").Database | null = null;
   try {
     db = new BetterSqlite3(dbPath, { readonly: true, fileMustExist: true, timeout: 5000 });
 
@@ -401,58 +226,15 @@ async function readClawlineMessages(params: {
   }
 }
 
-async function listClawlineUsers(params: {
-  cfg: OpenClawConfig;
-}): Promise<{ ok: boolean; users: { userId: string; messageCount: number }[]; error?: string }> {
-  const { cfg } = params;
-  const dbPath = resolveClawlineDbPath(cfg);
-
-  let db: BetterSqlite3.Database | null = null;
-  try {
-    db = new BetterSqlite3(dbPath, { readonly: true, fileMustExist: true, timeout: 5000 });
-
-    const stmt = db.prepare(`
-      SELECT userId, COUNT(*) as messageCount
-      FROM events
-      GROUP BY userId
-      ORDER BY MAX(timestamp) DESC
-    `);
-    const rows = stmt.all() as { userId: string; messageCount: number }[];
-
-    return { ok: true, users: rows };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return { ok: false, users: [], error: message };
-  } finally {
-    db?.close();
-  }
-}
-
 export const clawlineMessageActions: ChannelMessageActionAdapter = {
-  listActions: ({ cfg }) => {
+  describeMessageTool: ({ cfg }) => {
     if (!cfg.channels?.clawline?.enabled) {
-      return [];
+      return null;
     }
-    const actions: ChannelMessageActionName[] = [
-      "send",
-      "sendAttachment",
-      "read",
-      "list-users",
-      "channel-list",
-      "channel-create",
-      "channel-edit",
-      "channel-delete",
-    ];
-    return actions;
+    const actions: ChannelMessageActionName[] = ["send", "sendAttachment", "read"];
+    return { actions };
   },
-  supportsAction: ({ action }) =>
-    action === "sendAttachment" ||
-    action === "read" ||
-    action === "list-users" ||
-    action === "channel-list" ||
-    action === "channel-create" ||
-    action === "channel-edit" ||
-    action === "channel-delete",
+  supportsAction: ({ action }) => action === "sendAttachment" || action === "read",
 
   handleAction: async ({ action, params, cfg }): Promise<AgentToolResult<unknown>> => {
     if (action === "sendAttachment") {
@@ -501,87 +283,6 @@ export const clawlineMessageActions: ChannelMessageActionAdapter = {
 
       const result = await readClawlineMessages({ cfg, userId, limit, channelType, sessionKey });
       return jsonResult(result);
-    }
-
-    if (action === "list-users") {
-      const result = await listClawlineUsers({ cfg });
-      return jsonResult(result);
-    }
-
-    if (action === "channel-list") {
-      const userId = readLifecycleUserId(params);
-      const result = await callStreamApi({
-        cfg,
-        actionParams: params,
-        method: "GET",
-        path: buildServerStreamsBasePath(userId),
-      });
-      return jsonResult(result.ok ? { ok: true, status: result.status, ...result.body } : result);
-    }
-
-    if (action === "channel-create") {
-      const userId = readLifecycleUserId(params);
-      const displayName = readStringParam(params, ["displayName", "name", "title"]);
-      if (!displayName) {
-        throw new Error("Clawline channel-create requires displayName (or name/title)");
-      }
-      const idempotencyKey = buildIdempotencyKey(params);
-      const result = await callStreamApi({
-        cfg,
-        actionParams: params,
-        method: "POST",
-        path: buildServerStreamsBasePath(userId),
-        body: { displayName, idempotencyKey },
-      });
-      return jsonResult(
-        result.ok
-          ? { ok: true, status: result.status, idempotencyKey, ...result.body }
-          : { ...result, idempotencyKey },
-      );
-    }
-
-    if (action === "channel-edit") {
-      const userId = readLifecycleUserId(params);
-      const sessionKey = readStringParam(params, ["channelId", "sessionKey", "to"]);
-      if (!sessionKey) {
-        throw new Error("Clawline channel-edit requires channelId/sessionKey");
-      }
-      const displayName = readStringParam(params, ["displayName", "name", "title"]);
-      if (!displayName) {
-        throw new Error("Clawline channel-edit requires displayName (or name/title)");
-      }
-      const result = await callStreamApi({
-        cfg,
-        actionParams: params,
-        method: "PATCH",
-        path: `${buildServerStreamsBasePath(userId)}/${encodeURIComponent(sessionKey)}`,
-        body: { displayName },
-      });
-      return jsonResult(result.ok ? { ok: true, status: result.status, ...result.body } : result);
-    }
-
-    if (action === "channel-delete") {
-      const userId = readLifecycleUserId(params);
-      const sessionKey = readStringParam(params, ["channelId", "sessionKey", "to"]);
-      if (!sessionKey) {
-        throw new Error("Clawline channel-delete requires channelId/sessionKey");
-      }
-      const idempotencyKey = buildIdempotencyKey(params);
-      const result = await callStreamApi({
-        cfg,
-        actionParams: params,
-        method: "DELETE",
-        path: `${buildServerStreamsBasePath(userId)}/${encodeURIComponent(sessionKey)}`,
-        body: { idempotencyKey },
-        extraHeaders: {
-          "x-clawline-user-action": STREAM_DELETE_USER_ACTION,
-        },
-      });
-      return jsonResult(
-        result.ok
-          ? { ok: true, status: result.status, idempotencyKey, ...result.body }
-          : { ...result, idempotencyKey },
-      );
     }
 
     throw new Error(`Action ${action} is not supported for Clawline.`);

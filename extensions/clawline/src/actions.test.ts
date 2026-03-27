@@ -1,5 +1,5 @@
-import type { OpenClawConfig } from "openclaw/plugin-sdk";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/core";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("./runtime/outbound.js", () => {
   return {
@@ -10,29 +10,31 @@ vi.mock("./runtime/outbound.js", () => {
 import { clawlineMessageActions } from "./actions.js";
 import { sendClawlineOutboundMessage } from "./runtime/outbound.js";
 
-describe("clawlineMessageActions", () => {
-  const fetchMock = vi.fn<typeof fetch>();
+type ClawlineHandleAction = NonNullable<typeof clawlineMessageActions.handleAction>;
+type ClawlineActionContext = Parameters<ClawlineHandleAction>[0];
 
+async function runClawlineAction(
+  ctx: Omit<ClawlineActionContext, "channel">,
+): ReturnType<ClawlineHandleAction> {
+  const handleAction = clawlineMessageActions.handleAction;
+  if (!handleAction) {
+    throw new Error("Clawline handleAction is not registered");
+  }
+  return await handleAction({
+    channel: "clawline",
+    ...ctx,
+  });
+}
+
+describe("clawlineMessageActions", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    fetchMock.mockReset();
-    vi.stubGlobal("fetch", fetchMock);
   });
 
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
-  it("lists stream actions when clawline is enabled", () => {
+  it("describes stream actions when clawline is enabled", () => {
     const cfg: OpenClawConfig = { channels: { clawline: { enabled: true } } };
-    expect(clawlineMessageActions.listActions({ cfg })).toEqual(
-      expect.arrayContaining([
-        "sendAttachment",
-        "channel-list",
-        "channel-create",
-        "channel-edit",
-        "channel-delete",
-      ]),
+    expect(clawlineMessageActions.describeMessageTool({ cfg })?.actions).toEqual(
+      expect.arrayContaining(["sendAttachment", "read"]),
     );
     expect(clawlineMessageActions.supportsAction?.({ action: "sendAttachment" })).toBe(true);
   });
@@ -53,7 +55,7 @@ describe("clawlineMessageActions", () => {
       assetIds: [],
     });
 
-    const result = await clawlineMessageActions.handleAction({
+    const result = await runClawlineAction({
       action: "sendAttachment",
       params: {
         target: "flynn:main",
@@ -95,7 +97,7 @@ describe("clawlineMessageActions", () => {
       const cfg: OpenClawConfig = { channels: { clawline: { enabled: true } } };
       vi.mocked(sendClawlineOutboundMessage).mockImplementationOnce(() => new Promise(() => {}));
 
-      const promise = clawlineMessageActions.handleAction({
+      const promise = runClawlineAction({
         action: "sendAttachment",
         params: {
           target: "flynn:main",
@@ -115,240 +117,5 @@ describe("clawlineMessageActions", () => {
     } finally {
       vi.useRealTimers();
     }
-  });
-
-  it("lists streams via REST with clu secret auth", async () => {
-    const cfg = {
-      channels: {
-        clawline: {
-          enabled: true,
-          port: 19191,
-          network: { bindAddress: "127.0.0.1" },
-          server: { cluSecret: "clu-secret-1" },
-        },
-      },
-    } as OpenClawConfig;
-    fetchMock.mockResolvedValueOnce(
-      new Response(
-        JSON.stringify({
-          streams: [{ sessionKey: "agent:main:clawline:flynn:main", displayName: "Personal" }],
-        }),
-        { status: 200, headers: { "Content-Type": "application/json" } },
-      ),
-    );
-
-    const result = await clawlineMessageActions.handleAction({
-      action: "channel-list",
-      params: { userId: "flynn" },
-      cfg,
-      accountId: null,
-    });
-
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
-      "http://127.0.0.1:19191/api/server/users/flynn/streams",
-    );
-    expect(fetchMock.mock.calls[0]?.[1]).toEqual(
-      expect.objectContaining({
-        method: "GET",
-        headers: expect.objectContaining({
-          "X-CLU-Secret": "clu-secret-1",
-        }),
-      }),
-    );
-    expect(result.details).toEqual({
-      ok: true,
-      status: 200,
-      streams: [{ sessionKey: "agent:main:clawline:flynn:main", displayName: "Personal" }],
-    });
-  });
-
-  it("creates, renames, and deletes streams with sessionKey identity", async () => {
-    const cfg = {
-      channels: {
-        clawline: {
-          enabled: true,
-          port: 19191,
-          network: { bindAddress: "127.0.0.1" },
-          server: { cluSecret: "clu-secret-1" },
-        },
-      },
-    } as OpenClawConfig;
-    fetchMock
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            stream: {
-              sessionKey: "agent:main:clawline:flynn:s_deadbeef",
-              displayName: "Research",
-            },
-          }),
-          { status: 201, headers: { "Content-Type": "application/json" } },
-        ),
-      )
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            stream: {
-              sessionKey: "agent:main:clawline:flynn:s_deadbeef",
-              displayName: "Research v2",
-            },
-          }),
-          { status: 200, headers: { "Content-Type": "application/json" } },
-        ),
-      )
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            deletedSessionKey: "agent:main:clawline:flynn:s_deadbeef",
-          }),
-          { status: 200, headers: { "Content-Type": "application/json" } },
-        ),
-      );
-
-    const created = await clawlineMessageActions.handleAction({
-      action: "channel-create",
-      params: {
-        userId: "flynn",
-        displayName: "Research",
-        idempotencyKey: "req_create_stream_1",
-      },
-      cfg,
-      accountId: null,
-    });
-    const sessionKey = "agent:main:clawline:flynn:s_deadbeef";
-    const renamed = await clawlineMessageActions.handleAction({
-      action: "channel-edit",
-      params: {
-        userId: "flynn",
-        channelId: sessionKey,
-        displayName: "Research v2",
-      },
-      cfg,
-      accountId: null,
-    });
-    const deleted = await clawlineMessageActions.handleAction({
-      action: "channel-delete",
-      params: {
-        userId: "flynn",
-        channelId: sessionKey,
-        idempotencyKey: "req_delete_stream_1",
-      },
-      cfg,
-      accountId: null,
-    });
-
-    expect(fetchMock).toHaveBeenCalledTimes(3);
-    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
-      "http://127.0.0.1:19191/api/server/users/flynn/streams",
-    );
-    expect(fetchMock.mock.calls[0]?.[1]).toEqual(
-      expect.objectContaining({
-        method: "POST",
-        body: JSON.stringify({ displayName: "Research", idempotencyKey: "req_create_stream_1" }),
-      }),
-    );
-    expect(String(fetchMock.mock.calls[1]?.[0])).toBe(
-      "http://127.0.0.1:19191/api/server/users/flynn/streams/agent%3Amain%3Aclawline%3Aflynn%3As_deadbeef",
-    );
-    expect(fetchMock.mock.calls[1]?.[1]).toEqual(
-      expect.objectContaining({
-        method: "PATCH",
-        body: JSON.stringify({ displayName: "Research v2" }),
-      }),
-    );
-    expect(fetchMock.mock.calls[2]?.[1]).toEqual(
-      expect.objectContaining({
-        method: "DELETE",
-        headers: expect.objectContaining({
-          "x-clawline-user-action": "delete_stream",
-        }),
-        body: JSON.stringify({ idempotencyKey: "req_delete_stream_1" }),
-      }),
-    );
-
-    expect(created.details).toEqual({
-      ok: true,
-      status: 201,
-      idempotencyKey: "req_create_stream_1",
-      stream: {
-        sessionKey: "agent:main:clawline:flynn:s_deadbeef",
-        displayName: "Research",
-      },
-    });
-    expect(renamed.details).toEqual({
-      ok: true,
-      status: 200,
-      stream: {
-        sessionKey: "agent:main:clawline:flynn:s_deadbeef",
-        displayName: "Research v2",
-      },
-    });
-    expect(deleted.details).toEqual({
-      ok: true,
-      status: 200,
-      idempotencyKey: "req_delete_stream_1",
-      deletedSessionKey: "agent:main:clawline:flynn:s_deadbeef",
-    });
-  });
-
-  it("returns structured stream API errors", async () => {
-    const cfg = {
-      channels: { clawline: { enabled: true, server: { cluSecret: "clu-secret-1" } } },
-    } as OpenClawConfig;
-    fetchMock.mockResolvedValueOnce(
-      new Response(
-        JSON.stringify({
-          error: { code: "stream_not_found", message: "Stream not found" },
-        }),
-        { status: 404, headers: { "Content-Type": "application/json" } },
-      ),
-    );
-
-    const result = await clawlineMessageActions.handleAction({
-      action: "channel-edit",
-      params: {
-        userId: "flynn",
-        channelId: "agent:main:clawline:flynn:s_deadbeef",
-        displayName: "Rename",
-      },
-      cfg,
-      accountId: null,
-    });
-
-    expect(result.details).toEqual({
-      ok: false,
-      status: 404,
-      error: { code: "stream_not_found", message: "Stream not found" },
-      body: { error: { code: "stream_not_found", message: "Stream not found" } },
-    });
-  });
-
-  it("requires configured clu secret for stream lifecycle actions", async () => {
-    const cfg: OpenClawConfig = { channels: { clawline: { enabled: true } } };
-
-    await expect(
-      clawlineMessageActions.handleAction({
-        action: "channel-list",
-        params: { userId: "flynn", token: "legacy-token" },
-        cfg,
-        accountId: null,
-      }),
-    ).rejects.toThrow("channels.clawline.server.cluSecret");
-  });
-
-  it("requires userId for stream lifecycle actions", async () => {
-    const cfg = {
-      channels: { clawline: { enabled: true, server: { cluSecret: "clu-secret-1" } } },
-    } as OpenClawConfig;
-
-    await expect(
-      clawlineMessageActions.handleAction({
-        action: "channel-create",
-        params: { displayName: "Research" },
-        cfg,
-        accountId: null,
-      }),
-    ).rejects.toThrow("require userId");
   });
 });

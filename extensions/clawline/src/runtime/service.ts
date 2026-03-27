@@ -1,9 +1,9 @@
-import type { OpenClawConfig } from "../../../../src/config/config.js";
 import {
-  resolveStorePath,
-  resolveMainSessionKey,
   resolveAgentIdFromSessionKey,
-} from "../../../../src/config/sessions.js";
+  resolveMainSessionKey,
+  resolveStorePath,
+  type OpenClawConfig,
+} from "../runtime-api.js";
 import { resolveClawlineConfig } from "./config.js";
 import type { Logger, ProviderServer } from "./domain.js";
 import { setClawlineOutboundSender } from "./outbound.js";

@@ -130,7 +130,7 @@ export function createAssetHandlers(deps: AssetHandlerDeps) {
           }
           resolve();
         };
-        busboy.on("file", (fieldname, file, info) => {
+        busboy.on("file", (fieldname: string, file, info) => {
           if (handled || fieldname !== "file") {
             handled = true;
             file.resume();
@@ -145,7 +145,7 @@ export function createAssetHandlers(deps: AssetHandlerDeps) {
             writeStream.on("finish", writeResolve);
             writeStream.on("error", writeReject);
           });
-          file.on("data", (chunk) => {
+          file.on("data", (chunk: Buffer) => {
             size += chunk.length;
             if (mimeSniffSample.length < MIME_SNIFF_MAX_BYTES) {
               const remaining = MIME_SNIFF_MAX_BYTES - mimeSniffSample.length;

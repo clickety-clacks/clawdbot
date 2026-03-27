@@ -8,7 +8,7 @@ describe("clawline plugin", () => {
       accountId: "default",
       context: {
         From: "clawline:flynn-admin",
-        OriginatingTo: "Flynn:main",
+        NativeChannelId: "Flynn:main",
       },
       hasRepliedRef: { value: false },
     });
@@ -16,7 +16,7 @@ describe("clawline plugin", () => {
     expect(context?.currentChannelId).toBe("Flynn:main");
   });
 
-  it("skips tool context when OriginatingTo is missing", () => {
+  it("skips tool context when no supported threading target is present", () => {
     const context = clawlinePlugin.threading?.buildToolContext?.({
       cfg: {} as any,
       accountId: "default",

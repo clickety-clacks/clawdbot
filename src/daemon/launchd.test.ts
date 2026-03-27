@@ -9,6 +9,7 @@ import {
   isLaunchAgentListed,
   parseLaunchctlPrint,
   repairLaunchAgentBootstrap,
+  recoverLaunchAgentWithAppBounce,
   restartLaunchAgent,
   resolveLaunchAgentPlistPath,
 } from "./launchd.js";
@@ -29,6 +30,9 @@ const launchdRestartHandoffState = vi.hoisted(() => ({
   isCurrentProcessLaunchdServiceLabel: vi.fn<(label: string) => boolean>(() => false),
   scheduleDetachedLaunchdRestartHandoff: vi.fn((_params: unknown) => ({ ok: true, pid: 7331 })),
 }));
+const cleanStaleGatewayProcessesSync = vi.hoisted(() =>
+  vi.fn<(port?: number) => number[]>(() => []),
+);
 const defaultProgramArguments = ["node", "-e", "process.exit(0)"];
 
 function expectLaunchctlEnableBootstrapOrder(env: Record<string, string | undefined>) {
@@ -87,6 +91,10 @@ vi.mock("./launchd-restart-handoff.js", () => ({
     launchdRestartHandoffState.isCurrentProcessLaunchdServiceLabel(label),
   scheduleDetachedLaunchdRestartHandoff: (params: unknown) =>
     launchdRestartHandoffState.scheduleDetachedLaunchdRestartHandoff(params),
+}));
+
+vi.mock("../infra/restart-stale-pids.js", () => ({
+  cleanStaleGatewayProcessesSync: (port?: number) => cleanStaleGatewayProcessesSync(port),
 }));
 
 vi.mock("node:fs/promises", async (importOriginal) => {
@@ -151,6 +159,8 @@ beforeEach(() => {
   state.dirModes.clear();
   state.files.clear();
   state.fileModes.clear();
+  cleanStaleGatewayProcessesSync.mockReset();
+  cleanStaleGatewayProcessesSync.mockReturnValue([]);
   launchdRestartHandoffState.isCurrentProcessLaunchdServiceLabel.mockReset();
   launchdRestartHandoffState.isCurrentProcessLaunchdServiceLabel.mockReturnValue(false);
   launchdRestartHandoffState.scheduleDetachedLaunchdRestartHandoff.mockReset();
@@ -230,7 +240,7 @@ describe("launchctl list detection", () => {
 });
 
 describe("launchd bootstrap repair", () => {
-  it("enables, bootstraps, and kickstarts the resolved label", async () => {
+  it("enables, bootstraps, and starts the resolved label without forced kickstart", async () => {
     const env: Record<string, string | undefined> = {
       HOME: "/Users/test",
       OPENCLAW_PROFILE: "default",
@@ -240,11 +250,37 @@ describe("launchd bootstrap repair", () => {
 
     const { serviceId, bootstrapIndex } = expectLaunchctlEnableBootstrapOrder(env);
     const kickstartIndex = state.launchctlCalls.findIndex(
-      (c) => c[0] === "kickstart" && c[1] === "-k" && c[2] === serviceId,
+      (c) => c[0] === "kickstart" && c[1] === serviceId,
     );
 
     expect(kickstartIndex).toBeGreaterThanOrEqual(0);
     expect(bootstrapIndex).toBeLessThan(kickstartIndex);
+  });
+});
+
+describe("launchd app-bounce recovery", () => {
+  it("bounces the mac app and reboots the gateway launch agent", async () => {
+    const env: Record<string, string | undefined> = {
+      HOME: "/Users/test",
+      OPENCLAW_PROFILE: "default",
+    };
+
+    await recoverLaunchAgentWithAppBounce({
+      env,
+      stdout: new PassThrough(),
+    });
+
+    const domain = typeof process.getuid === "function" ? `gui/${process.getuid()}` : "gui/501";
+    const gatewayServiceId = `${domain}/ai.openclaw.gateway`;
+    const plistPath = resolveLaunchAgentPlistPath(env);
+
+    expect(state.launchctlCalls).toContainEqual(["bootout", gatewayServiceId]);
+    expect(state.launchctlCalls).toContainEqual(["bootout", `${domain}/ai.openclaw.mac`]);
+    expect(state.launchctlCalls).toContainEqual(["-x", "OpenClaw"]);
+    expect(state.launchctlCalls).toContainEqual(["-g", "-b", "ai.openclaw.mac"]);
+    expect(state.launchctlCalls).toContainEqual(["enable", gatewayServiceId]);
+    expect(state.launchctlCalls).toContainEqual(["bootstrap", domain, plistPath]);
+    expect(state.launchctlCalls).toContainEqual(["kickstart", gatewayServiceId]);
   });
 });
 
@@ -328,7 +364,10 @@ describe("launchd install", () => {
   });
 
   it("restarts LaunchAgent with kickstart and no bootout", async () => {
-    const env = createDefaultLaunchdEnv();
+    const env = {
+      ...createDefaultLaunchdEnv(),
+      OPENCLAW_GATEWAY_PORT: "18789",
+    };
     const result = await restartLaunchAgent({
       env,
       stdout: new PassThrough(),
@@ -338,9 +377,36 @@ describe("launchd install", () => {
     const label = "ai.openclaw.gateway";
     const serviceId = `${domain}/${label}`;
     expect(result).toEqual({ outcome: "completed" });
+    expect(cleanStaleGatewayProcessesSync).toHaveBeenCalledWith(18789);
     expect(state.launchctlCalls).toContainEqual(["kickstart", "-k", serviceId]);
     expect(state.launchctlCalls.some((call) => call[0] === "bootout")).toBe(false);
     expect(state.launchctlCalls.some((call) => call[0] === "bootstrap")).toBe(false);
+  });
+
+  it("uses the configured gateway port for stale cleanup", async () => {
+    const env = {
+      ...createDefaultLaunchdEnv(),
+      OPENCLAW_GATEWAY_PORT: "19001",
+    };
+
+    await restartLaunchAgent({
+      env,
+      stdout: new PassThrough(),
+    });
+
+    expect(cleanStaleGatewayProcessesSync).toHaveBeenCalledWith(19001);
+  });
+
+  it("skips stale cleanup when no explicit launch agent port can be resolved", async () => {
+    const env = createDefaultLaunchdEnv();
+    state.files.clear();
+
+    await restartLaunchAgent({
+      env,
+      stdout: new PassThrough(),
+    });
+
+    expect(cleanStaleGatewayProcessesSync).not.toHaveBeenCalled();
   });
 
   it("falls back to bootstrap when kickstart cannot find the service", async () => {
