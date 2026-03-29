@@ -440,6 +440,67 @@ function normalizeOutboundAttachmentData(input: ClawlineOutboundAttachmentInput)
   };
 }
 
+function canonicalizeReplayAttachments(
+  attachments: unknown,
+  logger: Logger,
+  messageId?: string,
+): NormalizedAttachment[] | undefined {
+  if (!Array.isArray(attachments) || attachments.length === 0) {
+    return undefined;
+  }
+  const canonical: NormalizedAttachment[] = [];
+  let rewroteMixedShape = false;
+  for (const attachment of attachments) {
+    if (!attachment || typeof attachment !== "object") {
+      continue;
+    }
+    const typed = attachment as {
+      type?: unknown;
+      mimeType?: unknown;
+      data?: unknown;
+      assetId?: unknown;
+    };
+    const assetId = typeof typed.assetId === "string" ? typed.assetId.trim() : "";
+    if (ASSET_ID_REGEX.test(assetId)) {
+      canonical.push({ type: "asset", assetId });
+      if (typed.type === "image" || typed.type === "document" || typeof typed.data === "string") {
+        rewroteMixedShape = true;
+      }
+      continue;
+    }
+    if (
+      typed.type === "image" &&
+      typeof typed.mimeType === "string" &&
+      typeof typed.data === "string"
+    ) {
+      canonical.push({
+        type: "image",
+        mimeType: typed.mimeType,
+        data: typed.data,
+      });
+      continue;
+    }
+    if (
+      typed.type === "document" &&
+      typeof typed.mimeType === "string" &&
+      typeof typed.data === "string"
+    ) {
+      canonical.push({
+        type: "document",
+        mimeType: typed.mimeType,
+        data: typed.data,
+      });
+    }
+  }
+  if (rewroteMixedShape) {
+    logger.warn?.("[clawline] replay_attachment_canonicalized", {
+      messageId,
+      attachmentCount: canonical.length,
+    });
+  }
+  return canonical.length > 0 ? canonical : undefined;
+}
+
 function buildClawlinePersonalSessionKey(agentId: string, userId: string): string {
   return buildClawlineUserStreamSessionKey(agentId, userId, "main");
 }
@@ -1471,7 +1532,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         throw new Error("Clawline outbound attachment exceeds max upload size");
       }
       const isInlineImage = INLINE_IMAGE_MIME_TYPES.has(mimeType);
-      if (isInlineImage) {
+      if (isInlineImage && buffer.length <= config.media.maxInlineBytes) {
         resolved.push({ type: "image", mimeType, data });
         continue;
       }
@@ -1536,7 +1597,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       const mimeType = (processed.contentType ?? "application/octet-stream").toLowerCase();
       const buffer = processed.buffer;
       const isInlineImage = INLINE_IMAGE_MIME_TYPES.has(mimeType);
-      if (isInlineImage) {
+      if (isInlineImage && buffer.length <= config.media.maxInlineBytes) {
         resolved.push({ type: "image", mimeType, data: buffer.toString("base64") });
         continue;
       }
@@ -3008,6 +3069,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         .map((row) => parseServerMessage(row.payloadJson, logger))
         .filter((event): event is ServerMessage => Boolean(event))
         .map((event) => {
+          event.attachments = canonicalizeReplayAttachments(event.attachments, logger, event.id);
           normalizeEventRouting(event);
           return event;
         });

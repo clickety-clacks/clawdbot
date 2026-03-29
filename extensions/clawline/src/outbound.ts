@@ -1,8 +1,4 @@
-import {
-  loadWebMedia,
-  sendClawlineOutboundMessage,
-  type ChannelOutboundAdapter,
-} from "openclaw/plugin-sdk";
+import { sendClawlineOutboundMessage, type ChannelOutboundAdapter } from "openclaw/plugin-sdk";
 
 function chunkTextForClawline(text: string, limit: number): string[] {
   if (!text) {
@@ -63,22 +59,14 @@ export const clawlineOutbound: ChannelOutboundAdapter = {
       },
     };
   },
-  sendMedia: async ({ cfg, to, text, mediaUrl }) => {
+  sendMedia: async ({ to, text, mediaUrl }) => {
     if (!mediaUrl) {
       throw new Error("Clawline outbound media delivery requires mediaUrl");
     }
-    const maxBytes = cfg.channels?.clawline?.media?.maxUploadBytes;
-    const media = await loadWebMedia(mediaUrl, maxBytes);
-    const attachments = [
-      {
-        data: media.buffer.toString("base64"),
-        mimeType: media.contentType ?? "application/octet-stream",
-      },
-    ];
     const result = await sendClawlineOutboundMessage({
       target: to,
       text: text ?? "",
-      attachments,
+      mediaUrl,
     });
     return {
       channel: "clawline",
