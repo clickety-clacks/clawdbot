@@ -466,6 +466,53 @@ async function authenticateDevice(
   return { ws, auth, streamSnapshot, sessionInfo };
 }
 
+async function authenticateDeviceWithQueue(
+  port: number,
+  deviceId: string,
+  token: string,
+  options: { authPayload?: Record<string, unknown> } = {},
+) {
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+  await waitForOpen(ws);
+  const queue = createMessageQueue(ws);
+  ws.send(
+    JSON.stringify({
+      type: "auth",
+      protocolVersion: PROTOCOL_VERSION,
+      deviceId,
+      token,
+      ...options.authPayload,
+    }),
+  );
+  const auth = await queue.next();
+  if (!auth?.success) {
+    queue.dispose();
+    ws.terminate();
+    throw new Error(
+      `Auth failed for ${deviceId}: ${typeof auth === "object" ? JSON.stringify(auth) : auth}`,
+    );
+  }
+  const streamSnapshot = await queue.next();
+  if (streamSnapshot?.type !== "stream_snapshot") {
+    queue.dispose();
+    ws.terminate();
+    throw new Error(
+      `Expected stream_snapshot after auth_result, got ${JSON.stringify(streamSnapshot)}`,
+    );
+  }
+  let sessionInfo: unknown = null;
+  if (Array.isArray(auth.features) && auth.features.includes("session_info")) {
+    const next = await queue.next();
+    if (next?.type !== "session_info") {
+      queue.dispose();
+      ws.terminate();
+      throw new Error(`Expected session_info after stream_snapshot, got ${JSON.stringify(next)}`);
+    }
+    sessionInfo = next;
+  }
+  return { ws, queue, auth, streamSnapshot, sessionInfo };
+}
+
 describe.sequential("clawline provider server", () => {
   it("reissues tokens for already approved devices", async () => {
     const deviceId = randomUUID();
@@ -712,6 +759,130 @@ describe.sequential("clawline provider server", () => {
         },
       ]);
       expect(result.assetIds).toEqual([]);
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("stores oversized outbound image attachments as asset-backed messages and replays them without inline data", async () => {
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry]);
+    try {
+      const largeBuffer = Buffer.alloc(300_000, 7);
+      const result = await ctx.server.sendMessage({
+        target: entry.userId,
+        text: "",
+        attachments: [
+          {
+            data: largeBuffer.toString("base64"),
+            mimeType: "image/png",
+          },
+        ],
+      });
+
+      expect(result.attachments).toHaveLength(1);
+      expect(result.attachments?.[0]).toMatchObject({
+        type: "asset",
+        assetId: expect.stringMatching(/^a_/),
+      });
+      const firstAttachment = result.attachments?.[0];
+      expect(firstAttachment?.type).toBe("asset");
+      const assetId = firstAttachment?.type === "asset" ? firstAttachment.assetId : undefined;
+      expect(result.assetIds).toEqual([assetId]);
+      expect(assetId).toBeTruthy();
+      const assetPath = path.join(ctx.mediaPath, "assets", assetId as string);
+      const stored = await fs.readFile(assetPath);
+      expect(stored.equals(largeBuffer)).toBe(true);
+
+      const pair = await performPairRequest(ctx.port, entry.deviceId);
+      const { ws, queue } = await authenticateDeviceWithQueue(
+        ctx.port,
+        entry.deviceId,
+        pair.token as string,
+      );
+      try {
+        const replay = await queue.next();
+        expect(replay).toMatchObject({
+          type: "message",
+          attachments: [{ type: "asset", assetId }],
+        });
+      } finally {
+        queue.dispose();
+        ws.terminate();
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("canonicalizes legacy replay attachments that mix asset ids with inline image payloads", async () => {
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry]);
+    try {
+      const largeBuffer = Buffer.alloc(300_000, 9);
+      const result = await ctx.server.sendMessage({
+        target: entry.userId,
+        text: "",
+        attachments: [
+          {
+            data: largeBuffer.toString("base64"),
+            mimeType: "image/png",
+          },
+        ],
+      });
+      const firstAttachment = result.attachments?.[0];
+      expect(firstAttachment?.type).toBe("asset");
+      const assetId = firstAttachment?.type === "asset" ? firstAttachment.assetId : "";
+      const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
+      const db = new BetterSqlite3(dbPath);
+      try {
+        const row = db
+          .prepare(`SELECT id, payloadJson FROM events ORDER BY sequence DESC LIMIT 1`)
+          .get() as { id: string; payloadJson: string };
+        const payload = JSON.parse(row.payloadJson) as {
+          attachments?: Array<Record<string, unknown>>;
+        };
+        payload.attachments = [
+          {
+            type: "image",
+            mimeType: "image/png",
+            data: Buffer.from("legacy-inline").toString("base64"),
+            assetId,
+          },
+        ];
+        const payloadJson = JSON.stringify(payload);
+        db.prepare(`UPDATE events SET payloadJson = ?, payloadBytes = ? WHERE id = ?`).run(
+          payloadJson,
+          Buffer.byteLength(payloadJson, "utf8"),
+          row.id,
+        );
+      } finally {
+        db.close();
+      }
+
+      const pair = await performPairRequest(ctx.port, entry.deviceId);
+      const { ws, queue } = await authenticateDeviceWithQueue(
+        ctx.port,
+        entry.deviceId,
+        pair.token as string,
+      );
+      try {
+        const replay = await queue.next();
+        expect(replay.attachments).toEqual([{ type: "asset", assetId }]);
+      } finally {
+        queue.dispose();
+        ws.terminate();
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
     } finally {
       await ctx.cleanup();
     }
@@ -1123,6 +1294,7 @@ describe.sequential("clawline provider server", () => {
       const ack = first?.type === "ack" ? first : await waitForMessage(ws);
       expect(ack).toMatchObject({ type: "ack", id: messageId });
       ws.terminate();
+      await new Promise((resolve) => setTimeout(resolve, 20));
     } finally {
       await ctx.cleanup();
     }

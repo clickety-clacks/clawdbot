@@ -2,21 +2,9 @@ import { chunkTextForOutbound } from "openclaw/plugin-sdk/text-chunking";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { setClawlineOutboundSender } from "./runtime/outbound.js";
 
-const loadWebMediaMock = vi.hoisted(() =>
-  vi.fn(async (_mediaUrl?: string, _maxBytes?: number) => ({
-    buffer: Buffer.from("media"),
-    contentType: "image/png",
-  })),
-);
-
-vi.mock("openclaw/plugin-sdk/web-media", () => ({
-  loadWebMedia: (mediaUrl: string, maxBytes?: number) => loadWebMediaMock(mediaUrl, maxBytes),
-}));
-
 describe("clawlineOutbound", () => {
   afterEach(() => {
     setClawlineOutboundSender(null);
-    loadWebMediaMock.mockClear();
   });
 
   it("uses the shared outbound text chunker", async () => {
@@ -48,12 +36,13 @@ describe("clawlineOutbound", () => {
   });
 
   it("attaches the channel to outbound sendMedia results", async () => {
-    setClawlineOutboundSender(async () => ({
+    const sender = vi.fn(async () => ({
       messageId: "msg-2",
       userId: "flynn:main",
       deviceId: "device-2",
       assetIds: ["asset-1"],
     }));
+    setClawlineOutboundSender(sender);
 
     const { clawlineOutbound } = await import("./outbound.js");
     await expect(
@@ -72,6 +61,10 @@ describe("clawlineOutbound", () => {
         assetIds: ["asset-1"],
       },
     });
-    expect(loadWebMediaMock).toHaveBeenCalledWith("https://example.com/image.png", 1234);
+    expect(sender).toHaveBeenCalledWith({
+      target: "flynn:main",
+      text: "hello",
+      mediaUrl: "https://example.com/image.png",
+    });
   });
 });

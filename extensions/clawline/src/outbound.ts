@@ -3,7 +3,6 @@ import {
   type ChannelOutboundAdapter,
 } from "openclaw/plugin-sdk/channel-send-result";
 import { chunkTextForOutbound } from "openclaw/plugin-sdk/text-chunking";
-import { loadWebMedia } from "openclaw/plugin-sdk/web-media";
 import { sendClawlineOutboundMessage } from "./runtime/outbound.js";
 
 export const clawlineOutbound: ChannelOutboundAdapter = {
@@ -34,22 +33,14 @@ export const clawlineOutbound: ChannelOutboundAdapter = {
         },
       };
     },
-    sendMedia: async ({ cfg, to, text, mediaUrl }) => {
+    sendMedia: async ({ to, text, mediaUrl }) => {
       if (!mediaUrl) {
         throw new Error("Clawline outbound media delivery requires mediaUrl");
       }
-      const maxBytes = cfg.channels?.clawline?.media?.maxUploadBytes;
-      const media = await loadWebMedia(mediaUrl, maxBytes);
-      const attachments = [
-        {
-          data: media.buffer.toString("base64"),
-          mimeType: media.contentType ?? "application/octet-stream",
-        },
-      ];
       const result = await sendClawlineOutboundMessage({
         target: to,
         text: text ?? "",
-        attachments,
+        mediaUrl,
       });
       return {
         messageId: result.messageId,
