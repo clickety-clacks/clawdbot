@@ -14,6 +14,7 @@ import BetterSqlite3 from "better-sqlite3";
 import jwt from "jsonwebtoken";
 import { type Dispatcher } from "undici";
 import WebSocket, { WebSocketServer } from "ws";
+import { isLoopbackHost, isPrivateOrLoopbackHost } from "../../../../src/gateway/net.js";
 import {
   ADMIN_SCOPE,
   DEFAULT_ACCOUNT_ID,
@@ -1211,6 +1212,125 @@ function isLocalhost(address: string): boolean {
   return ["127.0.0.1", "::1", "localhost"].includes(address);
 }
 
+const CLAWLINE_ALLOWED_ORIGINS_SETTING = "channels.clawline.network.allowedOrigins";
+
+type ClawlineBrowserOriginCheckResult =
+  | {
+      ok: true;
+      matchedBy: "allowlist" | "no-origin" | "private-network" | "tailnet";
+      origin: string | null;
+    }
+  | { ok: false; origin: string | null; reason: string };
+
+function parseClawlineBrowserOrigin(
+  originHeader?: string,
+):
+  | { kind: "missing" }
+  | { kind: "opaque"; origin: string }
+  | { kind: "origin"; origin: string; hostname: string }
+  | { kind: "invalid"; origin: string } {
+  const trimmed = originHeader?.trim();
+  if (!trimmed) {
+    return { kind: "missing" };
+  }
+  if (trimmed === "null") {
+    return { kind: "opaque", origin: "null" };
+  }
+  try {
+    const url = new URL(trimmed);
+    return {
+      kind: "origin",
+      origin: url.origin.toLowerCase(),
+      hostname: url.hostname.toLowerCase(),
+    };
+  } catch {
+    return { kind: "invalid", origin: trimmed };
+  }
+}
+
+function checkClawlineBrowserOrigin(params: {
+  originHeader?: string;
+  allowedOrigins?: string[];
+}): ClawlineBrowserOriginCheckResult {
+  const parsed = parseClawlineBrowserOrigin(params.originHeader);
+  if (parsed.kind === "missing") {
+    return {
+      ok: true,
+      matchedBy: "no-origin",
+      origin: null,
+    };
+  }
+
+  const allowlist = new Set(
+    (params.allowedOrigins ?? []).map((value) => value.trim().toLowerCase()).filter(Boolean),
+  );
+
+  if (parsed.kind === "opaque") {
+    if (allowlist.has(parsed.origin)) {
+      return {
+        ok: true,
+        matchedBy: "allowlist",
+        origin: parsed.origin,
+      };
+    }
+    return {
+      ok: false,
+      origin: parsed.origin,
+      reason: `Opaque browser origins are not accepted automatically. Add "null" to ${CLAWLINE_ALLOWED_ORIGINS_SETTING} if this is intentional.`,
+    };
+  }
+
+  if (parsed.kind === "invalid") {
+    return {
+      ok: false,
+      origin: parsed.origin,
+      reason: `Browser Origin header is invalid. Use a valid local/private/tailnet origin or add the exact public origin to ${CLAWLINE_ALLOWED_ORIGINS_SETTING}.`,
+    };
+  }
+
+  if (allowlist.has(parsed.origin)) {
+    return {
+      ok: true,
+      matchedBy: "allowlist",
+      origin: parsed.origin,
+    };
+  }
+
+  if (parsed.hostname.endsWith(".ts.net")) {
+    return {
+      ok: true,
+      matchedBy: "tailnet",
+      origin: parsed.origin,
+    };
+  }
+
+  if (isLoopbackHost(parsed.hostname) || isPrivateOrLoopbackHost(parsed.hostname)) {
+    return {
+      ok: true,
+      matchedBy: "private-network",
+      origin: parsed.origin,
+    };
+  }
+
+  return {
+    ok: false,
+    origin: parsed.origin,
+    reason: `Browser origin ${parsed.origin} is not allowed. Local/private/tailnet origins are accepted automatically, but public origins must be listed explicitly in ${CLAWLINE_ALLOWED_ORIGINS_SETTING}.`,
+  };
+}
+
+function buildRejectedOriginUpgradeResponse(reason: string): string {
+  const body = `${reason}\n`;
+  return [
+    "HTTP/1.1 403 Forbidden",
+    "Content-Type: text/plain; charset=utf-8",
+    `Content-Length: ${Buffer.byteLength(body, "utf8")}`,
+    "Connection: close",
+    "",
+    body,
+  ].join("\r\n");
+}
+
 async function ensureDir(dir: string) {
   await fs.mkdir(dir, { recursive: true });
 }
@@ -1438,12 +1558,17 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   if (!config.network.allowInsecurePublic && !isLocalhost(config.network.bindAddress)) {
     throw new Error("allowInsecurePublic must be true to bind non-localhost");
   }
+  const explicitPublicOrigins = (config.network.allowedOrigins ?? [])
+    .map((value) => value.trim().toLowerCase())
+    .filter((value) => value && value !== "null");
   if (
     config.network.allowInsecurePublic &&
     !isLocalhost(config.network.bindAddress) &&
-    (!config.network.allowedOrigins || config.network.allowedOrigins.length === 0)
+    explicitPublicOrigins.length === 0
   ) {
-    throw new Error("allowedOrigins must be configured when binding to a public interface");
+    logger.warn?.(
+      `[clawline] binding non-loopback without explicit public browser origins; local/private/tailnet origins will be accepted automatically, but public browser origins must be added to ${CLAWLINE_ALLOWED_ORIGINS_SETTING}`,
+    );
   }
   const providerTls = await loadGatewayTlsRuntime(openClawCfg.gateway?.tls);
   if (openClawCfg.gateway?.tls?.enabled === true && !providerTls.enabled) {
@@ -3776,7 +3901,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const terminalWss = new WebSocketServer({ noServer: true, maxPayload });
 
   httpServer.on("upgrade", (request, socket, head) => {
-    const origin = request.headers.origin ?? "null";
+    const originHeader = Array.isArray(request.headers.origin)
+      ? request.headers.origin[0]
+      : request.headers.origin;
+    const origin = originHeader ?? null;
     logger.info?.("[clawline:http] ws_upgrade_received", {
       url: request.url,
       origin,
@@ -3791,25 +3919,25 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       socket.destroy();
       return;
     }
-    let originAllowed = true;
-    if (config.network.allowedOrigins && config.network.allowedOrigins.length > 0) {
-      originAllowed = config.network.allowedOrigins.includes(origin);
-      logger.info?.("[clawline:http] ws_upgrade_origin_check", {
-        origin,
-        allowed: config.network.allowedOrigins,
-        originAllowed,
+    const originCheck = checkClawlineBrowserOrigin({
+      originHeader,
+      allowedOrigins: config.network.allowedOrigins,
+    });
+    logger.info?.("[clawline:http] ws_upgrade_origin_check", {
+      origin,
+      allowed: config.network.allowedOrigins,
+      originAllowed: originCheck.ok,
+      matchedBy: originCheck.ok ? originCheck.matchedBy : null,
+      reason: originCheck.ok ? null : originCheck.reason,
+    });
+    if (!originCheck.ok) {
+      logger.warn?.("[clawline:http] ws_upgrade_origin_rejected", {
+        origin: originCheck.origin,
+        reason: originCheck.reason,
+        setting: CLAWLINE_ALLOWED_ORIGINS_SETTING,
       });
-      if (!originAllowed) {
-        socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
-        socket.destroy();
-        return;
-      }
-    } else {
-      logger.info?.("[clawline:http] ws_upgrade_origin_check", {
-        origin,
-        allowed: "any",
-        originAllowed,
-      });
+      socket.end(buildRejectedOriginUpgradeResponse(originCheck.reason));
+      return;
     }
     logger.info?.("[clawline:http] ws_upgrade_forward", { origin });
     server.handleUpgrade(request, socket, head, (ws) => {

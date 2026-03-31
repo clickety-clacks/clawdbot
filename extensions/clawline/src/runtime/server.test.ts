@@ -1,6 +1,7 @@
 import { Blob } from "node:buffer";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import BetterSqlite3 from "better-sqlite3";
@@ -174,6 +175,7 @@ async function setupTestServer(
   initialAllowlist: AllowlistEntry[] = [],
   options: {
     alertInstructionsText?: string | null;
+    network?: Partial<ProviderConfig["network"]>;
     sessionStorePathRelative?: string;
     webRootFollowSymlinks?: boolean;
     webRootPathRelative?: string;
@@ -233,6 +235,7 @@ async function setupTestServer(
         maxUploadBytes: 8_000_000,
         unreferencedUploadTtlSeconds: 86_400,
       },
+      ...(options.network ? { network: options.network } : {}),
       alertInstructionsPath,
       webRootPath,
       webRoot: { followSymlinks: options.webRootFollowSymlinks === true },
@@ -401,6 +404,50 @@ async function performPairRequest(
   }
 }
 
+async function performPairRequestWithOrigin(
+  port: number,
+  deviceId: string,
+  origin: string,
+  overrides: PairRequestOverrides = {},
+) {
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`, { headers: { Origin: origin } });
+  await waitForOpen(ws);
+  const responsePromise = waitForMessage(ws);
+  ws.send(JSON.stringify(createPairRequestPayload(deviceId, overrides)));
+  try {
+    return await responsePromise;
+  } finally {
+    ws.terminate();
+  }
+}
+
+async function performRawWebSocketUpgrade(port: number, origin: string) {
+  return new Promise<string>((resolve, reject) => {
+    const socket = net.connect(port, "127.0.0.1");
+    const chunks: Buffer[] = [];
+
+    socket.on("connect", () => {
+      socket.write(
+        [
+          "GET /ws HTTP/1.1",
+          `Host: 127.0.0.1:${port}`,
+          "Connection: Upgrade",
+          "Upgrade: websocket",
+          "Sec-WebSocket-Version: 13",
+          "Sec-WebSocket-Key: dGVzdC1zZWVkLWtleQ==",
+          `Origin: ${origin}`,
+          "",
+          "",
+        ].join("\r\n"),
+      );
+    });
+
+    socket.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    socket.on("error", reject);
+    socket.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+  });
+}
+
 async function uploadAsset(port: number, token: string, data: Buffer, mimeType: string) {
   const form = new FormData();
   form.set("file", new Blob([new Uint8Array(data)], { type: mimeType }), "upload.bin");
@@ -514,6 +561,94 @@ async function authenticateDeviceWithQueue(
 }
 
 describe.sequential("clawline provider server", () => {
+  it("accepts local, private, and tailnet browser origins without explicit allowlist entries", async () => {
+    const ctx = await setupTestServer([], {
+      network: {
+        bindAddress: "0.0.0.0",
+        allowInsecurePublic: true,
+        allowedOrigins: [],
+      },
+    });
+    try {
+      const origins = [
+        "http://127.0.0.1:4173",
+        "http://10.0.0.24:4173",
+        "https://flynn-workbench.ts.net",
+      ];
+
+      for (const origin of origins) {
+        const response = await performPairRequestWithOrigin(ctx.port, randomUUID(), origin);
+        expect(response).toMatchObject({
+          type: "pair_result",
+          success: false,
+          reason: "pair_pending",
+        });
+      }
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("rejects unlisted public browser origins with a config hint", async () => {
+    const warnEntries: unknown[][] = [];
+    const logger: Logger = {
+      info: () => {},
+      warn: (...args: unknown[]) => warnEntries.push(args),
+      error: () => {},
+    };
+    const ctx = await setupTestServer([], {
+      logger,
+      network: {
+        bindAddress: "0.0.0.0",
+        allowInsecurePublic: true,
+        allowedOrigins: [],
+      },
+    });
+    try {
+      const response = await performRawWebSocketUpgrade(ctx.port, "https://example.com");
+      expect(response).toContain("HTTP/1.1 403 Forbidden");
+      expect(response).toContain("channels.clawline.network.allowedOrigins");
+      expect(response).toContain("https://example.com");
+      expect(warnEntries).toEqual(
+        expect.arrayContaining([
+          expect.arrayContaining([
+            "[clawline:http] ws_upgrade_origin_rejected",
+            expect.objectContaining({
+              origin: "https://example.com",
+              setting: "channels.clawline.network.allowedOrigins",
+            }),
+          ]),
+        ]),
+      );
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("accepts explicitly allowlisted public browser origins", async () => {
+    const ctx = await setupTestServer([], {
+      network: {
+        bindAddress: "0.0.0.0",
+        allowInsecurePublic: true,
+        allowedOrigins: ["https://clawline.app"],
+      },
+    });
+    try {
+      const response = await performPairRequestWithOrigin(
+        ctx.port,
+        randomUUID(),
+        "https://clawline.app",
+      );
+      expect(response).toMatchObject({
+        type: "pair_result",
+        success: false,
+        reason: "pair_pending",
+      });
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("reissues tokens for already approved devices", async () => {
     const deviceId = randomUUID();
     const originalLastSeen = Date.now() - 10_000;
