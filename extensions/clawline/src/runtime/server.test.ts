@@ -589,6 +589,100 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("includes exact device ids in pending approval alerts", async () => {
+    const ctx = await setupTestServer([], {
+      alertInstructionsText: "",
+    });
+    const deviceId = randomUUID();
+    try {
+      const response = await performPairRequest(ctx.port, deviceId, { claimedName: "flynn" });
+      expect(response).toMatchObject({
+        type: "pair_result",
+        success: false,
+        reason: "pair_pending",
+      });
+      const call = enqueueAnnounceMock.mock.calls[0]?.[0] as
+        | { item?: { prompt?: string } }
+        | undefined;
+      expect(call?.item?.prompt).toContain(
+        `New device pending approval: flynn (iOS/iPhone) [deviceId: ${deviceId}]`,
+      );
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("logs exact device ids when pending approvals are delivered", async () => {
+    const infoEntries: string[] = [];
+    const ctx = await setupTestServer([], {
+      logger: {
+        ...silentLogger,
+        info: (message: string) => infoEntries.push(message),
+      },
+    });
+    const deviceId = randomUUID();
+    const ws = new WebSocket(`ws://127.0.0.1:${ctx.port}/ws`);
+    await waitForOpen(ws);
+    const queue = createMessageQueue(ws);
+    try {
+      ws.send(JSON.stringify(createPairRequestPayload(deviceId, { claimedName: "flynn" })));
+      const pendingResult = await waitForQueuedMessage(
+        queue,
+        (value) =>
+          typeof value === "object" &&
+          value !== null &&
+          "type" in value &&
+          (value as { type?: string }).type === "pair_result",
+      );
+      expect(pendingResult).toMatchObject({
+        type: "pair_result",
+        success: false,
+        reason: "pair_pending",
+      });
+
+      const allowlist = JSON.parse(await fs.readFile(ctx.allowlistPath, "utf8")) as {
+        version: number;
+        entries: AllowlistEntry[];
+      };
+      allowlist.entries.push(
+        createAllowlistEntry({
+          deviceId,
+          claimedName: "flynn",
+          tokenDelivered: false,
+          lastSeenAt: null,
+        }),
+      );
+      await fs.writeFile(ctx.allowlistPath, `${JSON.stringify(allowlist, null, 2)}\n`);
+
+      const approvedResult = await waitForQueuedMessage(
+        queue,
+        (value) =>
+          typeof value === "object" &&
+          value !== null &&
+          "type" in value &&
+          (value as { type?: string; success?: boolean }).type === "pair_result" &&
+          (value as { success?: boolean }).success === true,
+      );
+      expect(approvedResult).toMatchObject({
+        type: "pair_result",
+        success: true,
+        userId: "flynn",
+      });
+      await vi.waitFor(() => {
+        expect(infoEntries).toContain(
+          `[clawline:http] pending_approval_delivered flynn (iOS/iPhone) [deviceId: ${deviceId}] userId=flynn isAdmin=true delivered=true`,
+        );
+      });
+      expect(infoEntries).toContain(
+        `[clawline:http] pair_request_upsert_pending flynn (iOS/iPhone) [deviceId: ${deviceId}] pendingCount=1`,
+      );
+    } finally {
+      queue.dispose();
+      ws.terminate();
+      await ctx.cleanup();
+    }
+  });
+
   it("rejects unlisted public browser origins with a config hint", async () => {
     const warnEntries: unknown[][] = [];
     const logger: Logger = {
@@ -727,7 +821,9 @@ describe.sequential("clawline provider server", () => {
         item?: { prompt?: string; origin?: { channel?: string; to?: string } };
       };
       expect(call?.key).toBe("agent:main:main");
-      expect(call?.item?.prompt).toBe("New device pending approval: qa sim (iOS)");
+      expect(call?.item?.prompt).toBe(
+        `New device pending approval: qa sim (iOS/iPhone) [deviceId: ${deviceId}]`,
+      );
       expect(call?.item?.origin).toEqual({ channel: "clawline", to: "agent:main:main" });
       expect(gatewayCallMock).not.toHaveBeenCalled();
     } finally {

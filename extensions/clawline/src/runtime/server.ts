@@ -1212,6 +1212,18 @@ function isLocalhost(address: string): boolean {
   return ["127.0.0.1", "::1", "localhost"].includes(address);
 }
 
+function describePairingEntry(entry: {
+  deviceId: string;
+  claimedName?: string;
+  deviceInfo?: Partial<DeviceInfo> | null;
+}): string {
+  const name = entry.claimedName?.trim() || "New device";
+  const platform = entry.deviceInfo?.platform?.trim() || "Unknown platform";
+  const model = entry.deviceInfo?.model?.trim();
+  const surface = model && model !== platform ? `${platform}/${model}` : platform;
+  return `${name} (${surface}) [deviceId: ${entry.deviceId}]`;
+}
+
 const CLAWLINE_ALLOWED_ORIGINS_SETTING = "channels.clawline.network.allowedOrigins";
 
 type ClawlineBrowserOriginCheckResult =
@@ -1545,9 +1557,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     await sendJson(session.socket, payload).catch(() => {});
   };
   async function notifyGatewayOfPending(entry: PendingEntry) {
-    const name = entry.claimedName ?? "New device";
-    const platform = entry.deviceInfo.platform || "Unknown platform";
-    const text = `New device pending approval: ${name} (${platform})`;
+    const text = `New device pending approval: ${describePairingEntry(entry)}`;
     await wakeGatewayForAlert(text, mainSessionKey);
   }
   const alertInstructionsPath =
@@ -4295,6 +4305,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     if (delivered) {
       await setTokenDelivered(entry.deviceId, true);
     }
+    logger.info?.(
+      `[clawline:http] pending_approval_delivered ${describePairingEntry(entry)} userId=${entry.userId} isAdmin=${entry.isAdmin} delivered=${delivered}`,
+    );
     pending.socket.close();
     await removePendingEntry(entry.deviceId).catch(() => {});
   }
@@ -7629,12 +7642,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     await refreshAllowlistFromDisk();
     const entry = findAllowlistEntry(deviceId);
     if (entry) {
-      logger.info?.("[clawline:http] pair_request_allowlist_entry", {
-        deviceId,
-        isAdmin: entry.isAdmin,
-        tokenDelivered: entry.tokenDelivered,
-        lastSeenAt: entry.lastSeenAt,
-      });
+      logger.info?.(
+        `[clawline:http] pair_request_allowlist_entry ${describePairingEntry(entry)} userId=${entry.userId} isAdmin=${entry.isAdmin} tokenDelivered=${entry.tokenDelivered} lastSeenAt=${entry.lastSeenAt ?? "null"}`,
+      );
     }
     if (entry && !entry.tokenDelivered) {
       const token = issueToken(entry);
@@ -7735,23 +7745,18 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       deviceInfo: sanitizedInfo,
       requestedAt: existingPendingEntry ? existingPendingEntry.requestedAt : now,
     };
-    logger.info?.("[clawline:http] pair_request_upsert_pending", {
-      deviceId,
-      claimedName: sanitizedClaimedName,
-      pendingCount: pendingFile.entries.length + (existingPendingEntry ? 0 : 1),
-    });
+    logger.info?.(
+      `[clawline:http] pair_request_upsert_pending ${describePairingEntry(pendingEntry)} pendingCount=${pendingFile.entries.length + (existingPendingEntry ? 0 : 1)}`,
+    );
     await upsertPendingEntry(pendingEntry);
-    logger.info?.("[clawline:http] pair_request_pending_persisted", {
-      deviceId,
-      pendingEntries: pendingFile.entries.length,
-    });
+    logger.info?.(
+      `[clawline:http] pair_request_pending_persisted ${describePairingEntry(pendingEntry)} pendingEntries=${pendingFile.entries.length}`,
+    );
     notifyGatewayOfPending(pendingEntry)
       .then(() =>
-        logger.info?.("[clawline:http] pair_request_pending_notified", {
-          deviceId,
-          claimedName: pendingEntry.claimedName,
-          platform: pendingEntry.deviceInfo.platform,
-        }),
+        logger.info?.(
+          `[clawline:http] pair_request_pending_notified ${describePairingEntry(pendingEntry)}`,
+        ),
       )
       .catch((err) =>
         logger.warn?.("[clawline:http] pair_request_pending_notify_failed", {
