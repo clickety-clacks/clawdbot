@@ -1343,6 +1343,42 @@ function buildRejectedOriginUpgradeResponse(reason: string): string {
   ].join("\r\n");
 }
 
+const STREAM_API_CORS_ALLOW_METHODS = "GET, POST, PATCH, DELETE, OPTIONS";
+const STREAM_API_CORS_ALLOW_HEADERS = "Authorization, Content-Type";
+
+function appendVaryHeader(res: http.ServerResponse, value: string) {
+  const current = res.getHeader("Vary");
+  const existingValues = Array.isArray(current)
+    ? current
+    : typeof current === "string"
+      ? current.split(",")
+      : [];
+  const normalized = new Set(
+    existingValues.map((entry) => entry.trim()).filter((entry) => entry.length > 0),
+  );
+  normalized.add(value);
+  res.setHeader("Vary", [...normalized].join(", "));
+}
+
+function applyStreamApiCorsHeaders(res: http.ServerResponse, origin: string | null) {
+  if (!origin) {
+    return;
+  }
+  appendVaryHeader(res, "Origin");
+  res.setHeader("Access-Control-Allow-Origin", origin);
+  res.setHeader("Access-Control-Allow-Methods", STREAM_API_CORS_ALLOW_METHODS);
+  res.setHeader("Access-Control-Allow-Headers", STREAM_API_CORS_ALLOW_HEADERS);
+  res.setHeader("Access-Control-Max-Age", "600");
+}
+
+function isStreamApiPath(pathName: string): boolean {
+  return (
+    pathName === "/api/streams" ||
+    pathName.startsWith("/api/streams/") ||
+    pathName === "/api/trackable-sessions"
+  );
+}
+
 async function ensureDir(dir: string) {
   await fs.mkdir(dir, { recursive: true });
 }
@@ -2978,6 +3014,41 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         method: req.method ?? "UNKNOWN",
         path: parsedUrl.pathname,
       });
+      if (isStreamApiPath(parsedUrl.pathname)) {
+        const originCheck = checkClawlineBrowserOrigin({
+          originHeader: req.headers.origin,
+          allowedOrigins: config.network.allowedOrigins,
+        });
+        logger.info?.("[clawline:http] stream_api_origin_check", {
+          origin: originCheck.origin,
+          allowed: config.network.allowedOrigins,
+          originAllowed: originCheck.ok,
+          matchedBy: originCheck.ok ? originCheck.matchedBy : null,
+          path: parsedUrl.pathname,
+          reason: originCheck.ok ? null : originCheck.reason,
+        });
+        if (!originCheck.ok) {
+          logger.warn?.("[clawline:http] stream_api_origin_rejected", {
+            origin: originCheck.origin,
+            path: parsedUrl.pathname,
+            reason: originCheck.reason,
+            setting: CLAWLINE_ALLOWED_ORIGINS_SETTING,
+          });
+          sendStreamApiError(res, 403, "origin_not_allowed", originCheck.reason);
+          return;
+        }
+        applyStreamApiCorsHeaders(res, originCheck.origin);
+        if (req.method === "OPTIONS") {
+          res.writeHead(204);
+          res.end();
+          logHttpRequest("request_handled", {
+            method: req.method,
+            path: parsedUrl.pathname,
+            status: 204,
+          });
+          return;
+        }
+      }
       if (req.method === "GET" && parsedUrl.pathname === "/version") {
         res.setHeader("Content-Type", "application/json");
         res.writeHead(200);
@@ -3048,10 +3119,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       res.writeHead(404).end();
     } catch (err) {
       const pathName = req.url ? new URL(req.url, "http://localhost").pathname : "";
-      const isStreamApi =
-        pathName === "/api/streams" ||
-        pathName.startsWith("/api/streams/") ||
-        pathName === "/api/trackable-sessions";
+      const isStreamApi = isStreamApiPath(pathName);
       if (isStreamApi) {
         if (err instanceof HttpError) {
           sendStreamApiError(res, err.status, err.code, err.message);

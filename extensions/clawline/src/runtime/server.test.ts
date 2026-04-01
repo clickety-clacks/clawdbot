@@ -589,6 +589,103 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("answers stream api browser preflights and requests for local, private, and tailnet origins", async () => {
+    const entry = createAllowlistEntry();
+    const ctx = await setupTestServer([entry], {
+      network: {
+        bindAddress: "0.0.0.0",
+        allowInsecurePublic: true,
+        allowedOrigins: [],
+      },
+    });
+    try {
+      const pairResult = await performPairRequest(ctx.port, entry.deviceId, {
+        claimedName: entry.claimedName,
+      });
+      const authToken = pairResult.token as string;
+      const { ws } = await authenticateDevice(ctx.port, entry.deviceId, authToken);
+      const authHeader = `Bearer ${authToken}`;
+      const origins = [
+        "http://127.0.0.1:4173",
+        "http://10.0.0.24:4173",
+        "https://flynn-workbench.ts.net",
+      ];
+
+      for (const origin of origins) {
+        const preflight = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
+          method: "OPTIONS",
+          headers: {
+            Origin: origin,
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "authorization",
+          },
+        });
+        expect(preflight.status).toBe(204);
+        expect(preflight.headers.get("access-control-allow-origin")).toBe(origin);
+        expect(preflight.headers.get("access-control-allow-methods")).toContain("GET");
+        expect(preflight.headers.get("access-control-allow-headers")).toContain("Authorization");
+
+        const response = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
+          headers: {
+            Authorization: authHeader,
+            Origin: origin,
+          },
+        });
+        expect(response.status).toBe(200);
+        expect(response.headers.get("access-control-allow-origin")).toBe(origin);
+      }
+      ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("rejects public stream api browser origins unless they are explicitly allowlisted", async () => {
+    const entry = createAllowlistEntry();
+    const blockedOrigin = "https://example.com";
+    const allowedOrigin = "https://clawline.app";
+    const ctx = await setupTestServer([entry], {
+      network: {
+        bindAddress: "0.0.0.0",
+        allowInsecurePublic: true,
+        allowedOrigins: [allowedOrigin],
+      },
+    });
+    try {
+      const pairResult = await performPairRequest(ctx.port, entry.deviceId, {
+        claimedName: entry.claimedName,
+      });
+      const authToken = pairResult.token as string;
+      const { ws } = await authenticateDevice(ctx.port, entry.deviceId, authToken);
+      const authHeader = `Bearer ${authToken}`;
+
+      const blockedResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
+        headers: {
+          Authorization: authHeader,
+          Origin: blockedOrigin,
+        },
+      });
+      expect(blockedResponse.status).toBe(403);
+      expect(await blockedResponse.json()).toMatchObject({
+        error: {
+          code: "origin_not_allowed",
+        },
+      });
+
+      const allowedResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
+        headers: {
+          Authorization: authHeader,
+          Origin: allowedOrigin,
+        },
+      });
+      expect(allowedResponse.status).toBe(200);
+      expect(allowedResponse.headers.get("access-control-allow-origin")).toBe(allowedOrigin);
+      ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("includes exact device ids in pending approval alerts", async () => {
     const ctx = await setupTestServer([], {
       alertInstructionsText: "",
