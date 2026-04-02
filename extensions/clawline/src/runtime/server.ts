@@ -3820,7 +3820,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     return globalFallbackKey;
   }
 
-  async function resolveGlobalAlertSessionKey(sessionKey: string): Promise<string> {
+  async function resolveGlobalSessionKeyFromAgentStores(sessionKey: string): Promise<string> {
     const normalized = normalizeSessionKey(sessionKey);
     if (!normalized) {
       return "";
@@ -3857,6 +3857,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       }
     }
     return "";
+  }
+
+  async function resolveGlobalAlertSessionKey(sessionKey: string): Promise<string> {
+    return resolveGlobalSessionKeyFromAgentStores(sessionKey);
   }
 
   async function wakeGatewayForAlert(text: string, sessionKey?: string, attachments?: unknown[]) {
@@ -5751,7 +5755,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
 
     if (lowerTargetInput.startsWith("agent:")) {
-      target = resolveSessionTargetFromSessionKey(normalizedTargetInput);
+      target = await resolveSessionTargetFromSessionKey(normalizedTargetInput);
       if (target.kind === "session") {
         sessionKeyHint = target.sessionKey;
       } else {
@@ -7040,7 +7044,29 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     | { kind: "session"; userId: string; sessionKey: string }
     | { kind: "device"; userId: string; deviceId: string };
 
-  function resolveSessionTargetFromSessionKey(sessionKey: string): ResolvedSendTarget {
+  function resolveOwningUserIdForSessionKey(sessionKey: string): string {
+    const normalized = normalizeSessionKey(sessionKey);
+    if (!normalized) {
+      return "";
+    }
+    const seenUserIds = new Set<string>();
+    for (const entry of allowlist.entries) {
+      const canonicalUserId = resolveUserTarget(entry.userId).userId;
+      const dedupeKey = canonicalUserId.toLowerCase();
+      if (seenUserIds.has(dedupeKey)) {
+        continue;
+      }
+      seenUserIds.add(dedupeKey);
+      if (loadStreamRowForUser(canonicalUserId, normalized)) {
+        return canonicalUserId;
+      }
+    }
+    return "";
+  }
+
+  async function resolveSessionTargetFromSessionKey(
+    sessionKey: string,
+  ): Promise<ResolvedSendTarget> {
     const trimmed = sessionKey.trim();
     if (!trimmed) {
       throw new Error("Delivering to clawline requires --to <userId|deviceId>");
@@ -7058,18 +7084,30 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       };
     }
     const parsed = parseClawlineUserSessionKey(trimmed);
-    if (!parsed) {
+    if (parsed) {
+      const canonicalUserId = resolveUserTarget(parsed.userId).userId;
+      return {
+        kind: "session",
+        userId: canonicalUserId,
+        sessionKey: buildClawlineUserStreamSessionKey(
+          parsed.agentId,
+          canonicalUserId,
+          parsed.streamSuffix,
+        ),
+      };
+    }
+    const globalSessionKey = await resolveGlobalSessionKeyFromAgentStores(trimmed);
+    if (!globalSessionKey) {
       throw new Error("Invalid clawline session key");
     }
-    const canonicalUserId = resolveUserTarget(parsed.userId).userId;
+    const owningUserId = resolveOwningUserIdForSessionKey(globalSessionKey);
+    if (!owningUserId) {
+      throw new Error("Invalid clawline session key");
+    }
     return {
       kind: "session",
-      userId: canonicalUserId,
-      sessionKey: buildClawlineUserStreamSessionKey(
-        parsed.agentId,
-        canonicalUserId,
-        parsed.streamSuffix,
-      ),
+      userId: owningUserId,
+      sessionKey: globalSessionKey,
     };
   }
 

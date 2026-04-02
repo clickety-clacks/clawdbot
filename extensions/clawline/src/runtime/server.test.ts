@@ -3262,6 +3262,78 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("delivers outbound sends to adopted non-clawline session keys", async () => {
+    const deviceId = randomUUID();
+    const adoptedSessionKey = "agent:main:subagent:uuid";
+    const entry = createAllowlistEntry({
+      deviceId,
+      userId: "flynn",
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry], {
+      sessionStorePathRelative: path.join("agents", "main", "sessions", "sessions.json"),
+    });
+    try {
+      await fs.writeFile(
+        ctx.sessionStorePath,
+        JSON.stringify(
+          {
+            [adoptedSessionKey]: {
+              sessionId: "sess_subagent",
+              updatedAt: Date.now() - 100,
+              label: "Subagent Session",
+              channel: "openclaw",
+              lastChannel: "openclaw",
+              lastTo: adoptedSessionKey,
+            },
+          },
+          null,
+          2,
+        ),
+      );
+
+      const pair = await performPairRequest(ctx.port, deviceId);
+      const token = pair.token as string;
+      const authed = await authenticateDevice(ctx.port, deviceId, token);
+      const adoptResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams/adopt`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ sessionKey: adoptedSessionKey }),
+      });
+      expect(adoptResponse.status).toBe(200);
+
+      const result = await ctx.server.sendMessage({
+        target: adoptedSessionKey,
+        text: "hello adopted stream",
+      });
+
+      expect(result.userId).toBe(entry.userId);
+      expect(result.deviceId).toBeUndefined();
+
+      const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
+      const db = new BetterSqlite3(dbPath);
+      try {
+        const row = db
+          .prepare(`SELECT userId, sessionKey, payloadJson FROM events WHERE id = ?`)
+          .get(result.messageId) as { userId: string; sessionKey: string; payloadJson: string };
+        expect(row.userId).toBe(entry.userId);
+        expect(JSON.parse(row.payloadJson)).toMatchObject({
+          content: "hello adopted stream",
+          sessionKey: adoptedSessionKey,
+        });
+      } finally {
+        db.close();
+      }
+      authed.ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("untracks adopted sessions via DELETE without crashing", async () => {
     const deviceId = randomUUID();
     const adoptedSessionKey = "agent:main:subagent:uuid";
