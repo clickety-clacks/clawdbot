@@ -1009,6 +1009,59 @@ describe("dispatchReplyFromConfig", () => {
     expect(dispatcher.sendFinalReply).not.toHaveBeenCalled();
   });
 
+  it("forwards replyOptions images into ACP turns", async () => {
+    setNoAbort();
+    const runtime = createAcpRuntime([{ type: "done" }]);
+    acpMocks.readAcpSessionEntry.mockReturnValue({
+      sessionKey: "agent:codex-acp:session-1",
+      storeSessionKey: "agent:codex-acp:session-1",
+      cfg: {},
+      storePath: "/tmp/mock-sessions.json",
+      entry: {},
+      acp: {
+        backend: "acpx",
+        agent: "codex",
+        runtimeSessionName: "runtime:1",
+        mode: "persistent",
+        state: "idle",
+        lastActivityAt: Date.now(),
+      },
+    });
+    acpMocks.requireAcpRuntimeBackend.mockReturnValue({
+      id: "acpx",
+      runtime,
+    });
+
+    const cfg = {
+      acp: {
+        enabled: true,
+        dispatch: { enabled: true },
+      },
+    } as OpenClawConfig;
+    const dispatcher = createDispatcher();
+    const ctx = buildTestCtx({
+      Provider: "discord",
+      Surface: "discord",
+      SessionKey: "agent:codex-acp:session-1",
+      BodyForAgent: "",
+    });
+
+    await dispatchReplyFromConfig({
+      ctx,
+      cfg,
+      dispatcher,
+      replyOptions: {
+        images: [{ type: "image", mimeType: "image/png", data: "aW1hZ2UtYnl0ZXM=" }],
+      },
+    });
+
+    expect(runtime.runTurn).toHaveBeenCalledTimes(1);
+    expect(runtime.runTurn.mock.calls[0]?.[0]).toMatchObject({
+      text: "",
+      attachments: [{ mediaType: "image/png", data: "aW1hZ2UtYnl0ZXM=" }],
+    });
+  });
+
   it("aborts ACP dispatch promptly when the caller abort signal fires", async () => {
     setNoAbort();
     let releaseTurn: (() => void) | undefined;
