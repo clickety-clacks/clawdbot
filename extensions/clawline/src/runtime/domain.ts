@@ -59,6 +59,12 @@ export type StreamDeletedServerMessage = {
   sessionKey: string;
 };
 
+export type StreamReadStateServerMessage = {
+  type: "stream_read_state";
+  sessionKey: string;
+  lastReadMessageId: string;
+};
+
 export type ClawlineOutboundAttachmentInput = {
   data: string;
   mimeType?: string;

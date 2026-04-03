@@ -1909,6 +1909,97 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("persists stream read state and syncs it across devices", async () => {
+    const userId = "flynn";
+    const sessionKey = "agent:main:clawline:flynn:main";
+    const firstDeviceId = randomUUID();
+    const secondDeviceId = randomUUID();
+    const thirdDeviceId = randomUUID();
+    const now = Date.now();
+    const baseEntry = {
+      claimedName: "Flynn",
+      deviceInfo: { platform: "iOS", model: "iPhone" },
+      userId,
+      isAdmin: false,
+      tokenDelivered: true,
+      createdAt: now - 5_000,
+      lastSeenAt: now - 2_000,
+    };
+    const ctx = await setupTestServer([
+      { ...baseEntry, deviceId: firstDeviceId },
+      { ...baseEntry, deviceId: secondDeviceId },
+      { ...baseEntry, deviceId: thirdDeviceId },
+    ]);
+    try {
+      const firstPair = await performPairRequest(ctx.port, firstDeviceId);
+      const secondPair = await performPairRequest(ctx.port, secondDeviceId);
+      const thirdPair = await performPairRequest(ctx.port, thirdDeviceId);
+      const { ws: firstWs } = await authenticateDevice(
+        ctx.port,
+        firstDeviceId,
+        firstPair.token as string,
+      );
+      const { ws: secondWs } = await authenticateDevice(
+        ctx.port,
+        secondDeviceId,
+        secondPair.token as string,
+      );
+      const firstQueue = createMessageQueue(firstWs);
+      const secondQueue = createMessageQueue(secondWs);
+
+      const sent = await ctx.server.sendMessage({
+        target: userId,
+        text: "hello",
+        sessionKey,
+      });
+
+      expect(await firstQueue.next()).toMatchObject({
+        type: "message",
+        id: sent.messageId,
+        sessionKey,
+      });
+      expect(await secondQueue.next()).toMatchObject({
+        type: "message",
+        id: sent.messageId,
+        sessionKey,
+      });
+
+      firstWs.send(
+        JSON.stringify({
+          type: "stream_read",
+          sessionKey,
+          lastReadMessageId: sent.messageId,
+        }),
+      );
+
+      expect(await firstQueue.next()).toMatchObject({
+        type: "stream_read_state",
+        sessionKey,
+        lastReadMessageId: sent.messageId,
+      });
+      expect(await secondQueue.next()).toMatchObject({
+        type: "stream_read_state",
+        sessionKey,
+        lastReadMessageId: sent.messageId,
+      });
+
+      const { auth: thirdAuth, ws: thirdWs } = await authenticateDevice(
+        ctx.port,
+        thirdDeviceId,
+        thirdPair.token as string,
+      );
+      expect(thirdAuth.streamReadStates).toMatchObject({ [sessionKey]: sent.messageId });
+
+      firstQueue.dispose();
+      secondQueue.dispose();
+      firstWs.terminate();
+      secondWs.terminate();
+      thirdWs.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("supports stream CRUD over REST and broadcasts stream events to all user sockets", async () => {
     const userId = "flynn";
     const firstDeviceId = randomUUID();
