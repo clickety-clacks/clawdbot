@@ -78,6 +78,8 @@ import type {
   StreamUpdatedServerMessage,
   StreamDeletedServerMessage,
   StreamReadStateServerMessage,
+  StreamTailState,
+  StreamTailStateServerMessage,
 } from "./domain.js";
 import { ClientMessageError, HttpError } from "./errors.js";
 import { createAssetHandlers } from "./http-assets.js";
@@ -224,6 +226,8 @@ const INTERACTIVE_HTML_MIME = "application/vnd.clawline.interactive-html+json";
 const INTERACTIVE_CALLBACK_MIME = "application/vnd.clawline.interactive-callback+json";
 const CLIENT_FEATURE_TERMINAL_BUBBLES_V1 = "terminal_bubbles_v1";
 const SERVER_FEATURE_SESSION_INFO = "session_info";
+const SERVER_FEATURE_STREAM_READ_STATE = "stream_read_state";
+const SERVER_FEATURE_STREAM_TAIL_STATE = "stream_tail_state";
 const TERMINAL_BUBBLES_UNSUPPORTED_NOTICE =
   "Terminal session hidden: this client does not support terminal bubbles yet. Update Clawline to view it.";
 const INLINE_DOCUMENT_MIME_TYPES = new Set([TERMINAL_SESSION_MIME, INTERACTIVE_HTML_MIME]);
@@ -240,7 +244,7 @@ const EXEC_COMPLETION_ALERT_PROMPT =
 const USER_ID_MAX_LENGTH = 48;
 const COMBINING_MARKS_REGEX = /[\u0300-\u036f]/g;
 const WEBROOT_PREFIX = "/www";
-const STREAM_DB_VERSION = 4;
+const STREAM_DB_VERSION = 5;
 const STREAM_SUFFIX_REGEX = /^s_[0-9a-f]{8}$/;
 const STREAM_DISPLAY_NAME_FALLBACK = "Stream";
 const STREAM_IDEMPOTENCY_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
@@ -378,7 +382,11 @@ function countTerminalSessionDocumentAttachments(values?: unknown[]): number {
 }
 
 function buildAuthResultFeatures(session: Session): string[] {
-  const features = [SERVER_FEATURE_SESSION_INFO];
+  const features = [
+    SERVER_FEATURE_SESSION_INFO,
+    SERVER_FEATURE_STREAM_READ_STATE,
+    SERVER_FEATURE_STREAM_TAIL_STATE,
+  ];
   if (session.clientFeatures.has(CLIENT_FEATURE_TERMINAL_BUBBLES_V1)) {
     features.push(CLIENT_FEATURE_TERMINAL_BUBBLES_V1);
   }
@@ -965,7 +973,13 @@ type StreamServerMessage =
   | StreamCreatedServerMessage
   | StreamUpdatedServerMessage
   | StreamDeletedServerMessage
-  | StreamReadStateServerMessage;
+  | StreamReadStateServerMessage
+  | StreamTailStateServerMessage;
+
+type StreamTailStateRow = {
+  sessionKey: string;
+  payloadJson: string;
+};
 
 type TrackableSessionApiEntry = {
   sessionKey: string;
@@ -1599,6 +1613,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       isAdmin: session.isAdmin,
       dmScope: resolved.dmScope,
       sessionKeys: resolved.streamSessionKeys,
+      streamReadStates: readStreamReadStatesForUser(session.userId, resolved.streamSessionKeys),
+      streamTailStates: readStreamTailStatesForUser(session.userId, resolved.streamSessionKeys),
     };
     await sendJson(session.socket, payload).catch(() => {});
   };
@@ -1702,6 +1718,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   let deleteExpiredStreamIdempotencyStmt!: SqliteStatement;
   let selectAdoptedSessionKeysByUserStmt!: SqliteStatement;
   let insertAdoptedSessionStmt!: SqliteStatement;
+  let selectStreamTailStatesByUserStmt!: SqliteStatement;
   let deleteMessageAssetsBySessionStmt!: SqliteStatement;
   let deleteMessagesBySessionStmt!: SqliteStatement;
   let deleteEventsBySessionStmt!: SqliteStatement;
@@ -1883,6 +1900,53 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       sessionKey: normalizedSessionKey,
       lastReadMessageId,
     };
+  };
+
+  const readStreamReadStatesForUser = (
+    userId: string,
+    allowedSessionKeys?: string[],
+  ): Record<string, string> => {
+    const allowed = allowedSessionKeys
+      ? new Set(allowedSessionKeys.map((sessionKey) => normalizeSessionKey(sessionKey)))
+      : null;
+    return readStreamReadStateMapForUser(userId, allowed ?? undefined);
+  };
+
+  const readStreamTailStatesForUser = (
+    userId: string,
+    allowedSessionKeys?: string[],
+  ): Record<string, StreamTailState> => {
+    if (!selectStreamTailStatesByUserStmt) {
+      return {};
+    }
+    const allowed = allowedSessionKeys
+      ? new Set(allowedSessionKeys.map((sessionKey) => normalizeSessionKey(sessionKey)))
+      : null;
+    const rows = selectStreamTailStatesByUserStmt.all(userId, userId) as StreamTailStateRow[];
+    const states: Record<string, StreamTailState> = {};
+    for (const row of rows) {
+      const normalizedSessionKey = normalizeSessionKey(row.sessionKey);
+      if (!normalizedSessionKey) {
+        continue;
+      }
+      if (allowed && !allowed.has(normalizedSessionKey)) {
+        continue;
+      }
+      const parsed = parseServerMessage(row.payloadJson, logger);
+      if (
+        !parsed ||
+        parsed.type !== "message" ||
+        !SERVER_EVENT_ID_REGEX.test(parsed.id) ||
+        (parsed.role !== "user" && parsed.role !== "assistant")
+      ) {
+        continue;
+      }
+      states[row.sessionKey] = {
+        lastMessageId: parsed.id,
+        lastMessageRole: parsed.role,
+      };
+    }
+    return states;
   };
 
   const filterStreamAccess = (streams: StreamSession[], isAdmin: boolean): StreamSession[] => {
@@ -2647,6 +2711,19 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       `INSERT OR IGNORE INTO adopted_sessions (userId, sessionKey, createdAt)
        VALUES (?, ?, ?)`,
     );
+    selectStreamTailStatesByUserStmt = newDb.prepare(
+      `SELECT latest.sessionKey, events.payloadJson
+       FROM (
+         SELECT sessionKey, MAX(sequence) as maxSequence
+         FROM events
+         WHERE userId = ? AND eventType = 'message' AND sessionKey IS NOT NULL
+         GROUP BY sessionKey
+       ) AS latest
+       JOIN events
+         ON events.userId = ?
+        AND events.sessionKey = latest.sessionKey
+        AND events.sequence = latest.maxSequence`,
+    );
     deleteMessageAssetsBySessionStmt = newDb.prepare(
       `DELETE FROM message_assets
        WHERE EXISTS (
@@ -2841,6 +2918,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       const orphanCandidates = selectOrphanedAssetsForUserStmt.all(params.userId) as Array<{
         assetId: string;
       }>;
+      deleteStreamReadStateBySessionStmt.run(params.userId, params.sessionKey);
       deleteMessageAssetsBySessionStmt.run(params.userId, params.userId, params.sessionKey);
       deleteMessagesBySessionStmt.run(params.userId, params.userId, params.sessionKey);
       deleteEventsBySessionStmt.run(params.userId, params.sessionKey);
@@ -4745,6 +4823,32 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     );
   }
 
+  function buildStreamTailStateEvent(event: ServerMessage): StreamTailStateServerMessage | null {
+    if (
+      event.type !== "message" ||
+      typeof event.sessionKey !== "string" ||
+      event.sessionKey.trim().length === 0 ||
+      !SERVER_EVENT_ID_REGEX.test(event.id) ||
+      (event.role !== "user" && event.role !== "assistant")
+    ) {
+      return null;
+    }
+    return {
+      type: "stream_tail_state",
+      sessionKey: event.sessionKey,
+      lastMessageId: event.id,
+      lastMessageRole: event.role,
+    };
+  }
+
+  async function broadcastStreamTailStateForUser(userId: string, event: ServerMessage) {
+    const payload = buildStreamTailStateEvent(event);
+    if (!payload) {
+      return;
+    }
+    await broadcastStreamEvent(userId, payload);
+  }
+
   function loadStreamRowForUser(userId: string, sessionKey: string): StreamSessionRow | null {
     const row = selectStreamSessionByKeyStmt.get(userId, sessionKey) as
       | StreamSessionRow
@@ -5476,10 +5580,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       session.isAdmin,
       session.adoptedSessionKeys,
     );
-    const readStateBySession = readStreamReadStateMapForUser(
-      session.userId,
-      new Set(sessionInfo.streamSessionKeys),
-    );
     const payload = {
       type: "auth_result",
       success: true,
@@ -5492,7 +5592,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       features: buildAuthResultFeatures(session),
       dmScope: sessionInfo.dmScope,
       sessionKeys: sessionInfo.streamSessionKeys,
-      streamReadStates: readStateBySession,
+      streamReadStates: readStreamReadStatesForUser(session.userId, sessionInfo.streamSessionKeys),
+      streamTailStates: readStreamTailStatesForUser(session.userId, sessionInfo.streamSessionKeys),
     };
     const streams = await runPerUserTask(session.userId, async () =>
       enqueueWriteTask(() => {
@@ -5979,6 +6080,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       insertEventTx(event, target.userId);
     });
     broadcastToSessionKey(normalizedResolvedSessionKey, event);
+    await broadcastStreamTailStateForUser(target.userId, event);
     return {
       messageId: event.id,
       userId: target.userId,
@@ -6324,6 +6426,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           });
           markProcessStage("broadcast_user_message");
           broadcastToSessionKey(resolvedSessionKey, event);
+          await broadcastStreamTailStateForUser(targetUserId, event);
 
           const attachmentSummary = describeClawlineAttachments(ownership.attachments);
           const inboundBody = attachmentSummary
@@ -6457,6 +6560,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
                 { preserveOpaqueSessionKey: inboundTarget.kind === "adopted" },
               );
               broadcastToSessionKey(resolvedSessionKey, assistantEvent);
+              await broadcastStreamTailStateForUser(targetUserId, assistantEvent);
               logger.info?.("[clawline] agent_run_phase", {
                 phase: "deliver_done",
                 messageId: payload.id,
@@ -6922,6 +7026,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
                 replyAttachments,
               );
               broadcastToSessionKey(resolvedSessionKey, assistantEvent);
+              await broadcastStreamTailStateForUser(targetUserId, assistantEvent);
               logger.info?.("[clawline] agent_run_phase", {
                 phase: "deliver_done",
                 messageId: clientId,
@@ -7316,6 +7421,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           break;
         case "message":
           await handleAuthedMessage(ws, payload);
+          break;
+        case "stream_read":
+          await handleAuthedStreamRead(ws, payload);
           break;
         case "interactive-callback":
           await handleAuthedInteractiveCallback(ws, payload);
@@ -8156,21 +8264,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   }
 
   // oxlint-disable-next-line typescript/no-explicit-any
-  async function handleAuthedInteractiveCallback(ws: WebSocket, payload: any) {
-    const state = connectionState.get(ws);
-    if (!state || !state.authenticated || !state.deviceId || !state.userId) {
-      await sendJson(ws, { type: "error", code: "auth_failed", message: "Not authenticated" });
-      ws.close();
-      return;
-    }
-    const session = sessionsByDevice.get(state.deviceId);
-    if (!session) {
-      await sendJson(ws, { type: "error", code: "auth_failed", message: "Session missing" });
-      return;
-    }
-    await processInteractiveCallback(session, payload);
-  }
-
   async function handleAuthedStreamRead(ws: WebSocket, payload: any) {
     const state = connectionState.get(ws);
     if (!state || !state.authenticated || !state.deviceId || !state.userId) {
@@ -8183,14 +8276,36 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       await sendJson(ws, { type: "error", code: "auth_failed", message: "Session missing" });
       return;
     }
+    const sessionKey = typeof payload.sessionKey === "string" ? payload.sessionKey.trim() : "";
+    const lastReadMessageId =
+      typeof payload.lastReadMessageId === "string" ? payload.lastReadMessageId.trim() : "";
+    if (!sessionKey || !lastReadMessageId || !SERVER_EVENT_ID_REGEX.test(lastReadMessageId)) {
+      await sendJson(ws, {
+        type: "error",
+        code: "invalid_message",
+        message: "Invalid stream read payload",
+      }).catch(() => {});
+      return;
+    }
+    const normalizedSessionKey = normalizeSessionKey(sessionKey);
+    const allowedSessionKey = session.sessionKeys.find((candidate) =>
+      sessionKeyEq(candidate, normalizedSessionKey),
+    );
+    if (!allowedSessionKey) {
+      await sendJson(ws, {
+        type: "error",
+        code: "stream_not_found",
+        message: "Stream not found",
+      }).catch(() => {});
+      return;
+    }
     try {
       const update = await runPerUserTask(session.userId, async () =>
         enqueueWriteTask(() =>
           updateStreamReadState({
             userId: session.userId,
-            sessionKey: typeof payload.sessionKey === "string" ? payload.sessionKey : "",
-            lastReadMessageId:
-              typeof payload.lastReadMessageId === "string" ? payload.lastReadMessageId : "",
+            sessionKey: allowedSessionKey,
+            lastReadMessageId,
           }),
         ),
       );
@@ -8208,11 +8323,27 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           type: "error",
           code: error.code,
           message: error.message,
-        });
+        }).catch(() => {});
         return;
       }
       throw error;
     }
+  }
+
+  // oxlint-disable-next-line typescript/no-explicit-any
+  async function handleAuthedInteractiveCallback(ws: WebSocket, payload: any) {
+    const state = connectionState.get(ws);
+    if (!state || !state.authenticated || !state.deviceId || !state.userId) {
+      await sendJson(ws, { type: "error", code: "auth_failed", message: "Not authenticated" });
+      ws.close();
+      return;
+    }
+    const session = sessionsByDevice.get(state.deviceId);
+    if (!session) {
+      await sendJson(ws, { type: "error", code: "auth_failed", message: "Session missing" });
+      return;
+    }
+    await processInteractiveCallback(session, payload);
   }
 
   let started = false;

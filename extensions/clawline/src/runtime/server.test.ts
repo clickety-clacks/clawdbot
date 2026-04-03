@@ -11,7 +11,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import type { getReplyFromConfig } from "../../../../src/auto-reply/reply.js";
 import type { OpenClawConfig } from "../../../../src/config/config.js";
-import type { AllowlistEntry, Logger, ProviderServer } from "./domain.js";
+import type { AllowlistEntry, Logger, ProviderConfig, ProviderServer } from "./domain.js";
 import { enqueueSystemEvent, resetSystemEventsForTest } from "./system-events.js";
 
 const gatewayCallMock = vi.fn();
@@ -235,7 +235,17 @@ async function setupTestServer(
         maxUploadBytes: 8_000_000,
         unreferencedUploadTtlSeconds: 86_400,
       },
-      ...(options.network ? { network: options.network } : {}),
+      ...(options.network
+        ? {
+            network: {
+              bindAddress: options.network.bindAddress ?? "127.0.0.1",
+              allowInsecurePublic: options.network.allowInsecurePublic ?? false,
+              ...(options.network.allowedOrigins
+                ? { allowedOrigins: options.network.allowedOrigins }
+                : {}),
+            } satisfies ProviderConfig["network"],
+          }
+        : {}),
       alertInstructionsPath,
       webRootPath,
       webRoot: { followSymlinks: options.webRootFollowSymlinks === true },
@@ -385,6 +395,23 @@ async function waitForQueuedMessage(
     }
   }
   throw new Error(`Did not receive expected queued message within ${attempts} attempts`);
+}
+
+async function waitForQueuedMessageWithTimeout(
+  queue: ReturnType<typeof createMessageQueue>,
+  predicate: (value: unknown) => boolean,
+  options: { attempts?: number; timeoutMs?: number } = {},
+) {
+  const timeoutMs = options.timeoutMs ?? 3_000;
+  return Promise.race([
+    waitForQueuedMessage(queue, predicate, options.attempts),
+    new Promise<never>((_, reject) =>
+      setTimeout(
+        () => reject(new Error(`Timed out waiting for queued message after ${timeoutMs}ms`)),
+        timeoutMs,
+      ),
+    ),
+  ]);
 }
 
 async function performPairRequest(
@@ -1742,6 +1769,272 @@ describe.sequential("clawline provider server", () => {
         expect.arrayContaining(["session_info", "terminal_bubbles_v1"]),
       );
       ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("includes stream read and tail state snapshots in auth_result", async () => {
+    const primaryDeviceId = randomUUID();
+    const secondaryDeviceId = randomUUID();
+    const baseEntry = {
+      claimedName: "QA Sim",
+      deviceInfo: {
+        platform: "iOS",
+        model: "iPhone",
+      },
+      userId: "snapshot_user",
+      isAdmin: false,
+      tokenDelivered: true,
+      createdAt: Date.now() - 10_000,
+      lastSeenAt: Date.now() - 5_000,
+    };
+    const ctx = await setupTestServer(
+      [
+        {
+          ...baseEntry,
+          deviceId: primaryDeviceId,
+        },
+        {
+          ...baseEntry,
+          deviceId: secondaryDeviceId,
+        },
+      ],
+      {
+        replyResolver: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 1_500));
+          return { text: "slow" };
+        },
+      },
+    );
+    try {
+      const primaryPair = await performPairRequest(ctx.port, primaryDeviceId);
+      const secondaryPair = await performPairRequest(ctx.port, secondaryDeviceId);
+      const {
+        ws: primaryWs,
+        queue: primaryQueue,
+        streamSnapshot,
+      } = await authenticateDeviceWithQueue(ctx.port, primaryDeviceId, primaryPair.token as string);
+      const mainStream = (
+        streamSnapshot.streams as Array<{ kind: string; sessionKey: string }>
+      ).find((stream) => stream.kind === "main");
+      expect(mainStream?.sessionKey).toBe("agent:main:clawline:snapshot_user:main");
+
+      const clientMessageId = `c_${randomUUID()}`;
+      primaryWs.send(
+        JSON.stringify({
+          type: "message",
+          id: clientMessageId,
+          content: "snapshot tail",
+          attachments: [],
+          sessionKey: mainStream?.sessionKey,
+        }),
+      );
+
+      await waitForQueuedMessageWithTimeout(
+        primaryQueue,
+        (value) =>
+          typeof value === "object" &&
+          value !== null &&
+          (value as { type?: string; id?: string }).type === "ack" &&
+          (value as { id?: string }).id === clientMessageId,
+      );
+      const echoed = (await waitForQueuedMessageWithTimeout(
+        primaryQueue,
+        (value) =>
+          typeof value === "object" &&
+          value !== null &&
+          (value as { type?: string; role?: string; content?: string }).type === "message" &&
+          (value as { role?: string }).role === "user" &&
+          (value as { content?: string }).content === "snapshot tail",
+      )) as { id: string };
+      await waitForQueuedMessageWithTimeout(
+        primaryQueue,
+        (value) =>
+          typeof value === "object" &&
+          value !== null &&
+          (
+            value as {
+              type?: string;
+              sessionKey?: string;
+              lastMessageId?: string;
+              lastMessageRole?: string;
+            }
+          ).type === "stream_tail_state" &&
+          (value as { sessionKey?: string }).sessionKey === mainStream?.sessionKey &&
+          (value as { lastMessageId?: string }).lastMessageId === echoed.id &&
+          (value as { lastMessageRole?: string }).lastMessageRole === "user",
+      );
+
+      primaryWs.send(
+        JSON.stringify({
+          type: "stream_read",
+          sessionKey: mainStream?.sessionKey,
+          lastReadMessageId: echoed.id,
+        }),
+      );
+      await waitForQueuedMessageWithTimeout(
+        primaryQueue,
+        (value) =>
+          typeof value === "object" &&
+          value !== null &&
+          (value as { type?: string; sessionKey?: string; lastReadMessageId?: string }).type ===
+            "stream_read_state" &&
+          (value as { sessionKey?: string }).sessionKey === mainStream?.sessionKey &&
+          (value as { lastReadMessageId?: string }).lastReadMessageId === echoed.id,
+      );
+
+      const { ws: secondaryWs, auth: secondaryAuth } = await authenticateDevice(
+        ctx.port,
+        secondaryDeviceId,
+        secondaryPair.token as string,
+      );
+      expect(secondaryAuth.streamReadStates).toEqual({
+        [mainStream?.sessionKey ?? ""]: echoed.id,
+      });
+      expect(secondaryAuth.streamTailStates).toEqual({
+        [mainStream?.sessionKey ?? ""]: {
+          lastMessageId: echoed.id,
+          lastMessageRole: "user",
+        },
+      });
+
+      primaryQueue.dispose();
+      primaryWs.terminate();
+      secondaryWs.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("broadcasts stream read and tail state updates to sibling devices", async () => {
+    const primaryDeviceId = randomUUID();
+    const secondaryDeviceId = randomUUID();
+    const baseEntry = {
+      claimedName: "QA Sim",
+      deviceInfo: {
+        platform: "iOS",
+        model: "iPhone",
+      },
+      userId: "sync_user",
+      isAdmin: false,
+      tokenDelivered: true,
+      createdAt: Date.now() - 10_000,
+      lastSeenAt: Date.now() - 5_000,
+    };
+    const ctx = await setupTestServer(
+      [
+        {
+          ...baseEntry,
+          deviceId: primaryDeviceId,
+        },
+        {
+          ...baseEntry,
+          deviceId: secondaryDeviceId,
+        },
+      ],
+      {
+        replyResolver: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 1_500));
+          return { text: "slow" };
+        },
+      },
+    );
+    try {
+      const primaryPair = await performPairRequest(ctx.port, primaryDeviceId);
+      const secondaryPair = await performPairRequest(ctx.port, secondaryDeviceId);
+      const {
+        ws: primaryWs,
+        queue: primaryQueue,
+        streamSnapshot: primarySnapshot,
+      } = await authenticateDeviceWithQueue(ctx.port, primaryDeviceId, primaryPair.token as string);
+      const { ws: secondaryWs, queue: secondaryQueue } = await authenticateDeviceWithQueue(
+        ctx.port,
+        secondaryDeviceId,
+        secondaryPair.token as string,
+      );
+      const mainStream = (
+        primarySnapshot.streams as Array<{ kind: string; sessionKey: string }>
+      ).find((stream) => stream.kind === "main");
+      expect(mainStream?.sessionKey).toBe("agent:main:clawline:sync_user:main");
+
+      const clientMessageId = `c_${randomUUID()}`;
+      primaryWs.send(
+        JSON.stringify({
+          type: "message",
+          id: clientMessageId,
+          content: "live sync",
+          attachments: [],
+          sessionKey: mainStream?.sessionKey,
+        }),
+      );
+
+      await waitForQueuedMessageWithTimeout(
+        primaryQueue,
+        (value) =>
+          typeof value === "object" &&
+          value !== null &&
+          (value as { type?: string; id?: string }).type === "ack" &&
+          (value as { id?: string }).id === clientMessageId,
+      );
+      const primaryEcho = (await waitForQueuedMessageWithTimeout(
+        primaryQueue,
+        (value) =>
+          typeof value === "object" &&
+          value !== null &&
+          (value as { type?: string; role?: string; content?: string }).type === "message" &&
+          (value as { role?: string }).role === "user" &&
+          (value as { content?: string }).content === "live sync",
+      )) as { id: string };
+      const siblingTail = await waitForQueuedMessageWithTimeout(
+        secondaryQueue,
+        (value) =>
+          typeof value === "object" &&
+          value !== null &&
+          (
+            value as {
+              type?: string;
+              sessionKey?: string;
+              lastMessageId?: string;
+              lastMessageRole?: string;
+            }
+          ).type === "stream_tail_state" &&
+          (value as { sessionKey?: string }).sessionKey === mainStream?.sessionKey &&
+          (value as { lastMessageRole?: string }).lastMessageRole === "user",
+      );
+      expect(siblingTail).toMatchObject({
+        type: "stream_tail_state",
+        sessionKey: mainStream?.sessionKey,
+        lastMessageId: primaryEcho.id,
+        lastMessageRole: "user",
+      });
+
+      primaryWs.send(
+        JSON.stringify({
+          type: "stream_read",
+          sessionKey: mainStream?.sessionKey,
+          lastReadMessageId: primaryEcho.id,
+        }),
+      );
+      const siblingRead = await waitForQueuedMessageWithTimeout(
+        secondaryQueue,
+        (value) =>
+          typeof value === "object" &&
+          value !== null &&
+          (value as { type?: string; sessionKey?: string; lastReadMessageId?: string }).type ===
+            "stream_read_state" &&
+          (value as { sessionKey?: string }).sessionKey === mainStream?.sessionKey,
+      );
+      expect(siblingRead).toMatchObject({
+        type: "stream_read_state",
+        sessionKey: mainStream?.sessionKey,
+        lastReadMessageId: primaryEcho.id,
+      });
+
+      primaryQueue.dispose();
+      secondaryQueue.dispose();
+      primaryWs.terminate();
+      secondaryWs.terminate();
     } finally {
       await ctx.cleanup();
     }

@@ -65,6 +65,17 @@ export type StreamReadStateServerMessage = {
   lastReadMessageId: string;
 };
 
+export type StreamTailState = {
+  lastMessageId: string;
+  lastMessageRole: "user" | "assistant";
+};
+
+export type StreamTailStateServerMessage = {
+  type: "stream_tail_state";
+  sessionKey: string;
+  lastMessageId: string;
+  lastMessageRole: "user" | "assistant";
+};
 export type ClawlineOutboundAttachmentInput = {
   data: string;
   mimeType?: string;
