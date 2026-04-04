@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { resolveFallbackRetryPrompt, sessionFileHasContent } from "./attempt-execution.js";
+import { resolveFallbackRetryPrompt, sessionFileHasActivePromptBody } from "./attempt-execution.js";
 
 describe("resolveFallbackRetryPrompt", () => {
   const originalBody = "Summarize the quarterly earnings report and highlight key trends.";
@@ -21,7 +21,7 @@ describe("resolveFallbackRetryPrompt", () => {
       resolveFallbackRetryPrompt({
         body: originalBody,
         isFallbackRetry: true,
-        sessionHasHistory: true,
+        sessionHasActiveBody: true,
       }),
     ).toBe("Continue where you left off. The previous model attempt failed or timed out.");
   });
@@ -32,7 +32,7 @@ describe("resolveFallbackRetryPrompt", () => {
         body: originalBody,
         isFallbackRetry: true,
         messageChannel: "clawline",
-        sessionHasHistory: true,
+        sessionHasActiveBody: true,
       }),
     ).toBe(originalBody);
   });
@@ -42,12 +42,12 @@ describe("resolveFallbackRetryPrompt", () => {
       resolveFallbackRetryPrompt({
         body: originalBody,
         isFallbackRetry: true,
-        sessionHasHistory: false,
+        sessionHasActiveBody: false,
       }),
     ).toBe(originalBody);
   });
 
-  it("preserves original body for fallback retry when sessionHasHistory is undefined", () => {
+  it("preserves original body for fallback retry when sessionHasActiveBody is undefined", () => {
     expect(
       resolveFallbackRetryPrompt({
         body: originalBody,
@@ -56,12 +56,12 @@ describe("resolveFallbackRetryPrompt", () => {
     ).toBe(originalBody);
   });
 
-  it("returns original body on first attempt regardless of sessionHasHistory", () => {
+  it("returns original body on first attempt regardless of sessionHasActiveBody", () => {
     expect(
       resolveFallbackRetryPrompt({
         body: originalBody,
         isFallbackRetry: false,
-        sessionHasHistory: true,
+        sessionHasActiveBody: true,
       }),
     ).toBe(originalBody);
 
@@ -69,7 +69,7 @@ describe("resolveFallbackRetryPrompt", () => {
       resolveFallbackRetryPrompt({
         body: originalBody,
         isFallbackRetry: false,
-        sessionHasHistory: false,
+        sessionHasActiveBody: false,
       }),
     ).toBe(originalBody);
   });
@@ -79,14 +79,15 @@ describe("resolveFallbackRetryPrompt", () => {
       resolveFallbackRetryPrompt({
         body: originalBody,
         isFallbackRetry: true,
-        sessionHasHistory: false,
+        sessionHasActiveBody: false,
       }),
     ).toBe(originalBody);
   });
 });
 
-describe("sessionFileHasContent", () => {
+describe("sessionFileHasActivePromptBody", () => {
   let tmpDir: string;
+  const activeBody = "Summarize the quarterly earnings report and highlight key trends.";
 
   beforeEach(async () => {
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "oc-test-"));
@@ -97,74 +98,92 @@ describe("sessionFileHasContent", () => {
   });
 
   it("returns false for undefined sessionFile", async () => {
-    expect(await sessionFileHasContent(undefined)).toBe(false);
+    expect(await sessionFileHasActivePromptBody(undefined, activeBody)).toBe(false);
   });
 
   it("returns false when session file does not exist", async () => {
-    expect(await sessionFileHasContent(path.join(tmpDir, "nonexistent.jsonl"))).toBe(false);
+    expect(
+      await sessionFileHasActivePromptBody(path.join(tmpDir, "nonexistent.jsonl"), activeBody),
+    ).toBe(false);
   });
 
   it("returns false when session file is empty", async () => {
     const file = path.join(tmpDir, "empty.jsonl");
     await fs.writeFile(file, "", "utf-8");
-    expect(await sessionFileHasContent(file)).toBe(false);
+    expect(await sessionFileHasActivePromptBody(file, activeBody)).toBe(false);
   });
 
-  it("returns false when session file has only user message (no assistant flush)", async () => {
-    const file = path.join(tmpDir, "user-only.jsonl");
+  it("returns false when transcript has prior assistant history but not the active body", async () => {
+    const file = path.join(tmpDir, "stale-history.jsonl");
     await fs.writeFile(
       file,
-      '{"type":"session","id":"s1"}\n{"type":"message","message":{"role":"user","content":"hello"}}\n',
+      [
+        '{"type":"session","id":"s1"}',
+        '{"type":"message","message":{"role":"user","content":"Earlier task"}}',
+        '{"type":"message","message":{"role":"assistant","content":"Earlier answer"}}',
+      ].join("\n") + "\n",
       "utf-8",
     );
-    expect(await sessionFileHasContent(file)).toBe(false);
+    expect(await sessionFileHasActivePromptBody(file, activeBody)).toBe(false);
   });
 
-  it("returns true when session file has assistant message (flushed)", async () => {
-    const file = path.join(tmpDir, "with-assistant.jsonl");
+  it("returns true when the latest user turn after the last assistant matches the active body", async () => {
+    const file = path.join(tmpDir, "with-active-body.jsonl");
     await fs.writeFile(
       file,
-      '{"type":"session","id":"s1"}\n{"type":"message","message":{"role":"user","content":"hello"}}\n{"type":"message","message":{"role":"assistant","content":"hi"}}\n',
+      [
+        '{"type":"session","id":"s1"}',
+        '{"type":"message","message":{"role":"user","content":"Earlier task"}}',
+        '{"type":"message","message":{"role":"assistant","content":"Earlier answer"}}',
+        JSON.stringify({ type: "message", message: { role: "user", content: activeBody } }),
+      ].join("\n") + "\n",
       "utf-8",
     );
-    expect(await sessionFileHasContent(file)).toBe(true);
+    expect(await sessionFileHasActivePromptBody(file, activeBody)).toBe(true);
   });
 
-  it("returns true when session file has spaced JSON (role : assistant)", async () => {
-    const file = path.join(tmpDir, "spaced.jsonl");
+  it("returns true when the active body is persisted as text blocks", async () => {
+    const file = path.join(tmpDir, "text-blocks.jsonl");
     await fs.writeFile(
       file,
-      '{"type":"message","message":{"role": "assistant","content":"hi"}}\n',
+      [
+        '{"type":"message","message":{"role":"assistant","content":"Earlier answer"}}',
+        JSON.stringify({
+          type: "message",
+          message: {
+            role: "user",
+            content: [{ type: "text", text: activeBody }],
+          },
+        }),
+      ].join("\n") + "\n",
       "utf-8",
     );
-    expect(await sessionFileHasContent(file)).toBe(true);
+    expect(await sessionFileHasActivePromptBody(file, activeBody)).toBe(true);
   });
 
-  it("returns true when assistant message appears after large user content", async () => {
-    const file = path.join(tmpDir, "large-user.jsonl");
-    // Create a user message whose JSON line exceeds 256KB to ensure the
-    // JSONL-based parser (CWE-703 fix) finds the assistant record that a
-    // naive byte-prefix approach would miss.
+  it("returns false when the matching active body was from an earlier turn", async () => {
+    const file = path.join(tmpDir, "stale-active-body.jsonl");
     const bigContent = "x".repeat(300 * 1024);
     const lines =
       [
         `{"type":"session","id":"s1"}`,
-        `{"type":"message","message":{"role":"user","content":"${bigContent}"}}`,
+        JSON.stringify({ type: "message", message: { role: "user", content: activeBody } }),
         `{"type":"message","message":{"role":"assistant","content":"done"}}`,
+        `{"type":"message","message":{"role":"user","content":"${bigContent}"}}`,
       ].join("\n") + "\n";
     await fs.writeFile(file, lines, "utf-8");
-    expect(await sessionFileHasContent(file)).toBe(true);
+    expect(await sessionFileHasActivePromptBody(file, activeBody)).toBe(false);
   });
 
   it("returns false when session file is a symbolic link", async () => {
     const realFile = path.join(tmpDir, "real.jsonl");
     await fs.writeFile(
       realFile,
-      '{"type":"message","message":{"role":"assistant","content":"hi"}}\n',
+      JSON.stringify({ type: "message", message: { role: "user", content: activeBody } }) + "\n",
       "utf-8",
     );
     const link = path.join(tmpDir, "link.jsonl");
     await fs.symlink(realFile, link);
-    expect(await sessionFileHasContent(link)).toBe(false);
+    expect(await sessionFileHasActivePromptBody(link, activeBody)).toBe(false);
   });
 });

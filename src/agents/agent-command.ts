@@ -57,7 +57,7 @@ import {
   persistSessionEntry as persistSessionEntryBase,
   prependInternalEventContext,
   runAgentAttempt,
-  sessionFileHasContent,
+  sessionFileHasActivePromptBody,
 } from "./command/attempt-execution.js";
 import { deliverAgentCommandResult } from "./command/delivery.js";
 import { resolveAgentRunContext } from "./command/run-context.js";
@@ -785,7 +785,7 @@ async function agentCommandInternal(
             sessionStore,
             storePath,
             allowTransientCooldownProbe: runOptions?.allowTransientCooldownProbe,
-            sessionHasHistory: !isNewSession || (await sessionFileHasContent(sessionFile)),
+            sessionHasActiveBody: await sessionFileHasActivePromptBody(sessionFile, body),
             onAgentEvent: (evt) => {
               // Track lifecycle end for fallback emission below.
               if (

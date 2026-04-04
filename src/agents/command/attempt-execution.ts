@@ -19,6 +19,7 @@ import { resolveMessageChannel } from "../../utils/message-channel.js";
 import { resolveBootstrapWarningSignaturesSeen } from "../bootstrap-budget.js";
 import { runCliAgent } from "../cli-runner.js";
 import { clearCliSession, getCliSessionBinding, setCliSessionBinding } from "../cli-session.js";
+import { collectTextContentBlocks } from "../content-blocks.js";
 import { FailoverError } from "../failover-error.js";
 import { formatAgentInternalEventsForPrompt } from "../internal-events.js";
 import { hasInternalRuntimeContext } from "../internal-runtime-context.js";
@@ -34,22 +35,39 @@ const log = createSubsystemLogger("agents/agent-command");
 /** Maximum number of JSONL records to inspect before giving up. */
 const SESSION_FILE_MAX_RECORDS = 500;
 
+function normalizePromptBodyForTranscriptMatch(value: string): string {
+  return value.replace(/\r\n?/g, "\n").trimEnd();
+}
+
+function extractTranscriptMessageText(
+  message: Record<string, unknown> | undefined,
+): string | undefined {
+  const content = message?.content;
+  if (typeof content === "string") {
+    return content;
+  }
+  const textBlocks = collectTextContentBlocks(content);
+  return textBlocks.length > 0 ? textBlocks.join("\n") : undefined;
+}
+
 /**
- * Check whether a session transcript file exists and contains at least one
- * assistant message, indicating that the SessionManager has flushed the
- * initial user+assistant exchange to disk.  This is used to decide whether
- * a fallback retry can rely on the on-disk history or must re-send the
- * original prompt.
+ * Check whether a session transcript file already contains the current active
+ * user prompt as the latest user turn after the last assistant reply. This is
+ * used to decide whether a fallback retry can rely on the on-disk history or
+ * must re-send the original prompt.
  *
  * The check parses JSONL records line-by-line (CWE-703) instead of relying
- * on a raw substring match against a bounded byte prefix, which could
- * produce false negatives when the pre-assistant content exceeds the byte
- * limit.
+ * on a raw substring match against a bounded byte prefix, which could miss
+ * the relevant user turn when the transcript has large earlier content.
  */
-export async function sessionFileHasContent(sessionFile: string | undefined): Promise<boolean> {
-  if (!sessionFile) {
+export async function sessionFileHasActivePromptBody(
+  sessionFile: string | undefined,
+  body: string,
+): Promise<boolean> {
+  if (!sessionFile || !body) {
     return false;
   }
+  const normalizedBody = normalizePromptBodyForTranscriptMatch(body);
   try {
     // Guard against symlink-following (CWE-400 / arbitrary-file-read vector).
     const stat = await fs.lstat(sessionFile);
@@ -61,6 +79,7 @@ export async function sessionFileHasContent(sessionFile: string | undefined): Pr
     try {
       const rl = readline.createInterface({ input: fh.createReadStream({ encoding: "utf-8" }) });
       let recordCount = 0;
+      let latestUserTextAfterAssistant: string | undefined;
       for await (const line of rl) {
         if (!line.trim()) {
           continue;
@@ -76,14 +95,23 @@ export async function sessionFileHasContent(sessionFile: string | undefined): Pr
           continue;
         }
         const rec = obj as Record<string, unknown> | null;
-        if (
-          rec?.type === "message" &&
-          (rec.message as Record<string, unknown> | undefined)?.role === "assistant"
-        ) {
-          return true;
+        if (rec?.type !== "message") {
+          continue;
         }
+        const message = rec.message as Record<string, unknown> | undefined;
+        if (message?.role === "assistant") {
+          latestUserTextAfterAssistant = undefined;
+          continue;
+        }
+        if (message?.role !== "user") {
+          continue;
+        }
+        latestUserTextAfterAssistant = extractTranscriptMessageText(message);
       }
-      return false;
+      return (
+        typeof latestUserTextAfterAssistant === "string" &&
+        normalizePromptBodyForTranscriptMatch(latestUserTextAfterAssistant) === normalizedBody
+      );
     } finally {
       await fh.close();
     }
@@ -117,7 +145,7 @@ export async function persistSessionEntry(params: PersistSessionEntryParams): Pr
 export function resolveFallbackRetryPrompt(params: {
   body: string;
   isFallbackRetry: boolean;
-  sessionHasHistory?: boolean;
+  sessionHasActiveBody?: boolean;
   messageChannel?: string;
 }): string {
   if (!params.isFallbackRetry) {
@@ -127,11 +155,11 @@ export function resolveFallbackRetryPrompt(params: {
     return params.body;
   }
   // When the session has no persisted history (e.g. a freshly-spawned subagent
-  // whose first attempt failed before the SessionManager flushed the user
-  // message to disk), the fallback model would receive only the generic
-  // recovery prompt and lose the original task entirely.  Preserve the
-  // original body in that case so the fallback model can execute the task.
-  if (!params.sessionHasHistory) {
+  // whose first attempt failed before the SessionManager flushed the active
+  // user message to disk), the fallback model would receive only the generic
+  // recovery prompt and lose the original task entirely. Preserve the
+  // original body until the current turn is actually persisted.
+  if (!params.sessionHasActiveBody) {
     return params.body;
   }
   return "Continue where you left off. The previous model attempt failed or timed out.";
@@ -333,13 +361,13 @@ export function runAgentAttempt(params: {
   sessionStore?: Record<string, SessionEntry>;
   storePath?: string;
   allowTransientCooldownProbe?: boolean;
-  sessionHasHistory?: boolean;
+  sessionHasActiveBody?: boolean;
 }) {
   const effectivePrompt = resolveFallbackRetryPrompt({
     body: params.body,
     isFallbackRetry: params.isFallbackRetry,
     messageChannel: params.messageChannel,
-    sessionHasHistory: params.sessionHasHistory,
+    sessionHasActiveBody: params.sessionHasActiveBody,
   });
   const bootstrapPromptWarningSignaturesSeen = resolveBootstrapWarningSignaturesSeen(
     params.sessionEntry?.systemPromptReport,
