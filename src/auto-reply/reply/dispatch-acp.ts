@@ -10,7 +10,6 @@ import {
   resolveSessionIdentityFromMeta,
 } from "../../acp/runtime/session-identity.js";
 import { readAcpSessionEntry } from "../../acp/runtime/session-meta.js";
-import type { ImageContent } from "../../agents/command/types.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import type { TtsAutoMode } from "../../config/types.tts.js";
 import { logVerbose } from "../../globals.js";
@@ -70,31 +69,9 @@ function resolveAcpPromptText(ctx: FinalizedMsgContext): string {
 
 const ACP_ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
 
-function resolveInlineImageAttachments(images?: ImageContent[]): AcpTurnAttachment[] {
-  if (!Array.isArray(images) || images.length === 0) {
-    return [];
-  }
-  return images
-    .filter(
-      (image): image is ImageContent =>
-        image?.type === "image" &&
-        typeof image.mimeType === "string" &&
-        image.mimeType.startsWith("image/") &&
-        typeof image.data === "string" &&
-        image.data.length > 0,
-    )
-    .map((image) => ({
-      mediaType: image.mimeType,
-      data: image.data,
-    }));
-}
-
-async function resolveAcpAttachments(
-  ctx: FinalizedMsgContext,
-  images?: ImageContent[],
-): Promise<AcpTurnAttachment[]> {
+async function resolveAcpAttachments(ctx: FinalizedMsgContext): Promise<AcpTurnAttachment[]> {
   const mediaAttachments = normalizeAttachments(ctx);
-  const results: AcpTurnAttachment[] = resolveInlineImageAttachments(images);
+  const results: AcpTurnAttachment[] = [];
   for (const attachment of mediaAttachments) {
     const mediaType = attachment.mime ?? "application/octet-stream";
     if (!mediaType.startsWith("image/")) {
@@ -303,7 +280,6 @@ export async function tryDispatchAcpReply(params: {
   originatingTo?: string;
   shouldSendToolSummaries: boolean;
   bypassForCommand: boolean;
-  images?: ImageContent[];
   onReplyStart?: () => Promise<void> | void;
   recordProcessed: DispatchProcessedRecorder;
   markIdle: (reason: string) => void;
@@ -391,7 +367,7 @@ export async function tryDispatchAcpReply(params: {
     }
 
     const promptText = resolveAcpPromptText(params.ctx);
-    const attachments = await resolveAcpAttachments(params.ctx, params.images);
+    const attachments = await resolveAcpAttachments(params.ctx);
     if (!promptText && attachments.length === 0) {
       const counts = params.dispatcher.getQueuedCounts();
       delivery.applyRoutedCounts(counts);
