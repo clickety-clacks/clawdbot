@@ -2765,12 +2765,34 @@ describe.sequential("clawline provider server", () => {
         }),
       );
 
-      expect(await firstQueue.next()).toMatchObject({
+      expect(
+        await waitForQueuedMessageWithTimeout(
+          firstQueue,
+          (value) =>
+            typeof value === "object" &&
+            value !== null &&
+            (value as { type?: string; sessionKey?: string; lastReadMessageId?: string }).type ===
+              "stream_read_state" &&
+            (value as { sessionKey?: string }).sessionKey === sessionKey &&
+            (value as { lastReadMessageId?: string }).lastReadMessageId === sent.messageId,
+        ),
+      ).toMatchObject({
         type: "stream_read_state",
         sessionKey,
         lastReadMessageId: sent.messageId,
       });
-      expect(await secondQueue.next()).toMatchObject({
+      expect(
+        await waitForQueuedMessageWithTimeout(
+          secondQueue,
+          (value) =>
+            typeof value === "object" &&
+            value !== null &&
+            (value as { type?: string; sessionKey?: string; lastReadMessageId?: string }).type ===
+              "stream_read_state" &&
+            (value as { sessionKey?: string }).sessionKey === sessionKey &&
+            (value as { lastReadMessageId?: string }).lastReadMessageId === sent.messageId,
+        ),
+      ).toMatchObject({
         type: "stream_read_state",
         sessionKey,
         lastReadMessageId: sent.messageId,
@@ -4304,7 +4326,7 @@ describe.sequential("clawline provider server", () => {
       const db = new BetterSqlite3(dbPath, { readonly: true });
       try {
         const userVersion = db.pragma("user_version", { simple: true }) as number;
-        expect(userVersion).toBe(4);
+        expect(userVersion).toBe(5);
         const eventsColumns = db.prepare(`PRAGMA table_info(events)`).all() as Array<{
           name: string;
         }>;

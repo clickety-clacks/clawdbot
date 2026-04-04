@@ -34,6 +34,10 @@ export { dispatchReplyFromConfig } from "../auto-reply/reply/dispatch-from-confi
 export { resetInboundDedupe } from "../auto-reply/reply/inbound-dedupe.js";
 export { finalizeInboundContext } from "../auto-reply/reply/inbound-context.js";
 export {
+  createInboundDebouncer,
+  resolveInboundDebounceMs,
+} from "../auto-reply/inbound-debounce.js";
+export {
   dispatchReplyWithBufferedBlockDispatcher,
   dispatchReplyWithDispatcher,
 } from "../auto-reply/reply/provider-dispatcher.js";
