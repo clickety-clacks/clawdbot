@@ -267,6 +267,86 @@ describe("onboard (non-interactive): gateway and remote auth", () => {
     });
   }, 60_000);
 
+  it("enables Clawline for first-time local quickstart installs", async () => {
+    await withStateDir("state-clawline-quickstart-", async (stateDir) => {
+      await runNonInteractiveSetup(
+        {
+          nonInteractive: true,
+          mode: "local",
+          flow: "quickstart",
+          workspace: path.join(stateDir, "openclaw"),
+          authChoice: "skip",
+          skipSkills: true,
+          skipHealth: true,
+          installDaemon: false,
+          gatewayBind: "loopback",
+        },
+        runtime,
+      );
+
+      const configPath = resolveStateConfigPath(process.env, stateDir);
+      const cfg = await readJsonFile<{
+        channels?: {
+          clawline?: {
+            enabled?: boolean;
+            port?: number;
+            network?: { bindAddress?: string; allowedOrigins?: string[] };
+          };
+        };
+      }>(configPath);
+
+      expect(cfg.channels?.clawline).toEqual({
+        enabled: true,
+        port: 18800,
+        network: {
+          bindAddress: "127.0.0.1",
+          allowedOrigins: ["null"],
+        },
+      });
+    });
+  }, 60_000);
+
+  it("does not auto-enable Clawline on existing configs", async () => {
+    await withStateDir("state-clawline-existing-", async (stateDir) => {
+      const configPath = resolveConfigPath(process.env, stateDir);
+      await fs.mkdir(path.dirname(configPath), { recursive: true });
+      await fs.writeFile(
+        configPath,
+        JSON.stringify({
+          gateway: {
+            port: getPseudoPort(38000),
+          },
+          meta: {
+            lastTouchedVersion: "2026.4.1",
+          },
+        }),
+      );
+
+      await runNonInteractiveSetup(
+        {
+          nonInteractive: true,
+          mode: "local",
+          flow: "quickstart",
+          workspace: path.join(stateDir, "openclaw"),
+          authChoice: "skip",
+          skipSkills: true,
+          skipHealth: true,
+          installDaemon: false,
+          gatewayBind: "loopback",
+        },
+        runtime,
+      );
+
+      const cfg = await readJsonFile<{
+        channels?: {
+          clawline?: unknown;
+        };
+      }>(configPath);
+
+      expect(cfg.channels?.clawline).toBeUndefined();
+    });
+  }, 60_000);
+
   it("uses OPENCLAW_GATEWAY_TOKEN when --gateway-token is omitted", async () => {
     await withStateDir("state-env-token-", async (stateDir) => {
       const envToken = "tok_env_fallback_123";

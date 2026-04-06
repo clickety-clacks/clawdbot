@@ -1,8 +1,11 @@
+import { clawlinePlugin } from "../../../extensions/clawline/src/channel.js";
 import { formatCliCommand } from "../../cli/command-format.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import { replaceConfigFile, resolveGatewayPort } from "../../config/config.js";
 import { logConfigUpdated } from "../../config/logging.js";
+import { DEFAULT_ACCOUNT_ID } from "../../routing/session-key.js";
 import type { RuntimeEnv } from "../../runtime.js";
+import { applyChannelAccountConfig } from "../channels/add-mutators.js";
 import { DEFAULT_GATEWAY_DAEMON_RUNTIME } from "../daemon-runtime.js";
 import { applyLocalSetupWorkspaceConfig } from "../onboard-config.js";
 import {
@@ -67,13 +70,42 @@ async function collectGatewayHealthFailureDiagnostics(): Promise<
     : undefined;
 }
 
+async function maybeApplyDefaultClawlineQuickstartConfig(params: {
+  opts: OnboardOptions;
+  baseConfig: OpenClawConfig;
+  nextConfig: OpenClawConfig;
+  hasExistingConfig: boolean;
+}): Promise<OpenClawConfig> {
+  if (params.hasExistingConfig) {
+    return params.nextConfig;
+  }
+  if (params.opts.flow !== "quickstart") {
+    return params.nextConfig;
+  }
+  if (params.opts.skipChannels ?? params.opts.skipProviders) {
+    return params.nextConfig;
+  }
+  if (params.baseConfig.channels?.clawline || params.nextConfig.channels?.clawline) {
+    return params.nextConfig;
+  }
+
+  return applyChannelAccountConfig({
+    cfg: params.nextConfig,
+    channel: "clawline",
+    accountId: DEFAULT_ACCOUNT_ID,
+    input: {},
+    plugin: clawlinePlugin,
+  });
+}
+
 export async function runNonInteractiveLocalSetup(params: {
   opts: OnboardOptions;
   runtime: RuntimeEnv;
   baseConfig: OpenClawConfig;
   baseHash?: string;
+  hasExistingConfig: boolean;
 }) {
-  const { opts, runtime, baseConfig, baseHash } = params;
+  const { opts, runtime, baseConfig, baseHash, hasExistingConfig } = params;
   const mode = "local" as const;
 
   const workspaceDir = resolveNonInteractiveWorkspaceDir({
@@ -123,6 +155,13 @@ export async function runNonInteractiveLocalSetup(params: {
     return;
   }
   nextConfig = gatewayResult.nextConfig;
+
+  nextConfig = await maybeApplyDefaultClawlineQuickstartConfig({
+    opts,
+    baseConfig,
+    nextConfig,
+    hasExistingConfig,
+  });
 
   nextConfig = applyNonInteractiveSkillsConfig({ nextConfig, opts, runtime });
 
