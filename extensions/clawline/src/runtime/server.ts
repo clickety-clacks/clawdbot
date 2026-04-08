@@ -106,6 +106,10 @@ type TerminalTmuxBackend = {
   }>;
 };
 
+type TerminalDestination = {
+  address: string;
+};
+
 function buildSshBaseArgs(cfg: ProviderConfig["terminal"]["tmux"]["ssh"]): string[] {
   const args: string[] = [];
   if (cfg.port && Number.isFinite(cfg.port)) {
@@ -139,10 +143,16 @@ function buildSshBaseArgs(cfg: ProviderConfig["terminal"]["tmux"]["ssh"]): strin
   return args;
 }
 
-function createTerminalTmuxBackend(config: ProviderConfig, logger: Logger): TerminalTmuxBackend {
-  const tmuxMode = config.terminal?.tmux?.mode ?? "local";
+function createTerminalTmuxBackend(
+  config: ProviderConfig,
+  logger: Logger,
+  destinationAddress?: string | null,
+): TerminalTmuxBackend {
   const sshCfg = config.terminal?.tmux?.ssh;
-  const sshTarget = typeof sshCfg?.target === "string" ? sshCfg.target.trim() : "";
+  const explicitTarget = typeof destinationAddress === "string" ? destinationAddress.trim() : "";
+  const tmuxMode = explicitTarget ? "ssh" : (config.terminal?.tmux?.mode ?? "local");
+  const sshTarget =
+    explicitTarget || (typeof sshCfg?.target === "string" ? sshCfg.target.trim() : "");
   const sshBaseArgs = sshCfg ? buildSshBaseArgs(sshCfg) : [];
 
   const isRemote = tmuxMode === "ssh";
@@ -770,19 +780,49 @@ function isClawlinePersonalUserStreamSessionKey(sessionKey: string, userId?: str
   return suffix === "main" || suffix === "dm" || isCustomStreamSuffix(suffix ?? "");
 }
 
+function normalizeTerminalDestination(value: unknown): TerminalDestination | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  const address =
+    typeof (value as { address?: unknown }).address === "string"
+      ? (value as { address: string }).address.trim()
+      : "";
+  if (!address) {
+    return undefined;
+  }
+  return { address };
+}
+
 function decodeTerminalSessionDescriptorFromBase64(data: string): {
   terminalSessionId: string;
   title?: string;
+  version?: number;
+  destination?: TerminalDestination;
 } | null {
   try {
     const decoded = Buffer.from(data, "base64").toString("utf8");
-    const obj = JSON.parse(decoded) as { terminalSessionId?: unknown; title?: unknown };
+    const obj = JSON.parse(decoded) as {
+      terminalSessionId?: unknown;
+      title?: unknown;
+      version?: unknown;
+      destination?: unknown;
+    };
     const id = typeof obj.terminalSessionId === "string" ? obj.terminalSessionId.trim() : "";
     if (!id) {
       return null;
     }
-    const title = typeof obj.title === "string" ? obj.title.trim() : undefined;
-    return { terminalSessionId: id, title };
+    const title =
+      typeof obj.title === "string" && obj.title.trim().length > 0 ? obj.title.trim() : undefined;
+    const version =
+      typeof obj.version === "number" && Number.isFinite(obj.version)
+        ? Math.floor(obj.version)
+        : undefined;
+    const destination = normalizeTerminalDestination(obj.destination);
+    if (version === 2 && !destination) {
+      return null;
+    }
+    return { terminalSessionId: id, title, version, destination };
   } catch {
     return null;
   }
@@ -1013,6 +1053,7 @@ type TerminalSessionRecord = {
   lastSeenAt: number;
   // MVP: terminalSessionId maps directly to a tmux session name on the terminal host.
   tmuxSessionName: string;
+  destination?: TerminalDestination;
 };
 
 export const DEFAULT_ALERT_INSTRUCTIONS_TEXT = `After handling this alert, evaluate: would Flynn want to know what happened? If yes, report to him. Don't just process silently.`;
@@ -1498,7 +1539,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const openClawCfg = options.openClawConfig;
   const dmScope = openClawCfg.session?.dmScope ?? "main";
   const logger: Logger = options.logger ?? console;
-  const tmuxBackend = createTerminalTmuxBackend(config, logger);
   const sessionStorePath = options.sessionStorePath;
   const mainSessionKey = options.mainSessionKey?.trim() || "agent:main:main";
   const mainSessionAgentId = resolveAgentIdFromSessionKey(mainSessionKey);
@@ -4038,6 +4078,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         terminalSessionId: string;
         tmuxSessionName: string;
         paneId: string;
+        tmuxBackend: TerminalTmuxBackend;
         // node-pty has no great runtime type here; treat as opaque.
         // oxlint-disable-next-line typescript/no-explicit-any
         pty: any;
@@ -4137,6 +4178,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           createdAt: now,
           lastSeenAt: now,
           tmuxSessionName: descriptor.terminalSessionId,
+          destination: descriptor.destination,
         });
         filtered.push(attachment);
         continue;
@@ -4149,7 +4191,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   function lookupTerminalSessionRecordFromDb(params: {
     userId: string;
     terminalSessionId: string;
-  }): { sessionKey: string; title?: string } | null {
+  }): { sessionKey: string; title?: string; destination?: TerminalDestination } | null {
     if (!selectEventsTailStmt) {
       return null;
     }
@@ -4188,7 +4230,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         if (!descriptor || descriptor.terminalSessionId !== params.terminalSessionId) {
           continue;
         }
-        return { sessionKey, title: descriptor.title || undefined };
+        return {
+          sessionKey,
+          title: descriptor.title || undefined,
+          destination: descriptor.destination,
+        };
       }
     }
     return null;
@@ -7335,7 +7381,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             ws.close();
             return;
           }
-          void resizeTmuxPane(state.paneId, cols, rows);
+          void resizeTmuxPane(state.paneId, cols, rows, state.tmuxBackend);
         } else {
           await sendJson(ws, { type: "terminal_error", message: "Invalid terminal resize" });
           ws.close();
@@ -7360,7 +7406,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         break;
       }
       case "terminal_close": {
-        void killTmuxSession(state.tmuxSessionName);
+        void killTmuxSession(state.tmuxSessionName, state.tmuxBackend);
         try {
           state.pty.kill();
         } catch (err) {
@@ -7461,6 +7507,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         createdAt: now,
         lastSeenAt: now,
         tmuxSessionName: terminalSessionId,
+        destination: dbRecord.destination,
       };
       terminalSessions.set(terminalSessionId, hydrated);
       record = hydrated;
@@ -7482,6 +7529,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       typeof payload.backfillLines === "number"
         ? Math.max(0, Math.floor(payload.backfillLines))
         : 0;
+    const tmuxBackend = createTerminalTmuxBackend(
+      config,
+      logger,
+      record.destination?.address ?? null,
+    );
 
     try {
       logger.info?.("[clawline:terminal] terminal_auth_start", {
@@ -7493,13 +7545,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         rows,
         backfillLines,
       });
-      let paneId = await resolveTmuxPaneId(record.tmuxSessionName);
+      let paneId = await resolveTmuxPaneId(record.tmuxSessionName, tmuxBackend);
       if (!paneId) {
         // If the session was referenced by a bubble but the tmux session hasn't been created yet,
         // create it on-demand so auth succeeds.
-        const ensured = await ensureTmuxSessionExists(record.tmuxSessionName);
+        const ensured = await ensureTmuxSessionExists(record.tmuxSessionName, tmuxBackend);
         if (ensured) {
-          paneId = await resolveTmuxPaneId(record.tmuxSessionName);
+          paneId = await resolveTmuxPaneId(record.tmuxSessionName, tmuxBackend);
         }
       }
       if (!paneId) {
@@ -7520,7 +7572,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       });
 
       if (backfillLines > 0) {
-        const backfill = await captureTmuxBackfill(paneId, Math.min(backfillLines, 5000));
+        const backfill = await captureTmuxBackfill(
+          paneId,
+          Math.min(backfillLines, 5000),
+          tmuxBackend,
+        );
         if (backfill.length > 0 && ws.readyState === WebSocket.OPEN) {
           // Chunk to avoid giant frames.
           const chunkSize = 32 * 1024;
@@ -7544,6 +7600,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         terminalSessionId,
         tmuxSessionName: record.tmuxSessionName,
         paneId,
+        tmuxBackend,
         pty,
       });
       logger.info?.("[clawline:terminal] terminal_auth_ready", {
@@ -7586,7 +7643,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
   }
 
-  async function resolveTmuxPaneId(tmuxSessionName: string): Promise<string | null> {
+  async function resolveTmuxPaneId(
+    tmuxSessionName: string,
+    tmuxBackend: TerminalTmuxBackend,
+  ): Promise<string | null> {
     try {
       const { stdout } = await tmuxBackend.execTmux(
         ["list-panes", "-t", tmuxSessionName, "-F", "#{pane_id}"],
@@ -7603,7 +7663,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
   }
 
-  async function captureTmuxBackfill(paneId: string, backfillLines: number): Promise<Buffer> {
+  async function captureTmuxBackfill(
+    paneId: string,
+    backfillLines: number,
+    tmuxBackend: TerminalTmuxBackend,
+  ): Promise<Buffer> {
     if (backfillLines <= 0) {
       return Buffer.alloc(0);
     }
@@ -7623,7 +7687,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
   }
 
-  async function ensureTmuxSessionExists(tmuxSessionName: string): Promise<boolean> {
+  async function ensureTmuxSessionExists(
+    tmuxSessionName: string,
+    tmuxBackend: TerminalTmuxBackend,
+  ): Promise<boolean> {
     const name = typeof tmuxSessionName === "string" ? tmuxSessionName.trim() : "";
     if (!name) {
       return false;
@@ -7660,7 +7727,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
   }
 
-  async function resizeTmuxPane(paneId: string, cols: number, rows: number) {
+  async function resizeTmuxPane(
+    paneId: string,
+    cols: number,
+    rows: number,
+    tmuxBackend: TerminalTmuxBackend,
+  ) {
     try {
       await tmuxBackend.execTmux(
         ["resize-pane", "-t", paneId, "-x", String(cols), "-y", String(rows)],
@@ -7676,7 +7748,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
   }
 
-  async function killTmuxSession(tmuxSessionName: string) {
+  async function killTmuxSession(tmuxSessionName: string, tmuxBackend: TerminalTmuxBackend) {
     try {
       await tmuxBackend.execTmux(["kill-session", "-t", tmuxSessionName], {
         timeout: 2_000,
