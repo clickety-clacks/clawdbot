@@ -11,6 +11,7 @@ import type { OpenClawConfig } from "openclaw/plugin-sdk/core";
 import { sendClawlineOutboundMessage } from "./runtime/outbound.js";
 
 const DEFAULT_CLAWLINE_PORT = 18800;
+const TERMINAL_SESSION_MIME = "application/vnd.clawline.terminal-session+json";
 
 type EventRow = {
   id: string;
@@ -111,6 +112,57 @@ function readStringParam(params: Record<string, unknown>, keys: string[]): strin
     }
   }
   return undefined;
+}
+
+function decodeBase64OrDataUrl(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.startsWith("data:")) {
+    const commaIndex = trimmed.indexOf(",");
+    if (commaIndex < 0) {
+      throw new Error("Clawline terminal bubble descriptor is not valid base64 JSON");
+    }
+    const metadata = trimmed.slice(5, commaIndex);
+    if (!/;base64(?:;|$)/i.test(metadata)) {
+      throw new Error("Clawline terminal bubble descriptor is not valid base64 JSON");
+    }
+    return Buffer.from(trimmed.slice(commaIndex + 1), "base64").toString("utf8");
+  }
+  return Buffer.from(trimmed, "base64").toString("utf8");
+}
+
+function validateTerminalBubbleAttachment(buffer: string): void {
+  let descriptor: {
+    version?: unknown;
+    terminalSessionId?: unknown;
+    destination?: { address?: unknown } | null;
+  };
+  try {
+    descriptor = JSON.parse(decodeBase64OrDataUrl(buffer)) as {
+      version?: unknown;
+      terminalSessionId?: unknown;
+      destination?: { address?: unknown } | null;
+    };
+  } catch {
+    throw new Error("Clawline terminal bubble descriptor is not valid base64 JSON");
+  }
+
+  const terminalSessionId =
+    typeof descriptor.terminalSessionId === "string" ? descriptor.terminalSessionId.trim() : "";
+  const version =
+    typeof descriptor.version === "number" && Number.isFinite(descriptor.version)
+      ? Math.floor(descriptor.version)
+      : null;
+  const destinationAddress =
+    typeof descriptor.destination?.address === "string"
+      ? descriptor.destination.address.trim()
+      : "";
+
+  if (!terminalSessionId) {
+    throw new Error("Clawline terminal bubble descriptor requires terminalSessionId");
+  }
+  if (version !== 2 || !destinationAddress) {
+    throw new Error("Clawline terminal bubbles now require version 2 with destination.address");
+  }
 }
 
 function summarizeOutboundResult(result: Awaited<ReturnType<typeof sendClawlineOutboundMessage>>) {
@@ -253,6 +305,9 @@ export const clawlineMessageActions: ChannelMessageActionAdapter = {
         (typeof params.mimeType === "string" ? params.mimeType : undefined) ??
         "application/octet-stream";
       const mimeType = normalizeMimeType(rawMimeType);
+      if (mimeType === TERMINAL_SESSION_MIME) {
+        validateTerminalBubbleAttachment(buffer);
+      }
       const caption =
         (typeof params.caption === "string" ? params.caption : undefined) ??
         (typeof params.message === "string" ? params.message : undefined) ??

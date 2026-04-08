@@ -118,4 +118,84 @@ describe("clawlineMessageActions", () => {
       vi.useRealTimers();
     }
   });
+
+  it("sendAttachment rejects legacy terminal bubble descriptors without destination routing", async () => {
+    const cfg: OpenClawConfig = { channels: { clawline: { enabled: true } } };
+    const legacyDescriptor = Buffer.from(
+      JSON.stringify({
+        version: 1,
+        terminalSessionId: "term_legacy",
+        title: "legacy terminal",
+      }),
+      "utf8",
+    ).toString("base64");
+
+    await expect(
+      runClawlineAction({
+        action: "sendAttachment",
+        params: {
+          target: "flynn:main",
+          buffer: legacyDescriptor,
+          mimeType: "application/vnd.clawline.terminal-session+json",
+        },
+        cfg,
+        accountId: null,
+      }),
+    ).rejects.toThrow("Clawline terminal bubbles now require version 2 with destination.address");
+
+    expect(vi.mocked(sendClawlineOutboundMessage)).not.toHaveBeenCalled();
+  });
+
+  it("sendAttachment accepts version 2 terminal bubble descriptors with destination routing", async () => {
+    const cfg: OpenClawConfig = { channels: { clawline: { enabled: true } } };
+    const descriptor = Buffer.from(
+      JSON.stringify({
+        version: 2,
+        terminalSessionId: "term_v2",
+        title: "eezo",
+        destination: { address: "mike@eezo" },
+      }),
+      "utf8",
+    ).toString("base64");
+    vi.mocked(sendClawlineOutboundMessage).mockResolvedValueOnce({
+      messageId: "msg-term-v2",
+      userId: "flynn",
+      deviceId: "device-1",
+      attachments: [
+        {
+          type: "document",
+          mimeType: "application/vnd.clawline.terminal-session+json",
+          data: descriptor,
+        },
+      ],
+      assetIds: [],
+    });
+
+    const result = await runClawlineAction({
+      action: "sendAttachment",
+      params: {
+        target: "flynn:main",
+        buffer: descriptor,
+        mimeType: "application/vnd.clawline.terminal-session+json",
+      },
+      cfg,
+      accountId: null,
+    });
+
+    expect(result.details).toEqual({
+      ok: true,
+      messageId: "msg-term-v2",
+      userId: "flynn",
+      deviceId: "device-1",
+      assetIds: [],
+      attachmentCount: 1,
+      attachments: [
+        {
+          type: "document",
+          mimeType: "application/vnd.clawline.terminal-session+json",
+        },
+      ],
+    });
+    expect(vi.mocked(sendClawlineOutboundMessage)).toHaveBeenCalledTimes(1);
+  });
 });
