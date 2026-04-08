@@ -26,77 +26,45 @@ agent:main:clawline:flynn:main        →  target = "flynn:main"
 
 If Flynn specifies a different stream, use that.
 
-### 2. Choose a destination and ensure tmux session exists there
+### 2. Choose a destination
 
 Every new terminal bubble must carry an explicit destination address. In the current routing model this is an SSH target string such as `mike@eezo` or `eezo`.
 
-The `terminalSessionId` in the descriptor must match a tmux session name on that destination host.
+You do not need to hand-author a descriptor or choose a `terminalSessionId`. The provider now generates the destination-aware descriptor and tmux session id from the request.
 
-**Use an existing session:**
+### 3. Send the terminal-bubble request
 
-```bash
-ssh <destination-address> tmux list-sessions | grep <session-name>
-```
+Send a structured `message sendAttachment` request with terminal mime type plus `destination.address`.
 
-**Or create one:**
-
-```bash
-ssh <destination-address> tmux new-session -d -s <session-name> -c /Users/mike 'zsh'
-```
-
-Keep names short, lowercase, hyphenated. Examples: `clu-term-test`, `gateway-logs`, `debug-shell`.
-
-### 3. Construct and send the descriptor
-
-Build the JSON descriptor, base64 encode it, and send via `message sendAttachment`.
-
-**Descriptor format:**
+**Request shape:**
 
 ```json
 {
-  "version": 2,
-  "terminalSessionId": "<tmux-session-name>",
+  "target": "<stream>",
+  "mimeType": "application/vnd.clawline.terminal-session+json",
   "title": "<human-readable title>",
   "destination": {
     "address": "<destination-address>"
-  },
-  "provider": {
-    "baseUrl": "http://TARS.local:18800",
-    "wsPath": "/ws/terminal"
-  },
-  "capabilities": {
-    "interactive": true,
-    "supportsBinaryFrames": true,
-    "supportsResize": true,
-    "supportsDetach": true
-  },
-  "auth": {
-    "mode": "chat_token"
   }
 }
 ```
 
-**Required fields:** `version` (always `2`), `terminalSessionId`, `destination.address`
-**Strongly recommended:** `provider.baseUrl` (without it, client falls back to stored pairing URL which may be empty)
+**Required fields:** `mimeType`, `target`, `destination.address`
 **Title rule:** `title` is presentation only. It may match the destination, but routing authority is `destination.address`.
-
-**Base64 encode:**
-
-```bash
-echo '<json>' | base64 | tr -d '\n'
-```
 
 **Send:**
 
 ```
-message(action=sendAttachment, channel=clawline, target=<stream>, mimeType=application/vnd.clawline.terminal-session+json, filename=terminal-session.json, buffer=<base64>)
+message(action=sendAttachment, channel=clawline, target=<stream>, mimeType=application/vnd.clawline.terminal-session+json, destination={"address":"<destination-address>"}, title="<optional title>")
 ```
+
+The provider emits the version 2 descriptor attachment, generates a fresh `terminalSessionId`, and creates the tmux session on first attach if needed.
 
 ### 4. Verify
 
 After sending, ask Flynn what they see. Expected: a chromeless terminal bubble with live shell content. If empty/collapsed, check:
 
-- tmux session exists on the exact destination host named in `destination.address`
+- the destination host in `destination.address` is reachable from the provider
 - Provider baseUrl is correct and reachable from device
 - Stream session key is a valid per-user Clawline key
 
@@ -105,23 +73,23 @@ After sending, ask Flynn what they see. Expected: a chromeless terminal bubble w
 | Field              | Value                                            |
 | ------------------ | ------------------------------------------------ |
 | MIME type          | `application/vnd.clawline.terminal-session+json` |
-| Provider URL       | `http://TARS.local:18800`                        |
 | WS path            | `/ws/terminal`                                   |
 | Auth mode          | `chat_token`                                     |
-| Descriptor version | `2`                                              |
+| Descriptor version | provider-generated `2`                           |
 | Routing authority  | `destination.address`                            |
+| tmux session id    | provider-generated from the new bubble request   |
 | tmux location      | Host named by `destination.address`              |
 
 ## Common patterns
 
 **Debug shell for Flynn:**
-Create a fresh tmux session and send it. Good for showing live logs, running commands, or debugging.
+Send a new destination-aware request. The provider will create the backing tmux session on first attach. Good for showing live logs, running commands, or debugging.
 
 **Attach to existing agent session:**
-If a tmux agent session exists on a destination host, send a bubble pointing at it. Flynn can watch the agent work in real time.
+Not part of this routing spec. The minimal flow is one new bubble request naming one destination address; the provider owns the generated session id and tmux lifecycle.
 
 **Tail logs:**
-Create a tmux session running `tail -f <logfile>`, send as bubble. Live log viewer in chat.
+Out of scope for this minimal routing slice unless another product surface intentionally writes that command into the created shell.
 
 ## Routing model
 
