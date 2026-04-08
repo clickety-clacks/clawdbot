@@ -102,7 +102,7 @@ describe("clawlineMessageActions", () => {
         params: {
           target: "flynn:main",
           buffer: "AAAABASE64PAYLOAD",
-          mimeType: "application/vnd.clawline.terminal-session+json",
+          mimeType: "application/vnd.clawline.interactive-html+json",
         },
         cfg,
         accountId: null,
