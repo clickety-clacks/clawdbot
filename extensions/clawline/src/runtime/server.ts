@@ -3576,14 +3576,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     if (!normalizedMessage) {
       throw new HttpError(400, "invalid_message", "Alert message is required");
     }
-    const normalizedSource = resolveAlertSource(source);
-    const text = normalizedSource
-      ? `[${normalizedSource}] ${normalizedMessage}`
-      : normalizedMessage;
-    if (Buffer.byteLength(text, "utf8") > config.sessions.maxMessageBytes) {
+    resolveAlertSource(source);
+    if (Buffer.byteLength(normalizedMessage, "utf8") > config.sessions.maxMessageBytes) {
       throw new HttpError(400, "message_too_large", "Alert message exceeds max size");
     }
-    return text;
+    return normalizedMessage;
   }
 
   function normalizeAlertMessage(value: string): string | null {
