@@ -2057,7 +2057,7 @@ describe.sequential("clawline provider server", () => {
         item?: { prompt?: string; origin?: { channel?: string; to?: string } };
       };
       expect(call?.key).toBe("agent:main:main");
-      expect(call?.item?.prompt).toBe(withMainAlertReplyRequirement("[codex] Check on Flynn"));
+      expect(call?.item?.prompt).toBe(withMainAlertReplyRequirement("Check on Flynn"));
       expect(call?.item?.origin).toEqual({ channel: "clawline", to: "agent:main:main" });
     } finally {
       await ctx.cleanup();
@@ -2268,7 +2268,7 @@ describe.sequential("clawline provider server", () => {
         item?: { prompt?: string; origin?: { channel?: string; to?: string } };
       };
       expect(call?.key).toBe("agent:main:clawline:flynn:main");
-      expect(call?.item?.prompt).toBe("[codex] Check personal channel");
+      expect(call?.item?.prompt).toBe("Check personal channel");
       expect(call?.item?.origin).toEqual({
         channel: "clawline",
         to: "agent:main:clawline:flynn:main",
@@ -2416,7 +2416,7 @@ describe.sequential("clawline provider server", () => {
         | { item?: { prompt?: string } }
         | undefined;
       const expected = withMainAlertReplyRequirement(
-        `These items completed. Execute the next task, or identify what is blocking.\n\n[codex] Check on Flynn`,
+        "These items completed. Execute the next task, or identify what is blocking.\n\nCheck on Flynn",
       );
       expect(call?.item?.prompt).toBe(expected);
     } finally {
@@ -2439,7 +2439,7 @@ describe.sequential("clawline provider server", () => {
       expect(response.status).toBe(200);
       const payload = await response.json();
       expect(payload).toEqual({ ok: true });
-      const expected = "[codex] Check on Flynn\n\nFollow up with Flynn ASAP.";
+      const expected = "Check on Flynn\n\nFollow up with Flynn ASAP.";
       const call = enqueueAnnounceMock.mock.calls[0]?.[0] as
         | { item?: { prompt?: string } }
         | undefined;
@@ -2467,7 +2467,7 @@ describe.sequential("clawline provider server", () => {
       const call = enqueueAnnounceMock.mock.calls[0]?.[0] as
         | { item?: { prompt?: string } }
         | undefined;
-      expect(call?.item?.prompt).toBe(withMainAlertReplyRequirement("[codex] Check on Flynn"));
+      expect(call?.item?.prompt).toBe(withMainAlertReplyRequirement("Check on Flynn"));
     } finally {
       await ctx.cleanup();
     }
@@ -2486,7 +2486,7 @@ describe.sequential("clawline provider server", () => {
         body: JSON.stringify({ message: "Check on Flynn", source: "codex" }),
       });
       expect(response.status).toBe(200);
-      const expected = `[codex] Check on Flynn\n\n${DEFAULT_ALERT_INSTRUCTIONS_TEXT}`;
+      const expected = `Check on Flynn\n\n${DEFAULT_ALERT_INSTRUCTIONS_TEXT}`;
       const call = enqueueAnnounceMock.mock.calls[0]?.[0] as
         | { item?: { prompt?: string } }
         | undefined;
