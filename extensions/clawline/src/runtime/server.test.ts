@@ -146,6 +146,7 @@ async function authenticateTerminalSession(params: {
   allowlistPath: string;
   entry: AllowlistEntry;
   terminalSessionId: string;
+  authPayloadExtras?: Record<string, unknown>;
 }): Promise<{ ws: WebSocket; response: unknown }> {
   const authToken = await createTerminalAuthToken(params.allowlistPath, params.entry);
   const ws = new WebSocket(`ws://127.0.0.1:${params.port}/ws/terminal`);
@@ -177,6 +178,7 @@ async function authenticateTerminalSession(params: {
       cols: 80,
       rows: 24,
       backfillLines: 0,
+      ...(params.authPayloadExtras ?? {}),
     }),
   );
 
@@ -4751,6 +4753,65 @@ describe.sequential("clawline provider server", () => {
       if (restartedServer) {
         await restartedServer.stop();
       }
+      await ctx.cleanup();
+      await fakeSsh.cleanup();
+    }
+  }, 30_000);
+
+  it("ignores client-sent destination hints during terminal_auth and routes by the persisted session record", async () => {
+    if (!(await ensureTmuxAvailable())) {
+      console.warn("Skipping terminal auth routing-authority test: tmux not found");
+      return;
+    }
+
+    const fakeSsh = await setupFakeSshProxy();
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      isAdmin: false,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry], {
+      terminalTmux: { mode: "ssh", sshTarget: "global.invalid" },
+    });
+    const terminalSessionId = `term_auth_hint_${randomUUID().replace(/-/g, "").slice(0, 10)}`;
+
+    try {
+      const descriptor = {
+        terminalSessionId,
+        title: "eezo shell",
+        version: 2,
+        destination: { address: "mike@eezo" },
+      };
+      const base64 = Buffer.from(JSON.stringify(descriptor), "utf8").toString("base64");
+      await ctx.server.sendMessage({
+        target: entry.userId,
+        text: "terminal",
+        attachments: [
+          {
+            data: base64,
+            mimeType: "application/vnd.clawline.terminal-session+json",
+          },
+        ],
+      });
+
+      const { ws, response } = await authenticateTerminalSession({
+        port: ctx.port,
+        allowlistPath: ctx.allowlistPath,
+        entry,
+        terminalSessionId,
+        authPayloadExtras: {
+          destination: { address: "mike@tars" },
+        },
+      });
+      expect((response as { type: string }).type).toBe("terminal_ready");
+      ws.terminate();
+
+      const targets = await readFakeSshTargets(fakeSsh.logPath);
+      expect(targets).toContain("mike@eezo");
+      expect(targets).not.toContain("mike@tars");
+      expect(targets).not.toContain("global.invalid");
+    } finally {
+      await killLocalTmuxSession(terminalSessionId);
       await ctx.cleanup();
       await fakeSsh.cleanup();
     }
