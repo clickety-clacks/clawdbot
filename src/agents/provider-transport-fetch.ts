@@ -6,8 +6,19 @@ import {
   resolveProviderRequestPolicyConfig,
 } from "./provider-request-config.js";
 
+type FetchPreconnect = (
+  url: string | URL,
+  options?: {
+    dns?: boolean;
+    tcp?: boolean;
+    http?: boolean;
+    https?: boolean;
+    credentials?: RequestCredentials;
+  },
+) => void;
+
 type GuardedModelFetch = typeof fetch & {
-  preconnect: typeof fetch.preconnect;
+  preconnect: FetchPreconnect;
 };
 
 function buildManagedResponse(response: Response, release: () => Promise<void>): Response {
@@ -72,6 +83,9 @@ function resolveModelRequestPolicy(model: Model<Api>) {
 export function buildGuardedModelFetch(model: Model<Api>): typeof fetch {
   const requestConfig = resolveModelRequestPolicy(model);
   const dispatcherPolicy = buildProviderRequestDispatcherPolicy(requestConfig);
+  const globalFetchWithPreconnect = globalThis.fetch as typeof fetch & {
+    preconnect?: FetchPreconnect;
+  };
   const guardedFetch = (async (input, init) => {
     const request = input instanceof Request ? new Request(input, init) : undefined;
     const url =
@@ -104,10 +118,10 @@ export function buildGuardedModelFetch(model: Model<Api>): typeof fetch {
     });
     return buildManagedResponse(result.response, result.release);
   }) as typeof fetch;
-  const preconnect =
-    typeof globalThis.fetch.preconnect === "function"
-      ? globalThis.fetch.preconnect.bind(globalThis.fetch)
-      : ((() => {}) satisfies typeof fetch.preconnect);
+  const preconnect: FetchPreconnect =
+    typeof globalFetchWithPreconnect.preconnect === "function"
+      ? globalFetchWithPreconnect.preconnect.bind(globalFetchWithPreconnect)
+      : () => {};
   return Object.assign(guardedFetch, {
     preconnect,
   }) as GuardedModelFetch;

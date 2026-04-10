@@ -5,8 +5,8 @@ export type SourceOrigin = "package" | "top-level";
 export type SkillSourceInfo = {
   path: string;
   source: string;
-  scope?: SourceScope;
-  origin?: SourceOrigin;
+  scope: SourceScope;
+  origin: SourceOrigin;
   baseDir?: string;
 };
 
