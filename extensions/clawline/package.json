@@ -27,6 +27,9 @@
       "localPath": "extensions/clawline",
       "defaultChoice": "local"
     },
+    "bundle": {
+      "stageRuntimeDependencies": true
+    },
     "releaseChecks": {
       "rootDependencyMirrorAllowlist": [
         "better-sqlite3",
