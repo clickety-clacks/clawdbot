@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveFallbackRetryPrompt } from "./agent.js";
+import { resolveFallbackRetryPrompt } from "../agents/command/attempt-execution.js";
 
 describe("resolveFallbackRetryPrompt", () => {
   it("preserves non-alert fallback retries", () => {

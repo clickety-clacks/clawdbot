@@ -14,7 +14,6 @@ import BetterSqlite3 from "better-sqlite3";
 import jwt from "jsonwebtoken";
 import { type Dispatcher } from "undici";
 import WebSocket, { WebSocketServer } from "ws";
-import { isLoopbackHost, isPrivateOrLoopbackHost } from "../../../../src/gateway/net.js";
 import {
   ADMIN_SCOPE,
   DEFAULT_ACCOUNT_ID,
@@ -30,6 +29,8 @@ import {
   finalizeInboundContext,
   getFollowupQueueDepth,
   hasAlphaChannel,
+  isLoopbackHost,
+  isPrivateOrLoopbackHost,
   isCronRunSessionKey,
   loadSessionStore,
   loadGatewayTlsRuntime,
@@ -40,11 +41,11 @@ import {
   parseAgentSessionKey,
   rawDataToString,
   recordInboundSession,
+  resolveAgentIdentity,
   resolveAgentIdFromSessionKey,
   resolveAllAgentSessionStoreTargetsSync,
   resolveEffectiveMessagesConfig,
   resolveHumanDelayConfig,
-  resolveIdentityName,
   resolveQueueSettings,
   resolveSessionTranscriptPath,
   resolveSessionStoreEntry,
@@ -77,6 +78,9 @@ import type {
   StreamCreatedServerMessage,
   StreamUpdatedServerMessage,
   StreamDeletedServerMessage,
+  StreamReadStateServerMessage,
+  StreamTailState,
+  StreamTailStateServerMessage,
 } from "./domain.js";
 import { ClientMessageError, HttpError } from "./errors.js";
 import { createAssetHandlers } from "./http-assets.js";
@@ -233,6 +237,8 @@ const INTERACTIVE_HTML_MIME = "application/vnd.clawline.interactive-html+json";
 const INTERACTIVE_CALLBACK_MIME = "application/vnd.clawline.interactive-callback+json";
 const CLIENT_FEATURE_TERMINAL_BUBBLES_V1 = "terminal_bubbles_v1";
 const SERVER_FEATURE_SESSION_INFO = "session_info";
+const SERVER_FEATURE_STREAM_READ_STATE = "stream_read_state";
+const SERVER_FEATURE_STREAM_TAIL_STATE = "stream_tail_state";
 const TERMINAL_BUBBLES_UNSUPPORTED_NOTICE =
   "Terminal session hidden: this client does not support terminal bubbles yet. Update Clawline to view it.";
 const INLINE_DOCUMENT_MIME_TYPES = new Set([TERMINAL_SESSION_MIME, INTERACTIVE_HTML_MIME]);
@@ -249,7 +255,7 @@ const EXEC_COMPLETION_ALERT_PROMPT =
 const USER_ID_MAX_LENGTH = 48;
 const COMBINING_MARKS_REGEX = /[\u0300-\u036f]/g;
 const WEBROOT_PREFIX = "/www";
-const STREAM_DB_VERSION = 4;
+const STREAM_DB_VERSION = 5;
 const STREAM_SUFFIX_REGEX = /^s_[0-9a-f]{8}$/;
 const STREAM_DISPLAY_NAME_FALLBACK = "Stream";
 const STREAM_IDEMPOTENCY_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
@@ -387,7 +393,11 @@ function countTerminalSessionDocumentAttachments(values?: unknown[]): number {
 }
 
 function buildAuthResultFeatures(session: Session): string[] {
-  const features = [SERVER_FEATURE_SESSION_INFO];
+  const features = [
+    SERVER_FEATURE_SESSION_INFO,
+    SERVER_FEATURE_STREAM_READ_STATE,
+    SERVER_FEATURE_STREAM_TAIL_STATE,
+  ];
   if (session.clientFeatures.has(CLIENT_FEATURE_TERMINAL_BUBBLES_V1)) {
     features.push(CLIENT_FEATURE_TERMINAL_BUBBLES_V1);
   }
@@ -1003,7 +1013,14 @@ type StreamServerMessage =
   | StreamSnapshotServerMessage
   | StreamCreatedServerMessage
   | StreamUpdatedServerMessage
-  | StreamDeletedServerMessage;
+  | StreamDeletedServerMessage
+  | StreamReadStateServerMessage
+  | StreamTailStateServerMessage;
+
+type StreamTailStateRow = {
+  sessionKey: string;
+  payloadJson: string;
+};
 
 type TrackableSessionApiEntry = {
   sessionKey: string;
@@ -1028,6 +1045,14 @@ type StreamSessionRow = {
   isBuiltIn: number;
   adopted: number;
   createdAt: number;
+  updatedAt: number;
+};
+
+type StreamReadStateRow = {
+  userId: string;
+  sessionKey: string;
+  lastReadMessageId: string;
+  lastReadSequence: number;
   updatedAt: number;
 };
 
@@ -1543,8 +1568,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const mainSessionKey = options.mainSessionKey?.trim() || "agent:main:main";
   const mainSessionAgentId = resolveAgentIdFromSessionKey(mainSessionKey);
 
+  const resolveIdentityName = (agentId: string) => {
+    const name = resolveAgentIdentity(openClawCfg, agentId)?.name;
+    return typeof name === "string" && name.trim().length > 0 ? name.trim() : undefined;
+  };
   const resolveAssistantSenderName = (sessionKey: string) =>
-    resolveIdentityName(openClawCfg, resolveAgentIdFromSessionKey(sessionKey));
+    resolveIdentityName(resolveAgentIdFromSessionKey(sessionKey));
 
   type SessionInfo = {
     dmScope: string;
@@ -1629,6 +1658,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       isAdmin: session.isAdmin,
       dmScope: resolved.dmScope,
       sessionKeys: resolved.streamSessionKeys,
+      streamReadStates: readStreamReadStatesForUser(session.userId, resolved.streamSessionKeys),
+      streamTailStates: readStreamTailStatesForUser(session.userId, resolved.streamSessionKeys),
     };
     await sendJson(session.socket, payload).catch(() => {});
   };
@@ -1723,11 +1754,16 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   let updateStreamSessionDisplayNameStmt!: SqliteStatement;
   let updateStreamSessionBuiltInMetadataStmt!: SqliteStatement;
   let deleteStreamSessionStmt!: SqliteStatement;
+  let selectStreamReadStatesByUserStmt!: SqliteStatement;
+  let selectStreamReadStateBySessionStmt!: SqliteStatement;
+  let upsertStreamReadStateStmt!: SqliteStatement;
+  let deleteStreamReadStateBySessionStmt!: SqliteStatement;
   let selectStreamIdempotencyStmt!: SqliteStatement;
   let insertStreamIdempotencyStmt!: SqliteStatement;
   let deleteExpiredStreamIdempotencyStmt!: SqliteStatement;
   let selectAdoptedSessionKeysByUserStmt!: SqliteStatement;
   let insertAdoptedSessionStmt!: SqliteStatement;
+  let selectStreamTailStatesByUserStmt!: SqliteStatement;
   let deleteMessageAssetsBySessionStmt!: SqliteStatement;
   let deleteMessagesBySessionStmt!: SqliteStatement;
   let deleteEventsBySessionStmt!: SqliteStatement;
@@ -1842,6 +1878,120 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         .map((row) => row.sessionKey.trim().toLowerCase())
         .filter((sessionKey) => sessionKey.length > 0),
     );
+  };
+
+  const readStreamReadStateMapForUser = (userId: string, sessionKeys?: Set<string>) => {
+    if (!selectStreamReadStatesByUserStmt) {
+      return {} as Record<string, string>;
+    }
+    const rows = selectStreamReadStatesByUserStmt.all(userId) as StreamReadStateRow[];
+    const result: Record<string, string> = {};
+    for (const row of rows) {
+      if (sessionKeys && !sessionKeys.has(row.sessionKey)) {
+        continue;
+      }
+      if (typeof row.lastReadMessageId !== "string" || row.lastReadMessageId.length === 0) {
+        continue;
+      }
+      result[row.sessionKey] = row.lastReadMessageId;
+    }
+    return result;
+  };
+
+  const updateStreamReadState = ({
+    userId,
+    sessionKey,
+    lastReadMessageId,
+  }: {
+    userId: string;
+    sessionKey: string;
+    lastReadMessageId: string;
+  }) => {
+    const normalizedSessionKey = normalizeStoredSessionKey(sessionKey, userId);
+    if (!normalizedSessionKey) {
+      throw new ClientMessageError("invalid_session", "Invalid sessionKey");
+    }
+    const existingStream = selectStreamSessionByKeyStmt.get(userId, normalizedSessionKey) as
+      | StreamSessionRow
+      | undefined;
+    if (!existingStream) {
+      throw new ClientMessageError("invalid_session", "Unknown sessionKey");
+    }
+    const eventRow = selectEventByIdStmt.get(lastReadMessageId) as
+      | { userId: string; sessionKey: string | null; sequence: number }
+      | undefined;
+    if (!eventRow || eventRow.userId !== userId || eventRow.sessionKey !== normalizedSessionKey) {
+      throw new ClientMessageError("invalid_message", "Unknown lastReadMessageId");
+    }
+    const existing = selectStreamReadStateBySessionStmt.get(userId, normalizedSessionKey) as
+      | StreamReadStateRow
+      | undefined;
+    if (existing && existing.lastReadSequence >= eventRow.sequence) {
+      return {
+        updated: false,
+        sessionKey: normalizedSessionKey,
+        lastReadMessageId: existing.lastReadMessageId,
+      };
+    }
+    upsertStreamReadStateStmt.run(
+      userId,
+      normalizedSessionKey,
+      lastReadMessageId,
+      eventRow.sequence,
+      nowMs(),
+    );
+    return {
+      updated: true,
+      sessionKey: normalizedSessionKey,
+      lastReadMessageId,
+    };
+  };
+
+  const readStreamReadStatesForUser = (
+    userId: string,
+    allowedSessionKeys?: string[],
+  ): Record<string, string> => {
+    const allowed = allowedSessionKeys
+      ? new Set(allowedSessionKeys.map((sessionKey) => normalizeSessionKey(sessionKey)))
+      : null;
+    return readStreamReadStateMapForUser(userId, allowed ?? undefined);
+  };
+
+  const readStreamTailStatesForUser = (
+    userId: string,
+    allowedSessionKeys?: string[],
+  ): Record<string, StreamTailState> => {
+    if (!selectStreamTailStatesByUserStmt) {
+      return {};
+    }
+    const allowed = allowedSessionKeys
+      ? new Set(allowedSessionKeys.map((sessionKey) => normalizeSessionKey(sessionKey)))
+      : null;
+    const rows = selectStreamTailStatesByUserStmt.all(userId, userId) as StreamTailStateRow[];
+    const states: Record<string, StreamTailState> = {};
+    for (const row of rows) {
+      const normalizedSessionKey = normalizeSessionKey(row.sessionKey);
+      if (!normalizedSessionKey) {
+        continue;
+      }
+      if (allowed && !allowed.has(normalizedSessionKey)) {
+        continue;
+      }
+      const parsed = parseServerMessage(row.payloadJson, logger);
+      if (
+        !parsed ||
+        parsed.type !== "message" ||
+        !SERVER_EVENT_ID_REGEX.test(parsed.id) ||
+        (parsed.role !== "user" && parsed.role !== "assistant")
+      ) {
+        continue;
+      }
+      states[row.sessionKey] = {
+        lastMessageId: parsed.id,
+        lastMessageRole: parsed.role,
+      };
+    }
+    return states;
   };
 
   const filterStreamAccess = (streams: StreamSession[], isAdmin: boolean): StreamSession[] => {
@@ -2134,6 +2284,16 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       );
       CREATE INDEX IF NOT EXISTS idx_adopted_sessions_user_created
         ON adopted_sessions(userId, createdAt);
+      CREATE TABLE IF NOT EXISTS stream_read_state (
+        userId TEXT NOT NULL,
+        sessionKey TEXT NOT NULL,
+        lastReadMessageId TEXT NOT NULL,
+        lastReadSequence INTEGER NOT NULL,
+        updatedAt INTEGER NOT NULL,
+        PRIMARY KEY (userId, sessionKey)
+      );
+      CREATE INDEX IF NOT EXISTS idx_stream_read_state_user_updated
+        ON stream_read_state(userId, updatedAt);
     `);
     if (!tableHasColumn("stream_sessions", "adopted")) {
       database.exec(`ALTER TABLE stream_sessions ADD COLUMN adopted INTEGER NOT NULL DEFAULT 0`);
@@ -2554,6 +2714,28 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     deleteStreamSessionStmt = newDb.prepare(
       `DELETE FROM stream_sessions WHERE userId = ? AND sessionKey = ?`,
     );
+    selectStreamReadStatesByUserStmt = newDb.prepare(
+      `SELECT userId, sessionKey, lastReadMessageId, lastReadSequence, updatedAt
+       FROM stream_read_state
+       WHERE userId = ?`,
+    );
+    selectStreamReadStateBySessionStmt = newDb.prepare(
+      `SELECT userId, sessionKey, lastReadMessageId, lastReadSequence, updatedAt
+       FROM stream_read_state
+       WHERE userId = ? AND sessionKey = ?`,
+    );
+    upsertStreamReadStateStmt = newDb.prepare(
+      `INSERT INTO stream_read_state
+         (userId, sessionKey, lastReadMessageId, lastReadSequence, updatedAt)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(userId, sessionKey) DO UPDATE SET
+         lastReadMessageId = excluded.lastReadMessageId,
+         lastReadSequence = excluded.lastReadSequence,
+         updatedAt = excluded.updatedAt`,
+    );
+    deleteStreamReadStateBySessionStmt = newDb.prepare(
+      `DELETE FROM stream_read_state WHERE userId = ? AND sessionKey = ?`,
+    );
     selectStreamIdempotencyStmt = newDb.prepare(
       `SELECT operation, responseJson FROM stream_idempotency WHERE userId = ? AND idempotencyKey = ?`,
     );
@@ -2573,6 +2755,19 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     insertAdoptedSessionStmt = newDb.prepare(
       `INSERT OR IGNORE INTO adopted_sessions (userId, sessionKey, createdAt)
        VALUES (?, ?, ?)`,
+    );
+    selectStreamTailStatesByUserStmt = newDb.prepare(
+      `SELECT latest.sessionKey, events.payloadJson
+       FROM (
+         SELECT sessionKey, MAX(sequence) as maxSequence
+         FROM events
+         WHERE userId = ? AND eventType = 'message' AND sessionKey IS NOT NULL
+         GROUP BY sessionKey
+       ) AS latest
+       JOIN events
+         ON events.userId = ?
+        AND events.sessionKey = latest.sessionKey
+        AND events.sequence = latest.maxSequence`,
     );
     deleteMessageAssetsBySessionStmt = newDb.prepare(
       `DELETE FROM message_assets
@@ -2720,7 +2915,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
        ORDER BY sequence DESC LIMIT ?`,
     );
     selectEventByIdStmt = newDb.prepare(
-      `SELECT id, userId, sequence, timestamp FROM events WHERE id = ? AND eventType = 'message'`,
+      `SELECT id, userId, sessionKey, sequence, timestamp
+       FROM events
+       WHERE id = ? AND eventType = 'message'`,
     );
     selectEventPayloadForUserStmt = newDb.prepare(
       `SELECT payloadJson FROM events WHERE userId = ? AND id = ? AND eventType = 'message'`,
@@ -2766,10 +2963,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       const orphanCandidates = selectOrphanedAssetsForUserStmt.all(params.userId) as Array<{
         assetId: string;
       }>;
+      deleteStreamReadStateBySessionStmt.run(params.userId, params.sessionKey);
       deleteMessageAssetsBySessionStmt.run(params.userId, params.userId, params.sessionKey);
       deleteMessagesBySessionStmt.run(params.userId, params.userId, params.sessionKey);
       deleteEventsBySessionStmt.run(params.userId, params.sessionKey);
       deleteStreamSessionStmt.run(params.userId, params.sessionKey);
+      deleteStreamReadStateBySessionStmt.run(params.userId, params.sessionKey);
       const deletedAssetIds: string[] = [];
       for (const row of orphanCandidates) {
         const result = deleteOrphanedAssetByIdStmt.run(row.assetId);
@@ -4672,6 +4871,32 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     );
   }
 
+  function buildStreamTailStateEvent(event: ServerMessage): StreamTailStateServerMessage | null {
+    if (
+      event.type !== "message" ||
+      typeof event.sessionKey !== "string" ||
+      event.sessionKey.trim().length === 0 ||
+      !SERVER_EVENT_ID_REGEX.test(event.id) ||
+      (event.role !== "user" && event.role !== "assistant")
+    ) {
+      return null;
+    }
+    return {
+      type: "stream_tail_state",
+      sessionKey: event.sessionKey,
+      lastMessageId: event.id,
+      lastMessageRole: event.role,
+    };
+  }
+
+  async function broadcastStreamTailStateForUser(userId: string, event: ServerMessage) {
+    const payload = buildStreamTailStateEvent(event);
+    if (!payload) {
+      return;
+    }
+    await broadcastStreamEvent(userId, payload);
+  }
+
   function loadStreamRowForUser(userId: string, sessionKey: string): StreamSessionRow | null {
     const row = selectStreamSessionByKeyStmt.get(userId, sessionKey) as
       | StreamSessionRow
@@ -5249,7 +5474,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         }
         if (existing.adopted === 1) {
           // Untrack: remove stream row + adopted_sessions row, but don't delete messages/assets
-          deleteStreamSessionStmt!.run(auth.userId, sessionKey);
+          deleteStreamSessionStmt.run(auth.userId, sessionKey);
           db!
             .prepare(`DELETE FROM adopted_sessions WHERE userId = ? AND sessionKey = ?`)
             .run(auth.userId, sessionKey);
@@ -5277,7 +5502,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         const deletedAssetIds = deleteStreamDataTx({
           userId: auth.userId,
           sessionKey,
-        }) as string[];
+        });
         for (const assetId of deletedAssetIds) {
           await safeUnlink(path.join(assetsDir, assetId));
         }
@@ -5415,6 +5640,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       features: buildAuthResultFeatures(session),
       dmScope: sessionInfo.dmScope,
       sessionKeys: sessionInfo.streamSessionKeys,
+      streamReadStates: readStreamReadStatesForUser(session.userId, sessionInfo.streamSessionKeys),
+      streamTailStates: readStreamTailStatesForUser(session.userId, sessionInfo.streamSessionKeys),
     };
     const streams = await runPerUserTask(session.userId, async () =>
       enqueueWriteTask(() => {
@@ -5901,6 +6128,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       insertEventTx(event, target.userId);
     });
     broadcastToSessionKey(normalizedResolvedSessionKey, event);
+    await broadcastStreamTailStateForUser(target.userId, event);
     return {
       messageId: event.id,
       userId: target.userId,
@@ -6246,6 +6474,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           });
           markProcessStage("broadcast_user_message");
           broadcastToSessionKey(resolvedSessionKey, event);
+          await broadcastStreamTailStateForUser(targetUserId, event);
 
           const attachmentSummary = describeClawlineAttachments(ownership.attachments);
           const inboundBody = attachmentSummary
@@ -6300,7 +6529,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
           const fallbackText = adapterOverrides.responseFallback?.trim() ?? "";
           const prefixContext: ResponsePrefixContext = {
-            identityName: resolveIdentityName(openClawCfg, route.agentId),
+            identityName: resolveIdentityName(route.agentId),
           };
 
           // Track activity state for typing indicator
@@ -6379,6 +6608,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
                 { preserveOpaqueSessionKey: inboundTarget.kind === "adopted" },
               );
               broadcastToSessionKey(resolvedSessionKey, assistantEvent);
+              await broadcastStreamTailStateForUser(targetUserId, assistantEvent);
               logger.info?.("[clawline] agent_run_phase", {
                 phase: "deliver_done",
                 messageId: payload.id,
@@ -6765,7 +6995,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
           const fallbackText = adapterOverrides.responseFallback?.trim() ?? "";
           const prefixContext: ResponsePrefixContext = {
-            identityName: resolveIdentityName(openClawCfg, route.agentId),
+            identityName: resolveIdentityName(route.agentId),
           };
 
           // Track activity state for typing indicator
@@ -6844,6 +7074,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
                 replyAttachments,
               );
               broadcastToSessionKey(resolvedSessionKey, assistantEvent);
+              await broadcastStreamTailStateForUser(targetUserId, assistantEvent);
               logger.info?.("[clawline] agent_run_phase", {
                 phase: "deliver_done",
                 messageId: clientId,
@@ -7238,6 +7469,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           break;
         case "message":
           await handleAuthedMessage(ws, payload);
+          break;
+        case "stream_read":
+          await handleAuthedStreamRead(ws, payload);
           break;
         case "interactive-callback":
           await handleAuthedInteractiveCallback(ws, payload);
@@ -8098,6 +8332,73 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       return;
     }
     await processClientMessage(session, payload);
+  }
+
+  // oxlint-disable-next-line typescript/no-explicit-any
+  async function handleAuthedStreamRead(ws: WebSocket, payload: any) {
+    const state = connectionState.get(ws);
+    if (!state || !state.authenticated || !state.deviceId || !state.userId) {
+      await sendJson(ws, { type: "error", code: "auth_failed", message: "Not authenticated" });
+      ws.close();
+      return;
+    }
+    const session = sessionsByDevice.get(state.deviceId);
+    if (!session) {
+      await sendJson(ws, { type: "error", code: "auth_failed", message: "Session missing" });
+      return;
+    }
+    const sessionKey = typeof payload.sessionKey === "string" ? payload.sessionKey.trim() : "";
+    const lastReadMessageId =
+      typeof payload.lastReadMessageId === "string" ? payload.lastReadMessageId.trim() : "";
+    if (!sessionKey || !lastReadMessageId || !SERVER_EVENT_ID_REGEX.test(lastReadMessageId)) {
+      await sendJson(ws, {
+        type: "error",
+        code: "invalid_message",
+        message: "Invalid stream read payload",
+      }).catch(() => {});
+      return;
+    }
+    const normalizedSessionKey = normalizeSessionKey(sessionKey);
+    const allowedSessionKey = session.sessionKeys.find((candidate) =>
+      sessionKeyEq(candidate, normalizedSessionKey),
+    );
+    if (!allowedSessionKey) {
+      await sendJson(ws, {
+        type: "error",
+        code: "stream_not_found",
+        message: "Stream not found",
+      }).catch(() => {});
+      return;
+    }
+    try {
+      const update = await runPerUserTask(session.userId, async () =>
+        enqueueWriteTask(() =>
+          updateStreamReadState({
+            userId: session.userId,
+            sessionKey: allowedSessionKey,
+            lastReadMessageId,
+          }),
+        ),
+      );
+      if (!update.updated) {
+        return;
+      }
+      await broadcastStreamEvent(session.userId, {
+        type: "stream_read_state",
+        sessionKey: update.sessionKey,
+        lastReadMessageId: update.lastReadMessageId,
+      });
+    } catch (error) {
+      if (error instanceof ClientMessageError) {
+        await sendJson(ws, {
+          type: "error",
+          code: error.code,
+          message: error.message,
+        }).catch(() => {});
+        return;
+      }
+      throw error;
+    }
   }
 
   // oxlint-disable-next-line typescript/no-explicit-any
