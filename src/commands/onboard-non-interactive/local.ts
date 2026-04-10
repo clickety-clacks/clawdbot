@@ -53,6 +53,16 @@ function resolveInstallDaemonGatewayHealthTiming(): {
   };
 }
 
+function resolveExistingGatewayAuthMismatchHints(detail: string | undefined): string[] {
+  if (!detail || !/gateway token mismatch/i.test(detail)) {
+    return [];
+  }
+  return [
+    "Detected auth mismatch with an already-running local gateway on this port.",
+    `Fix: rerun with \`--gateway-token <running-gateway-token>\` (or \`OPENCLAW_GATEWAY_TOKEN=<running-gateway-token>\`) to attach to that gateway, or stop the old gateway and rerun so the next gateway process picks up the new config.`,
+  ];
+}
+
 async function collectGatewayHealthFailureDiagnostics(): Promise<
   GatewayHealthFailureDiagnostics | undefined
 > {
@@ -301,6 +311,7 @@ export async function runNonInteractiveLocalSetup(params: {
         hints: !opts.installDaemon
           ? [
               "Non-interactive local setup only waits for an already-running gateway unless you pass --install-daemon.",
+              ...resolveExistingGatewayAuthMismatchHints(probe.detail),
               `Fix: start \`${formatCliCommand("openclaw gateway run")}\`, re-run with \`--install-daemon\`, or use \`--skip-health\`.`,
               process.platform === "win32"
                 ? "Native Windows managed gateway install tries Scheduled Tasks first and falls back to a per-user Startup-folder login item when task creation is denied."

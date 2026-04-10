@@ -567,6 +567,34 @@ describe("onboard (non-interactive): gateway and remote auth", () => {
     });
   }, 60_000);
 
+  it("explains token mismatch against an already-running local gateway", async () => {
+    await withStateDir("state-local-health-token-mismatch-", async (stateDir) => {
+      waitForGatewayReachableMock = vi.fn(async () => ({
+        ok: false,
+        detail:
+          "gateway closed (1008): unauthorized: gateway token mismatch (provide gateway auth token)",
+      }));
+
+      await expect(
+        runNonInteractiveSetup(
+          {
+            nonInteractive: true,
+            mode: "local",
+            workspace: path.join(stateDir, "openclaw"),
+            authChoice: "skip",
+            skipSkills: true,
+            skipHealth: false,
+            installDaemon: false,
+            gatewayBind: "loopback",
+          },
+          runtime,
+        ),
+      ).rejects.toThrow(
+        /already-running local gateway on this port[\s\S]*--gateway-token <running-gateway-token>[\s\S]*OPENCLAW_GATEWAY_TOKEN=<running-gateway-token>/,
+      );
+    });
+  }, 60_000);
+
   it("uses a longer health deadline when daemon install was requested", async () => {
     await withStateDir("state-local-daemon-health-", async (stateDir) => {
       let capturedDeadlineMs: number | undefined;
