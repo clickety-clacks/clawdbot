@@ -214,7 +214,7 @@ export async function startGatewayBonjourAdvertiser(
 
       const cleanupUnhandledRejection =
         services.length > 0
-          ? registerUnhandledRejectionHandler(handleCiaoUnhandledRejection)
+          ? registerUnhandledRejectionHandler((reason) => handleCiaoUnhandledRejection(reason))
           : undefined;
 
       return { responder, services, cleanupUnhandledRejection };
