@@ -1,15 +1,18 @@
-import { defineChannelPluginEntry } from "openclaw/plugin-sdk/core";
-import { clawlinePlugin } from "./src/channel.js";
+import { defineBundledChannelEntry } from "openclaw/plugin-sdk/channel-entry-contract";
 import { startClawlineService } from "./src/runtime/service.js";
 
 let serviceHandle: Awaited<ReturnType<typeof startClawlineService>> = null;
 let serviceStart: Promise<void> | null = null;
 
-export default defineChannelPluginEntry({
+export default defineBundledChannelEntry({
   id: "clawline",
   name: "Clawline",
   description: "Clawline channel plugin",
-  plugin: clawlinePlugin,
+  importMetaUrl: import.meta.url,
+  plugin: {
+    specifier: "./src/channel.js",
+    exportName: "clawlinePlugin",
+  },
   registerFull(api) {
     api.registerService({
       id: "clawline",
