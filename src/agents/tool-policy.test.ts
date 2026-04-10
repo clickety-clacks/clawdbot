@@ -6,6 +6,7 @@ import type { SandboxToolPolicy } from "./sandbox/types.js";
 import { TOOL_POLICY_CONFORMANCE } from "./tool-policy.conformance.js";
 import {
   applyOwnerOnlyToolPolicy,
+  collectExplicitAllowlist,
   expandToolGroups,
   isOwnerOnlyToolName,
   normalizeToolName,
@@ -19,24 +20,20 @@ function createOwnerPolicyTools() {
   return [
     {
       name: "read",
-      // oxlint-disable-next-line typescript/no-explicit-any
       execute: async () => ({ content: [], details: {} }) as any,
     },
     {
       name: "cron",
       ownerOnly: true,
-      // oxlint-disable-next-line typescript/no-explicit-any
       execute: async () => ({ content: [], details: {} }) as any,
     },
     {
       name: "gateway",
       ownerOnly: true,
-      // oxlint-disable-next-line typescript/no-explicit-any
       execute: async () => ({ content: [], details: {} }) as any,
     },
     {
       name: "whatsapp_login",
-      // oxlint-disable-next-line typescript/no-explicit-any
       execute: async () => ({ content: [], details: {} }) as any,
     },
   ] as unknown as AnyAgentTool[];
@@ -125,7 +122,6 @@ describe("tool-policy", () => {
       {
         name: "custom_admin_tool",
         ownerOnly: true,
-        // oxlint-disable-next-line typescript/no-explicit-any
         execute: async () => ({ content: [], details: {} }) as any,
       },
     ] as unknown as AnyAgentTool[];
@@ -133,16 +129,24 @@ describe("tool-policy", () => {
     expect(applyOwnerOnlyToolPolicy(tools, true)).toHaveLength(1);
   });
 
+  it("preserves explicit alsoAllow hints when allow is empty", () => {
+    expect(
+      collectExplicitAllowlist([
+        {
+          allow: ["*", "optional-demo"],
+        },
+      ]),
+    ).toContain("optional-demo");
+  });
+
   it("strips nodes for non-owner senders via fallback policy", () => {
     const tools = [
       {
         name: "read",
-        // oxlint-disable-next-line typescript/no-explicit-any
         execute: async () => ({ content: [], details: {} }) as any,
       },
       {
         name: "nodes",
-        // oxlint-disable-next-line typescript/no-explicit-any
         execute: async () => ({ content: [], details: {} }) as any,
       },
     ] as unknown as AnyAgentTool[];
