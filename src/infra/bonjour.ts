@@ -55,7 +55,6 @@ type BonjourServiceState = BonjourService["serviceState"];
 type BonjourCycle = {
   responder: BonjourResponder;
   services: Array<{ label: string; svc: BonjourService }>;
-  cleanupUnhandledRejection?: () => void;
 };
 
 type ServiceStateTracker = {
@@ -212,12 +211,7 @@ export async function startGatewayBonjourAdvertiser(
         svc: gateway as unknown as BonjourService,
       });
 
-      const cleanupUnhandledRejection =
-        services.length > 0
-          ? registerUnhandledRejectionHandler((reason) => handleCiaoUnhandledRejection(reason))
-          : undefined;
-
-      return { responder, services, cleanupUnhandledRejection };
+      return { responder, services };
     }
 
     async function stopCycle(cycle: BonjourCycle | null) {
@@ -249,8 +243,6 @@ export async function startGatewayBonjourAdvertiser(
         await cycle.responder.shutdown();
       } catch {
         /* ignore */
-      } finally {
-        cycle.cleanupUnhandledRejection?.();
       }
     }
 
@@ -303,6 +295,9 @@ export async function startGatewayBonjourAdvertiser(
 
     let stopped = false;
     let recreatePromise: Promise<void> | null = null;
+    const cleanupUnhandledRejection = registerUnhandledRejectionHandler((reason) =>
+      handleCiaoUnhandledRejection(reason),
+    );
     let cycle = createCycle();
     const stateTracker = new Map<string, ServiceStateTracker>();
     attachConflictListeners(cycle.services);
@@ -418,6 +413,7 @@ export async function startGatewayBonjourAdvertiser(
           await recreatePromise;
           await stopCycle(cycle);
         } finally {
+          cleanupUnhandledRejection();
           restoreConsoleLog();
         }
       },

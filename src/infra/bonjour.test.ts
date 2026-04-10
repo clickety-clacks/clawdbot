@@ -102,6 +102,7 @@ describe("gateway bonjour advertiser", () => {
     vi.spyOn(logging, "getLogger").mockReturnValue({
       info: (...args: unknown[]) => getLoggerInfo(...args),
     } as unknown as ReturnType<typeof logging.getLogger>);
+    registerUnhandledRejectionHandler.mockImplementation(() => vi.fn());
   });
 
   afterEach(() => {
@@ -480,6 +481,7 @@ describe("gateway bonjour advertiser", () => {
     await vi.advanceTimersByTimeAsync(15_000);
 
     expect(createService).toHaveBeenCalledTimes(2);
+    expect(registerUnhandledRejectionHandler).toHaveBeenCalledTimes(1);
     expect(activeHandlers.size).toBe(1);
 
     const [activeHandler] = [...activeHandlers];
