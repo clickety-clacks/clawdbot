@@ -1,11 +1,19 @@
-import type { Skill as CanonicalSkill, SourceInfo } from "@mariozechner/pi-coding-agent";
+import type { Skill as CanonicalSkill } from "@mariozechner/pi-coding-agent";
 
 export type SourceScope = "user" | "project" | "temporary";
 export type SourceOrigin = "package" | "top-level";
+export type SkillSourceInfo = {
+  path: string;
+  source: string;
+  scope?: SourceScope;
+  origin?: SourceOrigin;
+  baseDir?: string;
+};
 
 export type Skill = CanonicalSkill & {
   // Preserve legacy source reads while keeping the canonical upstream shape.
   source?: string;
+  sourceInfo?: SkillSourceInfo;
 };
 
 export function createSyntheticSourceInfo(
@@ -16,7 +24,7 @@ export function createSyntheticSourceInfo(
     origin?: SourceOrigin;
     baseDir?: string;
   },
-): SourceInfo {
+): SkillSourceInfo {
   return {
     path,
     source: options.source,

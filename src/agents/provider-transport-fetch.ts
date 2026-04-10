@@ -6,6 +6,10 @@ import {
   resolveProviderRequestPolicyConfig,
 } from "./provider-request-config.js";
 
+type GuardedModelFetch = typeof fetch & {
+  preconnect: typeof fetch.preconnect;
+};
+
 function buildManagedResponse(response: Response, release: () => Promise<void>): Response {
   if (!response.body) {
     void release();
@@ -68,7 +72,7 @@ function resolveModelRequestPolicy(model: Model<Api>) {
 export function buildGuardedModelFetch(model: Model<Api>): typeof fetch {
   const requestConfig = resolveModelRequestPolicy(model);
   const dispatcherPolicy = buildProviderRequestDispatcherPolicy(requestConfig);
-  return async (input, init) => {
+  const guardedFetch = (async (input, init) => {
     const request = input instanceof Request ? new Request(input, init) : undefined;
     const url =
       request?.url ??
@@ -99,5 +103,12 @@ export function buildGuardedModelFetch(model: Model<Api>): typeof fetch {
       ...(requestConfig.allowPrivateNetwork ? { policy: { allowPrivateNetwork: true } } : {}),
     });
     return buildManagedResponse(result.response, result.release);
-  };
+  }) as typeof fetch;
+  const preconnect =
+    typeof globalThis.fetch.preconnect === "function"
+      ? globalThis.fetch.preconnect.bind(globalThis.fetch)
+      : ((() => {}) satisfies typeof fetch.preconnect);
+  return Object.assign(guardedFetch, {
+    preconnect,
+  }) as GuardedModelFetch;
 }
