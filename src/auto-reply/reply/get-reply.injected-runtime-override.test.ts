@@ -111,7 +111,7 @@ describe("getReplyFromConfig injected runtime override", () => {
   it("falls back to fallbackNoticeActiveModel when runtime provider/model are absent", async () => {
     vi.mocked(modelSelection.resolveModelRefFromString).mockReturnValue({
       ref: { provider: "openai-codex", model: "gpt-5.4" },
-      matchedAlias: undefined,
+      alias: undefined,
     });
     mocks.initSessionState.mockResolvedValue({
       sessionCtx: {},

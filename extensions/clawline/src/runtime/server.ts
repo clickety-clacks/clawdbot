@@ -14,7 +14,6 @@ import BetterSqlite3 from "better-sqlite3";
 import jwt from "jsonwebtoken";
 import { type Dispatcher } from "undici";
 import WebSocket, { WebSocketServer } from "ws";
-import { isLoopbackHost, isPrivateOrLoopbackHost } from "../../../../src/gateway/net.js";
 import {
   ADMIN_SCOPE,
   DEFAULT_ACCOUNT_ID,
@@ -30,6 +29,8 @@ import {
   finalizeInboundContext,
   getFollowupQueueDepth,
   hasAlphaChannel,
+  isLoopbackHost,
+  isPrivateOrLoopbackHost,
   isCronRunSessionKey,
   loadSessionStore,
   loadGatewayTlsRuntime,
@@ -40,11 +41,11 @@ import {
   parseAgentSessionKey,
   rawDataToString,
   recordInboundSession,
+  resolveAgentIdentity,
   resolveAgentIdFromSessionKey,
   resolveAllAgentSessionStoreTargetsSync,
   resolveEffectiveMessagesConfig,
   resolveHumanDelayConfig,
-  resolveIdentityName,
   resolveQueueSettings,
   resolveSessionTranscriptPath,
   resolveSessionStoreEntry,
@@ -1527,8 +1528,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const mainSessionKey = options.mainSessionKey?.trim() || "agent:main:main";
   const mainSessionAgentId = resolveAgentIdFromSessionKey(mainSessionKey);
 
+  const resolveIdentityName = (agentId: string) => {
+    const name = resolveAgentIdentity(openClawCfg, agentId)?.name;
+    return typeof name === "string" && name.trim().length > 0 ? name.trim() : undefined;
+  };
   const resolveAssistantSenderName = (sessionKey: string) =>
-    resolveIdentityName(openClawCfg, resolveAgentIdFromSessionKey(sessionKey));
+    resolveIdentityName(resolveAgentIdFromSessionKey(sessionKey));
 
   type SessionInfo = {
     dmScope: string;
@@ -5423,7 +5428,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         }
         if (existing.adopted === 1) {
           // Untrack: remove stream row + adopted_sessions row, but don't delete messages/assets
-          deleteStreamSessionStmt!.run(auth.userId, sessionKey);
+          deleteStreamSessionStmt.run(auth.userId, sessionKey);
           db!
             .prepare(`DELETE FROM adopted_sessions WHERE userId = ? AND sessionKey = ?`)
             .run(auth.userId, sessionKey);
@@ -5451,7 +5456,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         const deletedAssetIds = deleteStreamDataTx({
           userId: auth.userId,
           sessionKey,
-        }) as string[];
+        });
         for (const assetId of deletedAssetIds) {
           await safeUnlink(path.join(assetsDir, assetId));
         }
@@ -6478,7 +6483,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
           const fallbackText = adapterOverrides.responseFallback?.trim() ?? "";
           const prefixContext: ResponsePrefixContext = {
-            identityName: resolveIdentityName(openClawCfg, route.agentId),
+            identityName: resolveIdentityName(route.agentId),
           };
 
           // Track activity state for typing indicator
@@ -6944,7 +6949,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
           const fallbackText = adapterOverrides.responseFallback?.trim() ?? "";
           const prefixContext: ResponsePrefixContext = {
-            identityName: resolveIdentityName(openClawCfg, route.agentId),
+            identityName: resolveIdentityName(route.agentId),
           };
 
           // Track activity state for typing indicator
@@ -7424,9 +7429,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           break;
         case "interactive-callback":
           await handleAuthedInteractiveCallback(ws, payload);
-          break;
-        case "stream_read":
-          await handleAuthedStreamRead(ws, payload);
           break;
         default:
           await sendJson(ws, { type: "error", code: "invalid_message", message: "Unknown type" });

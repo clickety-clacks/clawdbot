@@ -6,9 +6,9 @@ export {
   type AnnounceQueueItem,
   DEFAULT_AGENT_WORKSPACE_DIR,
   enqueueAnnounce,
+  resolveAgentIdentity,
   resolveEffectiveMessagesConfig,
   resolveHumanDelayConfig,
-  resolveIdentityName,
 } from "openclaw/plugin-sdk/agent-runtime";
 export type { OpenClawConfig } from "openclaw/plugin-sdk/core";
 export { resolveUserPath } from "openclaw/plugin-sdk/account-resolution";
@@ -29,6 +29,7 @@ export {
   ADMIN_SCOPE,
   loadGatewayTlsRuntime,
 } from "openclaw/plugin-sdk/gateway-runtime";
+export { isLoopbackHost } from "openclaw/plugin-sdk/browser-node-runtime";
 export {
   closeDispatcher,
   createPinnedDispatcher,
@@ -47,6 +48,7 @@ export {
   optimizeImageToJpeg,
   optimizeImageToPng,
 } from "openclaw/plugin-sdk/media-runtime";
+export { isPrivateOrLoopbackHost } from "openclaw/plugin-sdk/ssrf-runtime";
 export {
   DEFAULT_ACCOUNT_ID,
   isCronRunSessionKey,
