@@ -345,3 +345,122 @@ describe("legacy migrate controlUi.allowedOrigins seed (issue #29385)", () => {
     ]);
   });
 });
+
+describe("legacy migrate clawline config", () => {
+  it("moves top-level clawline config under channels.clawline", () => {
+    const legacyClawline = {
+      enabled: true,
+      port: 1234,
+      statePath: "/tmp/clawline",
+      network: {
+        bindAddress: "0.0.0.0",
+        allowInsecurePublic: true,
+        allowedOrigins: ["https://example.com"],
+      },
+      media: {
+        storagePath: "/tmp/media",
+      },
+      streams: {
+        maxStreamsPerUser: 64,
+        maxDisplayNameBytes: 80,
+      },
+      alertInstructionsPath: "/tmp/clawline/alerts.md",
+    };
+
+    const res = migrateLegacyConfig({
+      clawline: legacyClawline,
+    });
+
+    expect(res.changes).toEqual(["Moved clawline → channels.clawline."]);
+    expect(res.config?.channels?.clawline).toEqual(legacyClawline);
+    expect((res.config as { clawline?: unknown } | null)?.clawline).toBeUndefined();
+  });
+
+  it("merges top-level clawline into channels.clawline without overwriting explicit new-shape values", () => {
+    const res = migrateLegacyConfig({
+      clawline: {
+        enabled: true,
+        port: 1234,
+        media: {
+          storagePath: "/tmp/media",
+        },
+        network: {
+          bindAddress: "0.0.0.0",
+          allowInsecurePublic: true,
+          allowedOrigins: ["https://example.com"],
+        },
+        streams: {
+          maxStreamsPerUser: 64,
+          maxDisplayNameBytes: 80,
+        },
+      },
+      channels: {
+        clawline: {
+          enabled: false,
+          network: {
+            bindAddress: "127.0.0.1",
+          },
+          streams: {
+            maxStreamsPerUser: 16,
+          },
+        },
+      },
+    });
+
+    expect(res.changes).toEqual(["Merged clawline → channels.clawline."]);
+    expect(res.config?.channels?.clawline).toEqual({
+      enabled: false,
+      port: 1234,
+      media: {
+        storagePath: "/tmp/media",
+      },
+      network: {
+        bindAddress: "127.0.0.1",
+        allowInsecurePublic: true,
+        allowedOrigins: ["https://example.com"],
+      },
+      streams: {
+        maxStreamsPerUser: 16,
+        maxDisplayNameBytes: 80,
+      },
+    });
+    expect((res.config as { clawline?: unknown } | null)?.clawline).toBeUndefined();
+  });
+
+  it("is idempotent after moving clawline config into channels.clawline", () => {
+    const first = migrateLegacyConfig({
+      clawline: {
+        enabled: true,
+        port: 1234,
+      },
+    });
+
+    const second = migrateLegacyConfig(first.config);
+
+    expect(first.changes).toEqual(["Moved clawline → channels.clawline."]);
+    expect(first.config?.channels?.clawline).toEqual({
+      enabled: true,
+      port: 1234,
+    });
+    expect(second.config).toBeNull();
+    expect(second.changes).toEqual([]);
+  });
+
+  it("does not touch config already using channels.clawline", () => {
+    const config = {
+      channels: {
+        clawline: {
+          enabled: true,
+          port: 1234,
+        },
+      },
+    };
+    const before = structuredClone(config);
+
+    const res = migrateLegacyConfig(config);
+
+    expect(res.config).toBeNull();
+    expect(res.changes).toEqual([]);
+    expect(config).toEqual(before);
+  });
+});

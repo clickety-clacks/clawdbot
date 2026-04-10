@@ -23,7 +23,11 @@ URL pattern: `http://<hostname>:<clawline-port>/www/<filename>`
 
 - The port is the Clawline provider port (`channels.clawline.port`, default 18800)
 - This is NOT the gateway port or any other internal port
-- Example: `http://localhost:18800/www/index.html`
+- **Do not hand out `localhost` unless the viewer is definitely on the same machine that is serving the file.**
+- If the viewer is on another device (including Tailscale clients, remote browsers, gateway/web clients, phones, tablets, or laptops on the network), use the serving machine's reachable hostname or IP instead.
+- In Flynn's setup, prefer the host's reachable Tailscale/host address by default unless same-machine viewing is explicitly known.
+- Example for same-machine viewing only: `http://localhost:18800/www/index.html`
+- Example for remote viewing: `http://<reachable-hostname>:18800/www/index.html`
 
 ## Usage
 

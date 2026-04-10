@@ -93,6 +93,32 @@ const ServerSchema = z
   .strict()
   .optional();
 
+const TerminalSchema = z
+  .object({
+    tmux: z
+      .object({
+        mode: z.union([z.literal("local"), z.literal("ssh")]).optional(),
+        ssh: z
+          .object({
+            target: z.string().optional(),
+            identityFile: z.string().nullable().optional(),
+            port: z.number().int().positive().nullable().optional(),
+            knownHostsFile: z.string().nullable().optional(),
+            strictHostKeyChecking: z
+              .union([z.literal("yes"), z.literal("no"), z.literal("accept-new")])
+              .nullable()
+              .optional(),
+            extraArgs: z.array(z.string()).optional(),
+          })
+          .strict()
+          .optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict()
+  .optional();
+
 const WebRootSchema = z
   .object({
     followSymlinks: z.boolean().optional(),
@@ -108,6 +134,7 @@ export const ClawlineConfigSchema = z
     alertInstructionsPath: z.string().nullable().optional(),
     webRootPath: z.string().optional(),
     webRoot: WebRootSchema,
+    terminal: TerminalSchema,
     network: NetworkSchema,
     adapter: AdapterSchema,
     server: ServerSchema,
