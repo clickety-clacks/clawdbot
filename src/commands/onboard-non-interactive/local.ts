@@ -1,4 +1,4 @@
-import { clawlinePlugin } from "../../../extensions/clawline/src/channel.js";
+import { clawlinePlugin } from "../../../extensions/clawline/api.js";
 import { formatCliCommand } from "../../cli/command-format.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import { replaceConfigFile, resolveGatewayPort } from "../../config/config.js";
