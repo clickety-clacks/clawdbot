@@ -114,59 +114,9 @@ type TerminalDestination = {
   address: string;
 };
 
-function buildSshBaseArgs(cfg: ProviderConfig["terminal"]["tmux"]["ssh"]): string[] {
-  const args: string[] = [];
-  if (cfg.port && Number.isFinite(cfg.port)) {
-    args.push("-p", String(cfg.port));
-  }
-  const identityFile = typeof cfg.identityFile === "string" ? cfg.identityFile.trim() : "";
-  if (identityFile) {
-    args.push("-i", identityFile, "-o", "IdentitiesOnly=yes");
-  }
-  const knownHostsFile = typeof cfg.knownHostsFile === "string" ? cfg.knownHostsFile.trim() : "";
-  if (knownHostsFile) {
-    args.push("-o", `UserKnownHostsFile=${knownHostsFile}`);
-  }
-  const strict =
-    typeof cfg.strictHostKeyChecking === "string" ? cfg.strictHostKeyChecking.trim() : "";
-  if (strict) {
-    args.push("-o", `StrictHostKeyChecking=${strict}`);
-  }
-  // Prevent interactive prompts.
-  args.push("-o", "BatchMode=yes");
-  // Keep SSH failure modes predictable.
-  args.push("-o", "ConnectTimeout=5");
-
-  if (Array.isArray(cfg.extraArgs) && cfg.extraArgs.length > 0) {
-    for (const item of cfg.extraArgs) {
-      if (typeof item === "string" && item.trim().length > 0) {
-        args.push(item);
-      }
-    }
-  }
-  return args;
-}
-
-function createTerminalTmuxBackend(
-  config: ProviderConfig,
-  logger: Logger,
-  destinationAddress?: string | null,
-): TerminalTmuxBackend {
-  const sshCfg = config.terminal?.tmux?.ssh;
-  const explicitTarget = typeof destinationAddress === "string" ? destinationAddress.trim() : "";
-  const tmuxMode = explicitTarget ? "ssh" : (config.terminal?.tmux?.mode ?? "local");
-  const sshTarget =
-    explicitTarget || (typeof sshCfg?.target === "string" ? sshCfg.target.trim() : "");
-  const sshBaseArgs = sshCfg ? buildSshBaseArgs(sshCfg) : [];
-
-  const isRemote = tmuxMode === "ssh";
-  if (isRemote && !sshTarget) {
-    logger.warn?.(
-      "[clawline:terminal] tmux remote mode enabled but ssh target is empty; falling back to local",
-    );
-  }
-
-  const useRemote = isRemote && sshTarget.length > 0;
+function createTerminalTmuxBackend(destinationAddress: string): TerminalTmuxBackend {
+  const sshTarget = destinationAddress.trim();
+  const sshBaseArgs = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5"];
 
   /**
    * Shell-quote a single argument for safe insertion into a remote shell command string.
@@ -181,9 +131,6 @@ function createTerminalTmuxBackend(
 
   return {
     async execTmux(args: string[], options: { timeout: number; maxBuffer: number }) {
-      if (!useRemote) {
-        return execFile("tmux", args, options);
-      }
       // Build a single quoted shell command so special chars (e.g. `#` in tmux format
       // strings like `#{pane_id}`) are not misinterpreted by the remote shell.
       const remoteCmd = "LANG=en_US.UTF-8 " + ["tmux", ...args].map(shellQuoteArg).join(" ");
@@ -194,14 +141,6 @@ function createTerminalTmuxBackend(
         // oxlint-disable-next-line typescript/no-explicit-any
         spawn: (file: string, args: string[], options: any) => any;
       };
-      if (!useRemote) {
-        const pty = ptyModule.spawn("tmux", ["attach-session", "-t", params.sessionName], {
-          name: "xterm-256color",
-          cols: params.cols,
-          rows: params.rows,
-        });
-        return { pty };
-      }
       // Force a remote TTY so tmux attach behaves like a real client.
       const remoteCmd =
         "LANG=en_US.UTF-8 " +
@@ -1089,19 +1028,6 @@ const DEFAULT_CONFIG: ProviderConfig = {
   port: 18800,
   statePath: path.join(os.homedir(), ".openclaw", "clawline"),
   alertInstructionsPath: path.join(os.homedir(), ".openclaw", "clawline", "alert-instructions.md"),
-  terminal: {
-    tmux: {
-      mode: "local",
-      ssh: {
-        target: "",
-        identityFile: null,
-        port: null,
-        knownHostsFile: null,
-        strictHostKeyChecking: "accept-new",
-        extraArgs: [],
-      },
-    },
-  },
   network: {
     bindAddress: "127.0.0.1",
     allowInsecurePublic: false,
@@ -7753,6 +7679,15 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       ws.close();
       return;
     }
+    const destinationAddress = record.destination?.address.trim() ?? "";
+    if (!destinationAddress) {
+      await sendJson(ws, {
+        type: "terminal_error",
+        message: "Terminal session missing destination",
+      });
+      ws.close();
+      return;
+    }
 
     const cols = typeof payload.cols === "number" ? Math.max(1, Math.floor(payload.cols)) : 80;
     const rows = typeof payload.rows === "number" ? Math.max(1, Math.floor(payload.rows)) : 24;
@@ -7760,11 +7695,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       typeof payload.backfillLines === "number"
         ? Math.max(0, Math.floor(payload.backfillLines))
         : 0;
-    const tmuxBackend = createTerminalTmuxBackend(
-      config,
-      logger,
-      record.destination?.address ?? null,
-    );
+    const tmuxBackend = createTerminalTmuxBackend(destinationAddress);
 
     try {
       logger.info?.("[clawline:terminal] terminal_auth_start", {

@@ -93,23 +93,9 @@ Out of scope for this minimal routing slice unless another product surface inten
 
 ## Routing model
 
-The provider now routes terminal bubbles per bubble, not per process. For a version 2 descriptor with `destination.address`, the provider SSHes to that address for that bubble. The provider-global `terminal.tmux.ssh.target` remains only as compatibility fallback for old version 1 bubbles that lack destination metadata.
+The provider routes terminal bubbles per bubble, not per process. For a version 2 descriptor with `destination.address`, the provider SSHes to that address for that bubble. There is no provider-global terminal target fallback for new or legacy bubbles; old descriptors that lack destination metadata cannot establish a terminal transport.
 
-Provider SSH config still supplies shared connection defaults such as identity file and host-key settings:
-
-```json
-{
-  "terminal": {
-    "tmux": {
-      "ssh": {
-        "identityFile": "/Users/mike/.ssh/id_ed25519_clu"
-      }
-    }
-  }
-}
-```
-
-Do not rely on the provider-global ssh target to choose the destination for a new bubble.
+Provider-level SSH transport options were intentionally removed with the routing cleanup. `identityFile`, `port`, `knownHostsFile`, `strictHostKeyChecking`, and `extraArgs` are no longer supported under `channels.clawline.terminal`; terminal routing and transport authority now come from the bubble/request path only.
 
 ## Known limitations
 

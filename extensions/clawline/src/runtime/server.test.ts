@@ -179,7 +179,7 @@ async function authenticateTerminalSession(params: {
       cols: 80,
       rows: 24,
       backfillLines: 0,
-      ...(params.authPayloadExtras ?? {}),
+      ...params.authPayloadExtras,
     }),
   );
 
@@ -230,13 +230,10 @@ function decodeTerminalDescriptorFromResult(result: ClawlineOutboundSendResult) 
 }
 
 function createMessageQueue(ws: WebSocket) {
-  // oxlint-disable-next-line typescript/no-explicit-any
   const queued: any[] = [];
-  // oxlint-disable-next-line typescript/no-explicit-any
   const waiters: Array<(value: any) => void> = [];
 
   const onMessage = (data: WebSocket.RawData) => {
-    // oxlint-disable-next-line typescript/no-explicit-any
     let parsed: any;
     try {
       parsed = JSON.parse(decodeRawData(data));
@@ -343,10 +340,6 @@ async function setupTestServer(
     seedLegacyDatabase?: (dbPath: string) => Promise<void>;
     replyResolver?: typeof getReplyFromConfig;
     logger?: Logger;
-    terminalTmux?: {
-      mode?: "local" | "ssh";
-      sshTarget?: string;
-    };
   } = {},
 ): Promise<TestServerContext> {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "clawline-server-test-"));
@@ -410,18 +403,6 @@ async function setupTestServer(
       alertInstructionsPath,
       webRootPath,
       webRoot: { followSymlinks: options.webRootFollowSymlinks === true },
-      ...(options.terminalTmux
-        ? {
-            terminal: {
-              tmux: {
-                mode: options.terminalTmux.mode ?? "local",
-                ssh: {
-                  target: options.terminalTmux.sshTarget ?? "",
-                },
-              },
-            },
-          }
-        : {}),
     },
     openClawConfig: testOpenClawConfig,
     replyResolver: options.replyResolver ?? testReplyResolver,
@@ -501,7 +482,6 @@ function waitForOpen(ws: WebSocket): Promise<void> {
   });
 }
 
-// oxlint-disable-next-line typescript/no-explicit-any
 function waitForMessage(ws: WebSocket): Promise<any> {
   return new Promise((resolve, reject) => {
     let resolved = false;
@@ -1473,12 +1453,7 @@ describe.sequential("clawline provider server", () => {
       isAdmin: true,
       tokenDelivered: true,
     });
-    const ctx = await setupTestServer([entry], {
-      terminalTmux: {
-        mode: "ssh",
-        sshTarget: "nonexistent-host.invalid",
-      },
-    });
+    const ctx = await setupTestServer([entry]);
     try {
       const descriptor = {
         terminalSessionId: `term_${randomUUID()}`,
@@ -1517,12 +1492,7 @@ describe.sequential("clawline provider server", () => {
       isAdmin: true,
       tokenDelivered: true,
     });
-    const ctx = await setupTestServer([entry], {
-      terminalTmux: {
-        mode: "ssh",
-        sshTarget: "nonexistent-host.invalid",
-      },
-    });
+    const ctx = await setupTestServer([entry]);
     try {
       const descriptor = {
         terminalSessionId: `term_${randomUUID()}`,
@@ -1699,7 +1669,6 @@ describe.sequential("clawline provider server", () => {
         userPair.token as string,
       );
 
-      // oxlint-disable-next-line typescript/no-explicit-any
       const received: any[] = [];
       const listener = (data: WebSocket.RawData) => {
         received.push(JSON.parse(decodeRawData(data)));
@@ -1780,7 +1749,6 @@ describe.sequential("clawline provider server", () => {
         userPair.token as string,
       );
 
-      // oxlint-disable-next-line typescript/no-explicit-any
       const received: any[] = [];
       const listener = (data: WebSocket.RawData) => {
         received.push(JSON.parse(decodeRawData(data)));
@@ -4850,16 +4818,20 @@ describe.sequential("clawline provider server", () => {
       isAdmin: false,
       tokenDelivered: true,
     });
-    const ctx = await setupTestServer([entry], {
-      terminalTmux: { mode: "local" },
-    });
+    const fakeSsh = await setupFakeSshProxy();
+    const ctx = await setupTestServer([entry]);
 
     // The tmux session name will equal the terminalSessionId we generate.
     const terminalSessionId = `term_t001_${randomUUID().replace(/-/g, "").slice(0, 12)}`;
 
     try {
       // Register the terminal session by sending a message with a terminal descriptor.
-      const descriptor = { terminalSessionId, title: "T001 test session", version: 1 };
+      const descriptor = {
+        terminalSessionId,
+        title: "T001 test session",
+        version: 2,
+        destination: { address: "mike@eezo" },
+      };
       const base64 = Buffer.from(JSON.stringify(descriptor), "utf8").toString("base64");
       await ctx.server.sendMessage({
         target: entry.userId,
@@ -4941,6 +4913,7 @@ describe.sequential("clawline provider server", () => {
         // session may not exist if test failed before creation — that's fine
       }
       await ctx.cleanup();
+      await fakeSsh.cleanup();
     }
   }, 30_000); // 30-second timeout for tmux startup
 
@@ -4956,9 +4929,7 @@ describe.sequential("clawline provider server", () => {
       isAdmin: false,
       tokenDelivered: true,
     });
-    const ctx = await setupTestServer([entry], {
-      terminalTmux: { mode: "ssh", sshTarget: "global.invalid" },
-    });
+    const ctx = await setupTestServer([entry]);
     const terminalSessionIds = [
       `term_route_a_${randomUUID().replace(/-/g, "").slice(0, 10)}`,
       `term_route_b_${randomUUID().replace(/-/g, "").slice(0, 10)}`,
@@ -4999,7 +4970,7 @@ describe.sequential("clawline provider server", () => {
         port: ctx.port,
         allowlistPath: ctx.allowlistPath,
         entry,
-        terminalSessionId: terminalSessionIds[0]!,
+        terminalSessionId: terminalSessionIds[0],
       });
       expect((reattach.response as { type: string }).type).toBe("terminal_ready");
       reattach.ws.terminate();
@@ -5008,7 +4979,6 @@ describe.sequential("clawline provider server", () => {
       expect(targets).toContain("mike@eezo");
       expect(targets).toContain("mike@tars");
       expect(targets.at(-1)).toBe("mike@eezo");
-      expect(targets).not.toContain("global.invalid");
     } finally {
       for (const terminalSessionId of terminalSessionIds) {
         await killLocalTmuxSession(terminalSessionId);
@@ -5030,9 +5000,7 @@ describe.sequential("clawline provider server", () => {
       isAdmin: false,
       tokenDelivered: true,
     });
-    const ctx = await setupTestServer([entry], {
-      terminalTmux: { mode: "ssh", sshTarget: "global.invalid" },
-    });
+    const ctx = await setupTestServer([entry]);
     const outboundResults: ClawlineOutboundSendResult[] = [];
     let restartedServer: ProviderServer | null = null;
 
@@ -5100,7 +5068,7 @@ describe.sequential("clawline provider server", () => {
         port: ctx.port,
         allowlistPath: ctx.allowlistPath,
         entry,
-        terminalSessionId: descriptors[0]!.terminalSessionId,
+        terminalSessionId: descriptors[0].terminalSessionId,
       });
       expect((reattach.response as { type: string }).type).toBe("terminal_ready");
       reattach.ws.terminate();
@@ -5118,14 +5086,6 @@ describe.sequential("clawline provider server", () => {
           },
           alertInstructionsPath: ctx.alertInstructionsPath,
           webRootPath: ctx.webRootPath,
-          terminal: {
-            tmux: {
-              mode: "ssh",
-              ssh: {
-                target: "global.invalid",
-              },
-            },
-          },
         },
         openClawConfig: testOpenClawConfig,
         replyResolver: testReplyResolver,
@@ -5138,7 +5098,7 @@ describe.sequential("clawline provider server", () => {
         port: restartedServer.getPort(),
         allowlistPath: ctx.allowlistPath,
         entry,
-        terminalSessionId: descriptors[0]!.terminalSessionId,
+        terminalSessionId: descriptors[0].terminalSessionId,
       });
       expect((restartedAuth.response as { type: string }).type).toBe("terminal_ready");
       restartedAuth.ws.terminate();
@@ -5147,7 +5107,6 @@ describe.sequential("clawline provider server", () => {
       expect(targets).toContain("mike@eezo");
       expect(targets).toContain("mike@tars");
       expect(targets.at(-1)).toBe("mike@eezo");
-      expect(targets).not.toContain("global.invalid");
     } finally {
       setClawlineOutboundSender(null);
       for (const result of outboundResults) {
@@ -5177,9 +5136,7 @@ describe.sequential("clawline provider server", () => {
       isAdmin: false,
       tokenDelivered: true,
     });
-    const ctx = await setupTestServer([entry], {
-      terminalTmux: { mode: "ssh", sshTarget: "global.invalid" },
-    });
+    const ctx = await setupTestServer([entry]);
     const terminalSessionId = `term_auth_hint_${randomUUID().replace(/-/g, "").slice(0, 10)}`;
 
     try {
@@ -5216,7 +5173,6 @@ describe.sequential("clawline provider server", () => {
       const targets = await readFakeSshTargets(fakeSsh.logPath);
       expect(targets).toContain("mike@eezo");
       expect(targets).not.toContain("mike@tars");
-      expect(targets).not.toContain("global.invalid");
     } finally {
       await killLocalTmuxSession(terminalSessionId);
       await ctx.cleanup();
@@ -5224,9 +5180,9 @@ describe.sequential("clawline provider server", () => {
     }
   }, 30_000);
 
-  it("keeps version 1 terminal sessions on the configured global ssh target as compatibility fallback", async () => {
+  it("rejects version 1 terminal sessions without falling back to a global ssh target", async () => {
     if (!(await ensureTmuxAvailable())) {
-      console.warn("Skipping terminal routing fallback test: tmux not found");
+      console.warn("Skipping terminal routing no-fallback test: tmux not found");
       return;
     }
 
@@ -5236,9 +5192,7 @@ describe.sequential("clawline provider server", () => {
       isAdmin: false,
       tokenDelivered: true,
     });
-    const ctx = await setupTestServer([entry], {
-      terminalTmux: { mode: "ssh", sshTarget: "global.invalid" },
-    });
+    const ctx = await setupTestServer([entry]);
     const terminalSessionId = `term_v1_${randomUUID().replace(/-/g, "").slice(0, 10)}`;
 
     try {
@@ -5265,11 +5219,14 @@ describe.sequential("clawline provider server", () => {
         entry,
         terminalSessionId,
       });
-      expect((response as { type: string }).type).toBe("terminal_ready");
+      expect((response as { type: string }).type).toBe("terminal_error");
+      expect((response as { message?: string }).message).toBe(
+        "Terminal session missing destination",
+      );
       ws.terminate();
 
       const targets = await readFakeSshTargets(fakeSsh.logPath);
-      expect(targets).toContain("global.invalid");
+      expect(targets).toEqual([]);
     } finally {
       await killLocalTmuxSession(terminalSessionId);
       await ctx.cleanup();
@@ -5289,9 +5246,7 @@ describe.sequential("clawline provider server", () => {
       isAdmin: false,
       tokenDelivered: true,
     });
-    const ctx = await setupTestServer([entry], {
-      terminalTmux: { mode: "ssh", sshTarget: "global.invalid" },
-    });
+    const ctx = await setupTestServer([entry]);
     const terminalSessionId = `term_fail_${randomUUID().replace(/-/g, "").slice(0, 10)}`;
 
     try {
@@ -5326,7 +5281,6 @@ describe.sequential("clawline provider server", () => {
 
       const targets = await readFakeSshTargets(fakeSsh.logPath);
       expect(targets).toContain("missing-host.invalid");
-      expect(targets).not.toContain("global.invalid");
     } finally {
       await killLocalTmuxSession(terminalSessionId);
       await ctx.cleanup();
@@ -5346,9 +5300,7 @@ describe.sequential("clawline provider server", () => {
       isAdmin: false,
       tokenDelivered: true,
     });
-    const ctx = await setupTestServer([entry], {
-      terminalTmux: { mode: "ssh", sshTarget: "global.invalid" },
-    });
+    const ctx = await setupTestServer([entry]);
     const terminalSessionId = `term_restart_${randomUUID().replace(/-/g, "").slice(0, 10)}`;
     let restartedServer: ProviderServer | null = null;
 
@@ -5385,14 +5337,6 @@ describe.sequential("clawline provider server", () => {
           },
           alertInstructionsPath: ctx.alertInstructionsPath,
           webRootPath: ctx.webRootPath,
-          terminal: {
-            tmux: {
-              mode: "ssh",
-              ssh: {
-                target: "global.invalid",
-              },
-            },
-          },
         },
         openClawConfig: testOpenClawConfig,
         replyResolver: testReplyResolver,
@@ -5412,7 +5356,6 @@ describe.sequential("clawline provider server", () => {
 
       const targets = await readFakeSshTargets(fakeSsh.logPath);
       expect(targets).toContain("mike@eezo");
-      expect(targets).not.toContain("global.invalid");
     } finally {
       await killLocalTmuxSession(terminalSessionId);
       if (restartedServer) {

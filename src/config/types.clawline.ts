@@ -11,19 +11,6 @@ export type ClawlineConfig = {
   port?: number;
   statePath?: string;
   alertInstructionsPath?: string | null;
-  terminal?: {
-    tmux?: {
-      mode?: "local" | "ssh";
-      ssh?: {
-        target?: string;
-        identityFile?: string | null;
-        port?: number | null;
-        knownHostsFile?: string | null;
-        strictHostKeyChecking?: "yes" | "no" | "accept-new" | null;
-        extraArgs?: string[];
-      };
-    };
-  };
   network?: {
     bindAddress?: string;
     allowInsecurePublic?: boolean;

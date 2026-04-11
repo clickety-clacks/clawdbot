@@ -42,25 +42,24 @@ describe("ClawlineConfigSchema", () => {
     expect(parsed.server?.cluSecret).toBeNull();
   });
 
-  it("accepts terminal tmux config for current runtime compatibility", () => {
-    const parsed = ClawlineConfigSchema.parse({
-      terminal: {
-        tmux: {
-          mode: "ssh",
-          ssh: {
-            target: "mike@eezo",
-            identityFile: "/Users/mike/.ssh/id_ed25519_clu",
-            port: 22,
-            knownHostsFile: "/Users/mike/.ssh/known_hosts",
-            strictHostKeyChecking: "accept-new",
-            extraArgs: ["-o", "IdentitiesOnly=yes"],
+  it("rejects provider-global terminal routing config", () => {
+    expect(() =>
+      ClawlineConfigSchema.parse({
+        terminal: {
+          tmux: {
+            mode: "ssh",
+            ssh: {
+              target: "mike@eezo",
+              identityFile: "/Users/mike/.ssh/id_ed25519_clu",
+              port: 22,
+              knownHostsFile: "/Users/mike/.ssh/known_hosts",
+              strictHostKeyChecking: "accept-new",
+              extraArgs: ["-o", "IdentitiesOnly=yes"],
+            },
           },
         },
-      },
-    });
-
-    expect(parsed.terminal?.tmux?.mode).toBe("ssh");
-    expect(parsed.terminal?.tmux?.ssh?.target).toBe("mike@eezo");
+      }),
+    ).toThrow();
   });
 
   it("rejects unknown keys inside server block", () => {

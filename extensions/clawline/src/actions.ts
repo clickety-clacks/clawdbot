@@ -12,7 +12,6 @@ import type {
 import type { OpenClawConfig } from "openclaw/plugin-sdk/core";
 import { sendClawlineOutboundMessage } from "./runtime/outbound.js";
 
-const DEFAULT_CLAWLINE_PORT = 18800;
 const TERMINAL_SESSION_MIME = "application/vnd.clawline.terminal-session+json";
 const TERMINAL_BUBBLE_CAPABILITIES = {
   interactive: true,
@@ -254,20 +253,25 @@ function summarizeOutboundResult(result: Awaited<ReturnType<typeof sendClawlineO
   // Never echo base64 attachment payloads back to the agent/tool output. They can be large and
   // can cause tool delivery to stall.
   const attachments = Array.isArray(result.attachments)
-    ? result.attachments.map((a: any) => {
+    ? result.attachments.map((a: unknown) => {
         if (!a || typeof a !== "object") {
           return { type: "unknown" };
         }
-        if (a.type === "asset") {
-          return { type: "asset", assetId: a.assetId };
+        const attachment = a as { type?: unknown; assetId?: unknown; mimeType?: unknown };
+        if (attachment.type === "asset") {
+          return { type: "asset", assetId: attachment.assetId };
         }
-        if (a.type === "image") {
-          return { type: "image", mimeType: a.mimeType, assetId: a.assetId };
+        if (attachment.type === "image") {
+          return { type: "image", mimeType: attachment.mimeType, assetId: attachment.assetId };
         }
-        if (a.type === "document") {
-          return { type: "document", mimeType: a.mimeType };
+        if (attachment.type === "document") {
+          return { type: "document", mimeType: attachment.mimeType };
         }
-        return { type: String(a.type ?? "unknown") };
+        const type =
+          typeof attachment.type === "string" || typeof attachment.type === "number"
+            ? String(attachment.type)
+            : "unknown";
+        return { type };
       })
     : undefined;
 

@@ -63,19 +63,6 @@ const DEFAULTS: ResolvedClawlineConfig = {
   port: 18800,
   statePath: defaultStatePath,
   alertInstructionsPath: defaultAlertInstructionsPath,
-  terminal: {
-    tmux: {
-      mode: "local",
-      ssh: {
-        target: "",
-        identityFile: null,
-        port: null,
-        knownHostsFile: null,
-        strictHostKeyChecking: "accept-new",
-        extraArgs: [],
-      },
-    },
-  },
   network: {
     bindAddress: "127.0.0.1",
     allowInsecurePublic: false,

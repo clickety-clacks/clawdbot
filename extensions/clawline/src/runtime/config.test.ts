@@ -16,8 +16,6 @@ describe("resolveClawlineConfig", () => {
     expect(cfg.alertInstructionsPath).toBe(
       path.join(home, ".openclaw", "clawline", "alert-instructions.md"),
     );
-    expect(cfg.terminal.tmux.mode).toBe("local");
-    expect(cfg.terminal.tmux.ssh.target).toBe("");
     expect(cfg.network.bindAddress).toBe("127.0.0.1");
     expect(cfg.network.allowInsecurePublic).toBe(false);
     expect(cfg.server.cluSecret).toBeNull();

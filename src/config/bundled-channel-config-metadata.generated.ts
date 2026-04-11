@@ -582,6 +582,280 @@ export const GENERATED_BUNDLED_CHANNEL_CONFIG_METADATA = [
     },
   },
   {
+    pluginId: "clawline",
+    channelId: "clawline",
+    label: "Clawline",
+    description: "first-party local gateway; enable via config/onboarding.",
+    schema: {
+      $schema: "http://json-schema.org/draft-07/schema#",
+      type: "object",
+      properties: {
+        enabled: {
+          type: "boolean",
+        },
+        port: {
+          type: "integer",
+          minimum: 1,
+          maximum: 65535,
+        },
+        statePath: {
+          type: "string",
+        },
+        alertInstructionsPath: {
+          anyOf: [
+            {
+              type: "string",
+            },
+            {
+              type: "null",
+            },
+          ],
+        },
+        webRootPath: {
+          type: "string",
+        },
+        webRoot: {
+          type: "object",
+          properties: {
+            followSymlinks: {
+              type: "boolean",
+            },
+          },
+          additionalProperties: false,
+        },
+        network: {
+          type: "object",
+          properties: {
+            bindAddress: {
+              type: "string",
+            },
+            allowInsecurePublic: {
+              type: "boolean",
+            },
+            allowedOrigins: {
+              type: "array",
+              items: {
+                type: "string",
+              },
+            },
+          },
+          additionalProperties: false,
+        },
+        adapter: {
+          type: "object",
+          properties: {
+            provider: {
+              type: "string",
+            },
+            model: {
+              type: "string",
+            },
+            timeoutSeconds: {
+              type: "integer",
+              exclusiveMinimum: 0,
+              maximum: 9007199254740991,
+            },
+            responseFallback: {
+              type: "string",
+            },
+            systemPrompt: {
+              type: "string",
+            },
+          },
+          additionalProperties: false,
+        },
+        server: {
+          type: "object",
+          properties: {
+            cluSecret: {
+              anyOf: [
+                {
+                  type: "string",
+                  minLength: 1,
+                },
+                {
+                  type: "null",
+                },
+              ],
+            },
+          },
+          additionalProperties: false,
+        },
+        auth: {
+          type: "object",
+          properties: {
+            jwtSigningKey: {
+              anyOf: [
+                {
+                  type: "string",
+                },
+                {
+                  type: "null",
+                },
+              ],
+            },
+            tokenTtlSeconds: {
+              anyOf: [
+                {
+                  type: "integer",
+                  exclusiveMinimum: 0,
+                  maximum: 9007199254740991,
+                },
+                {
+                  type: "null",
+                },
+              ],
+            },
+            maxAttemptsPerMinute: {
+              type: "integer",
+              exclusiveMinimum: 0,
+              maximum: 9007199254740991,
+            },
+            reissueGraceSeconds: {
+              type: "integer",
+              minimum: 0,
+              maximum: 9007199254740991,
+            },
+          },
+          additionalProperties: false,
+        },
+        pairing: {
+          type: "object",
+          properties: {
+            maxPendingRequests: {
+              type: "integer",
+              exclusiveMinimum: 0,
+              maximum: 9007199254740991,
+            },
+            maxRequestsPerMinute: {
+              type: "integer",
+              exclusiveMinimum: 0,
+              maximum: 9007199254740991,
+            },
+            pendingTtlSeconds: {
+              type: "integer",
+              exclusiveMinimum: 0,
+              maximum: 9007199254740991,
+            },
+            pendingSocketTimeoutSeconds: {
+              type: "integer",
+              exclusiveMinimum: 0,
+              maximum: 9007199254740991,
+            },
+          },
+          additionalProperties: false,
+        },
+        media: {
+          type: "object",
+          properties: {
+            storagePath: {
+              type: "string",
+            },
+            maxInlineBytes: {
+              type: "integer",
+              exclusiveMinimum: 0,
+              maximum: 9007199254740991,
+            },
+            maxUploadBytes: {
+              type: "integer",
+              exclusiveMinimum: 0,
+              maximum: 9007199254740991,
+            },
+            unreferencedUploadTtlSeconds: {
+              type: "integer",
+              minimum: 0,
+              maximum: 9007199254740991,
+            },
+          },
+          additionalProperties: false,
+        },
+        sessions: {
+          type: "object",
+          properties: {
+            maxMessageBytes: {
+              type: "integer",
+              exclusiveMinimum: 0,
+              maximum: 9007199254740991,
+            },
+            maxReplayMessages: {
+              type: "integer",
+              exclusiveMinimum: 0,
+              maximum: 9007199254740991,
+            },
+            maxPromptMessages: {
+              type: "integer",
+              exclusiveMinimum: 0,
+              maximum: 9007199254740991,
+            },
+            maxMessagesPerSecond: {
+              type: "integer",
+              exclusiveMinimum: 0,
+              maximum: 9007199254740991,
+            },
+            maxTypingPerSecond: {
+              type: "integer",
+              exclusiveMinimum: 0,
+              maximum: 9007199254740991,
+            },
+            typingAutoExpireSeconds: {
+              type: "integer",
+              exclusiveMinimum: 0,
+              maximum: 9007199254740991,
+            },
+            maxQueuedMessages: {
+              type: "integer",
+              exclusiveMinimum: 0,
+              maximum: 9007199254740991,
+            },
+            maxWriteQueueDepth: {
+              type: "integer",
+              exclusiveMinimum: 0,
+              maximum: 9007199254740991,
+            },
+            adapterExecuteTimeoutSeconds: {
+              type: "integer",
+              exclusiveMinimum: 0,
+              maximum: 9007199254740991,
+            },
+            streamInactivitySeconds: {
+              type: "integer",
+              exclusiveMinimum: 0,
+              maximum: 9007199254740991,
+            },
+          },
+          additionalProperties: false,
+        },
+        streams: {
+          type: "object",
+          properties: {
+            chunkPersistIntervalMs: {
+              type: "integer",
+              exclusiveMinimum: 0,
+              maximum: 9007199254740991,
+            },
+            chunkBufferBytes: {
+              type: "integer",
+              exclusiveMinimum: 0,
+              maximum: 9007199254740991,
+            },
+            maxStreamsPerUser: {
+              type: "integer",
+              exclusiveMinimum: 0,
+              maximum: 9007199254740991,
+            },
+            maxDisplayNameBytes: {
+              type: "integer",
+              exclusiveMinimum: 0,
+              maximum: 9007199254740991,
+            },
+          },
+          additionalProperties: false,
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
     pluginId: "discord",
     channelId: "discord",
     label: "Discord",
