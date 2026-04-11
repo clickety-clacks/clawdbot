@@ -10,7 +10,7 @@ export default defineBundledChannelEntry({
   description: "Clawline channel plugin",
   importMetaUrl: import.meta.url,
   plugin: {
-    specifier: "./src/channel.js",
+    specifier: "./channel-plugin-api.js",
     exportName: "clawlinePlugin",
   },
   registerFull(api) {
