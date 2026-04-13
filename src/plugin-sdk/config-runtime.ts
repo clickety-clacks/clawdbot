@@ -108,7 +108,7 @@ export { resolveSessionKey } from "../config/sessions/session-key.js";
 export { resolveStorePath } from "../config/sessions/paths.js";
 export type { SessionResetMode } from "../config/sessions/reset.js";
 export type { SessionScope } from "../config/sessions/types.js";
-export { resolveAllAgentSessionStoreTargetsSync } from "../config/sessions/targets.js";
+export { resolveAllAgentSessionStoreTargetsSync } from "../config/sessions.js";
 export { resolveGroupSessionKey } from "../config/sessions/group.js";
 export { canonicalizeMainSessionAlias } from "../config/sessions/main-session.js";
 export {

@@ -38,9 +38,13 @@ This lane started from upstream tag `v2026.4.11` (`769908ec3f713ecde067eb8c8aa54
   - `resolveAllAgentSessionStoreTargetsSync`
   - `loadGatewayTlsRuntime`
   - `dispatchReplyFromConfig`
-- **Why load-bearing:** Clawline still uses these helpers in `extensions/clawline/src/runtime/server.ts` for alert wakeups, merged session discovery, TLS startup parity, and reply dispatch
+- **Why load-bearing:**
+  - `enqueueAnnounce`: Clawline alert wakeups must use the shared announce queue, and extension-only code cannot join that queue without a public enqueue seam.
+  - `resolveAllAgentSessionStoreTargetsSync`: Clawline trackable-session views must merge validated session stores across agent roots, and extension-only code would otherwise duplicate core discovery policy.
+  - `loadGatewayTlsRuntime`: Clawline must mirror gateway TLS startup behavior exactly, and extension-only code would otherwise duplicate certificate generation and fingerprint handling.
+  - `dispatchReplyFromConfig`: Clawline needs `replyResolver` injection on the current reply dispatch primitive, and the nearby public wrapper does not expose that hook without behavior changes.
 - **Verification:** `pnpm build` (including `check-plugin-sdk-exports`), `pnpm check`, `pnpm test extensions/clawline/src/runtime/service.test.ts extensions/clawline/src/runtime/session-store.test.ts extensions/clawline/src/runtime/server.test.ts -t "handles alert endpoint by waking gateway|forwards alert attachments through the wake queue to the gateway|startClawlineService|recordClawlineSessionActivity"`
-- **Follow-up / blocker:** unresolved doctrine blocker. Row A1 in the merge doctrine requires the lane to adapt to an existing documented public seam or stop and escalate; these four exports do not have a pre-existing upstream public replacement on `v2026.4.11`, so the blocker became smaller and sharper rather than disappearing.
+- **Follow-up / blocker:** none. Flynn approved this four-helper seam as the final intended minimal core carry-forward for `v2026.4.11`.
 
 ## 5. Alert attachment handling without widening a core queue contract
 
