@@ -12,8 +12,15 @@ vi.mock("../runtime-api.js", async () => {
   return {
     ...actual,
     resolveStorePath: resolveStorePathMock,
-    resolveMainSessionKey: resolveMainSessionKeyMock,
     resolveAgentIdFromSessionKey: resolveAgentIdFromSessionKeyMock,
+  };
+});
+
+vi.mock("./session-compat.js", async () => {
+  const actual = await vi.importActual("./session-compat.js");
+  return {
+    ...actual,
+    resolveClawlineMainSessionKey: resolveMainSessionKeyMock,
   };
 });
 

@@ -12,28 +12,22 @@ import { promisify } from "node:util";
 import type { Database as SqliteDatabase, Statement as SqliteStatement } from "better-sqlite3";
 import BetterSqlite3 from "better-sqlite3";
 import jwt from "jsonwebtoken";
+import { loadGatewayTlsRuntime } from "openclaw/plugin-sdk/gateway-runtime";
 import { type Dispatcher } from "undici";
 import WebSocket, { WebSocketServer } from "ws";
 import {
-  ADMIN_SCOPE,
   DEFAULT_ACCOUNT_ID,
-  DEFAULT_AGENT_WORKSPACE_DIR,
-  callGateway,
   closeDispatcher,
   createPinnedDispatcher,
   createReplyDispatcherWithTyping,
   detectMime,
   dispatchReplyFromConfig,
   enqueueAnnounce,
-  extractShortModelName,
   finalizeInboundContext,
-  getFollowupQueueDepth,
   hasAlphaChannel,
   isLoopbackHost,
   isPrivateOrLoopbackHost,
-  isCronRunSessionKey,
   loadSessionStore,
-  loadGatewayTlsRuntime,
   maxBytesForKind,
   mediaKindFromMime,
   optimizeImageToJpeg,
@@ -46,15 +40,10 @@ import {
   resolveAllAgentSessionStoreTargetsSync,
   resolveEffectiveMessagesConfig,
   resolveHumanDelayConfig,
-  resolveQueueSettings,
-  resolveSessionTranscriptPath,
   resolveSessionStoreEntry,
   resolvePinnedHostname,
-  type AnnounceQueueItem,
   type PinnedHostname,
   type ReplyPayload,
-  type ResponsePrefixContext,
-  type SessionEntry,
 } from "../runtime-api.js";
 import { clawlineAttachmentsToImages } from "./attachments.js";
 import type { ClawlineAdapterOverrides } from "./config.js";
@@ -83,10 +72,23 @@ import type {
   StreamTailStateServerMessage,
 } from "./domain.js";
 import { ClientMessageError, HttpError } from "./errors.js";
+import { callClawlineGatewayAgent } from "./gateway-alert-runtime.js";
 import { createAssetHandlers } from "./http-assets.js";
 import { createPerUserTaskQueue } from "./per-user-task-queue.js";
 import { SlidingWindowRateLimiter } from "./rate-limiter.js";
+import {
+  type ClawlineResponsePrefixContext,
+  extractClawlineShortModelName,
+  getClawlineFollowupQueueDepth,
+  resolveClawlineQueueSettings,
+} from "./reply-compat.js";
 import { ClawlineDeliveryTarget } from "./routing.js";
+import {
+  CLAWLINE_DEFAULT_AGENT_WORKSPACE_DIR,
+  isClawlineCronRunSessionKey,
+  resolveClawlineSessionTranscriptPath,
+  type ClawlineSessionEntry,
+} from "./session-compat.js";
 import { resolveSubscribedSessionKeys } from "./session-keys.js";
 import { recordClawlineSessionActivity } from "./session-store.js";
 import { peekSystemEvents } from "./system-events.js";
@@ -95,6 +97,7 @@ import { deepMerge } from "./utils/deep-merge.js";
 export const PROTOCOL_VERSION = 1;
 
 const execFile = promisify(execFileCb);
+type SessionEntry = ClawlineSessionEntry;
 
 type TerminalTmuxBackend = {
   execTmux(
@@ -265,8 +268,19 @@ const STREAM_OPERATION_DELETE = "delete_stream";
 const MAX_STREAMS_BODY_BYTES = 16 * 1024;
 const STREAM_SESSION_KEY_PATH_DECODE_PASSES = 4;
 
-type ClawlineAnnounceQueueItem = AnnounceQueueItem & {
+type ClawlineAnnounceQueueItem = {
+  announceId?: string;
   attachments?: unknown[];
+  prompt: string;
+  summaryLine?: string;
+  enqueuedAt: number;
+  sessionKey: string;
+  origin?: {
+    channel?: string;
+    to?: string;
+    accountId?: string;
+    threadId?: string | number;
+  };
 };
 
 function truncateUtf8(value: string, maxBytes: number): string {
@@ -1133,7 +1147,7 @@ const DEFAULT_CONFIG: ProviderConfig = {
     maxUploadBytes: 104_857_600,
     unreferencedUploadTtlSeconds: 3600,
   },
-  webRootPath: path.join(DEFAULT_AGENT_WORKSPACE_DIR, "www"),
+  webRootPath: path.join(CLAWLINE_DEFAULT_AGENT_WORKSPACE_DIR, "www"),
   webRoot: {
     followSymlinks: false,
   },
@@ -4120,10 +4134,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
       logger.info?.(`[clawline] alert_wake_start sessionKey=${resolvedSessionKey}`);
 
-      const queueSettings = resolveQueueSettings({ cfg: openClawCfg });
+      const queueSettings = resolveClawlineQueueSettings({ cfg: openClawCfg });
       const alertRunId = randomUUID();
-      const sendQueuedAlert = async (item: AnnounceQueueItem) => {
-        const queuedItem = item as ClawlineAnnounceQueueItem;
+      const sendQueuedAlert = async (item: ClawlineAnnounceQueueItem) => {
         const correlatedRunId = item.announceId?.trim() || alertRunId;
         const phaseBase = {
           sessionKey: item.sessionKey,
@@ -4135,13 +4148,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         logAlertRunPhase("wake-dispatched", phaseBase);
         logAlertRunPhase("agent-run-start", phaseBase);
         try {
-          const result = await callGateway({
+          const result = await callClawlineGatewayAgent({
             token: gatewayToken,
-            // Alert queue delivery is a system-owned action and must preserve owner-capable
-            // ingress behavior to avoid auth/tool gating differences from origin/main.
-            scopes: [ADMIN_SCOPE],
-            method: "agent",
-            params: {
+            request: {
               sessionKey: item.sessionKey,
               message: item.prompt,
               channel: origin?.channel,
@@ -4149,10 +4158,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               to: origin?.to,
               threadId,
               deliver: true,
-              attachments: queuedItem.attachments,
+              attachments: item.attachments,
               idempotencyKey: correlatedRunId,
             },
-            expectFinal: true,
             timeoutMs: 300_000,
           });
           const payloadCount = countAlertReplyPayloads(result);
@@ -5022,7 +5030,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
   function buildTrackableSessionDuplicateMarker(entry: TrackableSessionApiEntry): string {
     const sessionKey = entry.sessionKey.trim();
-    if (isCronRunSessionKey(sessionKey)) {
+    if (isClawlineCronRunSessionKey(sessionKey)) {
       const runId = sessionKey.split(":").at(-1)?.trim() ?? "";
       if (runId) {
         return runId.slice(0, 8);
@@ -6186,7 +6194,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       storePath: sessionStorePath,
       sessionKey: session.sessionKey,
       sessionId: session.sessionId,
-      sessionFile: resolveSessionTranscriptPath(session.sessionId, mainSessionAgentId),
+      sessionFile: resolveClawlineSessionTranscriptPath(session.sessionId, mainSessionAgentId),
       displayName: session.claimedName ?? session.deviceInfo?.model ?? null,
       logger,
     });
@@ -6541,7 +6549,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           });
 
           const fallbackText = adapterOverrides.responseFallback?.trim() ?? "";
-          const prefixContext: ResponsePrefixContext = {
+          const prefixContext: ClawlineResponsePrefixContext = {
             identityName: resolveIdentityName(route.agentId),
           };
 
@@ -6676,7 +6684,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
                   images: inboundImages.length > 0 ? inboundImages : undefined,
                   onModelSelected: (ctx) => {
                     prefixContext.provider = ctx.provider;
-                    prefixContext.model = extractShortModelName(ctx.model);
+                    prefixContext.model = extractClawlineShortModelName(ctx.model);
                     prefixContext.modelFull = `${ctx.provider}/${ctx.model}`;
                     prefixContext.thinkingLevel = ctx.thinkLevel ?? "off";
                   },
@@ -6727,7 +6735,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             // 2. deliveredCount > 0 means content was streamed (blocks/tools)
             // 3. queueDepth > 0 means message was queued for later processing
             const queueKey = route.sessionKey;
-            const queueDepth = getFollowupQueueDepth(queueKey);
+            const queueDepth = getClawlineFollowupQueueDepth(queueKey);
             const wasDelivered = queuedFinal || deliveredCount > 0;
             const wasQueued = !wasDelivered && queueDepth > 0;
 
@@ -7007,7 +7015,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           });
 
           const fallbackText = adapterOverrides.responseFallback?.trim() ?? "";
-          const prefixContext: ResponsePrefixContext = {
+          const prefixContext: ClawlineResponsePrefixContext = {
             identityName: resolveIdentityName(route.agentId),
           };
 
@@ -7146,7 +7154,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
                   images: inboundImages.length > 0 ? inboundImages : undefined,
                   onModelSelected: (ctx) => {
                     prefixContext.provider = ctx.provider;
-                    prefixContext.model = extractShortModelName(ctx.model);
+                    prefixContext.model = extractClawlineShortModelName(ctx.model);
                     prefixContext.modelFull = `${ctx.provider}/${ctx.model}`;
                     prefixContext.thinkingLevel = ctx.thinkLevel ?? "off";
                   },
@@ -7199,7 +7207,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             }
 
             const queueKey = route.sessionKey;
-            const queueDepth = getFollowupQueueDepth(queueKey);
+            const queueDepth = getClawlineFollowupQueueDepth(queueKey);
             const wasDelivered = queuedFinal || deliveredCount > 0;
             const wasQueued = !wasDelivered && queueDepth > 0;
 

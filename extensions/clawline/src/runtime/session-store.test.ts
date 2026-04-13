@@ -2,7 +2,8 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { loadSessionStore, resolveSessionTranscriptPath } from "../../../../src/config/sessions.js";
+import { loadSessionStore } from "../runtime-api.js";
+import { resolveClawlineSessionTranscriptPath } from "./session-compat.js";
 import { recordClawlineSessionActivity } from "./session-store.js";
 
 describe("recordClawlineSessionActivity", () => {
@@ -26,7 +27,7 @@ describe("recordClawlineSessionActivity", () => {
     expect(entry.chatType).toBe("direct");
     expect(entry.displayName).toBe("Alice");
     expect(entry.label).toBe("Alice");
-    expect(entry.sessionFile).toBe(resolveSessionTranscriptPath("session_1", "main"));
+    expect(entry.sessionFile).toBe(resolveClawlineSessionTranscriptPath("session_1", "main"));
     expect(entry.sessionId).toBe("session_1");
     expect(entry.lastChannel).toBe("clawline");
     const firstUpdatedAt = entry.updatedAt;
@@ -49,7 +50,7 @@ describe("recordClawlineSessionActivity", () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "clawline-session-stable-binding-"));
     const storePath = path.join(dir, "sessions.json");
     const sessionKey = "agent:main:clawline:flynn:main";
-    const initialSessionFile = resolveSessionTranscriptPath("session_first", "main");
+    const initialSessionFile = resolveClawlineSessionTranscriptPath("session_first", "main");
 
     await fs.writeFile(
       storePath,
@@ -115,7 +116,7 @@ describe("recordClawlineSessionActivity", () => {
     const store = loadSessionStore(storePath);
     const entry = store[sessionKey];
     expect(entry).toBeDefined();
-    expect(entry.sessionFile).toBe(resolveSessionTranscriptPath(sessionId, "main"));
+    expect(entry.sessionFile).toBe(resolveClawlineSessionTranscriptPath(sessionId, "main"));
   });
 
   it("does not set lastTo on connect", async () => {

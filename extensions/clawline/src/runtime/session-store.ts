@@ -1,15 +1,13 @@
 import path from "node:path";
+import { resolveAgentIdFromSessionKey, updateSessionStore } from "../runtime-api.js";
 import {
-  mergeSessionEntry,
-  resolveAgentIdFromSessionKey,
-  resolveSessionTranscriptPath,
-  resolveSessionTranscriptsDirForAgent,
-  type SessionChannelId,
-  type SessionEntry,
-  updateSessionStore,
-} from "../runtime-api.js";
+  mergeClawlineSessionEntry,
+  resolveClawlineSessionTranscriptPath,
+  resolveClawlineSessionTranscriptsDirForAgent,
+  type ClawlineSessionEntry,
+} from "./session-compat.js";
 
-export const CLAWLINE_SESSION_CHANNEL = "clawline" as SessionChannelId;
+export const CLAWLINE_SESSION_CHANNEL = "clawline" as const;
 
 type LoggerLike = { warn?: (...args: unknown[]) => void };
 
@@ -40,14 +38,14 @@ export async function recordClawlineSessionActivity(params: {
       const existing = store[sessionKey];
       const stableSessionId = existing?.sessionId ?? sessionId;
       const agentId = resolveAgentIdFromSessionKey(sessionKey);
-      const canonicalSessionsDir = resolveSessionTranscriptsDirForAgent(agentId);
-      const canonicalSessionFile = resolveSessionTranscriptPath(stableSessionId, agentId);
+      const canonicalSessionsDir = resolveClawlineSessionTranscriptsDirForAgent(agentId);
+      const canonicalSessionFile = resolveClawlineSessionTranscriptPath(stableSessionId, agentId);
       const existingSessionFile = existing?.sessionFile?.trim();
       const stableSessionFile =
         existingSessionFile && isWithinDir(existingSessionFile, canonicalSessionsDir)
           ? existingSessionFile
           : canonicalSessionFile;
-      const patch: Partial<SessionEntry> = {
+      const patch: Partial<ClawlineSessionEntry> = {
         sessionId: stableSessionId,
         channel: CLAWLINE_SESSION_CHANNEL,
         chatType: "direct",
@@ -57,7 +55,7 @@ export async function recordClawlineSessionActivity(params: {
         lastChannel: CLAWLINE_SESSION_CHANNEL,
       };
       // Don't set lastTo on connect; only update it after an actual user message.
-      store[sessionKey] = mergeSessionEntry(existing, patch);
+      store[sessionKey] = mergeClawlineSessionEntry(existing, patch);
     });
   } catch (err) {
     params.logger?.warn?.("[clawline] failed to update session store", err);

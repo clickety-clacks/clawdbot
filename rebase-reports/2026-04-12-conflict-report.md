@@ -31,12 +31,16 @@ This lane started from upstream tag `v2026.4.11` (`769908ec3f713ecde067eb8c8aa54
 
 ## 4. Minimal plugin-sdk subpath compatibility exports
 
-- **Files:** `src/plugin-sdk/agent-runtime.ts`, `src/plugin-sdk/config-runtime.ts`, `src/plugin-sdk/gateway-runtime.ts`, `src/plugin-sdk/reply-runtime.ts`, `src/plugin-sdk/routing.ts`
+- **Files:** `src/plugin-sdk/agent-runtime.ts`, `src/plugin-sdk/config-runtime.ts`, `src/plugin-sdk/gateway-runtime.ts`, `src/plugin-sdk/reply-runtime.ts`
 - **Upstream choice:** keep `src/plugin-sdk/index.ts` and the broader core surfaces upstream-default
-- **Carried-forward delta:** added only the public subpath exports that `extensions/clawline/**` still imports after review cleanup moved `rawDataToString` and the image optimizers onto existing upstream seams
-- **Why load-bearing:** Clawline still uses these helpers, and the branch will not compile without some public seam for them
-- **Verification:** `pnpm build` (including `check-plugin-sdk-exports`), `pnpm check`, `pnpm test extensions/clawline/src/entry.test.ts`
-- **Follow-up / blocker:** unresolved doctrine blocker. Row A1 in the merge doctrine requires the lane to adapt to an existing documented public seam or stop and escalate; the remaining exports do not have a pre-existing upstream public replacement on `v2026.4.11`, so this lane is no longer doctrine-clean without Flynn approval or a different upstream-approved seam plan.
+- **Carried-forward delta:** after the seam follow-up, kept only four public subpath exports that Clawline still cannot source from existing upstream seams on `v2026.4.11`:
+  - `enqueueAnnounce`
+  - `resolveAllAgentSessionStoreTargetsSync`
+  - `loadGatewayTlsRuntime`
+  - `dispatchReplyFromConfig`
+- **Why load-bearing:** Clawline still uses these helpers in `extensions/clawline/src/runtime/server.ts` for alert wakeups, merged session discovery, TLS startup parity, and reply dispatch
+- **Verification:** `pnpm build` (including `check-plugin-sdk-exports`), `pnpm check`, `pnpm test extensions/clawline/src/runtime/service.test.ts extensions/clawline/src/runtime/session-store.test.ts extensions/clawline/src/runtime/server.test.ts -t "handles alert endpoint by waking gateway|forwards alert attachments through the wake queue to the gateway|startClawlineService|recordClawlineSessionActivity"`
+- **Follow-up / blocker:** unresolved doctrine blocker. Row A1 in the merge doctrine requires the lane to adapt to an existing documented public seam or stop and escalate; these four exports do not have a pre-existing upstream public replacement on `v2026.4.11`, so the blocker became smaller and sharper rather than disappearing.
 
 ## 5. Alert attachment handling without widening a core queue contract
 

@@ -3,8 +3,6 @@
 // public `openclaw/plugin-sdk/*` subpaths.
 
 export {
-  type AnnounceQueueItem,
-  DEFAULT_AGENT_WORKSPACE_DIR,
   enqueueAnnounce,
   resolveAgentIdentity,
   resolveEffectiveMessagesConfig,
@@ -21,14 +19,10 @@ export { recordInboundSession } from "openclaw/plugin-sdk/conversation-runtime";
 export {
   createReplyDispatcherWithTyping,
   finalizeInboundContext,
+  dispatchReplyFromConfig,
   getReplyFromConfig,
   type ReplyPayload,
 } from "openclaw/plugin-sdk/reply-runtime";
-export {
-  callGateway,
-  ADMIN_SCOPE,
-  loadGatewayTlsRuntime,
-} from "openclaw/plugin-sdk/gateway-runtime";
 export { isLoopbackHost, rawDataToString } from "openclaw/plugin-sdk/browser-node-runtime";
 export {
   closeDispatcher,
@@ -49,25 +43,11 @@ export { optimizeImageToJpeg, optimizeImageToPng } from "openclaw/plugin-sdk/web
 export { isPrivateOrLoopbackHost } from "openclaw/plugin-sdk/ssrf-runtime";
 export {
   DEFAULT_ACCOUNT_ID,
-  isCronRunSessionKey,
   parseAgentSessionKey,
   resolveAgentIdFromSessionKey,
 } from "openclaw/plugin-sdk/routing";
 export {
-  dispatchReplyFromConfig,
-  extractShortModelName,
-  getFollowupQueueDepth,
-  resolveQueueSettings,
-  type ResponsePrefixContext,
-} from "openclaw/plugin-sdk/reply-runtime";
-export {
-  mergeSessionEntry,
   resolveAllAgentSessionStoreTargetsSync,
-  resolveMainSessionKey,
-  resolveSessionTranscriptPath,
-  resolveSessionTranscriptsDirForAgent,
-  type SessionChannelId,
-  type SessionEntry,
   updateSessionStore,
 } from "openclaw/plugin-sdk/config-runtime";
 

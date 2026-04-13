@@ -23,7 +23,6 @@ export {
   resolveThreadSessionKeys,
   sanitizeAgentId,
 } from "../routing/session-key.js";
-export { isCronRunSessionKey } from "../sessions/session-key-utils.js";
 export { resolveAccountEntry } from "../routing/account-lookup.js";
 export { listBoundAccountIds, resolveDefaultAgentBoundAccountId } from "../routing/bindings.js";
 export {

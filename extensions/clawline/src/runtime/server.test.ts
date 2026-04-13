@@ -28,10 +28,13 @@ vi.mock("../runtime-api.js", async () => {
   const actual = await vi.importActual("../runtime-api.js");
   return {
     ...actual,
-    callGateway: (...args: unknown[]) => gatewayCallMock(...args),
     enqueueAnnounce: (...args: unknown[]) => enqueueAnnounceMock(...args),
   };
 });
+
+vi.mock("./gateway-alert-runtime.js", () => ({
+  callClawlineGatewayAgent: (...args: unknown[]) => gatewayCallMock(...args),
+}));
 
 const sendMessageMock = vi.fn();
 vi.mock("../infra/outbound/message.js", () => ({
@@ -2391,8 +2394,7 @@ describe.sequential("clawline provider server", () => {
       await queued?.send?.(queued.item);
       expect(gatewayCallMock).toHaveBeenCalledWith(
         expect.objectContaining({
-          method: "agent",
-          params: expect.objectContaining({
+          request: expect.objectContaining({
             attachments: [attachment],
             sessionKey: "agent:main:clawline:flynn:main",
           }),

@@ -4,46 +4,63 @@ This review compared the actual `clawline-v2026-4-11-merge` branch contents agai
 
 ## Verdict
 
-The branch preserves Clawline function and is closer to the doctrine after review cleanup, but it is still **blocked** under the doctrine's strict A1 decision tree. The remaining plugin-sdk public-surface additions are functional, but they are not backed by an already-documented upstream public seam on `v2026.4.11`.
+The branch preserves Clawline function and now matches the doctrine much more closely after a second reduction pass, but it is still **blocked** under the doctrine's strict A1 decision tree. The blocker is now a short, explicit list of four remaining plugin-sdk public-surface additions that do not have an already-documented upstream public replacement seam on `v2026.4.11`.
 
 ## Blockers
 
-### 1. Remaining plugin-sdk public-surface expansion is still a doctrine blocker
+### 1. Four remaining plugin-sdk exports are still a doctrine blocker
 
-- **Files:** `src/plugin-sdk/agent-runtime.ts`, `src/plugin-sdk/config-runtime.ts`, `src/plugin-sdk/gateway-runtime.ts`, `src/plugin-sdk/reply-runtime.ts`, `src/plugin-sdk/routing.ts`
-- **Relevant lines:**
-  - `src/plugin-sdk/agent-runtime.ts:19`, `src/plugin-sdk/agent-runtime.ts:24`
-  - `src/plugin-sdk/config-runtime.ts:100`-`src/plugin-sdk/config-runtime.ts:115`
-  - `src/plugin-sdk/gateway-runtime.ts:3`, `src/plugin-sdk/gateway-runtime.ts:6`, `src/plugin-sdk/gateway-runtime.ts:13`
-  - `src/plugin-sdk/reply-runtime.ts:33`, `src/plugin-sdk/reply-runtime.ts:45`-`src/plugin-sdk/reply-runtime.ts:48`
-  - `src/plugin-sdk/routing.ts:26`
-- **Why this blocks doctrine compliance:**
-  - Doctrine row A1 explicitly says the lane must adapt Clawline to an existing documented public `openclaw/plugin-sdk/*` seam when one exists.
+- **Files:** `src/plugin-sdk/agent-runtime.ts`, `src/plugin-sdk/config-runtime.ts`, `src/plugin-sdk/gateway-runtime.ts`, `src/plugin-sdk/reply-runtime.ts`
+- **Remaining helpers only:**
+  - `enqueueAnnounce`
+  - `resolveAllAgentSessionStoreTargetsSync`
+  - `loadGatewayTlsRuntime`
+  - `dispatchReplyFromConfig`
+- **Why this still blocks doctrine compliance:**
+  - Doctrine row A1 says the lane must adapt Clawline to an existing documented public `openclaw/plugin-sdk/*` seam when one exists.
   - If no equivalent public seam exists, the doctrine says to stop and escalate rather than invent a new ad hoc core hook during merge execution.
-  - These exports are newly widened public seams on the branch. They keep Clawline compiling, but they are not upstream-default and they are not replacements that already existed on `v2026.4.11`.
-- **Evidence that this is real branch behavior, not just report drift:**
-  - `extensions/clawline/src/runtime/server.ts`
-  - `extensions/clawline/src/runtime/service.ts`
-  - `extensions/clawline/src/runtime/session-store.ts`
-  - `extensions/clawline/src/runtime/config.ts`
-  - `extensions/clawline/src/runtime-api.ts`
+  - These four exports are the only remaining widened public seams on the branch. They keep Clawline compiling and behaving correctly, but they are not upstream-default and they are not replacements that already existed on `v2026.4.11`.
 - **Adjudication:**
   - Functional: yes
   - Doctrine-clean: no
-  - Required next step: Flynn decision or a different upstream-approved public seam plan
+  - Required next step: Flynn decision or a different upstream-approved seam
+
+## Remaining Seam Plan
+
+If Flynn wants strict doctrine compliance, the remaining seam work is now explicit:
+
+1. `enqueueAnnounce`
+   - **Clawline use:** `extensions/clawline/src/runtime/server.ts:4197`
+   - **Why it remains:** Clawline alert wakeups intentionally use the same announce queue the core uses for subagent announcements so alerts drain under the same idle/ordering behavior.
+   - **Why no upstream seam suffices:** there is no existing upstream public seam for "enqueue one announce item onto the shared announce queue." Re-homing this locally would fork queue semantics rather than migrate to an upstream-owned interface.
+
+2. `resolveAllAgentSessionStoreTargetsSync`
+   - **Clawline use:** `extensions/clawline/src/runtime/server.ts:5078`
+   - **Why it remains:** Clawline merges visible session stores across agent roots before building trackable-session responses.
+   - **Why no upstream seam suffices:** upstream exposes ordinary single-store helpers, but no existing public seam exposes the validated multi-agent discovery walk. Replacing it locally would require copying the current discovery policy, symlink validation, and retired-agent-dir behavior.
+
+3. `loadGatewayTlsRuntime`
+   - **Clawline use:** `extensions/clawline/src/runtime/server.ts:1712`
+   - **Why it remains:** Clawline mirrors gateway TLS runtime behavior when deciding whether to start HTTPS/WSS and when surfacing TLS startup failures.
+   - **Why no upstream seam suffices:** there is no existing upstream public TLS-runtime helper on another documented plugin-sdk subpath. Re-homing it locally would duplicate gateway certificate generation, trusted-openssl lookup, and fingerprint normalization behavior.
+
+4. `dispatchReplyFromConfig`
+   - **Clawline use:** `extensions/clawline/src/runtime/server.ts:6678`, `extensions/clawline/src/runtime/server.ts:7148`
+   - **Why it remains:** Clawline needs the current reply dispatch primitive with its custom `replyResolver` injection and existing dispatcher behavior for both normal messages and interactive callbacks.
+   - **Why no upstream seam suffices:** the nearby upstream public helper `dispatchReplyFromConfigWithSettledDispatcher` does not expose the `replyResolver` hook Clawline currently uses, so migrating to it would change behavior rather than just re-home imports.
 
 ## Non-Blocking Findings
 
-### 1. Two initial plugin-sdk widenings were unnecessary and were removed during review
+### 1. The blocker shrank materially during the seam follow-up
 
-- **Files changed during review:** `extensions/clawline/src/runtime-api.ts`, `src/plugin-sdk/infra-runtime.ts`, `src/plugin-sdk/media-runtime.ts`
+- **Files changed during follow-up:** `extensions/clawline/src/runtime-api.ts`, `extensions/clawline/src/runtime/gateway-alert-runtime.ts`, `extensions/clawline/src/runtime/reply-compat.ts`, `extensions/clawline/src/runtime/session-compat.ts`
 - **What changed:**
-  - moved `rawDataToString` to the existing `openclaw/plugin-sdk/browser-node-runtime` seam
-  - moved `optimizeImageToJpeg` / `optimizeImageToPng` to the existing `openclaw/plugin-sdk/web-media` seam
-  - restored `src/plugin-sdk/infra-runtime.ts` and `src/plugin-sdk/media-runtime.ts` to upstream
+  - moved alert gateway delivery onto the existing `callGatewayFromCli` seam through an extension-local wrapper
+  - re-homed queue settings, response-prefix model labels, queue-depth reads, session transcript paths, cron-run detection, default workspace path, main-session-key resolution, and flat session-entry merge behavior into extension-local compat helpers
+  - updated focused Clawline tests to follow those local seams
 - **Why this matters:**
-  - these were true minimize-divergence misses in the first integration pass
-  - they no longer factor into the blocker list
+  - the blocker is no longer a broad "plugin-sdk widening" complaint
+  - the remaining issue is now the four-helper seam plan above
 
 ### 2. `src/canvas-host/a2ui/.bundle.hash` drift is acceptable build-artifact drift
 
@@ -53,24 +70,25 @@ The branch preserves Clawline function and is closer to the doctrine after revie
   - the upstream bundler hashes `pnpm-lock.yaml`, and the doctrine explicitly required lockfile regeneration for the carried-forward dependency set
   - the artifact drift therefore follows from the required build inputs rather than from a Clawline-specific divergence in the A2UI pipeline
 
-### 3. Engram checks were non-material
+### 3. Engram checks sharpened the blocker, but did not clear it
 
-- Queried `src/plugin-sdk/agent-runtime.ts:1-40` and the provided `df32aaec-9bf7-486d-bae1-9faf9e263d4e` source id.
-- The results were noisy/non-material and did not change the review outcome.
+- Queried `src/auto-reply/reply/dispatch-from-config.ts:201-260` and `src/agents/subagent-announce-queue.ts:212-237`, plus the provided source ids.
+- The results did not produce a new upstream seam, but they did reinforce that `dispatchReplyFromConfig` and `enqueueAnnounce` are tied to real shared core behavior rather than being easy cosmetic wrappers.
 
 ## Doctrine Fit
 
 - **Preserve Clawline function:** yes
 - **Adopt upstream patterns:** mostly yes, and improved during review by moving Clawline back to existing upstream public seams where available
-- **Minimize divergence:** improved, but not fully satisfied because the remaining plugin-sdk exports still widen upstream public surface
+- **Minimize divergence:** substantially improved; the remaining divergence is down to four helpers
 - **Restore upstream by default:** mostly yes outside the remaining plugin-sdk blocker
-- **Avoid invented core hooks:** not fully satisfied
+- **Avoid invented core hooks:** not fully satisfied until the remaining four-helper seam question is resolved
 
 ## Flynn Review Readiness
 
-This branch is ready for Flynn review **as a blocked doctrine decision**, not as a clean pass. If Flynn accepts the remaining plugin-sdk public-surface expansion as the intended carry-forward seam, the branch is otherwise in much better shape. If Flynn wants strict doctrine conformance, the lane still needs a different upstream-approved seam plan before it is ready to land.
+This branch is ready for Flynn review **as a narrower blocked doctrine decision**, not as a clean pass. If Flynn accepts the remaining four plugin-sdk public-surface additions as the intended carry-forward seam, the branch is otherwise in good shape. If Flynn wants strict doctrine conformance, the lane still needs a different upstream-approved seam for those four helpers before it is ready to land.
 
 ## Verification Run
 
 - `pnpm check`
 - `pnpm build`
+- `pnpm test extensions/clawline/src/runtime/service.test.ts extensions/clawline/src/runtime/session-store.test.ts extensions/clawline/src/runtime/server.test.ts -t "handles alert endpoint by waking gateway|forwards alert attachments through the wake queue to the gateway|startClawlineService|recordClawlineSessionActivity"`
