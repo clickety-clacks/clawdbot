@@ -29,13 +29,12 @@ export {
   ADMIN_SCOPE,
   loadGatewayTlsRuntime,
 } from "openclaw/plugin-sdk/gateway-runtime";
-export { isLoopbackHost } from "openclaw/plugin-sdk/browser-node-runtime";
+export { isLoopbackHost, rawDataToString } from "openclaw/plugin-sdk/browser-node-runtime";
 export {
   closeDispatcher,
   createPinnedDispatcher,
   enqueueSystemEvent,
   peekSystemEvents,
-  rawDataToString,
   resetSystemEventsForTest,
   resolvePinnedHostname,
   type PinnedHostname,
@@ -45,9 +44,8 @@ export {
   hasAlphaChannel,
   maxBytesForKind,
   mediaKindFromMime,
-  optimizeImageToJpeg,
-  optimizeImageToPng,
 } from "openclaw/plugin-sdk/media-runtime";
+export { optimizeImageToJpeg, optimizeImageToPng } from "openclaw/plugin-sdk/web-media";
 export { isPrivateOrLoopbackHost } from "openclaw/plugin-sdk/ssrf-runtime";
 export {
   DEFAULT_ACCOUNT_ID,

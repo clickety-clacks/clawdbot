@@ -31,12 +31,12 @@ This lane started from upstream tag `v2026.4.11` (`769908ec3f713ecde067eb8c8aa54
 
 ## 4. Minimal plugin-sdk subpath compatibility exports
 
-- **Files:** `src/plugin-sdk/agent-runtime.ts`, `src/plugin-sdk/config-runtime.ts`, `src/plugin-sdk/gateway-runtime.ts`, `src/plugin-sdk/infra-runtime.ts`, `src/plugin-sdk/media-runtime.ts`, `src/plugin-sdk/reply-runtime.ts`, `src/plugin-sdk/routing.ts`
+- **Files:** `src/plugin-sdk/agent-runtime.ts`, `src/plugin-sdk/config-runtime.ts`, `src/plugin-sdk/gateway-runtime.ts`, `src/plugin-sdk/reply-runtime.ts`, `src/plugin-sdk/routing.ts`
 - **Upstream choice:** keep `src/plugin-sdk/index.ts` and the broader core surfaces upstream-default
-- **Carried-forward delta:** added only the public subpath exports that `extensions/clawline/**` imports on current fork head
-- **Why load-bearing:** doctrine requires plugin-sdk subpath compatibility while explicitly preferring upstream-default core elsewhere
+- **Carried-forward delta:** added only the public subpath exports that `extensions/clawline/**` still imports after review cleanup moved `rawDataToString` and the image optimizers onto existing upstream seams
+- **Why load-bearing:** Clawline still uses these helpers, and the branch will not compile without some public seam for them
 - **Verification:** `pnpm build` (including `check-plugin-sdk-exports`), `pnpm check`, `pnpm test extensions/clawline/src/entry.test.ts`
-- **Follow-up / blocker:** none
+- **Follow-up / blocker:** unresolved doctrine blocker. Row A1 in the merge doctrine requires the lane to adapt to an existing documented public seam or stop and escalate; the remaining exports do not have a pre-existing upstream public replacement on `v2026.4.11`, so this lane is no longer doctrine-clean without Flynn approval or a different upstream-approved seam plan.
 
 ## 5. Alert attachment handling without widening a core queue contract
 
@@ -61,7 +61,7 @@ This lane started from upstream tag `v2026.4.11` (`769908ec3f713ecde067eb8c8aa54
 - **Files:** `src/canvas-host/a2ui/.bundle.hash`
 - **Upstream choice:** keep the upstream A2UI bundling flow
 - **Carried-forward delta:** accepted the regenerated bundle hash produced by the required build
-- **Why load-bearing:** keeps the tree consistent with the required `pnpm build` output after the final carry-forward
+- **Why load-bearing:** keeps the tree consistent with the required `pnpm build` output after the final carry-forward; `scripts/bundle-a2ui.mjs` hashes `pnpm-lock.yaml`, so the doctrine-required lockfile regeneration legitimately changes this artifact even when the bundle payload stays upstream-default
 - **Verification:** a subsequent `pnpm build` reported `A2UI bundle up to date; skipping`
 - **Follow-up / blocker:** none
 
