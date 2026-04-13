@@ -66,12 +66,27 @@ const stagedRuntimeDepPruneRules = new Map([
   // Type declarations only; runtime resolves through lib/es entrypoints.
   ["@larksuiteoapi/node-sdk", ["types"]],
 ]);
-const runtimeDepsStagingVersion = 2;
+const runtimeDepsStagingVersion = 3;
+
+function packageRequiresLifecycleInstall(packageJson) {
+  if (packageJson?.gypfile === true) {
+    return true;
+  }
+  const scripts = packageJson?.scripts;
+  if (!scripts || typeof scripts !== "object") {
+    return false;
+  }
+  return ["preinstall", "install", "postinstall"].some((key) => {
+    const value = scripts[key];
+    return typeof value === "string" && value.trim().length > 0;
+  });
+}
 
 function collectInstalledRuntimeClosure(rootNodeModulesDir, dependencySpecs) {
   const packageCache = new Map();
   const closure = new Set();
   const queue = Object.entries(dependencySpecs);
+  let requiresLifecycleInstall = false;
 
   while (queue.length > 0) {
     const [depName, spec] = queue.shift();
@@ -90,6 +105,9 @@ function collectInstalledRuntimeClosure(rootNodeModulesDir, dependencySpecs) {
     const packageJson = packageCache.get(depName) ?? readJson(packageJsonPath);
     packageCache.set(depName, packageJson);
     closure.add(depName);
+    if (packageRequiresLifecycleInstall(packageJson)) {
+      requiresLifecycleInstall = true;
+    }
 
     for (const [childName, childSpec] of Object.entries(packageJson.dependencies ?? {})) {
       queue.push([childName, childSpec]);
@@ -99,7 +117,10 @@ function collectInstalledRuntimeClosure(rootNodeModulesDir, dependencySpecs) {
     }
   }
 
-  return [...closure];
+  return {
+    dependencyNames: [...closure],
+    requiresLifecycleInstall,
+  };
 }
 
 function pruneStagedInstalledDependencyCargo(nodeModulesDir, depName) {
@@ -208,8 +229,8 @@ function stageInstalledRootRuntimeDeps(params) {
     return false;
   }
 
-  const dependencyNames = collectInstalledRuntimeClosure(rootNodeModulesDir, dependencySpecs);
-  if (dependencyNames === null) {
+  const dependencyClosure = collectInstalledRuntimeClosure(rootNodeModulesDir, dependencySpecs);
+  if (dependencyClosure === null || dependencyClosure.requiresLifecycleInstall) {
     return false;
   }
 
@@ -224,7 +245,7 @@ function stageInstalledRootRuntimeDeps(params) {
   );
 
   try {
-    for (const depName of dependencyNames) {
+    for (const depName of dependencyClosure.dependencyNames) {
       const sourcePath = dependencyNodeModulesPath(rootNodeModulesDir, depName);
       const targetPath = dependencyNodeModulesPath(stagedNodeModulesDir, depName);
       fs.mkdirSync(path.dirname(targetPath), { recursive: true });
@@ -258,14 +279,7 @@ function installPluginRuntimeDeps(params) {
     `openclaw-runtime-deps-${sanitizeTempPrefixSegment(pluginId)}-`,
   );
   const npmRunner = resolveNpmRunner({
-    npmArgs: [
-      "install",
-      "--omit=dev",
-      "--silent",
-      "--ignore-scripts",
-      "--legacy-peer-deps",
-      "--package-lock=false",
-    ],
+    npmArgs: ["install", "--omit=dev", "--silent", "--legacy-peer-deps", "--package-lock=false"],
   });
   try {
     writeJson(path.join(tempInstallDir, "package.json"), packageJson);

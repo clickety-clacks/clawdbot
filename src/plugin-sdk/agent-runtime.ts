@@ -16,10 +16,12 @@ export * from "../agents/pi-embedded-utils.js";
 export * from "../agents/provider-id.js";
 export * from "../agents/sandbox-paths.js";
 export * from "../agents/schema/typebox.js";
+export { type AnnounceQueueItem, enqueueAnnounce } from "../agents/subagent-announce-queue.js";
 export * from "../agents/tools/common.js";
 export * from "../agents/tools/web-guarded-fetch.js";
 export * from "../agents/tools/web-shared.js";
 export * from "../agents/tools/web-fetch-utils.js";
+export { DEFAULT_AGENT_WORKSPACE_DIR } from "../agents/workspace.js";
 // Intentional public runtime surface: channel plugins use ingress agent helpers directly.
 export * from "../agents/agent-command.js";
 export * from "../tts/tts.js";

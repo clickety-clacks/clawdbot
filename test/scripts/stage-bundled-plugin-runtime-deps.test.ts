@@ -318,6 +318,60 @@ describe("stageBundledPluginRuntimeDeps", () => {
     expect(installCount).toBe(1);
   });
 
+  it("falls back to staged install when a matching root dependency needs lifecycle scripts", () => {
+    const { pluginDir, repoRoot } = createBundledPluginFixture({
+      packageJson: {
+        name: "@openclaw/fixture-plugin",
+        version: "1.0.0",
+        dependencies: { nativeish: "1.0.0" },
+        openclaw: { bundle: { stageRuntimeDependencies: true } },
+      },
+    });
+    const rootDepDir = path.join(repoRoot, "node_modules", "nativeish");
+    fs.mkdirSync(rootDepDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(rootDepDir, "package.json"),
+      JSON.stringify(
+        {
+          name: "nativeish",
+          version: "1.0.0",
+          scripts: { install: "node build.js" },
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+    fs.writeFileSync(path.join(rootDepDir, "root-marker.txt"), "root\n", "utf8");
+
+    let installCount = 0;
+    stageBundledPluginRuntimeDeps({
+      cwd: repoRoot,
+      installPluginRuntimeDepsImpl: ({ fingerprint }: { fingerprint: string }) => {
+        installCount += 1;
+        const stagedDepDir = path.join(pluginDir, "node_modules", "nativeish");
+        fs.mkdirSync(stagedDepDir, { recursive: true });
+        fs.writeFileSync(path.join(stagedDepDir, "installed-marker.txt"), "staged\n", "utf8");
+        fs.writeFileSync(
+          path.join(pluginDir, ".openclaw-runtime-deps-stamp.json"),
+          `${JSON.stringify({ fingerprint }, null, 2)}\n`,
+          "utf8",
+        );
+      },
+    });
+
+    expect(installCount).toBe(1);
+    expect(
+      fs.existsSync(path.join(pluginDir, "node_modules", "nativeish", "root-marker.txt")),
+    ).toBe(false);
+    expect(
+      fs.readFileSync(
+        path.join(pluginDir, "node_modules", "nativeish", "installed-marker.txt"),
+        "utf8",
+      ),
+    ).toBe("staged\n");
+  });
+
   it("retries transient runtime dependency staging failures before surfacing an error", () => {
     const { pluginDir, repoRoot } = createBundledPluginFixture({
       packageJson: {
