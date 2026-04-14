@@ -1,0 +1,91 @@
+import { type LiveTransportScenarioDefinition } from "../shared/live-transport-scenarios.js";
+import { type MatrixQaObservedEvent } from "./matrix-driver-client.js";
+export type MatrixQaScenarioId = "matrix-thread-follow-up" | "matrix-thread-isolation" | "matrix-top-level-reply-shape" | "matrix-reaction-notification" | "matrix-restart-resume" | "matrix-mention-gating" | "matrix-allowlist-block";
+export type MatrixQaScenarioDefinition = LiveTransportScenarioDefinition<MatrixQaScenarioId>;
+export type MatrixQaReplyArtifact = {
+    bodyPreview?: string;
+    eventId: string;
+    mentions?: MatrixQaObservedEvent["mentions"];
+    relatesTo?: MatrixQaObservedEvent["relatesTo"];
+    sender?: string;
+    tokenMatched?: boolean;
+};
+export type MatrixQaCanaryArtifact = {
+    driverEventId: string;
+    reply: MatrixQaReplyArtifact;
+    token: string;
+};
+export type MatrixQaScenarioArtifacts = {
+    actorUserId?: string;
+    driverEventId?: string;
+    expectedNoReplyWindowMs?: number;
+    reactionEmoji?: string;
+    reactionEventId?: string;
+    reactionTargetEventId?: string;
+    reply?: MatrixQaReplyArtifact;
+    restartSignal?: string;
+    rootEventId?: string;
+    threadDriverEventId?: string;
+    threadReply?: MatrixQaReplyArtifact;
+    threadRootEventId?: string;
+    threadToken?: string;
+    token?: string;
+    topLevelDriverEventId?: string;
+    topLevelReply?: MatrixQaReplyArtifact;
+    topLevelToken?: string;
+    triggerBody?: string;
+};
+export type MatrixQaScenarioExecution = {
+    artifacts?: MatrixQaScenarioArtifacts;
+    details: string;
+};
+type MatrixQaActorId = "driver" | "observer";
+type MatrixQaSyncState = Partial<Record<MatrixQaActorId, string>>;
+type MatrixQaScenarioContext = {
+    baseUrl: string;
+    canary?: MatrixQaCanaryArtifact;
+    driverAccessToken: string;
+    driverUserId: string;
+    observedEvents: MatrixQaObservedEvent[];
+    observerAccessToken: string;
+    observerUserId: string;
+    restartGateway?: () => Promise<void>;
+    roomId: string;
+    syncState: MatrixQaSyncState;
+    sutUserId: string;
+    timeoutMs: number;
+};
+export declare const MATRIX_QA_SCENARIOS: MatrixQaScenarioDefinition[];
+export declare const MATRIX_QA_STANDARD_SCENARIO_IDS: import("../shared/live-transport-scenarios.js").LiveTransportStandardScenarioId[];
+export declare function findMatrixQaScenarios(ids?: string[]): MatrixQaScenarioDefinition[];
+export declare function buildMentionPrompt(sutUserId: string, token: string): string;
+declare function buildMatrixReplyArtifact(event: MatrixQaObservedEvent, token?: string): MatrixQaReplyArtifact;
+export declare function buildMatrixReplyDetails(label: string, artifact: MatrixQaReplyArtifact): string[];
+declare function readMatrixQaSyncCursor(syncState: MatrixQaSyncState, actorId: MatrixQaActorId): string | undefined;
+declare function writeMatrixQaSyncCursor(syncState: MatrixQaSyncState, actorId: MatrixQaActorId, since?: string): void;
+export declare function runMatrixQaCanary(params: {
+    baseUrl: string;
+    driverAccessToken: string;
+    observedEvents: MatrixQaObservedEvent[];
+    roomId: string;
+    syncState: MatrixQaSyncState;
+    sutUserId: string;
+    timeoutMs: number;
+}): Promise<{
+    body: string;
+    driverEventId: string;
+    reply: MatrixQaReplyArtifact;
+    since: string | undefined;
+    token: string;
+}>;
+export declare function runMatrixQaScenario(scenario: MatrixQaScenarioDefinition, context: MatrixQaScenarioContext): Promise<MatrixQaScenarioExecution>;
+export declare const __testing: {
+    MATRIX_QA_STANDARD_SCENARIO_IDS: import("../shared/live-transport-scenarios.js").LiveTransportStandardScenarioId[];
+    buildMatrixReplyDetails: typeof buildMatrixReplyDetails;
+    buildMatrixReplyArtifact: typeof buildMatrixReplyArtifact;
+    buildMentionPrompt: typeof buildMentionPrompt;
+    findMatrixQaScenarios: typeof findMatrixQaScenarios;
+    readMatrixQaSyncCursor: typeof readMatrixQaSyncCursor;
+    writeMatrixQaSyncCursor: typeof writeMatrixQaSyncCursor;
+};
+export {};
