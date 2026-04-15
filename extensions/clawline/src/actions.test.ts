@@ -96,6 +96,157 @@ describe("clawlineMessageActions", () => {
     });
   });
 
+  it("sendAttachment forwards the current session key for same-user stream routing", async () => {
+    const cfg: OpenClawConfig = { channels: { clawline: { enabled: true } } };
+    vi.mocked(sendClawlineOutboundMessage).mockResolvedValueOnce({
+      messageId: "msg-stream",
+      userId: "flynn",
+      attachments: [
+        {
+          type: "document",
+          mimeType: "application/vnd.clawline.interactive-html+json",
+          data: "AAAABASE64PAYLOAD",
+        },
+      ],
+      assetIds: [],
+    });
+
+    await runClawlineAction({
+      action: "sendAttachment",
+      params: {
+        target: "flynn:main",
+        buffer: "AAAABASE64PAYLOAD",
+        mimeType: "application/vnd.clawline.interactive-html+json",
+      },
+      cfg,
+      accountId: null,
+      sessionKey: "agent:main:clawline:flynn:s_4a2b448d",
+    });
+
+    expect(vi.mocked(sendClawlineOutboundMessage)).toHaveBeenCalledWith({
+      target: "flynn:main",
+      text: "",
+      sessionKey: "agent:main:clawline:flynn:s_4a2b448d",
+      attachments: [
+        { data: "AAAABASE64PAYLOAD", mimeType: "application/vnd.clawline.interactive-html+json" },
+      ],
+    });
+  });
+
+  it("sendAttachment keeps explicit stream targets authoritative", async () => {
+    const cfg: OpenClawConfig = { channels: { clawline: { enabled: true } } };
+    vi.mocked(sendClawlineOutboundMessage).mockResolvedValueOnce({
+      messageId: "msg-explicit-stream",
+      userId: "flynn",
+      attachments: [
+        {
+          type: "document",
+          mimeType: "application/vnd.clawline.interactive-html+json",
+          data: "AAAABASE64PAYLOAD",
+        },
+      ],
+      assetIds: [],
+    });
+
+    await runClawlineAction({
+      action: "sendAttachment",
+      params: {
+        target: "agent:main:clawline:flynn:main",
+        buffer: "AAAABASE64PAYLOAD",
+        mimeType: "application/vnd.clawline.interactive-html+json",
+      },
+      cfg,
+      accountId: null,
+      sessionKey: "agent:main:clawline:flynn:s_4a2b448d",
+    });
+
+    expect(vi.mocked(sendClawlineOutboundMessage)).toHaveBeenCalledWith({
+      target: "agent:main:clawline:flynn:main",
+      text: "",
+      attachments: [
+        { data: "AAAABASE64PAYLOAD", mimeType: "application/vnd.clawline.interactive-html+json" },
+      ],
+    });
+  });
+
+  it("sendAttachment keeps same-user non-current delivery targets authoritative", async () => {
+    const cfg: OpenClawConfig = { channels: { clawline: { enabled: true } } };
+    vi.mocked(sendClawlineOutboundMessage).mockResolvedValueOnce({
+      messageId: "msg-other-stream",
+      userId: "flynn",
+      attachments: [
+        {
+          type: "document",
+          mimeType: "application/vnd.clawline.interactive-html+json",
+          data: "AAAABASE64PAYLOAD",
+        },
+      ],
+      assetIds: [],
+    });
+
+    await runClawlineAction({
+      action: "sendAttachment",
+      params: {
+        target: "flynn:s_deadbeef",
+        buffer: "AAAABASE64PAYLOAD",
+        mimeType: "application/vnd.clawline.interactive-html+json",
+      },
+      cfg,
+      accountId: null,
+      sessionKey: "agent:main:clawline:flynn:s_4a2b448d",
+    });
+
+    expect(vi.mocked(sendClawlineOutboundMessage)).toHaveBeenCalledWith({
+      target: "flynn:s_deadbeef",
+      text: "",
+      attachments: [
+        { data: "AAAABASE64PAYLOAD", mimeType: "application/vnd.clawline.interactive-html+json" },
+      ],
+    });
+  });
+
+  it.each(["user:susan", "susan:main"])(
+    "sendAttachment does not apply current session routing to another user target %s",
+    async (target) => {
+      const cfg: OpenClawConfig = { channels: { clawline: { enabled: true } } };
+      vi.mocked(sendClawlineOutboundMessage).mockResolvedValueOnce({
+        messageId: "msg-cross-user",
+        userId: "susan",
+        attachments: [
+          {
+            type: "document",
+            mimeType: "application/vnd.clawline.interactive-html+json",
+            data: "AAAABASE64PAYLOAD",
+          },
+        ],
+        assetIds: [],
+      });
+
+      await runClawlineAction({
+        action: "sendAttachment",
+        params: {
+          target,
+          buffer: "AAAABASE64PAYLOAD",
+          mimeType: "application/vnd.clawline.interactive-html+json",
+        },
+        cfg,
+        accountId: null,
+        sessionKey: "agent:main:clawline:flynn:s_4a2b448d",
+      });
+
+      expect(vi.mocked(sendClawlineOutboundMessage)).toHaveBeenCalledWith({
+        target,
+        text: "",
+        attachments: [
+          {
+            data: "AAAABASE64PAYLOAD",
+            mimeType: "application/vnd.clawline.interactive-html+json",
+          },
+        ],
+      });
+    },
+  );
+
   it("sendAttachment times out instead of hanging forever", async () => {
     vi.useFakeTimers();
     try {

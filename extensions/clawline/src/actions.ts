@@ -11,6 +11,7 @@ import type {
 } from "openclaw/plugin-sdk/channel-contract";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/core";
 import { sendClawlineOutboundMessage } from "./runtime/outbound.js";
+import { ClawlineDeliveryTarget } from "./runtime/routing.js";
 
 const TERMINAL_SESSION_MIME = "application/vnd.clawline.terminal-session+json";
 const TERMINAL_BUBBLE_CAPABILITIES = {
@@ -249,6 +250,52 @@ function resolveSendAttachmentBuffer(params: {
   return explicitBuffer;
 }
 
+function resolveAttachmentSessionKey(params: {
+  target: string;
+  sessionKey?: string | null;
+}): string | undefined {
+  const sessionKey = typeof params.sessionKey === "string" ? params.sessionKey.trim() : "";
+  if (!sessionKey) {
+    return undefined;
+  }
+  let currentTarget: ClawlineDeliveryTarget;
+  try {
+    currentTarget = ClawlineDeliveryTarget.fromSessionKey(sessionKey);
+  } catch {
+    return undefined;
+  }
+
+  const target = params.target.trim();
+  const lowerTarget = target.toLowerCase();
+  if (!target || lowerTarget.startsWith("agent:") || lowerTarget.startsWith("device:")) {
+    return undefined;
+  }
+
+  if (lowerTarget.startsWith("user:")) {
+    const userId = target.slice("user:".length).trim();
+    return userId.toLowerCase() === currentTarget.userId().toLowerCase() ? sessionKey : undefined;
+  }
+
+  if (target.includes(":")) {
+    let targetDelivery: ClawlineDeliveryTarget;
+    try {
+      targetDelivery = ClawlineDeliveryTarget.fromString(target);
+    } catch {
+      return undefined;
+    }
+    if (targetDelivery.userId().toLowerCase() !== currentTarget.userId().toLowerCase()) {
+      return undefined;
+    }
+    const targetSessionLabel = targetDelivery.sessionLabel().toLowerCase();
+    const currentSessionLabel = currentTarget.sessionLabel().toLowerCase();
+    return targetSessionLabel === currentSessionLabel || targetSessionLabel === "main"
+      ? sessionKey
+      : undefined;
+  }
+
+  return target.toLowerCase() === currentTarget.userId().toLowerCase() ? sessionKey : undefined;
+}
+
 function summarizeOutboundResult(result: Awaited<ReturnType<typeof sendClawlineOutboundMessage>>) {
   // Never echo base64 attachment payloads back to the agent/tool output. They can be large and
   // can cause tool delivery to stall.
@@ -397,7 +444,7 @@ export const clawlineMessageActions: ChannelMessageActionAdapter = {
   },
   supportsAction: ({ action }) => action === "sendAttachment" || action === "read",
 
-  handleAction: async ({ action, params, cfg }): Promise<AgentToolResult<unknown>> => {
+  handleAction: async ({ action, params, cfg, sessionKey }): Promise<AgentToolResult<unknown>> => {
     if (action === "sendAttachment") {
       const to =
         (typeof params.target === "string" ? params.target : undefined) ??
@@ -415,10 +462,12 @@ export const clawlineMessageActions: ChannelMessageActionAdapter = {
         (typeof params.caption === "string" ? params.caption : undefined) ??
         (typeof params.message === "string" ? params.message : undefined) ??
         "";
+      const routedSessionKey = resolveAttachmentSessionKey({ target: to, sessionKey });
       const result = await promiseWithTimeout(
         sendClawlineOutboundMessage({
           target: to.trim(),
           text: caption,
+          ...(routedSessionKey ? { sessionKey: routedSessionKey } : {}),
           attachments: [{ data: buffer, mimeType }],
         }),
         15_000,
