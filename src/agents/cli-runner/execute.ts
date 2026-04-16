@@ -467,10 +467,7 @@ export async function executePreparedCliRun(
           ...parsed,
           rawText,
           finalPromptText: prompt,
-          text: applyPluginTextReplacements(
-            rawText,
-            context.backendResolved.textTransforms?.output,
-          ),
+          text: applyPluginTextReplacements(rawText, context.backendResolved.textTransforms?.output),
         };
       } finally {
         restoreSkillEnv?.();
