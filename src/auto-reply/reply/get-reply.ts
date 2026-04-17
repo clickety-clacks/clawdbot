@@ -13,6 +13,7 @@ import { type OpenClawConfig, loadConfig } from "../../config/config.js";
 import { defaultRuntime } from "../../runtime.js";
 import { normalizeOptionalString } from "../../shared/string-coerce.js";
 import { normalizeStringEntries } from "../../shared/string-normalization.js";
+import { INTERNAL_MESSAGE_CHANNEL } from "../../utils/message-channel.js";
 import type { GetReplyOptions } from "../get-reply-options.types.js";
 import type { ReplyPayload } from "../reply-payload.js";
 import type { MsgContext } from "../templating.js";
@@ -141,6 +142,59 @@ async function applyLinkUnderstandingIfNeeded(params: {
   const { applyLinkUnderstanding } = await import("../../link-understanding/apply.runtime.js");
   await applyLinkUnderstanding(params);
   return true;
+}
+
+function resolveInjectedDeliveryActiveRuntimeModel(params: {
+  provider: string;
+  model: string;
+  defaultProvider: string;
+  aliasIndex: ReturnType<typeof resolveDefaultModel>["aliasIndex"];
+  ctx: MsgContext;
+  hasResolvedHeartbeatModelOverride: boolean;
+  hasSessionModelOverride: boolean;
+  channelModelOverride?: { model: string } | null | undefined;
+  sessionEntry: {
+    modelProvider?: string | null;
+    model?: string | null;
+    fallbackNoticeActiveModel?: string | null;
+  };
+}): { provider: string; model: string } | null {
+  if (params.ctx.Provider !== INTERNAL_MESSAGE_CHANNEL) {
+    return null;
+  }
+  if (
+    params.hasResolvedHeartbeatModelOverride ||
+    params.hasSessionModelOverride ||
+    params.channelModelOverride
+  ) {
+    return null;
+  }
+
+  const runtimeProvider = params.sessionEntry.modelProvider?.trim();
+  const runtimeModel = params.sessionEntry.model?.trim();
+  if (runtimeProvider && runtimeModel) {
+    if (runtimeProvider !== params.provider || runtimeModel !== params.model) {
+      return { provider: runtimeProvider, model: runtimeModel };
+    }
+    return null;
+  }
+
+  const fallbackRuntime = params.sessionEntry.fallbackNoticeActiveModel?.trim();
+  if (!fallbackRuntime) {
+    return null;
+  }
+  const resolved = resolveModelRefFromString({
+    raw: fallbackRuntime,
+    defaultProvider: params.defaultProvider,
+    aliasIndex: params.aliasIndex,
+  });
+  if (!resolved) {
+    return null;
+  }
+  if (resolved.ref.provider === params.provider && resolved.ref.model === params.model) {
+    return null;
+  }
+  return resolved.ref;
 }
 
 export async function getReplyFromConfig(
@@ -342,6 +396,28 @@ export async function getReplyFromConfig(
       provider = resolved.ref.provider;
       model = resolved.ref.model;
     }
+  }
+
+  const injectedDeliveryRuntimeOverride = resolveInjectedDeliveryActiveRuntimeModel({
+    provider,
+    model,
+    defaultProvider,
+    aliasIndex,
+    ctx: finalized,
+    hasResolvedHeartbeatModelOverride,
+    hasSessionModelOverride,
+    channelModelOverride,
+    sessionEntry,
+  });
+  if (injectedDeliveryRuntimeOverride) {
+    // Temporary injected-delivery override for openclaw/openclaw#54675.
+    // Gateway-injected webchat deliveries can incorrectly restart from the selected/default
+    // model path even when the session's active runtime is already on a fallback backend.
+    // Until upstream fixes #54675, prefer the recorded active runtime here so injected
+    // deliveries stay on the provider/model the session was actually using.
+    // TODO: remove this when upstream fixes #54675.
+    provider = injectedDeliveryRuntimeOverride.provider;
+    model = injectedDeliveryRuntimeOverride.model;
   }
 
   if (

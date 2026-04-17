@@ -102,6 +102,7 @@ describe("gateway bonjour advertiser", () => {
     vi.spyOn(logging, "getLogger").mockReturnValue({
       info: (...args: unknown[]) => getLoggerInfo(...args),
     } as unknown as ReturnType<typeof logging.getLogger>);
+    registerUnhandledRejectionHandler.mockImplementation(() => vi.fn());
   });
 
   afterEach(() => {
