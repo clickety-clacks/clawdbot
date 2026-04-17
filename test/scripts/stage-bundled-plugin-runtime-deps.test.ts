@@ -18,13 +18,29 @@ describe("stageBundledPluginRuntimeDeps", () => {
     const repoRoot = createTempDir("openclaw-runtime-deps-");
     const pluginId = params.pluginId ?? "fixture-plugin";
     const pluginDir = path.join(repoRoot, "dist", "extensions", pluginId);
+    const pluginSdkDir = path.join(repoRoot, "dist", "plugin-sdk");
     fs.mkdirSync(pluginDir, { recursive: true });
+    fs.mkdirSync(pluginSdkDir, { recursive: true });
+    fs.writeFileSync(path.join(pluginSdkDir, "reply-runtime.js"), "export {};\n", "utf8");
     fs.writeFileSync(
       path.join(pluginDir, "package.json"),
       `${JSON.stringify(params.packageJson, null, 2)}\n`,
       "utf8",
     );
     return { pluginDir, repoRoot };
+  }
+
+  function expectHostPackageSelfReference(nodeModulesDir: string, repoRoot: string) {
+    const hostPackageDir = path.join(nodeModulesDir, "openclaw");
+    expect(JSON.parse(fs.readFileSync(path.join(hostPackageDir, "package.json"), "utf8"))).toEqual({
+      name: "openclaw",
+      private: true,
+      type: "module",
+      exports: { "./plugin-sdk/*": "./plugin-sdk/*.js" },
+    });
+    expect(fs.realpathSync(path.join(hostPackageDir, "plugin-sdk"))).toBe(
+      fs.realpathSync(path.join(repoRoot, "dist", "plugin-sdk")),
+    );
   }
 
   it("pins fallback install specs to exact installed versions", () => {
@@ -166,6 +182,43 @@ describe("stageBundledPluginRuntimeDeps", () => {
       dependencies: { "left-pad": "1.3.0" },
       openclaw: { bundle: { stageRuntimeDependencies: true } },
     });
+    expectHostPackageSelfReference(nodeModulesDir, repoRoot);
+  });
+
+  it("restages matching stamped deps when the host package self-reference is missing", () => {
+    const { pluginDir, repoRoot } = createBundledPluginFixture({
+      packageJson: {
+        name: "@openclaw/fixture-plugin",
+        version: "1.0.0",
+        dependencies: { "left-pad": "1.3.0" },
+        openclaw: { bundle: { stageRuntimeDependencies: true } },
+      },
+    });
+    const nodeModulesDir = path.join(pluginDir, "node_modules");
+
+    let installCount = 0;
+    const stageOnce = () =>
+      stageBundledPluginRuntimeDeps({
+        cwd: repoRoot,
+        installPluginRuntimeDepsImpl: ({ fingerprint }: { fingerprint: string }) => {
+          installCount += 1;
+          fs.mkdirSync(nodeModulesDir, { recursive: true });
+          fs.writeFileSync(path.join(nodeModulesDir, "marker.txt"), `${installCount}\n`, "utf8");
+          fs.writeFileSync(
+            path.join(pluginDir, ".openclaw-runtime-deps-stamp.json"),
+            `${JSON.stringify({ fingerprint }, null, 2)}\n`,
+            "utf8",
+          );
+        },
+      });
+
+    stageOnce();
+    fs.rmSync(path.join(nodeModulesDir, "openclaw"), { recursive: true, force: true });
+    stageOnce();
+
+    expect(installCount).toBe(2);
+    expect(fs.readFileSync(path.join(nodeModulesDir, "marker.txt"), "utf8")).toBe("2\n");
+    expectHostPackageSelfReference(nodeModulesDir, repoRoot);
   });
 
   it("restages when the manifest-owned runtime deps change", () => {
@@ -359,6 +412,7 @@ describe("stageBundledPluginRuntimeDeps", () => {
     expect(
       fs.readFileSync(path.join(pluginDir, "node_modules", "left-pad", "index.js"), "utf8"),
     ).toBe("module.exports = 1;\n");
+    expectHostPackageSelfReference(path.join(pluginDir, "node_modules"), repoRoot);
     expect(fs.existsSync(path.join(pluginDir, ".openclaw-runtime-deps-stamp.json"))).toBe(true);
   });
 

@@ -191,8 +191,12 @@ const defaultStagedRuntimeDepPruneRules = new Map([
   ["@jimp/plugin-quantize", { paths: ["src/__image_snapshots__"] }],
   ["@jimp/plugin-threshold", { paths: ["src/__image_snapshots__"] }],
 ]);
-const runtimeDepsStagingVersion = 6;
+const runtimeDepsStagingVersion = 7;
 const exactVersionSpecRe = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u;
+const hostPackageSelfReferenceName = "openclaw";
+const hostPackageSelfReferenceExports = {
+  "./plugin-sdk/*": "./plugin-sdk/*.js",
+};
 
 function resolveRuntimeDepPruneConfig(params = {}) {
   return {
@@ -838,6 +842,64 @@ function resolveRuntimeDepsStampPath(pluginDir) {
   return path.join(pluginDir, ".openclaw-runtime-deps-stamp.json");
 }
 
+function resolveHostPackageSelfReferencePath(nodeModulesDir) {
+  return path.join(nodeModulesDir, hostPackageSelfReferenceName);
+}
+
+function resolveHostPackagePluginSdkDir(repoRoot) {
+  return path.join(repoRoot, "dist", "plugin-sdk");
+}
+
+function resolveHostPackageSelfReferenceTarget(selfReferencePath, repoRoot) {
+  const pluginSdkDir = resolveHostPackagePluginSdkDir(repoRoot);
+  if (process.platform === "win32") {
+    return pluginSdkDir;
+  }
+  return path.relative(selfReferencePath, pluginSdkDir) || ".";
+}
+
+function hostPackageSelfReferenceMatches(nodeModulesDir, repoRoot) {
+  const selfReferencePath = resolveHostPackageSelfReferencePath(nodeModulesDir);
+  try {
+    const packageJson = readJson(path.join(selfReferencePath, "package.json"));
+    return (
+      packageJson.name === hostPackageSelfReferenceName &&
+      packageJson.type === "module" &&
+      JSON.stringify(packageJson.exports) === JSON.stringify(hostPackageSelfReferenceExports) &&
+      fs.realpathSync(path.join(selfReferencePath, "plugin-sdk")) ===
+        fs.realpathSync(resolveHostPackagePluginSdkDir(repoRoot))
+    );
+  } catch {
+    return false;
+  }
+}
+
+function ensureHostPackageSelfReference(nodeModulesDir, repoRoot) {
+  assertPathIsNotSymlink(nodeModulesDir, "write host package self-reference");
+  fs.mkdirSync(nodeModulesDir, { recursive: true });
+  const selfReferencePath = resolveHostPackageSelfReferencePath(nodeModulesDir);
+  removePathIfExists(selfReferencePath);
+  fs.mkdirSync(selfReferencePath, { recursive: true });
+  writeJson(path.join(selfReferencePath, "package.json"), {
+    name: hostPackageSelfReferenceName,
+    private: true,
+    type: "module",
+    exports: hostPackageSelfReferenceExports,
+  });
+  fs.symlinkSync(
+    resolveHostPackageSelfReferenceTarget(selfReferencePath, repoRoot),
+    path.join(selfReferencePath, "plugin-sdk"),
+    process.platform === "win32" ? "junction" : "dir",
+  );
+}
+
+function writeRuntimeDepsStamp(pluginDir, fingerprint) {
+  writeJsonAtomically(resolveRuntimeDepsStampPath(pluginDir), {
+    fingerprint,
+    generatedAt: new Date().toISOString(),
+  });
+}
+
 function createRuntimeDepsFingerprint(packageJson, pruneConfig, params = {}) {
   const repoRoot = params.repoRoot;
   const lockfilePath =
@@ -912,7 +974,6 @@ function stageInstalledRootRuntimeDeps(params) {
   const allowedRealRoots = rootsToCopy.map((record) => record.realRoot);
 
   const nodeModulesDir = path.join(pluginDir, "node_modules");
-  const stampPath = resolveRuntimeDepsStampPath(pluginDir);
   const stagedNodeModulesDir = path.join(
     makePluginOwnedTempDir(pluginDir, "stage"),
     "node_modules",
@@ -944,10 +1005,8 @@ function stageInstalledRootRuntimeDeps(params) {
     pruneStagedRuntimeDependencyCargo(stagedNodeModulesDir, pruneConfig);
 
     replaceDirAtomically(nodeModulesDir, stagedNodeModulesDir);
-    writeJsonAtomically(stampPath, {
-      fingerprint,
-      generatedAt: new Date().toISOString(),
-    });
+    ensureHostPackageSelfReference(nodeModulesDir, repoRoot);
+    writeRuntimeDepsStamp(pluginDir, fingerprint);
     return true;
   } finally {
     removePathIfExists(path.dirname(stagedNodeModulesDir));
@@ -1002,7 +1061,6 @@ function installPluginRuntimeDeps(params) {
     repoRoot,
   } = params;
   const nodeModulesDir = path.join(pluginDir, "node_modules");
-  const stampPath = resolveRuntimeDepsStampPath(pluginDir);
   const tempInstallDir = makePluginOwnedTempDir(pluginDir, "install");
   const pinnedGroups = resolvePinnedRuntimeDependencyGroups(packageJson, {
     directDependencyPackageRoot,
@@ -1042,10 +1100,8 @@ function installPluginRuntimeDeps(params) {
       assertPathIsNotSymlink(nodeModulesDir, "remove runtime deps");
       removePathIfExists(nodeModulesDir);
     }
-    writeJsonAtomically(stampPath, {
-      fingerprint,
-      generatedAt: new Date().toISOString(),
-    });
+    ensureHostPackageSelfReference(nodeModulesDir, repoRoot);
+    writeRuntimeDepsStamp(pluginDir, fingerprint);
   } finally {
     removePathIfExists(tempInstallDir);
   }
@@ -1081,7 +1137,11 @@ export function stageBundledPluginRuntimeDeps(params = {}) {
       rootInstalledRuntimeFingerprint,
     });
     const stamp = readRuntimeDepsStamp(stampPath);
-    if (fs.existsSync(nodeModulesDir) && stamp?.fingerprint === fingerprint) {
+    if (
+      fs.existsSync(nodeModulesDir) &&
+      stamp?.fingerprint === fingerprint &&
+      hostPackageSelfReferenceMatches(nodeModulesDir, repoRoot)
+    ) {
       continue;
     }
     if (
@@ -1110,6 +1170,10 @@ export function stageBundledPluginRuntimeDeps(params = {}) {
           repoRoot,
         },
       });
+      if (installPluginRuntimeDepsImpl !== installPluginRuntimeDeps) {
+        ensureHostPackageSelfReference(nodeModulesDir, repoRoot);
+        writeRuntimeDepsStamp(pluginDir, fingerprint);
+      }
     } catch (error) {
       throw createRootRuntimeStagingError({ packageJson, pluginId, cause: error });
     }
