@@ -18,8 +18,8 @@ export {
 export { recordInboundSession } from "openclaw/plugin-sdk/conversation-runtime";
 export {
   createReplyDispatcherWithTyping,
+  dispatchInboundMessage,
   finalizeInboundContext,
-  dispatchReplyFromConfig,
   getReplyFromConfig,
   type ReplyPayload,
 } from "openclaw/plugin-sdk/reply-runtime";

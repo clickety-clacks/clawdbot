@@ -1,11 +1,8 @@
-import { clawlinePlugin } from "../../../extensions/clawline/api.js";
 import { formatCliCommand } from "../../cli/command-format.js";
 import { replaceConfigFile, resolveGatewayPort } from "../../config/config.js";
 import { logConfigUpdated } from "../../config/logging.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
-import { DEFAULT_ACCOUNT_ID } from "../../routing/session-key.js";
 import type { RuntimeEnv } from "../../runtime.js";
-import { applyChannelAccountConfig } from "../channels/add-mutators.js";
 import { DEFAULT_GATEWAY_DAEMON_RUNTIME } from "../daemon-runtime.js";
 import { applyLocalSetupWorkspaceConfig } from "../onboard-config.js";
 import {
@@ -53,16 +50,6 @@ function resolveInstallDaemonGatewayHealthTiming(): {
   };
 }
 
-function resolveExistingGatewayAuthMismatchHints(detail: string | undefined): string[] {
-  if (!detail || !/gateway token mismatch/i.test(detail)) {
-    return [];
-  }
-  return [
-    "Detected auth mismatch with an already-running local gateway on this port.",
-    `Fix: rerun with \`--gateway-token <running-gateway-token>\` (or \`OPENCLAW_GATEWAY_TOKEN=<running-gateway-token>\`) to attach to that gateway, or stop the old gateway and rerun so the next gateway process picks up the new config.`,
-  ];
-}
-
 async function collectGatewayHealthFailureDiagnostics(): Promise<
   GatewayHealthFailureDiagnostics | undefined
 > {
@@ -104,42 +91,13 @@ async function collectGatewayHealthFailureDiagnostics(): Promise<
     : undefined;
 }
 
-async function maybeApplyDefaultClawlineQuickstartConfig(params: {
-  opts: OnboardOptions;
-  baseConfig: OpenClawConfig;
-  nextConfig: OpenClawConfig;
-  hasExistingConfig: boolean;
-}): Promise<OpenClawConfig> {
-  if (params.hasExistingConfig) {
-    return params.nextConfig;
-  }
-  if (params.opts.flow !== "quickstart") {
-    return params.nextConfig;
-  }
-  if (params.opts.skipChannels ?? params.opts.skipProviders) {
-    return params.nextConfig;
-  }
-  if (params.baseConfig.channels?.clawline || params.nextConfig.channels?.clawline) {
-    return params.nextConfig;
-  }
-
-  return applyChannelAccountConfig({
-    cfg: params.nextConfig,
-    channel: "clawline",
-    accountId: DEFAULT_ACCOUNT_ID,
-    input: {},
-    plugin: clawlinePlugin,
-  });
-}
-
 export async function runNonInteractiveLocalSetup(params: {
   opts: OnboardOptions;
   runtime: RuntimeEnv;
   baseConfig: OpenClawConfig;
   baseHash?: string;
-  hasExistingConfig: boolean;
 }) {
-  const { opts, runtime, baseConfig, baseHash, hasExistingConfig } = params;
+  const { opts, runtime, baseConfig, baseHash } = params;
   const mode = "local" as const;
 
   const workspaceDir = resolveNonInteractiveWorkspaceDir({
@@ -193,13 +151,6 @@ export async function runNonInteractiveLocalSetup(params: {
     return;
   }
   nextConfig = gatewayResult.nextConfig;
-
-  nextConfig = await maybeApplyDefaultClawlineQuickstartConfig({
-    opts,
-    baseConfig,
-    nextConfig,
-    hasExistingConfig,
-  });
 
   nextConfig = applyNonInteractiveSkillsConfig({ nextConfig, opts, runtime });
 
@@ -308,18 +259,15 @@ export async function runNonInteractiveLocalSetup(params: {
         daemonInstall: daemonInstallStatus,
         daemonRuntime: opts.installDaemon ? daemonRuntimeRaw : undefined,
         diagnostics,
-        hints: [
-          ...resolveExistingGatewayAuthMismatchHints(probe.detail),
-          ...(!opts.installDaemon
-            ? [
-                "Non-interactive local setup only waits for an already-running gateway unless you pass --install-daemon.",
-                `Fix: start \`${formatCliCommand("openclaw gateway run")}\`, re-run with \`--install-daemon\`, or use \`--skip-health\`.`,
-                process.platform === "win32"
-                  ? "Native Windows managed gateway install tries Scheduled Tasks first and falls back to a per-user Startup-folder login item when task creation is denied."
-                  : undefined,
-              ].filter((value): value is string => Boolean(value))
-            : [`Run \`${formatCliCommand("openclaw gateway status --deep")}\` for more detail.`]),
-        ],
+        hints: !opts.installDaemon
+          ? [
+              "Non-interactive local setup only waits for an already-running gateway unless you pass --install-daemon.",
+              `Fix: start \`${formatCliCommand("openclaw gateway run")}\`, re-run with \`--install-daemon\`, or use \`--skip-health\`.`,
+              process.platform === "win32"
+                ? "Native Windows managed gateway install tries Scheduled Tasks first and falls back to a per-user Startup-folder login item when task creation is denied."
+                : undefined,
+            ].filter((value): value is string => Boolean(value))
+          : [`Run \`${formatCliCommand("openclaw gateway status --deep")}\` for more detail.`],
       });
       runtime.exit(1);
       return;

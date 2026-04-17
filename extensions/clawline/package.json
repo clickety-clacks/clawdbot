@@ -31,10 +31,10 @@
       "id": "clawline",
       "label": "Clawline",
       "selectionLabel": "Clawline (local devices)",
-      "docsPath": "/providers/clawline",
+      "docsPath": "/channels/clawline",
       "docsLabel": "clawline",
       "blurb": "first-party local gateway; enable via config/onboarding.",
-      "order": 10
+      "order": 900
     },
     "install": {
       "npmSpec": "@openclaw/clawline",

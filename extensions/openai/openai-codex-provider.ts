@@ -17,26 +17,20 @@ import {
   normalizeProviderId,
   type ProviderPlugin,
 } from "openclaw/plugin-sdk/provider-model-shared";
-import { buildProviderStreamFamilyHooks } from "openclaw/plugin-sdk/provider-stream-family";
 import { fetchCodexUsage } from "openclaw/plugin-sdk/provider-usage";
 import { normalizeLowercaseStringOrEmpty, readStringValue } from "openclaw/plugin-sdk/text-runtime";
+import { isOpenAIApiBaseUrl, isOpenAICodexBaseUrl } from "./base-url.js";
 import { OPENAI_CODEX_DEFAULT_MODEL } from "./default-models.js";
 import { resolveCodexAuthIdentity } from "./openai-codex-auth-identity.js";
 import { buildOpenAICodexProvider } from "./openai-codex-catalog.js";
 import { CODEX_CLI_PROFILE_ID, readOpenAICodexCliOAuthProfile } from "./openai-codex-cli-auth.js";
-import { buildOpenAIReplayPolicy } from "./replay-policy.js";
 import {
+  buildOpenAIResponsesProviderHooks,
   buildOpenAISyntheticCatalogEntry,
   cloneFirstTemplateModel,
   findCatalogTemplate,
-  isOpenAIApiBaseUrl,
-  isOpenAICodexBaseUrl,
   matchesExactOrPrefix,
 } from "./shared.js";
-import {
-  resolveOpenAITransportTurnState,
-  resolveOpenAIWebSocketSessionPolicy,
-} from "./transport-policy.js";
 
 const PROVIDER_ID = "openai-codex";
 const OPENAI_CODEX_BASE_URL = "https://chatgpt.com/backend-api";
@@ -100,7 +94,24 @@ const OPENAI_CODEX_MODERN_MODEL_IDS = [
   OPENAI_CODEX_GPT_53_MODEL_ID,
   OPENAI_CODEX_GPT_53_SPARK_MODEL_ID,
 ] as const;
-const OPENAI_RESPONSES_STREAM_HOOKS = buildProviderStreamFamilyHooks("openai-responses-defaults");
+
+function normalizeCodexTransportFields(params: {
+  api?: ProviderRuntimeModel["api"] | null;
+  baseUrl?: string;
+}): {
+  api?: ProviderRuntimeModel["api"];
+  baseUrl?: string;
+} {
+  const useCodexTransport =
+    !params.baseUrl || isOpenAIApiBaseUrl(params.baseUrl) || isOpenAICodexBaseUrl(params.baseUrl);
+  const api =
+    useCodexTransport && (!params.api || params.api === "openai-responses")
+      ? "openai-codex-responses"
+      : (params.api ?? undefined);
+  const baseUrl =
+    api === "openai-codex-responses" && useCodexTransport ? OPENAI_CODEX_BASE_URL : params.baseUrl;
+  return { api, baseUrl };
+}
 
 function normalizeCodexTransport(model: ProviderRuntimeModel): ProviderRuntimeModel {
   const lowerModelId = normalizeLowercaseStringOrEmpty(model.id);
@@ -110,14 +121,12 @@ function normalizeCodexTransport(model: ProviderRuntimeModel): ProviderRuntimeMo
     normalizeLowercaseStringOrEmpty(model.name) === OPENAI_CODEX_GPT_54_LEGACY_MODEL_ID
       ? OPENAI_CODEX_GPT_54_MODEL_ID
       : model.name;
-  const useCodexTransport =
-    !model.baseUrl || isOpenAIApiBaseUrl(model.baseUrl) || isOpenAICodexBaseUrl(model.baseUrl);
-  const api =
-    useCodexTransport && model.api === "openai-responses" ? "openai-codex-responses" : model.api;
-  const baseUrl =
-    api === "openai-codex-responses" && (!model.baseUrl || isOpenAIApiBaseUrl(model.baseUrl))
-      ? OPENAI_CODEX_BASE_URL
-      : model.baseUrl;
+  const normalizedTransport = normalizeCodexTransportFields({
+    api: model.api,
+    baseUrl: model.baseUrl,
+  });
+  const api = normalizedTransport.api ?? model.api;
+  const baseUrl = normalizedTransport.baseUrl ?? model.baseUrl;
   if (
     api === model.api &&
     baseUrl === model.baseUrl &&
@@ -335,26 +344,23 @@ export function buildOpenAICodexProviderPlugin(): ProviderPlugin {
       const id = ctx.modelId.trim().toLowerCase();
       return id === OPENAI_CODEX_GPT_54_MODEL_ID || id === OPENAI_CODEX_GPT_54_PRO_MODEL_ID;
     },
-    buildReplayPolicy: buildOpenAIReplayPolicy,
-    prepareExtraParams: (ctx) => {
-      const transport = ctx.extraParams?.transport;
-      if (transport === "auto" || transport === "sse" || transport === "websocket") {
-        return ctx.extraParams;
-      }
-      return {
-        ...ctx.extraParams,
-        transport: "auto",
-      };
-    },
-    ...OPENAI_RESPONSES_STREAM_HOOKS,
-    resolveTransportTurnState: (ctx) => resolveOpenAITransportTurnState(ctx),
-    resolveWebSocketSessionPolicy: (ctx) => resolveOpenAIWebSocketSessionPolicy(ctx),
+    ...buildOpenAIResponsesProviderHooks(),
     resolveReasoningOutputMode: () => "native",
     normalizeResolvedModel: (ctx) => {
       if (normalizeProviderId(ctx.provider) !== PROVIDER_ID) {
         return undefined;
       }
       return normalizeCodexTransport(ctx.model);
+    },
+    normalizeTransport: ({ provider, api, baseUrl }) => {
+      if (normalizeProviderId(provider) !== PROVIDER_ID) {
+        return undefined;
+      }
+      const normalized = normalizeCodexTransportFields({ api, baseUrl });
+      if (normalized.api === api && normalized.baseUrl === baseUrl) {
+        return undefined;
+      }
+      return normalized;
     },
     resolveUsageAuth: async (ctx) => await ctx.resolveOAuthToken(),
     fetchUsageSnapshot: async (ctx) =>

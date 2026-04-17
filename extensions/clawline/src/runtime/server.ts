@@ -21,7 +21,7 @@ import {
   createPinnedDispatcher,
   createReplyDispatcherWithTyping,
   detectMime,
-  dispatchReplyFromConfig,
+  dispatchInboundMessage,
   enqueueAnnounce,
   finalizeInboundContext,
   hasAlphaChannel,
@@ -6675,7 +6675,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
                 sessionKey: resolvedSessionKey,
                 imageCount: inboundImages.length,
               });
-              const result = await dispatchReplyFromConfig({
+              const result = await dispatchInboundMessage({
                 ctx: ctxPayload,
                 cfg: openClawCfg,
                 dispatcher,
@@ -7145,7 +7145,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
                 sourceMessageId,
                 interactiveAction: action,
               });
-              const result = await dispatchReplyFromConfig({
+              const result = await dispatchInboundMessage({
                 ctx: ctxPayload,
                 cfg: openClawCfg,
                 dispatcher,

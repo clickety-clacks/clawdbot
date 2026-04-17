@@ -45,17 +45,6 @@ describe("bonjour-ciao", () => {
     expect(ignoreCiaoUnhandledRejection(error)).toBe(true);
   });
 
-  it("classifies wrapped ciao cancellation reasons through nested causes", () => {
-    const wrapped = Object.assign(new Error("outer"), {
-      cause: new Error("CIAO PROBING CANCELLED"),
-    });
-
-    expect(classifyCiaoUnhandledRejection(wrapped)).toEqual({
-      kind: "cancellation",
-      formatted: "CIAO PROBING CANCELLED",
-    });
-  });
-
   it("keeps unrelated rejections visible", () => {
     expect(ignoreCiaoUnhandledRejection(new Error("boom"))).toBe(false);
   });

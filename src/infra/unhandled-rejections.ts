@@ -1,7 +1,6 @@
 import process from "node:process";
 import { normalizeLowercaseStringOrEmpty } from "../shared/string-coerce.js";
 import { restoreTerminalState } from "../terminal/restore.js";
-import { classifyCiaoUnhandledRejection } from "./bonjour-ciao.js";
 import {
   collectErrorGraphCandidates,
   extractErrorCode,
@@ -345,12 +344,6 @@ export function installUnhandledRejectionHandler(): void {
 
   process.on("unhandledRejection", (reason, _promise) => {
     if (isUnhandledRejectionHandled(reason)) {
-      return;
-    }
-
-    const ciaoClassification = classifyCiaoUnhandledRejection(reason);
-    if (ciaoClassification) {
-      console.warn("[openclaw] Suppressed ciao unhandled rejection:", ciaoClassification.formatted);
       return;
     }
 

@@ -207,17 +207,5 @@ describe("installUnhandledRejectionHandler - fatal detection", () => {
         expect.stringContaining("This operation was aborted"),
       );
     });
-
-    it("does not exit on ciao cancellation rejections", () => {
-      const ciaoCancellation = Object.assign(new Error("wrapper"), {
-        cause: new Error("CIAO PROBING CANCELLED"),
-      });
-
-      expectExitCodeFromUnhandled(ciaoCancellation, []);
-      expect(consoleWarnSpy).toHaveBeenCalledWith(
-        "[openclaw] Suppressed ciao unhandled rejection:",
-        "CIAO PROBING CANCELLED",
-      );
-    });
   });
 });

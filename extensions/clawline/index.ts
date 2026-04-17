@@ -1,7 +1,10 @@
 import { defineBundledChannelEntry } from "openclaw/plugin-sdk/channel-entry-contract";
-import { startClawlineService } from "./src/runtime/service.js";
 
-let serviceHandle: Awaited<ReturnType<typeof startClawlineService>> = null;
+type ClawlineServiceHandle = {
+  stop: () => void | Promise<void>;
+};
+
+let serviceHandle: ClawlineServiceHandle | null = null;
 let serviceStart: Promise<void> | null = null;
 
 export default defineBundledChannelEntry({
@@ -30,6 +33,7 @@ export default defineBundledChannelEntry({
         }
         serviceStart = (async () => {
           try {
+            const { startClawlineService } = await import("./service-api.js");
             serviceHandle = await startClawlineService({ config, logger });
           } catch (err) {
             logger.error?.(`clawline service failed to start: ${String(err)}`);

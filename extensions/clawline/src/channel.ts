@@ -38,11 +38,11 @@ const meta = {
   id: "clawline",
   label: "Clawline",
   selectionLabel: "Clawline (local devices)",
-  docsPath: "/providers/clawline",
+  docsPath: "/channels/clawline",
   docsLabel: "clawline",
   blurb: "first-party local gateway; enable via config/onboarding.",
   aliases: ["clawline-dm"],
-  order: 10,
+  order: 900,
 };
 
 function resolveClawlineAccount(params: {
@@ -101,6 +101,18 @@ export const clawlinePlugin = {
   // Clawline runs as a plugin service, not a channel gateway startAccount loop.
   // Mark runtime as running so gateway health-monitor does not treat it as stopped.
   status: {
+    buildAccountSnapshot: ({ account, runtime }) => ({
+      accountId: account.accountId,
+      enabled: account.enabled,
+      configured: account.configured,
+      running: runtime?.running ?? true,
+      connected: runtime?.connected ?? true,
+      lastStartAt: runtime?.lastStartAt ?? null,
+      lastStopAt: runtime?.lastStopAt ?? null,
+      lastError: runtime?.lastError ?? null,
+      lastInboundAt: runtime?.lastInboundAt ?? null,
+      lastOutboundAt: runtime?.lastOutboundAt ?? null,
+    }),
     defaultRuntime: {
       accountId: DEFAULT_ACCOUNT_ID,
       running: true,

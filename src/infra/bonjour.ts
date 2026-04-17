@@ -55,6 +55,7 @@ type BonjourServiceState = BonjourService["serviceState"];
 type BonjourCycle = {
   responder: BonjourResponder;
   services: Array<{ label: string; svc: BonjourService }>;
+  cleanupUnhandledRejection?: () => void;
 };
 
 type ServiceStateTracker = {
@@ -67,7 +68,7 @@ type ConsoleLogFn = (...args: unknown[]) => void;
 const WATCHDOG_INTERVAL_MS = 5_000;
 const REPAIR_DEBOUNCE_MS = 30_000;
 const STUCK_ANNOUNCING_MS = 8_000;
-const ANNOUNCED_SERVICE_STATE = "announced" as BonjourServiceState;
+const BONJOUR_ANNOUNCED_STATE = "announced" as BonjourServiceState;
 const CIAO_SELF_PROBE_RETRY_FRAGMENT =
   "failed probing with reason: Error: Can't probe for a service which is announced already.";
 
@@ -95,7 +96,7 @@ function serviceSummary(label: string, svc: BonjourService): string {
 }
 
 function isAnnouncedState(state: BonjourServiceState | "unknown") {
-  return state === ANNOUNCED_SERVICE_STATE;
+  return state === BONJOUR_ANNOUNCED_STATE;
 }
 
 function handleCiaoUnhandledRejection(reason: unknown): boolean {
@@ -212,7 +213,12 @@ export async function startGatewayBonjourAdvertiser(
         svc: gateway as unknown as BonjourService,
       });
 
-      return { responder, services };
+      const cleanupUnhandledRejection =
+        services.length > 0
+          ? registerUnhandledRejectionHandler(handleCiaoUnhandledRejection)
+          : undefined;
+
+      return { responder, services, cleanupUnhandledRejection };
     }
 
     async function stopCycle(cycle: BonjourCycle | null) {
@@ -244,6 +250,8 @@ export async function startGatewayBonjourAdvertiser(
         await cycle.responder.shutdown();
       } catch {
         /* ignore */
+      } finally {
+        cycle.cleanupUnhandledRejection?.();
       }
     }
 
@@ -296,9 +304,6 @@ export async function startGatewayBonjourAdvertiser(
 
     let stopped = false;
     let recreatePromise: Promise<void> | null = null;
-    const cleanupUnhandledRejection = registerUnhandledRejectionHandler((reason) =>
-      handleCiaoUnhandledRejection(reason),
-    );
     let cycle = createCycle();
     const stateTracker = new Map<string, ServiceStateTracker>();
     attachConflictListeners(cycle.services);
@@ -414,7 +419,6 @@ export async function startGatewayBonjourAdvertiser(
           await recreatePromise;
           await stopCycle(cycle);
         } finally {
-          cleanupUnhandledRejection();
           restoreConsoleLog();
         }
       },

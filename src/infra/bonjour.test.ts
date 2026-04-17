@@ -102,7 +102,6 @@ describe("gateway bonjour advertiser", () => {
     vi.spyOn(logging, "getLogger").mockReturnValue({
       info: (...args: unknown[]) => getLoggerInfo(...args),
     } as unknown as ReturnType<typeof logging.getLogger>);
-    registerUnhandledRejectionHandler.mockImplementation(() => vi.fn());
   });
 
   afterEach(() => {
@@ -441,57 +440,6 @@ describe("gateway bonjour advertiser", () => {
     expect(shutdown).toHaveBeenCalledTimes(1);
 
     await started.stop();
-  });
-
-  it("keeps the active ciao rejection handler after advertiser recreation", async () => {
-    enableAdvertiserUnitMode();
-    vi.useFakeTimers();
-
-    const activeHandlers = new Set<(reason: unknown) => boolean>();
-    registerUnhandledRejectionHandler.mockImplementation(
-      (handler: (reason: unknown) => boolean) => {
-        activeHandlers.add(handler);
-        return () => {
-          activeHandlers.delete(handler);
-        };
-      },
-    );
-
-    const stateRef = { value: "announcing" };
-    const destroy = vi.fn().mockResolvedValue(undefined);
-    let advertiseCount = 0;
-    const advertise = vi.fn().mockImplementation(() => {
-      advertiseCount += 1;
-      if (advertiseCount === 1) {
-        stateRef.value = "announcing";
-        return new Promise<void>(() => {});
-      }
-      stateRef.value = "announced";
-      return Promise.resolve();
-    });
-    mockCiaoService({ advertise, destroy, stateRef });
-
-    const started = await startGatewayBonjourAdvertiser({
-      gatewayPort: 18789,
-      sshPort: 2222,
-    });
-
-    expect(activeHandlers.size).toBe(1);
-
-    await vi.advanceTimersByTimeAsync(15_000);
-
-    expect(createService).toHaveBeenCalledTimes(2);
-    expect(registerUnhandledRejectionHandler).toHaveBeenCalledTimes(1);
-    expect(activeHandlers.size).toBe(1);
-
-    const [activeHandler] = [...activeHandlers];
-    expect(activeHandler?.(new Error("CIAO PROBING CANCELLED"))).toBe(true);
-    expect(logDebug).toHaveBeenCalledWith(
-      expect.stringContaining("ignoring unhandled ciao rejection"),
-    );
-
-    await started.stop();
-    expect(activeHandlers.size).toBe(0);
   });
 
   it("normalizes hostnames with domains for service names", async () => {
