@@ -5,7 +5,7 @@ import {
 } from "../runtime-api.js";
 import { resolveClawlineConfig } from "./config.js";
 import type { Logger, ProviderServer } from "./domain.js";
-import { setClawlineOutboundSender } from "./outbound.js";
+import { createClawlineOutboundSenderOwnerToken, setClawlineOutboundSender } from "./outbound.js";
 import { createProviderServer } from "./server.js";
 import { resolveClawlineMainSessionKey } from "./session-compat.js";
 
@@ -38,14 +38,15 @@ export async function startClawlineService(params: {
     sessionStorePath,
     mainSessionKey,
   });
+  const ownerToken = createClawlineOutboundSenderOwnerToken();
   await server.start();
-  setClawlineOutboundSender((payload) => server.sendMessage(payload));
+  setClawlineOutboundSender((payload) => server.sendMessage(payload), ownerToken);
   logger.info?.(
     `[clawline] listening on ${providerConfig.network.bindAddress}:${server.getPort()}`,
   );
   return {
     stop: async () => {
-      setClawlineOutboundSender(null);
+      setClawlineOutboundSender(null, ownerToken);
       await server.stop();
     },
   };
