@@ -1154,6 +1154,7 @@ const DEFAULT_CONFIG: ProviderConfig = {
   sessions: {
     maxMessageBytes: 65_536,
     maxReplayMessages: 500,
+    maxReplayMessagesPerStream: 20,
     maxPromptMessages: 200,
     maxMessagesPerSecond: 5,
     maxTypingPerSecond: 2,
@@ -1616,6 +1617,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const sessionKeyEq = (a: string, b: string) => normalizeSessionKey(a) === normalizeSessionKey(b);
   const dedupeKeys = (keys: string[]) =>
     Array.from(new Map(keys.map((key) => [normalizeSessionKey(key), key])).values());
+  type AlertSessionKeyIndexEntry = {
+    mtimeMs: number;
+    sizeBytes: number;
+    sessionKeys: Map<string, string>;
+  };
+  const alertSessionKeyIndexByStorePath = new Map<string, AlertSessionKeyIndexEntry>();
 
   const buildSessionInfo = (
     userId: string,
@@ -1671,7 +1678,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     session.sessionKey = info.mainSessionKey;
     return info;
   };
-  const sendSessionInfo = async (session: Session, info?: ReturnType<typeof buildSessionInfo>) => {
+  const sendSessionInfo = async (
+    session: Session,
+    info?: ReturnType<typeof buildSessionInfo>,
+  ): Promise<boolean> => {
     const resolved =
       info ?? buildSessionInfo(session.userId, session.isAdmin, session.adoptedSessionKeys);
     const payload = {
@@ -1683,7 +1693,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       streamReadStates: readStreamReadStatesForUser(session.userId, resolved.streamSessionKeys),
       streamTailStates: readStreamTailStatesForUser(session.userId, resolved.streamSessionKeys),
     };
-    await sendJson(session.socket, payload).catch(() => {});
+    return sendJson(session.socket, payload).catch(() => false);
   };
   async function notifyGatewayOfPending(entry: PendingEntry) {
     const text = `New device pending approval: ${describePairingEntry(entry)}`;
@@ -1764,11 +1774,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   let selectAssetStmt!: SqliteStatement;
   let selectExpiredAssetsStmt!: SqliteStatement;
   let deleteAssetStmt!: SqliteStatement;
-  let selectEventsAfterStmt!: SqliteStatement;
   let selectEventsTailStmt!: SqliteStatement;
+  let selectEventsTailBySessionStmt!: SqliteStatement;
+  let selectEventsAfterBySessionStmt!: SqliteStatement;
+  let countEventsBySessionStmt!: SqliteStatement;
+  let countEventsAfterBySessionStmt!: SqliteStatement;
   let selectEventByIdStmt!: SqliteStatement;
   let selectEventPayloadForUserStmt!: SqliteStatement;
-  let selectEventsAfterTimestampStmt!: SqliteStatement;
   let selectStreamSessionsByUserStmt!: SqliteStatement;
   let selectStreamSessionByKeyStmt!: SqliteStatement;
   let selectStreamMaxOrderStmt!: SqliteStatement;
@@ -2924,17 +2936,33 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       },
     );
 
-    selectEventsAfterStmt = newDb.prepare(
-      `SELECT id, payloadJson
-       FROM events
-       WHERE userId = ? AND eventType = 'message' AND sequence > ?
-       ORDER BY sequence ASC`,
-    );
     selectEventsTailStmt = newDb.prepare(
       `SELECT id, payloadJson
        FROM events
        WHERE userId = ? AND eventType = 'message'
        ORDER BY sequence DESC LIMIT ?`,
+    );
+    selectEventsTailBySessionStmt = newDb.prepare(
+      `SELECT id, payloadJson, sequence, timestamp
+       FROM events
+       WHERE userId = ? AND eventType = 'message' AND sessionKey = ?
+       ORDER BY sequence DESC LIMIT ?`,
+    );
+    selectEventsAfterBySessionStmt = newDb.prepare(
+      `SELECT id, payloadJson, sequence, timestamp
+       FROM events
+       WHERE userId = ? AND eventType = 'message' AND sessionKey = ? AND sequence > ?
+       ORDER BY sequence DESC LIMIT ?`,
+    );
+    countEventsBySessionStmt = newDb.prepare(
+      `SELECT COUNT(*) as count
+       FROM events
+       WHERE userId = ? AND eventType = 'message' AND sessionKey = ?`,
+    );
+    countEventsAfterBySessionStmt = newDb.prepare(
+      `SELECT COUNT(*) as count
+       FROM events
+       WHERE userId = ? AND eventType = 'message' AND sessionKey = ? AND sequence > ?`,
     );
     selectEventByIdStmt = newDb.prepare(
       `SELECT id, userId, sessionKey, sequence, timestamp
@@ -2943,12 +2971,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     );
     selectEventPayloadForUserStmt = newDb.prepare(
       `SELECT payloadJson FROM events WHERE userId = ? AND id = ? AND eventType = 'message'`,
-    );
-    selectEventsAfterTimestampStmt = newDb.prepare(
-      `SELECT id, payloadJson
-       FROM events
-       WHERE userId = ? AND eventType = 'message' AND timestamp > ?
-       ORDER BY sequence ASC`,
     );
     insertEventTx = newDb.transaction(
       (
@@ -3230,7 +3252,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
   }
 
-  type EventRow = { id: string; payloadJson: string };
+  type EventRow = { id: string; payloadJson: string; sequence?: number; timestamp?: number };
 
   const logHttpRequest = (event: string, info?: Record<string, unknown>) => {
     if (info) {
@@ -4078,6 +4100,40 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     return globalFallbackKey;
   }
 
+  async function getAlertSessionKeyIndexForStore(
+    storePath: string,
+  ): Promise<Map<string, string> | null> {
+    let stat: Stats;
+    try {
+      stat = await fs.stat(storePath);
+    } catch (err) {
+      const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+      if (code === "ENOENT") {
+        alertSessionKeyIndexByStorePath.delete(storePath);
+        return null;
+      }
+      throw err;
+    }
+    const cached = alertSessionKeyIndexByStorePath.get(storePath);
+    if (cached && cached.mtimeMs === stat.mtimeMs && cached.sizeBytes === stat.size) {
+      return cached.sessionKeys;
+    }
+    const store = loadSessionStore(storePath);
+    const sessionKeys = new Map<string, string>();
+    for (const key of Object.keys(store)) {
+      const normalized = normalizeSessionKey(key);
+      if (normalized) {
+        sessionKeys.set(normalized, key);
+      }
+    }
+    alertSessionKeyIndexByStorePath.set(storePath, {
+      mtimeMs: stat.mtimeMs,
+      sizeBytes: stat.size,
+      sessionKeys,
+    });
+    return sessionKeys;
+  }
+
   async function resolveGlobalSessionKeyFromAgentStores(sessionKey: string): Promise<string> {
     const normalized = normalizeSessionKey(sessionKey);
     if (!normalized) {
@@ -4099,17 +4155,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         continue;
       }
       const storePath = path.join(agentsDir, entry.name, "sessions", "sessions.json");
-      let store: Record<string, { sessionId?: string }>;
-      try {
-        store = loadSessionStore(storePath, { skipCache: true });
-      } catch (err) {
-        const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
-        if (code === "ENOENT") {
-          continue;
-        }
-        throw err;
-      }
-      const matchedKey = Object.keys(store).find((key) => sessionKeyEq(key, normalized));
+      const sessionKeyIndex = await getAlertSessionKeyIndexForStore(storePath);
+      const matchedKey = sessionKeyIndex?.get(normalized);
       if (matchedKey) {
         return matchedKey;
       }
@@ -5007,11 +5054,16 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     if (!sessions || sessions.size === 0) {
       return;
     }
-    const sends: Promise<boolean>[] = [];
+    const sends: Array<Promise<{ session: Session; delivered: boolean }>> = [];
     for (const session of sessions) {
-      sends.push(sendJson(session.socket, payload));
+      sends.push(sendJson(session.socket, payload).then((delivered) => ({ session, delivered })));
     }
-    await Promise.allSettled(sends);
+    const results = await Promise.allSettled(sends);
+    for (const result of results) {
+      if (result.status === "fulfilled" && !result.value.delivered) {
+        removeSession(result.value.session);
+      }
+    }
   }
 
   async function handleListStreamsRequest(req: http.IncomingMessage, res: http.ServerResponse) {
@@ -5562,9 +5614,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   }
 
   async function sendReplay(session: Session, lastMessageId: string | null) {
-    // All messages are stored under the real userId; sessionKey determines routing.
-    // Query once to get all messages for this user.
-    const transcriptTargets: Array<{ userId: string }> = [{ userId: session.userId }];
     const expectedMainStreamSessionKey = buildClawlinePersonalSessionKey(
       mainSessionAgentId,
       session.userId,
@@ -5595,17 +5644,56 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       }
       event.sessionKey = normalized;
     };
-    let anchor: { userId: string; sequence: number; timestamp: number } | null = null;
+    const normalizeReplayAnchorSessionKey = (rawSessionKey: string, fallbackUserId: string) => {
+      if (!rawSessionKey.trim()) {
+        return "";
+      }
+      const normalizedOpaqueSessionKey = rawSessionKey.trim()
+        ? normalizeSessionKey(rawSessionKey)
+        : "";
+      if (
+        normalizedOpaqueSessionKey &&
+        allowedSessionKeys.has(normalizedOpaqueSessionKey) &&
+        !normalizedOpaqueSessionKey.includes(":clawline:")
+      ) {
+        return normalizedOpaqueSessionKey;
+      }
+      const normalized = normalizeStoredSessionKey(rawSessionKey, fallbackUserId);
+      return normalized && allowedSessionKeys.has(normalizeSessionKey(normalized))
+        ? normalized
+        : "";
+    };
+    let anchor: {
+      userId: string;
+      sessionKey: string;
+      sequence: number;
+      timestamp: number;
+    } | null = null;
     if (lastMessageId) {
       const anchorRow = selectEventByIdStmt.get(lastMessageId) as
-        | { id: string; userId: string; sequence: number; timestamp: number }
+        | {
+            id: string;
+            userId: string;
+            sessionKey: string | null;
+            sequence: number;
+            timestamp: number;
+          }
         | undefined;
       if (anchorRow) {
-        anchor = {
-          userId: anchorRow.userId,
-          sequence: anchorRow.sequence,
-          timestamp: anchorRow.timestamp,
-        };
+        const anchorSessionKey = normalizeReplayAnchorSessionKey(
+          anchorRow.sessionKey ?? "",
+          anchorRow.userId,
+        );
+        if (!anchorSessionKey) {
+          anchor = null;
+        } else {
+          anchor = {
+            userId: anchorRow.userId,
+            sessionKey: anchorSessionKey,
+            sequence: anchorRow.sequence,
+            timestamp: anchorRow.timestamp,
+          };
+        }
       }
     }
     // Debug logging for duplicate investigation
@@ -5616,34 +5704,58 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       anchorFound: !!anchor,
       anchorSequence: anchor?.sequence,
     });
-    const combined: ServerMessage[] = [];
-    for (const target of transcriptTargets) {
-      let rows: EventRow[] = [];
-      if (!anchor) {
-        rows = selectEventsTailStmt.all(
-          target.userId,
-          config.sessions.maxReplayMessages,
-        ) as EventRow[];
-      } else if (target.userId === anchor.userId) {
-        rows = selectEventsAfterStmt.all(target.userId, anchor.sequence) as EventRow[];
-      } else {
-        rows = selectEventsAfterTimestampStmt.all(target.userId, anchor.timestamp) as EventRow[];
+    const replayCap = config.sessions.maxReplayMessagesPerStream;
+    let replayTruncated = false;
+    let anchorApplied = false;
+    const selected: Array<{ event: ServerMessage; sequence: number }> = [];
+    const replaySessionKeys = dedupeKeys(
+      session.sessionKeys.length > 0 ? session.sessionKeys : session.provisionedSessionKeys,
+    );
+    for (const sessionKey of replaySessionKeys) {
+      const normalizedSessionKey = normalizeSessionKey(sessionKey);
+      const hasAnchorForStream =
+        anchor !== null &&
+        anchor.userId === session.userId &&
+        sessionKeyEq(anchor.sessionKey, normalizedSessionKey);
+      if (hasAnchorForStream) {
+        anchorApplied = true;
       }
+      const anchorSequence = hasAnchorForStream ? anchor?.sequence : undefined;
+      const totalEligibleRow = (
+        anchorSequence !== undefined
+          ? countEventsAfterBySessionStmt.get(session.userId, normalizedSessionKey, anchorSequence)
+          : countEventsBySessionStmt.get(session.userId, normalizedSessionKey)
+      ) as { count: number };
+      if (totalEligibleRow.count > replayCap) {
+        replayTruncated = true;
+      }
+      const rows = (
+        anchorSequence !== undefined
+          ? selectEventsAfterBySessionStmt.all(
+              session.userId,
+              normalizedSessionKey,
+              anchorSequence,
+              replayCap,
+            )
+          : selectEventsTailBySessionStmt.all(session.userId, normalizedSessionKey, replayCap)
+      ) as EventRow[];
       const parsed = rows
+        .toReversed()
         .map((row) => parseServerMessage(row.payloadJson, logger))
-        .filter((event): event is ServerMessage => Boolean(event))
-        .map((event) => {
+        .map((event, index) => ({ event, row: rows[rows.length - 1 - index] }))
+        .filter(
+          (entry): entry is { event: ServerMessage; row: EventRow } =>
+            Boolean(entry.event) && Boolean(entry.row),
+        )
+        .map(({ event, row }) => {
           event.attachments = canonicalizeReplayAttachments(event.attachments, logger, event.id);
           normalizeEventRouting(event);
-          return event;
+          return { event, sequence: row.sequence ?? 0 };
         });
-      combined.push(...parsed);
+      selected.push(...parsed);
     }
-    combined.sort((a, b) => a.timestamp - b.timestamp);
-    const limited =
-      combined.length > config.sessions.maxReplayMessages
-        ? combined.slice(combined.length - config.sessions.maxReplayMessages)
-        : combined;
+    selected.sort((a, b) => a.event.timestamp - b.event.timestamp || a.sequence - b.sequence);
+    const limited = selected.map(({ event }) => event);
     const sessionInfo = buildSessionInfo(
       session.userId,
       session.isAdmin,
@@ -5656,8 +5768,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       sessionId: session.sessionId,
       isAdmin: session.isAdmin,
       replayCount: limited.length,
-      replayTruncated: combined.length > limited.length,
-      historyReset: !lastMessageId,
+      replayTruncated,
+      historyReset: !anchorApplied,
       features: buildAuthResultFeatures(session),
       dmScope: sessionInfo.dmScope,
       sessionKeys: sessionInfo.streamSessionKeys,
@@ -5682,9 +5794,30 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       firstEventId: limited[0]?.id,
       lastEventId: limited[limited.length - 1]?.id,
     });
-    await sendJson(session.socket, payload).catch(() => {});
-    await sendJson(session.socket, { type: "stream_snapshot", streams }).catch(() => {});
-    await sendSessionInfo(session, sessionInfo);
+    const abortReplay = () => {
+      removeSession(session);
+      connectionState.delete(session.socket);
+      if (
+        session.socket.readyState !== WebSocket.CLOSED &&
+        session.socket.readyState !== WebSocket.CLOSING
+      ) {
+        session.socket.close();
+      }
+    };
+    if (!(await sendJson(session.socket, payload).catch(() => false))) {
+      abortReplay();
+      return;
+    }
+    if (
+      !(await sendJson(session.socket, { type: "stream_snapshot", streams }).catch(() => false))
+    ) {
+      abortReplay();
+      return;
+    }
+    if (!(await sendSessionInfo(session, sessionInfo))) {
+      abortReplay();
+      return;
+    }
     for (const event of limited) {
       const normalized = normalizePayloadForSession(session, event, mainSessionKey.toLowerCase());
       if (!normalized) {
@@ -5729,7 +5862,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           },
         );
       }
-      await sendJson(session.socket, normalized).catch(() => {});
+      if (!(await sendJson(session.socket, normalized).catch(() => false))) {
+        abortReplay();
+        return;
+      }
     }
   }
 
@@ -5768,6 +5904,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         sessionId: session.sessionId,
         socketState: socketStateLabel(session.socket),
       });
+      removeSession(session);
       return;
     }
     logger.info?.("[clawline] outbound_delivery_attempt", {
@@ -5808,6 +5945,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           socketState: socketStateLabel(session.socket),
           error: formatError(err),
         });
+        removeSession(session);
         session.socket.close();
         return;
       }
@@ -6160,7 +6298,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   }
 
   function removeSession(session: Session) {
-    sessionsByDevice.delete(session.deviceId);
+    if (sessionsByDevice.get(session.deviceId) === session) {
+      sessionsByDevice.delete(session.deviceId);
+    }
     const sessions = userSessions.get(session.userId);
     if (sessions) {
       sessions.delete(session);

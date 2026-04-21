@@ -108,6 +108,7 @@ const DEFAULTS: ResolvedClawlineConfig = {
   sessions: {
     maxMessageBytes: 65_536,
     maxReplayMessages: 500,
+    maxReplayMessagesPerStream: 20,
     maxPromptMessages: 200,
     maxMessagesPerSecond: 5,
     maxTypingPerSecond: 2,

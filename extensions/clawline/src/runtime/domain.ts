@@ -164,6 +164,7 @@ export interface ProviderConfig {
   sessions: {
     maxMessageBytes: number;
     maxReplayMessages: number;
+    maxReplayMessagesPerStream: number;
     maxPromptMessages: number;
     maxMessagesPerSecond: number;
     maxTypingPerSecond: number;

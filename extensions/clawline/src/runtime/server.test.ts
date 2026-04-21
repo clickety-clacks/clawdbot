@@ -24,11 +24,20 @@ import { enqueueSystemEvent, resetSystemEventsForTest } from "./system-events.js
 
 const gatewayCallMock = vi.fn();
 const enqueueAnnounceMock = vi.fn();
+const loadSessionStoreMock = vi.fn();
 vi.mock("../runtime-api.js", async () => {
   const actual = await vi.importActual("../runtime-api.js");
   return {
     ...actual,
     enqueueAnnounce: (...args: unknown[]) => enqueueAnnounceMock(...args),
+    loadSessionStore: (...args: unknown[]) => {
+      loadSessionStoreMock(...args);
+      return (
+        actual as {
+          loadSessionStore: (...innerArgs: unknown[]) => unknown;
+        }
+      ).loadSessionStore(...args);
+    },
   };
 });
 
@@ -269,6 +278,7 @@ beforeEach(() => {
   gatewayCallMock.mockResolvedValue({ ok: true });
   enqueueAnnounceMock.mockReset();
   enqueueAnnounceMock.mockReturnValue(true);
+  loadSessionStoreMock.mockClear();
   sendMessageMock.mockReset();
   sendMessageMock.mockResolvedValue({
     channel: "clawline",
@@ -574,6 +584,26 @@ async function waitForQueuedMessageWithTimeout(
       ),
     ),
   ]);
+}
+
+async function collectQueuedMessagesUntilIdle(
+  queue: ReturnType<typeof createMessageQueue>,
+  options: { idleMs?: number; maxMessages?: number } = {},
+) {
+  const idleMs = options.idleMs ?? 150;
+  const maxMessages = options.maxMessages ?? 100;
+  const messages: ParsedWsFrame[] = [];
+  for (let index = 0; index < maxMessages; index += 1) {
+    const next = await Promise.race([
+      queue.next(),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), idleMs)),
+    ]);
+    if (next === null) {
+      break;
+    }
+    messages.push(next);
+  }
+  return messages;
 }
 
 async function performPairRequest(
@@ -1400,6 +1430,182 @@ describe.sequential("clawline provider server", () => {
         ws.terminate();
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("replays the latest 20 messages per subscribed stream independently", async () => {
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      userId: "flynn",
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry]);
+    try {
+      const personalSessionKey = "agent:main:clawline:flynn:main";
+      const globalSessionKey = "agent:main:main";
+      for (let index = 1; index <= 25; index += 1) {
+        await ctx.server.sendMessage({
+          target: entry.userId,
+          text: `personal ${index}`,
+          sessionKey: personalSessionKey,
+        });
+      }
+      for (let index = 1; index <= 5; index += 1) {
+        await ctx.server.sendMessage({
+          target: entry.userId,
+          text: `global ${index}`,
+          sessionKey: globalSessionKey,
+        });
+      }
+
+      const pair = await performPairRequest(ctx.port, entry.deviceId);
+      const { ws, queue, auth } = await authenticateDeviceWithQueue(
+        ctx.port,
+        entry.deviceId,
+        pair.token as string,
+      );
+      try {
+        expect(auth.replayTruncated).toBe(true);
+        const replayed = await collectQueuedMessagesUntilIdle(queue);
+        const messages = replayed.filter((value) => value.type === "message");
+        const personalMessages = messages.filter(
+          (value) => value.sessionKey === personalSessionKey,
+        );
+        const globalMessages = messages.filter((value) => value.sessionKey === globalSessionKey);
+
+        expect(messages).toHaveLength(25);
+        expect(personalMessages.map((value) => value.content)).toEqual(
+          Array.from({ length: 20 }, (_, index) => `personal ${index + 6}`),
+        );
+        expect(globalMessages.map((value) => value.content)).toEqual(
+          Array.from({ length: 5 }, (_, index) => `global ${index + 1}`),
+        );
+        expect(messages.map((value) => value.content)).toEqual([
+          ...Array.from({ length: 20 }, (_, index) => `personal ${index + 6}`),
+          ...Array.from({ length: 5 }, (_, index) => `global ${index + 1}`),
+        ]);
+      } finally {
+        queue.dispose();
+        ws.terminate();
+      }
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("marks replay history reset when the supplied anchor is stale", async () => {
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      userId: "flynn",
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry]);
+    try {
+      const pair = await performPairRequest(ctx.port, entry.deviceId);
+      const { ws, auth } = await authenticateDevice(
+        ctx.port,
+        entry.deviceId,
+        pair.token as string,
+        {
+          authPayload: { lastMessageId: `s_${randomUUID()}` },
+        },
+      );
+      expect(auth.historyReset).toBe(true);
+      ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("marks replay history reset when the supplied anchor belongs to another user", async () => {
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      userId: "flynn",
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const otherEntry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      userId: "other",
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry, otherEntry]);
+    try {
+      const otherMessage = await ctx.server.sendMessage({
+        target: otherEntry.userId,
+        text: "other global",
+        sessionKey: "agent:main:main",
+      });
+
+      const pair = await performPairRequest(ctx.port, entry.deviceId);
+      const { ws, auth } = await authenticateDevice(
+        ctx.port,
+        entry.deviceId,
+        pair.token as string,
+        {
+          authPayload: { lastMessageId: otherMessage.messageId },
+        },
+      );
+      expect(auth.historyReset).toBe(true);
+      ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("stops replay immediately when the socket closes during initial replay sends", async () => {
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      userId: "flynn",
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const info = vi.fn();
+    const logger: Logger = {
+      info,
+      warn: () => {},
+      error: () => {},
+    };
+    const ctx = await setupTestServer([entry], { logger });
+    try {
+      for (let index = 1; index <= 5; index += 1) {
+        await ctx.server.sendMessage({
+          target: entry.userId,
+          text: `replay ${index}`,
+          sessionKey: "agent:main:clawline:flynn:main",
+        });
+      }
+
+      const pair = await performPairRequest(ctx.port, entry.deviceId);
+      const ws = new WebSocket(`ws://127.0.0.1:${ctx.port}/ws`);
+      await waitForOpen(ws);
+      await new Promise<void>((resolve, reject) => {
+        ws.send(
+          JSON.stringify({
+            type: "auth",
+            protocolVersion: PROTOCOL_VERSION,
+            deviceId: entry.deviceId,
+            token: pair.token,
+          }),
+          (err) => {
+            if (err) {
+              reject(err);
+              return;
+            }
+            ws.terminate();
+            resolve();
+          },
+        );
+      });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      const replaySendLogs = info.mock.calls.filter(([event]) => event === "replay_send");
+      expect(replaySendLogs).toHaveLength(0);
     } finally {
       await ctx.cleanup();
     }
@@ -2660,6 +2866,133 @@ describe.sequential("clawline provider server", () => {
         channel: "clawline",
         to: globalSessionKey,
       });
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("reuses the alert fallback session-key index while store files are unchanged", async () => {
+    const entry = createAllowlistEntry();
+    const ctx = await setupTestServer([entry]);
+    const authHeader = await createAuthHeader(ctx, entry);
+    const globalSessionKey = "agent:codex:discord:channel:stable";
+    const rootDir = path.dirname(path.dirname(ctx.allowlistPath));
+    const globalStorePath = path.join(rootDir, "agents", "codex", "sessions", "sessions.json");
+    try {
+      await fs.mkdir(path.dirname(globalStorePath), { recursive: true });
+      await fs.writeFile(
+        globalStorePath,
+        JSON.stringify(
+          {
+            [globalSessionKey]: {
+              sessionId: "sess_global_alert_stable",
+              updatedAt: Date.now(),
+            },
+          },
+          null,
+          2,
+        ),
+      );
+
+      loadSessionStoreMock.mockClear();
+      for (let index = 0; index < 2; index += 1) {
+        const response = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: authHeader },
+          body: JSON.stringify({
+            message: `Check global registered session ${index}`,
+            source: "codex",
+            sessionKey: globalSessionKey,
+          }),
+        });
+        expect(response.status).toBe(200);
+      }
+
+      const fallbackLoads = loadSessionStoreMock.mock.calls.filter(
+        ([storePath]) => storePath === globalStorePath,
+      );
+      expect(fallbackLoads).toHaveLength(1);
+      expect(fallbackLoads[0]?.[1]).not.toMatchObject({ skipCache: true });
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("rebuilds the alert fallback session-key index when a store file changes", async () => {
+    const entry = createAllowlistEntry();
+    const ctx = await setupTestServer([entry]);
+    const authHeader = await createAuthHeader(ctx, entry);
+    const firstSessionKey = "agent:codex:discord:channel:first";
+    const secondSessionKey = "agent:codex:discord:channel:second";
+    const rootDir = path.dirname(path.dirname(ctx.allowlistPath));
+    const globalStorePath = path.join(rootDir, "agents", "codex", "sessions", "sessions.json");
+    try {
+      await fs.mkdir(path.dirname(globalStorePath), { recursive: true });
+      await fs.writeFile(
+        globalStorePath,
+        JSON.stringify(
+          {
+            [firstSessionKey]: {
+              sessionId: "sess_global_alert_first",
+              updatedAt: Date.now(),
+            },
+          },
+          null,
+          2,
+        ),
+      );
+
+      const firstResponse = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: authHeader },
+        body: JSON.stringify({
+          message: "Warm global registered session",
+          source: "codex",
+          sessionKey: firstSessionKey,
+        }),
+      });
+      expect(firstResponse.status).toBe(200);
+
+      loadSessionStoreMock.mockClear();
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      await fs.writeFile(
+        globalStorePath,
+        JSON.stringify(
+          {
+            [firstSessionKey]: {
+              sessionId: "sess_global_alert_first",
+              updatedAt: Date.now(),
+            },
+            [secondSessionKey]: {
+              sessionId: "sess_global_alert_second",
+              updatedAt: Date.now(),
+            },
+          },
+          null,
+          2,
+        ),
+      );
+
+      const secondResponse = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: authHeader },
+        body: JSON.stringify({
+          message: "Check updated global registered session",
+          source: "codex",
+          sessionKey: secondSessionKey,
+        }),
+      });
+      expect(secondResponse.status).toBe(200);
+      const fallbackLoads = loadSessionStoreMock.mock.calls.filter(
+        ([storePath]) => storePath === globalStorePath,
+      );
+      expect(fallbackLoads).toHaveLength(1);
+      expect(enqueueAnnounceMock).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          key: secondSessionKey,
+          item: expect.objectContaining({ sessionKey: secondSessionKey }),
+        }),
+      );
     } finally {
       await ctx.cleanup();
     }
