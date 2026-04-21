@@ -1,6 +1,6 @@
 import { execFile as execFileCb } from "node:child_process";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import type { Dirent, Stats } from "node:fs";
+import type { Stats } from "node:fs";
 import { watch, type FSWatcher, createReadStream } from "node:fs";
 import fs from "node:fs/promises";
 import http from "node:http";
@@ -1617,12 +1617,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const sessionKeyEq = (a: string, b: string) => normalizeSessionKey(a) === normalizeSessionKey(b);
   const dedupeKeys = (keys: string[]) =>
     Array.from(new Map(keys.map((key) => [normalizeSessionKey(key), key])).values());
-  type AlertSessionKeyIndexEntry = {
-    mtimeMs: number;
-    sizeBytes: number;
-    sessionKeys: Map<string, string>;
-  };
-  const alertSessionKeyIndexByStorePath = new Map<string, AlertSessionKeyIndexEntry>();
 
   const buildSessionInfo = (
     userId: string,
@@ -4093,79 +4087,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       }
     }
 
-    const globalFallbackKey = await resolveGlobalAlertSessionKey(resolvedSessionKey);
-    if (!globalFallbackKey) {
-      throw new HttpError(404, "stream_not_found", "Stream not found");
-    }
-    return globalFallbackKey;
-  }
-
-  async function getAlertSessionKeyIndexForStore(
-    storePath: string,
-  ): Promise<Map<string, string> | null> {
-    let stat: Stats;
-    try {
-      stat = await fs.stat(storePath);
-    } catch (err) {
-      const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
-      if (code === "ENOENT") {
-        alertSessionKeyIndexByStorePath.delete(storePath);
-        return null;
-      }
-      throw err;
-    }
-    const cached = alertSessionKeyIndexByStorePath.get(storePath);
-    if (cached && cached.mtimeMs === stat.mtimeMs && cached.sizeBytes === stat.size) {
-      return cached.sessionKeys;
-    }
-    const store = loadSessionStore(storePath);
-    const sessionKeys = new Map<string, string>();
-    for (const key of Object.keys(store)) {
-      const normalized = normalizeSessionKey(key);
-      if (normalized) {
-        sessionKeys.set(normalized, key);
-      }
-    }
-    alertSessionKeyIndexByStorePath.set(storePath, {
-      mtimeMs: stat.mtimeMs,
-      sizeBytes: stat.size,
-      sessionKeys,
-    });
-    return sessionKeys;
-  }
-
-  async function resolveGlobalSessionKeyFromAgentStores(sessionKey: string): Promise<string> {
-    const normalized = normalizeSessionKey(sessionKey);
-    if (!normalized) {
-      return "";
-    }
-    const agentsDir = path.join(path.dirname(config.statePath), "agents");
-    let agentEntries: Dirent[] = [];
-    try {
-      agentEntries = await fs.readdir(agentsDir, { withFileTypes: true });
-    } catch (err) {
-      const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
-      if (code === "ENOENT") {
-        return "";
-      }
-      throw err;
-    }
-    for (const entry of agentEntries) {
-      if (!entry.isDirectory()) {
-        continue;
-      }
-      const storePath = path.join(agentsDir, entry.name, "sessions", "sessions.json");
-      const sessionKeyIndex = await getAlertSessionKeyIndexForStore(storePath);
-      const matchedKey = sessionKeyIndex?.get(normalized);
-      if (matchedKey) {
-        return matchedKey;
-      }
-    }
-    return "";
-  }
-
-  async function resolveGlobalAlertSessionKey(sessionKey: string): Promise<string> {
-    return resolveGlobalSessionKeyFromAgentStores(sessionKey);
+    throw new HttpError(404, "stream_not_found", "Stream not found");
   }
 
   async function wakeGatewayForAlert(text: string, sessionKey?: string, attachments?: unknown[]) {
@@ -7531,18 +7453,14 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         ),
       };
     }
-    const globalSessionKey = await resolveGlobalSessionKeyFromAgentStores(trimmed);
-    if (!globalSessionKey) {
-      throw new Error("Invalid clawline session key");
-    }
-    const owningUserId = resolveOwningUserIdForSessionKey(globalSessionKey);
+    const owningUserId = resolveOwningUserIdForSessionKey(trimmed);
     if (!owningUserId) {
       throw new Error("Invalid clawline session key");
     }
     return {
       kind: "session",
       userId: owningUserId,
-      sessionKey: globalSessionKey,
+      sessionKey: trimmed,
     };
   }
 

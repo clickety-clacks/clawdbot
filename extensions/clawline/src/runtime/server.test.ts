@@ -2822,7 +2822,7 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
-  it("routes alerts to globally registered non-clawline session keys via fallback", async () => {
+  it("rejects globally registered non-clawline alert session keys without store lookup", async () => {
     const entry = createAllowlistEntry();
     const ctx = await setupTestServer([entry]);
     const authHeader = await createAuthHeader(ctx, entry);
@@ -2854,145 +2854,16 @@ describe.sequential("clawline provider server", () => {
           sessionKey: globalSessionKey,
         }),
       });
-      expect(response.status).toBe(200);
-      expect(enqueueAnnounceMock).toHaveBeenCalledTimes(1);
-      const call = enqueueAnnounceMock.mock.calls[0]?.[0] as {
-        key?: string;
-        item?: { sessionKey?: string; origin?: { channel?: string; to?: string } };
-      };
-      expect(call?.key).toBe(globalSessionKey);
-      expect(call?.item?.sessionKey).toBe(globalSessionKey);
-      expect(call?.item?.origin).toEqual({
-        channel: "clawline",
-        to: globalSessionKey,
-      });
-    } finally {
-      await ctx.cleanup();
-    }
-  });
-
-  it("reuses the alert fallback session-key index while store files are unchanged", async () => {
-    const entry = createAllowlistEntry();
-    const ctx = await setupTestServer([entry]);
-    const authHeader = await createAuthHeader(ctx, entry);
-    const globalSessionKey = "agent:codex:discord:channel:stable";
-    const rootDir = path.dirname(path.dirname(ctx.allowlistPath));
-    const globalStorePath = path.join(rootDir, "agents", "codex", "sessions", "sessions.json");
-    try {
-      await fs.mkdir(path.dirname(globalStorePath), { recursive: true });
-      await fs.writeFile(
-        globalStorePath,
-        JSON.stringify(
-          {
-            [globalSessionKey]: {
-              sessionId: "sess_global_alert_stable",
-              updatedAt: Date.now(),
-            },
-          },
-          null,
-          2,
-        ),
-      );
-
-      loadSessionStoreMock.mockClear();
-      for (let index = 0; index < 2; index += 1) {
-        const response = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: authHeader },
-          body: JSON.stringify({
-            message: `Check global registered session ${index}`,
-            source: "codex",
-            sessionKey: globalSessionKey,
-          }),
-        });
-        expect(response.status).toBe(200);
-      }
-
-      const fallbackLoads = loadSessionStoreMock.mock.calls.filter(
+      expect(response.status).toBe(404);
+      const data = (await response.json()) as { code?: string };
+      expect(data.code).toBe("stream_not_found");
+      expect(enqueueAnnounceMock).not.toHaveBeenCalled();
+      expect(gatewayCallMock).not.toHaveBeenCalled();
+      expect(sendMessageMock).not.toHaveBeenCalled();
+      const storeLoads = loadSessionStoreMock.mock.calls.filter(
         ([storePath]) => storePath === globalStorePath,
       );
-      expect(fallbackLoads).toHaveLength(1);
-      expect(fallbackLoads[0]?.[1]).not.toMatchObject({ skipCache: true });
-    } finally {
-      await ctx.cleanup();
-    }
-  });
-
-  it("rebuilds the alert fallback session-key index when a store file changes", async () => {
-    const entry = createAllowlistEntry();
-    const ctx = await setupTestServer([entry]);
-    const authHeader = await createAuthHeader(ctx, entry);
-    const firstSessionKey = "agent:codex:discord:channel:first";
-    const secondSessionKey = "agent:codex:discord:channel:second";
-    const rootDir = path.dirname(path.dirname(ctx.allowlistPath));
-    const globalStorePath = path.join(rootDir, "agents", "codex", "sessions", "sessions.json");
-    try {
-      await fs.mkdir(path.dirname(globalStorePath), { recursive: true });
-      await fs.writeFile(
-        globalStorePath,
-        JSON.stringify(
-          {
-            [firstSessionKey]: {
-              sessionId: "sess_global_alert_first",
-              updatedAt: Date.now(),
-            },
-          },
-          null,
-          2,
-        ),
-      );
-
-      const firstResponse = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: authHeader },
-        body: JSON.stringify({
-          message: "Warm global registered session",
-          source: "codex",
-          sessionKey: firstSessionKey,
-        }),
-      });
-      expect(firstResponse.status).toBe(200);
-
-      loadSessionStoreMock.mockClear();
-      await new Promise((resolve) => setTimeout(resolve, 5));
-      await fs.writeFile(
-        globalStorePath,
-        JSON.stringify(
-          {
-            [firstSessionKey]: {
-              sessionId: "sess_global_alert_first",
-              updatedAt: Date.now(),
-            },
-            [secondSessionKey]: {
-              sessionId: "sess_global_alert_second",
-              updatedAt: Date.now(),
-            },
-          },
-          null,
-          2,
-        ),
-      );
-
-      const secondResponse = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: authHeader },
-        body: JSON.stringify({
-          message: "Check updated global registered session",
-          source: "codex",
-          sessionKey: secondSessionKey,
-        }),
-      });
-      expect(secondResponse.status).toBe(200);
-      const fallbackLoads = loadSessionStoreMock.mock.calls.filter(
-        ([storePath]) => storePath === globalStorePath,
-      );
-      expect(fallbackLoads).toHaveLength(1);
-      expect(enqueueAnnounceMock).toHaveBeenLastCalledWith(
-        expect.objectContaining({
-          key: secondSessionKey,
-          item: expect.objectContaining({ sessionKey: secondSessionKey }),
-        }),
-      );
+      expect(storeLoads).toHaveLength(0);
     } finally {
       await ctx.cleanup();
     }
