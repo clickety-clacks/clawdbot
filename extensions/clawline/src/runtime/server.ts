@@ -8705,13 +8705,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         !Array.isArray(payload.replayCursorsBySessionKey)
           ? (payload.replayCursorsBySessionKey as Record<string, unknown>)
           : {};
-      if (Object.keys(replayCursorsBySessionKey).length === 0) {
+      if (typeof payload.lastMessageId === "string") {
         logger.warn?.("[clawline] deprecated_replay_auth_field", {
           deviceId: session.deviceId,
           userId: session.userId,
           deprecatedField: "lastMessageId",
           replacementField: "replayCursorsBySessionKey",
-          lastMessageIdPresent: typeof payload.lastMessageId === "string",
+          lastMessageIdPresent: true,
         });
       }
       logger.info("replay_request", {
