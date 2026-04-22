@@ -207,6 +207,8 @@ export type ClawlineOutboundSendParams = {
   attachments?: ClawlineOutboundAttachmentInput[];
   /** Session key for this delivery (optional; otherwise derived from target). */
   sessionKey?: string;
+  replyToMessageId?: string;
+  replyToClientMessageId?: string;
 };
 
 export type ClawlineOutboundSendResult = {

@@ -1,7 +1,12 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { ClawlineOutboundSendParams, ClawlineOutboundSendResult } from "./domain.js";
 
 type ClawlineSendFn = (params: ClawlineOutboundSendParams) => Promise<ClawlineOutboundSendResult>;
 export type ClawlineOutboundSenderOwnerToken = symbol;
+type ClawlineOutboundCorrelation = Pick<
+  ClawlineOutboundSendParams,
+  "replyToMessageId" | "replyToClientMessageId"
+>;
 
 type ClawlineOutboundBridgeState = {
   ownerToken: ClawlineOutboundSenderOwnerToken | null;
@@ -9,6 +14,7 @@ type ClawlineOutboundBridgeState = {
 };
 
 const CLAWLINE_OUTBOUND_BRIDGE_STATE_KEY = Symbol.for("openclaw.clawline.outboundBridgeState");
+const outboundCorrelation = new AsyncLocalStorage<ClawlineOutboundCorrelation>();
 
 function getClawlineOutboundBridgeGlobalStore(): typeof globalThis & {
   [CLAWLINE_OUTBOUND_BRIDGE_STATE_KEY]?: ClawlineOutboundBridgeState;
@@ -75,5 +81,17 @@ export async function sendClawlineOutboundMessage(
   if (!sender) {
     throw new Error("clawline outbound delivery is not available (service not running)");
   }
-  return await sender(params);
+  const correlation = outboundCorrelation.getStore();
+  return await sender({
+    ...params,
+    replyToMessageId: params.replyToMessageId ?? correlation?.replyToMessageId,
+    replyToClientMessageId: params.replyToClientMessageId ?? correlation?.replyToClientMessageId,
+  });
+}
+
+export async function runWithClawlineOutboundCorrelation<T>(
+  correlation: ClawlineOutboundCorrelation,
+  task: () => Promise<T>,
+): Promise<T> {
+  return await outboundCorrelation.run(correlation, task);
 }

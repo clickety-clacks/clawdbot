@@ -728,6 +728,16 @@ async function authenticateDevice(
     }
     sessionInfo = next;
   }
+  if (auth.replayCount === 0) {
+    const syncComplete = await queue.next();
+    if (syncComplete?.type !== "sync_complete") {
+      queue.dispose();
+      ws.terminate();
+      throw new Error(
+        `Expected sync_complete after auth setup, got ${JSON.stringify(syncComplete)}`,
+      );
+    }
+  }
   queue.dispose();
   return { ws, auth, streamSnapshot, sessionInfo };
 }
@@ -1486,6 +1496,134 @@ describe.sequential("clawline provider server", () => {
         expect(messages.map((value) => value.content)).toEqual([
           ...Array.from({ length: 20 }, (_, index) => `personal ${index + 6}`),
           ...Array.from({ length: 5 }, (_, index) => `global ${index + 1}`),
+        ]);
+      } finally {
+        queue.dispose();
+        ws.terminate();
+      }
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("uses per-stream replay cursors and legacy fallback only for the owning stream", async () => {
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      userId: "flynn",
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry]);
+    try {
+      const personalSessionKey = "agent:main:clawline:flynn:main";
+      const globalSessionKey = "agent:main:main";
+      const personal1 = await ctx.server.sendMessage({
+        target: entry.userId,
+        text: "personal 1",
+        sessionKey: personalSessionKey,
+      });
+      await ctx.server.sendMessage({
+        target: entry.userId,
+        text: "personal 2",
+        sessionKey: personalSessionKey,
+      });
+      const global1 = await ctx.server.sendMessage({
+        target: entry.userId,
+        text: "global 1",
+        sessionKey: globalSessionKey,
+      });
+      await ctx.server.sendMessage({
+        target: entry.userId,
+        text: "global 2",
+        sessionKey: globalSessionKey,
+      });
+
+      const pair = await performPairRequest(ctx.port, entry.deviceId);
+      const { ws, queue, auth } = await authenticateDeviceWithQueue(
+        ctx.port,
+        entry.deviceId,
+        pair.token as string,
+        {
+          authPayload: {
+            lastMessageId: global1.messageId,
+            replayCursorsBySessionKey: {
+              [personalSessionKey]: personal1.messageId,
+            },
+          },
+        },
+      );
+      try {
+        expect(auth.historyReset).toBe(false);
+        expect(auth.replayCount).toBe(2);
+        const replayed = await collectQueuedMessagesUntilIdle(queue);
+        const messages = replayed.filter((value) => value.type === "message");
+        expect(messages.map((value) => value.content)).toEqual(["personal 2", "global 2"]);
+        expect(replayed.some((value) => value.type === "sync_complete")).toBe(true);
+      } finally {
+        queue.dispose();
+        ws.terminate();
+      }
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("treats invalid per-stream cursors as latest-window recovery for only that stream", async () => {
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      userId: "flynn",
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry]);
+    try {
+      const personalSessionKey = "agent:main:clawline:flynn:main";
+      const globalSessionKey = "agent:main:main";
+      const personal1 = await ctx.server.sendMessage({
+        target: entry.userId,
+        text: "personal 1",
+        sessionKey: personalSessionKey,
+      });
+      await ctx.server.sendMessage({
+        target: entry.userId,
+        text: "personal 2",
+        sessionKey: personalSessionKey,
+      });
+      const global1 = await ctx.server.sendMessage({
+        target: entry.userId,
+        text: "global 1",
+        sessionKey: globalSessionKey,
+      });
+      await ctx.server.sendMessage({
+        target: entry.userId,
+        text: "global 2",
+        sessionKey: globalSessionKey,
+      });
+
+      const pair = await performPairRequest(ctx.port, entry.deviceId);
+      const { ws, queue, auth } = await authenticateDeviceWithQueue(
+        ctx.port,
+        entry.deviceId,
+        pair.token as string,
+        {
+          authPayload: {
+            lastMessageId: global1.messageId,
+            replayCursorsBySessionKey: {
+              [personalSessionKey]: personal1.messageId,
+              [globalSessionKey]: `s_${randomUUID()}`,
+            },
+          },
+        },
+      );
+      try {
+        expect(auth.historyReset).toBe(true);
+        expect(auth.replayCount).toBe(3);
+        const replayed = await collectQueuedMessagesUntilIdle(queue);
+        const messages = replayed.filter((value) => value.type === "message");
+        expect(messages.map((value) => value.content)).toEqual([
+          "personal 2",
+          "global 1",
+          "global 2",
         ]);
       } finally {
         queue.dispose();
@@ -2822,12 +2960,14 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
-  it("rejects globally registered non-clawline alert session keys without store lookup", async () => {
+  it("routes alerts to globally registered non-clawline session keys", async () => {
     const entry = createAllowlistEntry();
-    const ctx = await setupTestServer([entry]);
+    const ctx = await setupTestServer([entry], {
+      sessionStorePathRelative: path.join("agents", "main", "sessions", "sessions.json"),
+    });
     const authHeader = await createAuthHeader(ctx, entry);
     const globalSessionKey = "agent:codex:discord:channel:123";
-    const rootDir = path.dirname(path.dirname(ctx.allowlistPath));
+    const rootDir = path.dirname(path.dirname(path.dirname(path.dirname(ctx.sessionStorePath))));
     const globalStorePath = path.join(rootDir, "agents", "codex", "sessions", "sessions.json");
     try {
       await fs.mkdir(path.dirname(globalStorePath), { recursive: true });
@@ -2854,16 +2994,62 @@ describe.sequential("clawline provider server", () => {
           sessionKey: globalSessionKey,
         }),
       });
-      expect(response.status).toBe(404);
-      const data = (await response.json()) as { code?: string };
-      expect(data.code).toBe("stream_not_found");
-      expect(enqueueAnnounceMock).not.toHaveBeenCalled();
+      expect(response.status).toBe(200);
+      const data = await response.json();
+      expect(data).toEqual({ ok: true });
+      expect(enqueueAnnounceMock).toHaveBeenCalledTimes(1);
+      const call = enqueueAnnounceMock.mock.calls[0]?.[0] as {
+        key?: string;
+        item?: { origin?: { channel?: string; to?: string }; sessionKey?: string };
+      };
+      expect(call?.key).toBe(globalSessionKey);
+      expect(call?.item?.sessionKey).toBe(globalSessionKey);
+      expect(call?.item?.origin).toEqual({ channel: "clawline", to: globalSessionKey });
       expect(gatewayCallMock).not.toHaveBeenCalled();
       expect(sendMessageMock).not.toHaveBeenCalled();
-      const storeLoads = loadSessionStoreMock.mock.calls.filter(
-        ([storePath]) => storePath === globalStorePath,
+      expect(loadSessionStoreMock).not.toHaveBeenCalled();
+
+      const repeatedResponse = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: authHeader },
+        body: JSON.stringify({
+          message: "Check cached global registered session",
+          source: "codex",
+          sessionKey: globalSessionKey,
+        }),
+      });
+      expect(repeatedResponse.status).toBe(200);
+      expect(loadSessionStoreMock).not.toHaveBeenCalled();
+
+      const newGlobalSessionKey = "agent:codex:discord:channel:456";
+      await fs.writeFile(
+        globalStorePath,
+        JSON.stringify(
+          {
+            [globalSessionKey]: {
+              sessionId: "sess_global_alert",
+              updatedAt: Date.now(),
+            },
+            [newGlobalSessionKey]: {
+              sessionId: "sess_global_alert_new",
+              updatedAt: Date.now(),
+            },
+          },
+          null,
+          2,
+        ),
       );
-      expect(storeLoads).toHaveLength(0);
+      const invalidatedResponse = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: authHeader },
+        body: JSON.stringify({
+          message: "Check invalidated global registered session",
+          source: "codex",
+          sessionKey: newGlobalSessionKey,
+        }),
+      });
+      expect(invalidatedResponse.status).toBe(200);
+      expect(loadSessionStoreMock).not.toHaveBeenCalled();
     } finally {
       await ctx.cleanup();
     }
@@ -3038,7 +3224,7 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
-  it("returns 404 for unknown alert stream session keys", async () => {
+  it("returns 404 for missing alert session keys", async () => {
     const entry = createAllowlistEntry();
     const ctx = await setupTestServer([entry]);
     const authHeader = await createAuthHeader(ctx, entry);
@@ -3047,7 +3233,7 @@ describe.sequential("clawline provider server", () => {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: authHeader },
         body: JSON.stringify({
-          message: "Unknown stream",
+          message: "Missing session",
           source: "codex",
           sessionKey: "agent:main:clawline:flynn:s_deadbeef",
         }),
@@ -3694,6 +3880,111 @@ describe.sequential("clawline provider server", () => {
 
       queue.dispose();
       authed.ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("serializes same-stream agent dispatch end to end", async () => {
+    const deviceId = randomUUID();
+    const firstMessageId = `c_${randomUUID()}`;
+    const secondMessageId = `c_${randomUUID()}`;
+    let secondStarted = false;
+    let resolveFirstEntered!: () => void;
+    const firstStarted = new Promise<void>((resolve) => {
+      resolveFirstEntered = resolve;
+    });
+    let releaseBlockedFirst!: () => void;
+    const blockedFirst = new Promise<void>((resolve) => {
+      releaseBlockedFirst = resolve;
+    });
+    const replyResolver: typeof testReplyResolver = async (ctx) => {
+      const messageSid = (ctx as { MessageSid?: unknown }).MessageSid;
+      if (messageSid === firstMessageId) {
+        resolveFirstEntered();
+        await blockedFirst;
+        return { text: "first reply" };
+      }
+      if (messageSid === secondMessageId) {
+        secondStarted = true;
+        return { text: "second reply" };
+      }
+      return { text: "unexpected reply" };
+    };
+    const entry = createAllowlistEntry({
+      deviceId,
+      userId: "flynn",
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry], { replyResolver });
+    try {
+      const pair = await performPairRequest(ctx.port, deviceId);
+      const token = pair.token as string;
+      const { ws } = await authenticateDevice(ctx.port, deviceId, token);
+      const queue = createMessageQueue(ws);
+
+      ws.send(
+        JSON.stringify({
+          type: "message",
+          id: firstMessageId,
+          content: "first prompt",
+        }),
+      );
+      await waitForQueuedMessage(queue, (value) => {
+        const typed = value as { type?: string; id?: string };
+        return typed.type === "ack" && typed.id === firstMessageId;
+      });
+      const firstEcho = (await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const typed = value as {
+          type?: string;
+          role?: string;
+          content?: string;
+          clientMessageId?: string;
+          sessionKey?: string;
+        };
+        return (
+          typed.type === "message" && typed.role === "user" && typed.content === "first prompt"
+        );
+      })) as { id?: string; clientMessageId?: string; sessionKey?: string };
+      expect(firstEcho.id?.startsWith("s_")).toBe(true);
+      expect(firstEcho.clientMessageId).toBe(firstMessageId);
+      expect(firstEcho.sessionKey).toBe("agent:main:clawline:flynn:main");
+      await firstStarted;
+
+      ws.send(
+        JSON.stringify({
+          type: "message",
+          id: secondMessageId,
+          content: "second prompt",
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(secondStarted).toBe(false);
+
+      releaseBlockedFirst();
+
+      const firstAssistant = (await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const typed = value as {
+          type?: string;
+          role?: string;
+          content?: string;
+          replyToMessageId?: string;
+        };
+        return typed.type === "message" && typed.role === "assistant";
+      })) as { content?: string; replyToMessageId?: string; replyToClientMessageId?: string };
+      expect(firstAssistant.content).toBe("first reply");
+      expect(firstAssistant.replyToMessageId).toBe(firstEcho.id);
+      expect(firstAssistant.replyToClientMessageId).toBe(firstMessageId);
+
+      const secondAssistant = (await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const typed = value as { type?: string; role?: string; content?: string };
+        return typed.type === "message" && typed.role === "assistant";
+      })) as { content?: string };
+      expect(secondAssistant.content).toBe("second reply");
+
+      queue.dispose();
+      ws.terminate();
     } finally {
       await ctx.cleanup();
     }
