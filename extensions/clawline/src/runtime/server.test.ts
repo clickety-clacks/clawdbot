@@ -3864,10 +3864,31 @@ describe.sequential("clawline provider server", () => {
           typed.role === "assistant" &&
           typed.sessionKey === adoptedSessionKey
         );
-      })) as { sessionKey?: string; content?: string };
+      })) as { id: string; sessionKey?: string; content?: string };
       expect(assistantMessage).toMatchObject({
         sessionKey: adoptedSessionKey,
         content: "heimdal adopted ok",
+      });
+
+      authed.ws.send(
+        JSON.stringify({
+          type: "stream_read",
+          sessionKey: adoptedSessionKey,
+          lastReadMessageId: assistantMessage.id,
+        }),
+      );
+      const readState = await waitForQueuedMessage(queue, (value) => {
+        const typed = value as { type?: string; sessionKey?: string; lastReadMessageId?: string };
+        return (
+          typed?.type === "stream_read_state" &&
+          typed.sessionKey === adoptedSessionKey &&
+          typed.lastReadMessageId === assistantMessage.id
+        );
+      });
+      expect(readState).toMatchObject({
+        type: "stream_read_state",
+        sessionKey: adoptedSessionKey,
+        lastReadMessageId: assistantMessage.id,
       });
 
       expect(capturedCtx).toMatchObject({

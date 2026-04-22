@@ -1944,42 +1944,47 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     sessionKey: string;
     lastReadMessageId: string;
   }) => {
-    const normalizedSessionKey = normalizeStoredSessionKey(sessionKey, userId);
-    if (!normalizedSessionKey) {
+    const requestedSessionKey = normalizeSessionKey(sessionKey);
+    if (!requestedSessionKey) {
       throw new ClientMessageError("invalid_session", "Invalid sessionKey");
     }
-    const existingStream = selectStreamSessionByKeyStmt.get(userId, normalizedSessionKey) as
+    const existingStream = selectStreamSessionByKeyStmt.get(userId, requestedSessionKey) as
       | StreamSessionRow
       | undefined;
     if (!existingStream) {
       throw new ClientMessageError("invalid_session", "Unknown sessionKey");
     }
+    const storedSessionKey = existingStream.sessionKey;
     const eventRow = selectEventByIdStmt.get(lastReadMessageId) as
       | { userId: string; sessionKey: string | null; sequence: number }
       | undefined;
-    if (!eventRow || eventRow.userId !== userId || eventRow.sessionKey !== normalizedSessionKey) {
+    if (
+      !eventRow ||
+      eventRow.userId !== userId ||
+      !sessionKeyEq(eventRow.sessionKey ?? "", storedSessionKey)
+    ) {
       throw new ClientMessageError("invalid_message", "Unknown lastReadMessageId");
     }
-    const existing = selectStreamReadStateBySessionStmt.get(userId, normalizedSessionKey) as
+    const existing = selectStreamReadStateBySessionStmt.get(userId, storedSessionKey) as
       | StreamReadStateRow
       | undefined;
     if (existing && existing.lastReadSequence >= eventRow.sequence) {
       return {
         updated: false,
-        sessionKey: normalizedSessionKey,
+        sessionKey: storedSessionKey,
         lastReadMessageId: existing.lastReadMessageId,
       };
     }
     upsertStreamReadStateStmt.run(
       userId,
-      normalizedSessionKey,
+      storedSessionKey,
       lastReadMessageId,
       eventRow.sequence,
       nowMs(),
     );
     return {
       updated: true,
-      sessionKey: normalizedSessionKey,
+      sessionKey: storedSessionKey,
       lastReadMessageId,
     };
   };
