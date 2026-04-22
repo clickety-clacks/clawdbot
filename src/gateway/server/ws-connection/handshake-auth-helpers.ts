@@ -120,7 +120,8 @@ function isSharedSecretLoopbackLocalEquivalent(params: {
   sharedAuthOk: boolean;
   authMethod: GatewayAuthResult["method"];
 }): boolean {
-  const usesSharedSecretAuth = params.authMethod === "token" || params.authMethod === "password";
+  const usesSharedSecretAuth =
+    params.authMethod === "token" || params.authMethod === "password";
   return (
     params.sharedAuthOk &&
     usesSharedSecretAuth &&
