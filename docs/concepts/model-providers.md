@@ -43,6 +43,7 @@ For model selection rules, see [/concepts/models](/concepts/models).
   `matchesContextOverflowError`, `classifyFailoverReason`,
   `isCacheTtlEligible`, `buildMissingAuthMessage`, `suppressBuiltInModel`,
   `augmentModelCatalog`, `isBinaryThinking`, `supportsXHighThinking`,
+  `supportsAdaptiveThinking`, `supportsMaxThinking`,
   `resolveDefaultThinkingLevel`, `applyConfigDefaults`, `isModernModelRef`,
   `prepareRuntimeAuth`, `resolveUsageAuth`, `fetchUsageSnapshot`, and
   `onModelSelected`.
@@ -133,6 +134,8 @@ Typical split:
   discovery and config merging
 - `isBinaryThinking`: provider owns binary on/off thinking UX
 - `supportsXHighThinking`: provider opts selected models into `xhigh`
+- `supportsAdaptiveThinking`: provider opts selected models into `adaptive`
+- `supportsMaxThinking`: provider opts selected models into `max`
 - `resolveDefaultThinkingLevel`: provider owns default `/think` policy for a
   model family
 - `applyConfigDefaults`: provider applies provider-specific global defaults
@@ -171,7 +174,7 @@ Current bundled examples:
   normalization (`input` / `output` and `prompt` / `completion` families), the
   shared `openai-responses-defaults` stream family for native OpenAI/Codex
   wrappers, provider-family metadata, bundled image-generation provider
-  registration for `gpt-image-1`, and bundled video-generation provider
+  registration for `gpt-image-2`, and bundled video-generation provider
   registration for `sora-2`
 - `google` and `google-gemini-cli`: Gemini 3.1 forward-compat fallback,
   native Gemini replay validation, bootstrap replay sanitation, tagged
@@ -431,7 +434,7 @@ See [/providers/kilocode](/providers/kilocode) for setup details.
   `input: ["text", "image"]`; the bundled provider catalog keeps the chat refs
   text-only until that provider config is materialized
 - Moonshot: `moonshot` (`MOONSHOT_API_KEY`)
-- Example model: `moonshot/kimi-k2.5`
+- Example model: `moonshot/kimi-k2.6`
 - Kimi Coding: `kimi` (`KIMI_API_KEY` or `KIMICODE_API_KEY`)
 - Example model: `kimi/kimi-code`
 - Qianfan: `qianfan` (`QIANFAN_API_KEY`)
@@ -488,13 +491,14 @@ need to override the base URL or model metadata:
 
 - Provider: `moonshot`
 - Auth: `MOONSHOT_API_KEY`
-- Example model: `moonshot/kimi-k2.5`
+- Example model: `moonshot/kimi-k2.6`
 - CLI: `openclaw onboard --auth-choice moonshot-api-key` or `openclaw onboard --auth-choice moonshot-api-key-cn`
 
 Kimi K2 model IDs:
 
 [//]: # "moonshot-kimi-k2-model-refs:start"
 
+- `moonshot/kimi-k2.6`
 - `moonshot/kimi-k2.5`
 - `moonshot/kimi-k2-thinking`
 - `moonshot/kimi-k2-thinking-turbo`
@@ -505,7 +509,7 @@ Kimi K2 model IDs:
 ```json5
 {
   agents: {
-    defaults: { model: { primary: "moonshot/kimi-k2.5" } },
+    defaults: { model: { primary: "moonshot/kimi-k2.6" } },
   },
   models: {
     mode: "merge",
@@ -514,7 +518,7 @@ Kimi K2 model IDs:
         baseUrl: "https://api.moonshot.ai/v1",
         apiKey: "${MOONSHOT_API_KEY}",
         api: "openai-completions",
-        models: [{ id: "kimi-k2.5", name: "Kimi K2.5" }],
+        models: [{ id: "kimi-k2.6", name: "Kimi K2.6" }],
       },
     },
   },

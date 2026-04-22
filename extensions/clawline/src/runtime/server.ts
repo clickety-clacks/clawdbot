@@ -99,17 +99,29 @@ export const PROTOCOL_VERSION = 1;
 const execFile = promisify(execFileCb);
 type SessionEntry = ClawlineSessionEntry;
 
+type ClientPayload = Record<string, unknown>;
+
+type PtyProcess = {
+  write(data: string): void;
+  resize(cols: number, rows: number): void;
+  kill(): void;
+  onData(callback: (data: string) => void): void;
+  onExit(callback: (event: { exitCode?: number }) => void): void;
+};
+
+function isClientPayload(value: unknown): value is ClientPayload {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
 type TerminalTmuxBackend = {
   execTmux(
     args: string[],
     options: { timeout: number; maxBuffer: number },
   ): Promise<{
-    // oxlint-disable-next-line typescript/no-explicit-any
-    stdout: any;
+    stdout: unknown;
   }>;
   spawnAttachPty(params: { sessionName: string; cols: number; rows: number }): Promise<{
-    // oxlint-disable-next-line typescript/no-explicit-any
-    pty: any;
+    pty: PtyProcess;
   }>;
 };
 
@@ -194,8 +206,11 @@ function createTerminalTmuxBackend(
     },
     async spawnAttachPty(params: { sessionName: string; cols: number; rows: number }) {
       const ptyModule = (await import("@lydell/node-pty")) as unknown as {
-        // oxlint-disable-next-line typescript/no-explicit-any
-        spawn: (file: string, args: string[], options: any) => any;
+        spawn: (
+          file: string,
+          args: string[],
+          options: { name: string; cols: number; rows: number },
+        ) => PtyProcess;
       };
       if (!useRemote) {
         const pty = ptyModule.spawn("tmux", ["attach-session", "-t", params.sessionName], {
@@ -220,8 +235,6 @@ function createTerminalTmuxBackend(
   };
 }
 
-// eslint-disable-next-line no-control-regex
-const CONTROL_CHARS_REGEX = /[\u0000-\u001F\u007F]/g;
 const UUID_V4_REGEX =
   /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/;
 const SERVER_EVENT_ID_REGEX =
@@ -267,6 +280,18 @@ const STREAM_OPERATION_CREATE = "create_stream";
 const STREAM_OPERATION_DELETE = "delete_stream";
 const MAX_STREAMS_BODY_BYTES = 16 * 1024;
 const STREAM_SESSION_KEY_PATH_DECODE_PASSES = 4;
+
+function stripControlChars(value: string): string {
+  let result = "";
+  for (const char of value) {
+    const code = char.charCodeAt(0);
+    if (code <= 0x1f || code === 0x7f) {
+      continue;
+    }
+    result += char;
+  }
+  return result;
+}
 
 type ClawlineAnnounceQueueItem = {
   announceId?: string;
@@ -466,7 +491,7 @@ function sanitizeLabel(label?: string): string | undefined {
   if (typeof label !== "string") {
     return undefined;
   }
-  const stripped = label.replace(CONTROL_CHARS_REGEX, "").trim();
+  const stripped = stripControlChars(label).trim();
   if (!stripped) {
     return undefined;
   }
@@ -477,7 +502,7 @@ function sanitizeStreamDisplayName(value: unknown, maxBytes: number): string | n
   if (typeof value !== "string") {
     return null;
   }
-  const stripped = value.replace(CONTROL_CHARS_REGEX, "").trim();
+  const stripped = stripControlChars(value).trim();
   if (!stripped) {
     return null;
   }
@@ -492,7 +517,7 @@ function sanitizeDeviceInfo(info: DeviceInfo): DeviceInfo {
     if (typeof value !== "string") {
       return undefined;
     }
-    const stripped = value.replace(CONTROL_CHARS_REGEX, "").trim();
+    const stripped = stripControlChars(value).trim();
     if (!stripped) {
       return undefined;
     }
@@ -3651,7 +3676,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   }
 
   function normalizeAlertMessage(value: string): string | null {
-    const cleaned = value.replace(CONTROL_CHARS_REGEX, "").trim();
+    const cleaned = stripControlChars(value).trim();
     if (!cleaned) {
       return null;
     }
@@ -4292,9 +4317,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         tmuxSessionName: string;
         paneId: string;
         tmuxBackend: TerminalTmuxBackend;
-        // node-pty has no great runtime type here; treat as opaque.
-        // oxlint-disable-next-line typescript/no-explicit-any
-        pty: any;
+        pty: PtyProcess;
       };
   const terminalConnectionState = new WeakMap<WebSocket, TerminalConnectionState>();
   const terminalSessions = new Map<string, TerminalSessionRecord>();
@@ -6319,9 +6342,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     };
   };
 
-  // Clawline WS payloads are runtime-validated; keep `any` here to avoid a huge type layer.
-  // oxlint-disable-next-line typescript/no-explicit-any
-  async function processClientMessage(session: Session, payload: any) {
+  async function processClientMessage(session: Session, payload: ClientPayload) {
     let processStage = "start";
     const markProcessStage = (stage: string) => {
       processStage = stage;
@@ -6339,6 +6360,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       if (typeof payload.id !== "string" || !payload.id.startsWith("c_")) {
         throw new ClientMessageError("invalid_message", "Invalid id");
       }
+      const messageId = payload.id;
       const rawContent = typeof payload.content === "string" ? payload.content : "";
       markProcessStage("normalize_attachments");
       const attachmentsInfo = normalizeAttachmentsInput(payload.attachments, config.media);
@@ -6426,21 +6448,21 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               throw new ClientMessageError("invalid_message", "Message failed");
             }
             if (existing.ackSent === 0) {
-              session.socket.send(JSON.stringify({ type: "ack", id: payload.id }), (err) => {
+              session.socket.send(JSON.stringify({ type: "ack", id: messageId }), (err) => {
                 if (!err) {
-                  markAckSent(session.deviceId, payload.id);
+                  markAckSent(session.deviceId, messageId);
                   return;
                 }
                 logger.warn?.(`[clawline] ack_send_failed: ${formatError(err)}`, {
-                  messageId: payload.id,
+                  messageId,
                   deviceId: session.deviceId,
                 });
               });
             } else {
-              session.socket.send(JSON.stringify({ type: "ack", id: payload.id }), (err) => {
+              session.socket.send(JSON.stringify({ type: "ack", id: messageId }), (err) => {
                 if (err) {
                   logger.warn?.(`[clawline] duplicate_ack_send_failed: ${formatError(err)}`, {
-                    messageId: payload.id,
+                    messageId,
                     deviceId: session.deviceId,
                   });
                 }
@@ -6472,7 +6494,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           const { event } = await persistUserMessage(
             session,
             targetUserId,
-            payload.id,
+            messageId,
             rawContent,
             ownership.attachments,
             attachmentsHash,
@@ -6481,12 +6503,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           );
           markProcessStage("send_ack");
           await new Promise<void>((resolve) => {
-            session.socket.send(JSON.stringify({ type: "ack", id: payload.id }), (err) => {
+            session.socket.send(JSON.stringify({ type: "ack", id: messageId }), (err) => {
               if (!err) {
-                markAckSent(session.deviceId, payload.id);
+                markAckSent(session.deviceId, messageId);
               } else {
                 logger.warn?.(`[clawline] ack_send_failed: ${formatError(err)}`, {
-                  messageId: payload.id,
+                  messageId,
                   deviceId: session.deviceId,
                 });
               }
@@ -6835,8 +6857,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
   }
 
-  // oxlint-disable-next-line typescript/no-explicit-any
-  async function processInteractiveCallback(session: Session, payload: any) {
+  async function processInteractiveCallback(session: Session, payload: ClientPayload) {
     try {
       const sourceMessageId = typeof payload.messageId === "string" ? payload.messageId.trim() : "";
       if (!sourceMessageId) {
@@ -7464,8 +7485,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       logger.info?.("[clawline:http] ws_message_received", {
         bytes: Buffer.byteLength(rawString, "utf8"),
       });
-      // oxlint-disable-next-line typescript/no-explicit-any
-      let payload: any;
+      let payload: unknown;
       try {
         payload = JSON.parse(rawString);
       } catch {
@@ -7473,7 +7493,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         ws.close();
         return;
       }
-      if (!payload || typeof payload.type !== "string") {
+      if (!isClientPayload(payload) || typeof payload.type !== "string") {
         await sendJson(ws, { type: "error", code: "invalid_message", message: "Missing type" });
         return;
       }
@@ -7552,8 +7572,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         return;
       }
       const rawString = rawDataToString(raw);
-      // oxlint-disable-next-line typescript/no-explicit-any
-      let payload: any;
+      let payload: unknown;
       try {
         payload = JSON.parse(rawString);
       } catch {
@@ -7561,10 +7580,14 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         ws.close();
         return;
       }
-      if ("authInProgress" in state && state.authInProgress && payload?.type !== "terminal_auth") {
+      if (
+        "authInProgress" in state &&
+        state.authInProgress &&
+        (!isClientPayload(payload) || payload.type !== "terminal_auth")
+      ) {
         return;
       }
-      if (!payload || payload.type !== "terminal_auth") {
+      if (!isClientPayload(payload) || payload.type !== "terminal_auth") {
         void sendJson(ws, { type: "terminal_error", message: "Expected terminal_auth" });
         ws.close();
         return;
@@ -7600,8 +7623,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
 
     const rawString = rawDataToString(raw);
-    // oxlint-disable-next-line typescript/no-explicit-any
-    let payload: any;
+    let payload: unknown;
     try {
       payload = JSON.parse(rawString);
     } catch {
@@ -7609,7 +7631,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       ws.close();
       return;
     }
-    if (!payload || typeof payload.type !== "string") {
+    if (!isClientPayload(payload) || typeof payload.type !== "string") {
       await sendJson(ws, { type: "terminal_error", message: "Missing type" });
       ws.close();
       return;
@@ -7682,8 +7704,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
   }
 
-  // oxlint-disable-next-line typescript/no-explicit-any
-  async function handleTerminalAuth(ws: WebSocket, payload: any) {
+  async function handleTerminalAuth(ws: WebSocket, payload: ClientPayload) {
     if (payload.protocolVersion !== PROTOCOL_VERSION) {
       await sendJson(ws, { type: "terminal_error", message: "Unsupported protocol" });
       ws.close();
@@ -8014,8 +8035,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
   }
 
-  // oxlint-disable-next-line typescript/no-explicit-any
-  async function handlePairRequest(ws: WebSocket, payload: any) {
+  async function handlePairRequest(ws: WebSocket, payload: ClientPayload) {
     logger.info?.("[clawline:http] pair_request_start", {
       deviceId: payload?.deviceId,
       protocolVersion: payload?.protocolVersion,
@@ -8066,7 +8086,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       return;
     }
     // Lowercase the claimed name for consistent routing (case-insensitive login)
-    const sanitizedClaimedName = sanitizeLabel(payload.claimedName)?.toLowerCase();
+    const sanitizedClaimedName = sanitizeLabel(
+      typeof payload.claimedName === "string" ? payload.claimedName : undefined,
+    )?.toLowerCase();
     const normalizedUserId = normalizeUserIdFromClaimedName(sanitizedClaimedName);
     const deviceId = payload.deviceId;
     await refreshAllowlistFromDisk();
@@ -8210,8 +8232,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     );
   }
 
-  // oxlint-disable-next-line typescript/no-explicit-any
-  async function handleAuth(ws: WebSocket, payload: any) {
+  async function handleAuth(ws: WebSocket, payload: ClientPayload) {
     if (payload.protocolVersion !== PROTOCOL_VERSION) {
       await sendJson(ws, {
         type: "error",
@@ -8339,8 +8360,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
   }
 
-  // oxlint-disable-next-line typescript/no-explicit-any
-  async function handleAuthedMessage(ws: WebSocket, payload: any) {
+  async function handleAuthedMessage(ws: WebSocket, payload: ClientPayload) {
     const state = connectionState.get(ws);
     if (!state || !state.authenticated || !state.deviceId || !state.userId) {
       await sendJson(ws, { type: "error", code: "auth_failed", message: "Not authenticated" });
@@ -8355,8 +8375,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     await processClientMessage(session, payload);
   }
 
-  // oxlint-disable-next-line typescript/no-explicit-any
-  async function handleAuthedStreamRead(ws: WebSocket, payload: any) {
+  async function handleAuthedStreamRead(ws: WebSocket, payload: ClientPayload) {
     const state = connectionState.get(ws);
     if (!state || !state.authenticated || !state.deviceId || !state.userId) {
       await sendJson(ws, { type: "error", code: "auth_failed", message: "Not authenticated" });
@@ -8422,8 +8441,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
   }
 
-  // oxlint-disable-next-line typescript/no-explicit-any
-  async function handleAuthedInteractiveCallback(ws: WebSocket, payload: any) {
+  async function handleAuthedInteractiveCallback(ws: WebSocket, payload: ClientPayload) {
     const state = connectionState.get(ws);
     if (!state || !state.authenticated || !state.deviceId || !state.userId) {
       await sendJson(ws, { type: "error", code: "auth_failed", message: "Not authenticated" });
