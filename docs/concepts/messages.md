@@ -62,7 +62,7 @@ Config (global default + per-channel overrides):
 Notes:
 
 - Debounce applies to **text-only** messages; media/attachments flush immediately.
-- Control commands bypass debouncing so they remain standalone.
+- Control commands bypass debouncing so they remain standalone — **except** when a channel explicitly opts in to same-sender DM coalescing (e.g. [BlueBubbles `coalesceSameSenderDms`](/channels/bluebubbles#coalescing-split-send-dms-command--url-in-one-composition)), where DM commands wait inside the debounce window so a split-send payload can join the same agent turn.
 
 ## Sessions and devices
 
@@ -166,6 +166,10 @@ OpenClaw resolves that behavior by conversation type:
 Defaults live under `agents.defaults.silentReply` and
 `agents.defaults.silentReplyRewrite`; `surfaces.<id>.silentReply` and
 `surfaces.<id>.silentReplyRewrite` can override them per surface.
+
+When the parent session has one or more pending spawned subagent runs, bare
+silent replies are dropped on all surfaces instead of being rewritten, so the
+parent stays quiet until the child completion event delivers the real reply.
 
 ## Related
 

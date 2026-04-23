@@ -1,89 +1,14 @@
 import {
   ensureMemoryIndexSchema,
+  loadSqliteVecExtension,
   requireNodeSqlite,
 } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { bm25RankToScore, buildFtsQuery } from "./hybrid.js";
 import { searchKeyword, searchVector } from "./manager-search.js";
 
-describe("memory vector search SQL", () => {
-  it("uses sqlite-vec KNN query (MATCH + k) when available", async () => {
-    const rows = [
-      {
-        id: "id-1",
-        path: "MEMORY.md",
-        start_line: 1,
-        end_line: 1,
-        text: "hello",
-        source: "memory",
-        dist: 0.1,
-      },
-    ];
-    const all = vi.fn((..._args: unknown[]) => rows);
-    const prepare = vi.fn((_sql: string) => ({ all }));
-    const db = { prepare } as unknown as Parameters<typeof searchVector>[0]["db"];
-
-    const result = await searchVector({
-      db,
-      vectorTable: "chunks_vec",
-      providerModel: "mock-model",
-      queryVec: [1, 2, 3],
-      limit: 5,
-      snippetMaxChars: 100,
-      ensureVectorReady: async () => true,
-      sourceFilterVec: { sql: "", params: [] },
-      sourceFilterChunks: { sql: "", params: [] },
-    });
-
-    expect(result).toHaveLength(1);
-    expect(prepare).toHaveBeenCalledTimes(1);
-    const sql = prepare.mock.calls[0]?.[0] ?? "";
-    expect(sql).toContain("embedding MATCH ? AND k = ?");
-    expect(sql).toContain("WITH knn AS");
-    expect(sql).toContain("JOIN chunks c ON c.id = v.id");
-  });
-
-  it("pushes source filter into KNN selection and oversamples k", async () => {
-    const rows = [
-      {
-        id: "id-1",
-        path: "MEMORY.md",
-        start_line: 1,
-        end_line: 1,
-        text: "hello",
-        source: "memory",
-        dist: 0.1,
-      },
-    ];
-    const all = vi.fn((..._args: unknown[]) => rows);
-    const prepare = vi.fn((_sql: string) => ({ all }));
-    const db = { prepare } as unknown as Parameters<typeof searchVector>[0]["db"];
-
-    await searchVector({
-      db,
-      vectorTable: "chunks_vec",
-      providerModel: "mock-model",
-      queryVec: [1, 2, 3],
-      limit: 5,
-      snippetMaxChars: 100,
-      ensureVectorReady: async () => true,
-      sourceFilterVec: { sql: " AND c.source IN (?)", params: ["memory"] },
-      sourceFilterChunks: { sql: " AND source IN (?)", params: ["memory"] },
-    });
-
-    const sql = prepare.mock.calls[0]?.[0] ?? "";
-    expect(sql).toContain("WHERE c.model = ? AND c.source IN (?)");
-    expect(sql).toContain("embedding MATCH ? AND k = ?");
-
-    const args = all.mock.calls[0] ?? [];
-    expect(Buffer.isBuffer(args[0])).toBe(true);
-    expect(args[1]).toBe("mock-model");
-    expect(args[2]).toBe("memory");
-    expect(Buffer.isBuffer(args[3])).toBe(true);
-    expect(args[4]).toBe(50);
-    expect(args[5]).toBe(5);
-  });
-});
+const vectorToBlob = (embedding: number[]): Buffer =>
+  Buffer.from(new Float32Array(embedding).buffer);
 
 describe("searchKeyword trigram fallback", () => {
   const { DatabaseSync } = requireNodeSqlite();
@@ -251,5 +176,72 @@ describe("searchKeyword trigram fallback", () => {
     });
 
     expect(repeated[0]?.score).toBe(unique[0]?.score);
+  });
+});
+
+describe("searchVector sqlite-vec KNN", () => {
+  const { DatabaseSync } = requireNodeSqlite();
+
+  it("fills the requested limit after model filters prune nearest KNN candidates", async () => {
+    const db = new DatabaseSync(":memory:", { allowExtension: true });
+    try {
+      const loaded = await loadSqliteVecExtension({ db });
+      expect(loaded.ok, loaded.error).toBe(true);
+      ensureMemoryIndexSchema({
+        db,
+        embeddingCacheTable: "embedding_cache",
+        cacheEnabled: false,
+        ftsTable: "chunks_fts",
+        ftsEnabled: false,
+      });
+      db.exec(`
+        CREATE VIRTUAL TABLE chunks_vec USING vec0(
+          id TEXT PRIMARY KEY,
+          embedding FLOAT[2]
+        );
+      `);
+
+      const insertChunk = db.prepare(
+        "INSERT INTO chunks (id, path, source, start_line, end_line, hash, model, text, embedding, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      );
+      const insertVector = db.prepare("INSERT INTO chunks_vec (id, embedding) VALUES (?, ?)");
+      const addChunk = (params: { id: string; model: string; vector: [number, number] }) => {
+        insertChunk.run(
+          params.id,
+          `memory/${params.id}.md`,
+          "memory",
+          1,
+          1,
+          params.id,
+          params.model,
+          `chunk ${params.id}`,
+          JSON.stringify(params.vector),
+          1,
+        );
+        insertVector.run(params.id, vectorToBlob(params.vector));
+      };
+
+      for (let i = 0; i < 20; i += 1) {
+        addChunk({ id: `other-${i}`, model: "other-model", vector: [1, i / 1000] });
+      }
+      addChunk({ id: "target-1", model: "target-model", vector: [0.5, 0.5] });
+      addChunk({ id: "target-2", model: "target-model", vector: [0.4, 0.6] });
+
+      const results = await searchVector({
+        db,
+        vectorTable: "chunks_vec",
+        providerModel: "target-model",
+        queryVec: [1, 0],
+        limit: 2,
+        snippetMaxChars: 200,
+        ensureVectorReady: async () => true,
+        sourceFilterVec: { sql: "", params: [] },
+        sourceFilterChunks: { sql: "", params: [] },
+      });
+
+      expect(results.map((row) => row.id)).toEqual(["target-1", "target-2"]);
+    } finally {
+      db.close();
+    }
   });
 });

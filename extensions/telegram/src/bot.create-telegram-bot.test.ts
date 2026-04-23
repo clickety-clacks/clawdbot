@@ -46,6 +46,7 @@ const {
   getTelegramSequentialKey,
   setTelegramBotRuntimeForTest,
 } = await import("./bot.js");
+const { resetTelegramForumFlagCacheForTest } = await import("./bot/helpers.js");
 let createTelegramBot: (
   opts: Parameters<typeof import("./bot.js").createTelegramBot>[0],
 ) => ReturnType<typeof import("./bot.js").createTelegramBot>;
@@ -131,6 +132,7 @@ describe("createTelegramBot", () => {
     process.env.TZ = ORIGINAL_TZ;
   });
   beforeEach(() => {
+    resetTelegramForumFlagCacheForTest();
     setTelegramBotRuntimeForTest(
       telegramBotRuntimeForTest as unknown as Parameters<typeof setTelegramBotRuntimeForTest>[0],
     );
@@ -1705,7 +1707,12 @@ describe("createTelegramBot", () => {
     const configForAgent = (agentId: string) => ({
       channels: {
         telegram: {
+          defaultAccount: "work",
           accounts: {
+            work: {
+              botToken: "tok-work",
+              dmPolicy: "open",
+            },
             opie: {
               botToken: "tok-opie",
               dmPolicy: "open",
@@ -1809,7 +1816,12 @@ describe("createTelegramBot", () => {
     loadConfig.mockReturnValue({
       channels: {
         telegram: {
+          defaultAccount: "work",
           accounts: {
+            work: {
+              botToken: "tok-work",
+              dmPolicy: "open",
+            },
             opie: {
               botToken: "tok-opie",
               dmPolicy: "open",
@@ -3274,6 +3286,16 @@ describe("createTelegramBot", () => {
     expect(buildModelsProviderDataMock).toHaveBeenCalledTimes(2);
     expect(editMessageTextSpy).toHaveBeenCalledTimes(1);
     expect(editMessageTextSpy.mock.calls[0]?.[2]).toContain("Select a provider:");
+    expect(
+      (
+        editMessageTextSpy.mock.calls[0]?.[3] as {
+          reply_markup?: { inline_keyboard?: unknown[][] };
+        }
+      )?.reply_markup?.inline_keyboard?.[0]?.[0],
+    ).toEqual({
+      text: "Add model",
+      callback_data: "/models add",
+    });
   });
 
   it("retries command pagination callbacks after a bubbled edit failure", async () => {
@@ -3654,6 +3676,16 @@ describe("createTelegramBot", () => {
 
     expect(editMessageTextSpy).toHaveBeenCalledTimes(2);
     expect(editMessageTextSpy.mock.calls.at(-1)?.[2]).toContain("Select a provider:");
+    expect(
+      (
+        editMessageTextSpy.mock.calls.at(-1)?.[3] as {
+          reply_markup?: { inline_keyboard?: unknown[][] };
+        }
+      )?.reply_markup?.inline_keyboard?.[0]?.[0],
+    ).toEqual({
+      text: "Add model",
+      callback_data: "/models add",
+    });
   });
 
   it("retries model selection callbacks after a bubbled session-store failure", async () => {

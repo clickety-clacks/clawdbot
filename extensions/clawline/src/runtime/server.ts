@@ -8545,9 +8545,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         await sendJson(ws, { type: "pair_result", success: false, reason: "pair_pending" });
         ws.close();
         return;
-      } else {
-        logger.info?.("[clawline:http] pair_request_token_redispatch", { deviceId });
       }
+      logger.info?.("[clawline:http] pair_request_token_redispatch", { deviceId });
       const token = issueToken(entry);
       const delivered = await sendJson(ws, {
         type: "pair_result",
