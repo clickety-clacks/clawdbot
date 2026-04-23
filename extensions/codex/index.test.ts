@@ -1,7 +1,6 @@
 import fs from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { createTestPluginApi } from "../../test/helpers/plugins/plugin-api.js";
-import { createCodexAppServerAgentHarness } from "./harness.js";
 import plugin from "./index.js";
 
 describe("codex plugin", () => {
@@ -13,7 +12,7 @@ describe("codex plugin", () => {
     expect(manifest.enabledByDefault).toBeUndefined();
   });
 
-  it("registers the codex provider and agent harness", () => {
+  it("does not register a model provider or agent harness", () => {
     const registerAgentHarness = vi.fn();
     const registerCommand = vi.fn();
     const registerProvider = vi.fn();
@@ -32,31 +31,11 @@ describe("codex plugin", () => {
       }),
     );
 
-    expect(registerProvider.mock.calls[0]?.[0]).toMatchObject({ id: "codex", label: "Codex" });
-    expect(registerAgentHarness.mock.calls[0]?.[0]).toMatchObject({
-      id: "codex",
-      label: "Codex agent harness",
-      dispose: expect.any(Function),
-    });
+    expect(registerProvider).not.toHaveBeenCalled();
+    expect(registerAgentHarness).not.toHaveBeenCalled();
     expect(registerCommand.mock.calls[0]?.[0]).toMatchObject({
       name: "codex",
       description: "Inspect and control the Codex app-server harness",
     });
-  });
-
-  it("only claims the codex provider by default", () => {
-    const harness = createCodexAppServerAgentHarness();
-
-    expect(
-      harness.supports({ provider: "codex", modelId: "gpt-5.4", requestedRuntime: "auto" })
-        .supported,
-    ).toBe(true);
-    expect(
-      harness.supports({
-        provider: "openai-codex",
-        modelId: "gpt-5.4",
-        requestedRuntime: "auto",
-      }),
-    ).toMatchObject({ supported: false });
   });
 });
