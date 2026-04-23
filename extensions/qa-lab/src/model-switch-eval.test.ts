@@ -26,6 +26,14 @@ describe("qa model-switch evaluation", () => {
     ).toBe(true);
   });
 
+  it("accepts concise handed-off phrasing from live models", () => {
+    expect(
+      hasModelSwitchContinuityEvidence(
+        "The harness has handed off to the alternate model for this turn, and the read tool confirms continued access to the QA scenario pack mission.",
+      ),
+    ).toBe(true);
+  });
+
   it("accepts concise paraphrases of the kickoff task after a handoff", () => {
     expect(
       hasModelSwitchContinuityEvidence(

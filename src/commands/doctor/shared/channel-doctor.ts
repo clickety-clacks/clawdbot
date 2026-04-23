@@ -1,8 +1,8 @@
 import {
-  getBundledChannelPlugin,
-  listBundledChannelPlugins,
+  getBundledChannelSetupPlugin,
+  listBundledChannelSetupPlugins,
 } from "../../../channels/plugins/bundled.js";
-import { getChannelPlugin, listChannelPlugins } from "../../../channels/plugins/registry.js";
+import { getLoadedChannelPlugin, listChannelPlugins } from "../../../channels/plugins/registry.js";
 import type {
   ChannelDoctorAdapter,
   ChannelDoctorConfigMutation,
@@ -37,11 +37,27 @@ function safeListActiveChannelPlugins() {
   }
 }
 
-function safeListBundledChannelPlugins() {
+function safeListBundledChannelSetupPlugins() {
   try {
-    return listBundledChannelPlugins();
+    return listBundledChannelSetupPlugins();
   } catch {
     return [];
+  }
+}
+
+function safeGetLoadedChannelPlugin(id: string) {
+  try {
+    return getLoadedChannelPlugin(id);
+  } catch {
+    return undefined;
+  }
+}
+
+function safeGetBundledChannelSetupPlugin(id: string) {
+  try {
+    return getBundledChannelSetupPlugin(id);
+  } catch {
+    return undefined;
   }
 }
 
@@ -50,19 +66,14 @@ function listChannelDoctorEntries(channelIds?: readonly string[]): ChannelDoctor
   const selectedIds = channelIds ? new Set(channelIds) : null;
   const plugins = selectedIds
     ? [...selectedIds].flatMap((id) => {
-        let activeOrBundledPlugin;
-        try {
-          activeOrBundledPlugin = getChannelPlugin(id);
-        } catch {
-          activeOrBundledPlugin = undefined;
+        const loadedPlugin = safeGetLoadedChannelPlugin(id);
+        if (loadedPlugin?.doctor) {
+          return [loadedPlugin];
         }
-        if (activeOrBundledPlugin?.doctor) {
-          return [activeOrBundledPlugin];
-        }
-        const bundledPlugin = getBundledChannelPlugin(id);
-        return bundledPlugin ? [bundledPlugin] : [];
+        const bundledSetupPlugin = safeGetBundledChannelSetupPlugin(id);
+        return bundledSetupPlugin ? [bundledSetupPlugin] : [];
       })
-    : [...safeListActiveChannelPlugins(), ...safeListBundledChannelPlugins()];
+    : [...safeListActiveChannelPlugins(), ...safeListBundledChannelSetupPlugins()];
   for (const plugin of plugins) {
     if (!plugin.doctor) {
       continue;

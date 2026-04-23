@@ -245,12 +245,14 @@ function collectInstalledRuntimeDependencyRoots(
   rootNodeModulesDir,
   dependencySpecs,
   directDependencyPackageRoot = null,
+  optionalDependencyNames = new Set(),
 ) {
   const packageCache = new Map();
   const directRoots = [];
   const allRoots = [];
   const queue = Object.entries(dependencySpecs).map(([depName, spec]) => ({
     depName,
+    optional: optionalDependencyNames.has(depName),
     spec,
     parentPackageRoot: directDependencyPackageRoot,
     direct: true,
@@ -267,6 +269,9 @@ function collectInstalledRuntimeDependencyRoots(
       rootNodeModulesDir,
     });
     if (depRoot === null) {
+      if (current.optional) {
+        continue;
+      }
       return null;
     }
     const canonicalDepRoot = fs.realpathSync(depRoot);
@@ -289,6 +294,7 @@ function collectInstalledRuntimeDependencyRoots(
     for (const [childName, childSpec] of Object.entries(packageJson.dependencies ?? {})) {
       queue.push({
         depName: childName,
+        optional: false,
         spec: childSpec,
         parentPackageRoot: depRoot,
         direct: false,
@@ -297,6 +303,7 @@ function collectInstalledRuntimeDependencyRoots(
     for (const [childName, childSpec] of Object.entries(packageJson.optionalDependencies ?? {})) {
       queue.push({
         depName: childName,
+        optional: true,
         spec: childSpec,
         parentPackageRoot: depRoot,
         direct: false,
@@ -395,6 +402,7 @@ function resolveInstalledDirectDependencyNames(
   rootNodeModulesDir,
   dependencySpecs,
   directDependencyPackageRoot = null,
+  optionalDependencyNames = new Set(),
 ) {
   const directDependencyNames = [];
   for (const [depName, spec] of Object.entries(dependencySpecs)) {
@@ -405,6 +413,9 @@ function resolveInstalledDirectDependencyNames(
       rootNodeModulesDir,
     });
     if (depRoot === null) {
+      if (optionalDependencyNames.has(depName)) {
+        continue;
+      }
       return null;
     }
     const installedVersion = readInstalledDependencyVersionFromRoot(depRoot);
@@ -467,6 +478,7 @@ function resolveInstalledRuntimeClosureFingerprint(params) {
     params.rootNodeModulesDir,
     dependencySpecs,
     params.directDependencyPackageRoot,
+    new Set(Object.keys(params.packageJson.optionalDependencies ?? {})),
   );
   if (resolution === null) {
     return null;
@@ -819,7 +831,13 @@ function runNpmInstall(params) {
   const npmEnv = {
     ...(params.npmRunner.env ?? process.env),
     CI: "1",
+    npm_config_audit: "false",
+    npm_config_fund: "false",
+    npm_config_legacy_peer_deps: "true",
     npm_config_loglevel: "error",
+    npm_config_package_lock: "false",
+    npm_config_progress: "false",
+    npm_config_save: "false",
     npm_config_yes: "true",
   };
   const result = spawnSync(params.npmRunner.command, params.npmRunner.args, {
@@ -949,6 +967,7 @@ function stageInstalledRootRuntimeDeps(params) {
     ...packageJson.dependencies,
     ...packageJson.optionalDependencies,
   };
+  const optionalDependencyNames = new Set(Object.keys(packageJson.optionalDependencies ?? {}));
   const rootNodeModulesDir = path.join(repoRoot, "node_modules");
   if (Object.keys(dependencySpecs).length === 0 || !fs.existsSync(rootNodeModulesDir)) {
     return false;
@@ -958,6 +977,7 @@ function stageInstalledRootRuntimeDeps(params) {
     rootNodeModulesDir,
     dependencySpecs,
     directDependencyPackageRoot,
+    optionalDependencyNames,
   );
   if (directDependencyNames === null) {
     return false;
@@ -966,14 +986,22 @@ function stageInstalledRootRuntimeDeps(params) {
     rootNodeModulesDir,
     dependencySpecs,
     directDependencyPackageRoot,
+    optionalDependencyNames,
   );
   if (resolution === null) {
     return false;
   }
   const rootsToCopy = selectRuntimeDependencyRootsToCopy(resolution);
+  const nodeModulesDir = path.join(pluginDir, "node_modules");
+  if (rootsToCopy.length === 0) {
+    assertPathIsNotSymlink(nodeModulesDir, "remove runtime deps");
+    removePathIfExists(nodeModulesDir);
+    ensureHostPackageSelfReference(nodeModulesDir, repoRoot);
+    writeRuntimeDepsStamp(pluginDir, fingerprint);
+    return true;
+  }
   const allowedRealRoots = rootsToCopy.map((record) => record.realRoot);
 
-  const nodeModulesDir = path.join(pluginDir, "node_modules");
   const stagedNodeModulesDir = path.join(
     makePluginOwnedTempDir(pluginDir, "stage"),
     "node_modules",
@@ -1076,14 +1104,7 @@ function installPluginRuntimeDeps(params) {
       runNpmInstall({
         cwd: tempInstallDir,
         npmRunner: resolveNpmRunner({
-          npmArgs: [
-            "install",
-            "--omit=dev",
-            "--ignore-scripts",
-            "--legacy-peer-deps",
-            "--package-lock=false",
-            "--silent",
-          ],
+          npmArgs: ["install", "--no-audit", "--no-fund", "--ignore-scripts", "--silent"],
         }),
       });
     }

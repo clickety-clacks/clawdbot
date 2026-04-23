@@ -2,6 +2,8 @@ import path from "node:path";
 import { normalizeLowercaseStringOrEmpty } from "openclaw/plugin-sdk/text-runtime";
 import { ensureRepoBoundDirectory, resolveRepoRelativeOutputDir } from "./cli-paths.js";
 import type { QaCliBackendAuthMode } from "./gateway-child.js";
+import type { QaProviderMode } from "./model-selection.js";
+import { getQaProvider } from "./providers/index.js";
 import type { QaTransportId } from "./qa-transport-registry.js";
 import { readQaBootstrapScenarioCatalog } from "./scenario-catalog.js";
 
@@ -28,12 +30,14 @@ function normalizeQaConfigString(value: unknown): string | undefined {
 function scenarioMatchesLiveLane(params: {
   scenario: QaSeedScenario;
   primaryModel: string;
-  providerMode: "mock-openai" | "live-frontier";
+  providerMode: QaProviderMode;
   claudeCliAuthMode?: QaCliBackendAuthMode;
+  env?: NodeJS.ProcessEnv;
 }) {
-  if (params.providerMode !== "live-frontier") {
+  if (getQaProvider(params.providerMode).kind !== "live") {
     return true;
   }
+  const env = params.env ?? process.env;
   const selected = splitModelRef(params.primaryModel);
   const config = params.scenario.execution.config ?? {};
   const requiredProvider = normalizeQaConfigString(config.requiredProvider);
@@ -48,13 +52,17 @@ function scenarioMatchesLiveLane(params: {
   if (requiredAuthMode && params.claudeCliAuthMode !== requiredAuthMode) {
     return false;
   }
+  const requiredEnv = normalizeQaConfigString(config.requiredEnv);
+  if (requiredEnv && !env[requiredEnv]?.trim()) {
+    return false;
+  }
   return true;
 }
 
 function selectQaSuiteScenarios(params: {
   scenarios: ReturnType<typeof readQaBootstrapScenarioCatalog>["scenarios"];
   scenarioIds?: string[];
-  providerMode: "mock-openai" | "live-frontier";
+  providerMode: QaProviderMode;
   primaryModel: string;
   claudeCliAuthMode?: QaCliBackendAuthMode;
 }) {

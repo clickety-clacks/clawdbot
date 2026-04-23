@@ -100,17 +100,29 @@ export const PROTOCOL_VERSION = 1;
 const execFile = promisify(execFileCb);
 type SessionEntry = ClawlineSessionEntry;
 
+type ClientPayload = Record<string, unknown>;
+
+type PtyProcess = {
+  write(data: string): void;
+  resize(cols: number, rows: number): void;
+  kill(): void;
+  onData(callback: (data: string) => void): void;
+  onExit(callback: (event: { exitCode?: number }) => void): void;
+};
+
+function isClientPayload(value: unknown): value is ClientPayload {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
 type TerminalTmuxBackend = {
   execTmux(
     args: string[],
     options: { timeout: number; maxBuffer: number },
   ): Promise<{
-    // oxlint-disable-next-line typescript/no-explicit-any
-    stdout: any;
+    stdout: unknown;
   }>;
   spawnAttachPty(params: { sessionName: string; cols: number; rows: number }): Promise<{
-    // oxlint-disable-next-line typescript/no-explicit-any
-    pty: any;
+    pty: PtyProcess;
   }>;
 };
 
@@ -195,8 +207,11 @@ function createTerminalTmuxBackend(
     },
     async spawnAttachPty(params: { sessionName: string; cols: number; rows: number }) {
       const ptyModule = (await import("@lydell/node-pty")) as unknown as {
-        // oxlint-disable-next-line typescript/no-explicit-any
-        spawn: (file: string, args: string[], options: any) => any;
+        spawn: (
+          file: string,
+          args: string[],
+          options: { name: string; cols: number; rows: number },
+        ) => PtyProcess;
       };
       if (!useRemote) {
         const pty = ptyModule.spawn("tmux", ["attach-session", "-t", params.sessionName], {
@@ -221,8 +236,6 @@ function createTerminalTmuxBackend(
   };
 }
 
-// eslint-disable-next-line no-control-regex
-const CONTROL_CHARS_REGEX = /[\u0000-\u001F\u007F]/g;
 const UUID_V4_REGEX =
   /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/;
 const SERVER_EVENT_ID_REGEX =
@@ -268,6 +281,18 @@ const STREAM_OPERATION_CREATE = "create_stream";
 const STREAM_OPERATION_DELETE = "delete_stream";
 const MAX_STREAMS_BODY_BYTES = 16 * 1024;
 const STREAM_SESSION_KEY_PATH_DECODE_PASSES = 4;
+
+function stripControlChars(value: string): string {
+  let result = "";
+  for (const char of value) {
+    const code = char.charCodeAt(0);
+    if (code <= 0x1f || code === 0x7f) {
+      continue;
+    }
+    result += char;
+  }
+  return result;
+}
 
 type ClawlineAnnounceQueueItem = {
   announceId?: string;
@@ -467,7 +492,7 @@ function sanitizeLabel(label?: string): string | undefined {
   if (typeof label !== "string") {
     return undefined;
   }
-  const stripped = label.replace(CONTROL_CHARS_REGEX, "").trim();
+  const stripped = stripControlChars(label).trim();
   if (!stripped) {
     return undefined;
   }
@@ -478,7 +503,7 @@ function sanitizeStreamDisplayName(value: unknown, maxBytes: number): string | n
   if (typeof value !== "string") {
     return null;
   }
-  const stripped = value.replace(CONTROL_CHARS_REGEX, "").trim();
+  const stripped = stripControlChars(value).trim();
   if (!stripped) {
     return null;
   }
@@ -493,7 +518,7 @@ function sanitizeDeviceInfo(info: DeviceInfo): DeviceInfo {
     if (typeof value !== "string") {
       return undefined;
     }
-    const stripped = value.replace(CONTROL_CHARS_REGEX, "").trim();
+    const stripped = stripControlChars(value).trim();
     if (!stripped) {
       return undefined;
     }
@@ -3677,7 +3702,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   }
 
   function normalizeAlertMessage(value: string): string | null {
-    const cleaned = value.replace(CONTROL_CHARS_REGEX, "").trim();
+    const cleaned = stripControlChars(value).trim();
     if (!cleaned) {
       return null;
     }
@@ -4283,9 +4308,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         tmuxSessionName: string;
         paneId: string;
         tmuxBackend: TerminalTmuxBackend;
-        // node-pty has no great runtime type here; treat as opaque.
-        // oxlint-disable-next-line typescript/no-explicit-any
-        pty: any;
+        pty: PtyProcess;
       };
   const terminalConnectionState = new WeakMap<WebSocket, TerminalConnectionState>();
   const terminalSessions = new Map<string, TerminalSessionRecord>();
@@ -6650,9 +6673,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     };
   };
 
-  // Clawline WS payloads are runtime-validated; keep `any` here to avoid a huge type layer.
-  // oxlint-disable-next-line typescript/no-explicit-any
-  async function processClientMessage(session: Session, payload: any) {
+  async function processClientMessage(session: Session, payload: ClientPayload) {
     let processStage = "start";
     const markProcessStage = (stage: string) => {
       processStage = stage;
@@ -6670,6 +6691,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       if (typeof payload.id !== "string" || !payload.id.startsWith("c_")) {
         throw new ClientMessageError("invalid_message", "Invalid id");
       }
+      const messageId = payload.id;
       const rawContent = typeof payload.content === "string" ? payload.content : "";
       markProcessStage("normalize_attachments");
       const attachmentsInfo = normalizeAttachmentsInput(payload.attachments, config.media);
@@ -6711,7 +6733,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       const inboundTarget = resolveInboundMessageTarget(session, resolvedSessionKey);
       markProcessStage("route_inbound_message");
       logger.info?.("[clawline] inbound message routing", {
-        messageId: payload.id,
+        messageId,
         payloadSessionKey: payload.sessionKey,
         resolvedSessionKey,
         targetKind: inboundTarget.kind,
@@ -6739,7 +6761,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             throw new ClientMessageError("token_revoked", "Device revoked");
           }
           markProcessStage("duplicate_lookup");
-          const existing = selectMessageStmt.get(session.deviceId, payload.id) as
+          const existing = selectMessageStmt.get(session.deviceId, messageId) as
             | {
                 deviceId: string;
                 contentHash: string;
@@ -6760,21 +6782,21 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               throw new ClientMessageError("invalid_message", "Message failed");
             }
             if (existing.ackSent === 0) {
-              session.socket.send(JSON.stringify({ type: "ack", id: payload.id }), (err) => {
+              session.socket.send(JSON.stringify({ type: "ack", id: messageId }), (err) => {
                 if (!err) {
-                  markAckSent(session.deviceId, payload.id);
+                  markAckSent(session.deviceId, messageId);
                   return;
                 }
                 logger.warn?.(`[clawline] ack_send_failed: ${formatError(err)}`, {
-                  messageId: payload.id,
+                  messageId,
                   deviceId: session.deviceId,
                 });
               });
             } else {
-              session.socket.send(JSON.stringify({ type: "ack", id: payload.id }), (err) => {
+              session.socket.send(JSON.stringify({ type: "ack", id: messageId }), (err) => {
                 if (err) {
                   logger.warn?.(`[clawline] duplicate_ack_send_failed: ${formatError(err)}`, {
-                    messageId: payload.id,
+                    messageId,
                     deviceId: session.deviceId,
                   });
                 }
@@ -6809,24 +6831,24 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           const { event } = await persistUserMessage(
             session,
             targetUserId,
-            payload.id,
+            messageId,
             rawContent,
             ownership.attachments,
             attachmentsHash,
             ownership.assetIds,
             resolvedSessionKey,
           );
-          if (markMessageFailedIfDeviceRevoked(session.deviceId, payload.id)) {
+          if (markMessageFailedIfDeviceRevoked(session.deviceId, messageId)) {
             return;
           }
           markProcessStage("send_ack");
           await new Promise<void>((resolve) => {
-            session.socket.send(JSON.stringify({ type: "ack", id: payload.id }), (err) => {
+            session.socket.send(JSON.stringify({ type: "ack", id: messageId }), (err) => {
               if (!err) {
-                markAckSent(session.deviceId, payload.id);
+                markAckSent(session.deviceId, messageId);
               } else {
                 logger.warn?.(`[clawline] ack_send_failed: ${formatError(err)}`, {
-                  messageId: payload.id,
+                  messageId,
                   deviceId: session.deviceId,
                 });
               }
@@ -6865,7 +6887,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             To: inboundTarget.contextTo,
             SessionKey: route.sessionKey,
             AccountId: route.accountId,
-            MessageSid: payload.id,
+            MessageSid: messageId,
             ChatType: "direct",
             SenderName: session.claimedName ?? session.deviceInfo?.model ?? peerId,
             SenderId: session.userId,
@@ -6898,7 +6920,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           const sendActivitySignal = async (isActive: boolean) => {
             logger.info?.("[clawline] activity_signal", {
               isActive,
-              messageId: payload.id,
+              messageId,
               sessionKey: route.sessionKey,
             });
             await sendJson(session.socket, {
@@ -6906,7 +6928,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               event: "activity",
               payload: {
                 isActive,
-                messageId: payload.id,
+                messageId,
                 sessionKey: route.sessionKey,
               },
             }).catch(() => {});
@@ -6922,7 +6944,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               const deliverStartedAt = Date.now();
               logger.info?.("[clawline] agent_run_phase", {
                 phase: "deliver_start",
-                messageId: payload.id,
+                messageId,
                 sessionKey: resolvedSessionKey,
                 hasText: Boolean(replyPayload.text?.trim()),
                 mediaUrlCount: replyPayload.mediaUrls?.length ?? (replyPayload.mediaUrl ? 1 : 0),
@@ -6960,7 +6982,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               if (assistantText === null) {
                 return;
               }
-              if (markMessageFailedIfDeviceRevoked(session.deviceId, payload.id)) {
+              if (markMessageFailedIfDeviceRevoked(session.deviceId, messageId)) {
                 return;
               }
               const assistantEvent = await persistAssistantMessage(
@@ -6972,14 +6994,14 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
                 {
                   preserveOpaqueSessionKey: inboundTarget.kind === "adopted",
                   replyToMessageId: event.id,
-                  replyToClientMessageId: payload.id,
+                  replyToClientMessageId: messageId,
                 },
               );
               broadcastToSessionKey(resolvedSessionKey, assistantEvent);
               await broadcastStreamTailStateForUser(targetUserId, assistantEvent);
               logger.info?.("[clawline] agent_run_phase", {
                 phase: "deliver_done",
-                messageId: payload.id,
+                messageId,
                 sessionKey: resolvedSessionKey,
                 assistantTextLength: assistantText.length,
                 attachmentCount: attachments.length,
@@ -7005,7 +7027,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           runAgentDispatch = async () => {
             markProcessStage("agent_run_start");
             logger.info?.("[clawline] agent_run_start", {
-              messageId: payload.id,
+              messageId,
               sessionId: session.sessionId,
               sessionKey: resolvedSessionKey,
               userId: session.userId,
@@ -7018,14 +7040,14 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             try {
               logger.info?.("[clawline] agent_run_phase", {
                 phase: "dispatch_start",
-                messageId: payload.id,
+                messageId,
                 sessionKey: resolvedSessionKey,
                 imageCount: inboundImages.length,
               });
               const result = await runWithClawlineOutboundCorrelation(
                 {
                   replyToMessageId: event.id,
-                  replyToClientMessageId: payload.id,
+                  replyToClientMessageId: messageId,
                 },
                 () =>
                   dispatchInboundMessage({
@@ -7050,7 +7072,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               deliveredCount = result.counts.block + result.counts.tool + result.counts.final;
               logger.info?.("[clawline] agent_run_phase", {
                 phase: "dispatch_return",
-                messageId: payload.id,
+                messageId,
                 sessionKey: resolvedSessionKey,
                 queuedFinal,
                 deliveredCount,
@@ -7066,14 +7088,14 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             const waitForIdleStartedAt = Date.now();
             logger.info?.("[clawline] agent_run_phase", {
               phase: "wait_for_idle_start",
-              messageId: payload.id,
+              messageId,
               sessionKey: resolvedSessionKey,
             });
             markDispatchIdle();
             await dispatcher.waitForIdle();
             logger.info?.("[clawline] agent_run_phase", {
               phase: "wait_for_idle_done",
-              messageId: payload.id,
+              messageId,
               sessionKey: resolvedSessionKey,
               elapsedMs: Date.now() - waitForIdleStartedAt,
             });
@@ -7083,7 +7105,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               activitySignaled = false;
               void sendActivitySignal(false);
             }
-            if (markMessageFailedIfDeviceRevoked(session.deviceId, payload.id)) {
+            if (markMessageFailedIfDeviceRevoked(session.deviceId, messageId)) {
               return;
             }
 
@@ -7097,7 +7119,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             const wasQueued = !wasDelivered && queueDepth > 0;
 
             logger.info?.("[clawline] agent_run_end", {
-              messageId: payload.id,
+              messageId,
               sessionId: session.sessionId,
               sessionKey: resolvedSessionKey,
               userId: session.userId,
@@ -7111,7 +7133,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
             if (!wasDelivered && !wasQueued) {
               logger.warn?.("[clawline] agent_run_no_delivery", {
-                messageId: payload.id,
+                messageId,
                 sessionId: session.sessionId,
                 sessionKey: resolvedSessionKey,
                 userId: session.userId,
@@ -7123,16 +7145,16 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               updateMessageStreamingStmt.run(
                 MessageStreamingState.Failed,
                 session.deviceId,
-                payload.id,
+                messageId,
               );
               const errorSent = await sendJson(session.socket, {
                 type: "error",
                 code: "server_error",
                 message: "Unable to deliver reply",
-                messageId: payload.id,
+                messageId,
               }).catch(() => false);
               logger.warn?.("[clawline] agent_run_no_delivery_error_emit", {
-                messageId: payload.id,
+                messageId,
                 sessionKey: resolvedSessionKey,
                 deviceId: session.deviceId,
                 errorSent,
@@ -7144,7 +7166,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             updateMessageStreamingStmt.run(
               wasQueued ? MessageStreamingState.Queued : MessageStreamingState.Finalized,
               session.deviceId,
-              payload.id,
+              messageId,
             );
           };
           markProcessStage("dispatch_agent_run");
@@ -7195,8 +7217,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
   }
 
-  // oxlint-disable-next-line typescript/no-explicit-any
-  async function processInteractiveCallback(session: Session, payload: any) {
+  async function processInteractiveCallback(session: Session, payload: ClientPayload) {
     try {
       const sourceMessageId = typeof payload.messageId === "string" ? payload.messageId.trim() : "";
       if (!sourceMessageId) {
@@ -7848,8 +7869,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       logger.info?.("[clawline:http] ws_message_received", {
         bytes: Buffer.byteLength(rawString, "utf8"),
       });
-      // oxlint-disable-next-line typescript/no-explicit-any
-      let payload: any;
+      let payload: unknown;
       try {
         payload = JSON.parse(rawString);
       } catch {
@@ -7857,7 +7877,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         ws.close();
         return;
       }
-      if (!payload || typeof payload.type !== "string") {
+      if (!isClientPayload(payload) || typeof payload.type !== "string") {
         await sendJson(ws, { type: "error", code: "invalid_message", message: "Missing type" });
         return;
       }
@@ -7936,8 +7956,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         return;
       }
       const rawString = rawDataToString(raw);
-      // oxlint-disable-next-line typescript/no-explicit-any
-      let payload: any;
+      let payload: unknown;
       try {
         payload = JSON.parse(rawString);
       } catch {
@@ -7945,10 +7964,14 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         ws.close();
         return;
       }
-      if ("authInProgress" in state && state.authInProgress && payload?.type !== "terminal_auth") {
+      if (
+        "authInProgress" in state &&
+        state.authInProgress &&
+        (!isClientPayload(payload) || payload.type !== "terminal_auth")
+      ) {
         return;
       }
-      if (!payload || payload.type !== "terminal_auth") {
+      if (!isClientPayload(payload) || payload.type !== "terminal_auth") {
         void sendJson(ws, { type: "terminal_error", message: "Expected terminal_auth" });
         ws.close();
         return;
@@ -7984,8 +8007,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
 
     const rawString = rawDataToString(raw);
-    // oxlint-disable-next-line typescript/no-explicit-any
-    let payload: any;
+    let payload: unknown;
     try {
       payload = JSON.parse(rawString);
     } catch {
@@ -7993,7 +8015,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       ws.close();
       return;
     }
-    if (!payload || typeof payload.type !== "string") {
+    if (!isClientPayload(payload) || typeof payload.type !== "string") {
       await sendJson(ws, { type: "terminal_error", message: "Missing type" });
       ws.close();
       return;
@@ -8066,8 +8088,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
   }
 
-  // oxlint-disable-next-line typescript/no-explicit-any
-  async function handleTerminalAuth(ws: WebSocket, payload: any) {
+  async function handleTerminalAuth(ws: WebSocket, payload: ClientPayload) {
     if (payload.protocolVersion !== PROTOCOL_VERSION) {
       await sendJson(ws, { type: "terminal_error", message: "Unsupported protocol" });
       ws.close();
@@ -8398,8 +8419,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
   }
 
-  // oxlint-disable-next-line typescript/no-explicit-any
-  async function handlePairRequest(ws: WebSocket, payload: any) {
+  async function handlePairRequest(ws: WebSocket, payload: ClientPayload) {
     logger.info?.("[clawline:http] pair_request_start", {
       deviceId: payload?.deviceId,
       protocolVersion: payload?.protocolVersion,
@@ -8450,7 +8470,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       return;
     }
     // Lowercase the claimed name for consistent routing (case-insensitive login)
-    const sanitizedClaimedName = sanitizeLabel(payload.claimedName)?.toLowerCase();
+    const sanitizedClaimedName = sanitizeLabel(
+      typeof payload.claimedName === "string" ? payload.claimedName : undefined,
+    )?.toLowerCase();
     const normalizedUserId = normalizeUserIdFromClaimedName(sanitizedClaimedName);
     const deviceId = payload.deviceId;
     await refreshAllowlistFromDisk();
@@ -8594,8 +8616,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     );
   }
 
-  // oxlint-disable-next-line typescript/no-explicit-any
-  async function handleAuth(ws: WebSocket, payload: any) {
+  async function handleAuth(ws: WebSocket, payload: ClientPayload) {
     if (payload.protocolVersion !== PROTOCOL_VERSION) {
       await sendJson(ws, {
         type: "error",
@@ -8753,8 +8774,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
   }
 
-  // oxlint-disable-next-line typescript/no-explicit-any
-  async function handleAuthedMessage(ws: WebSocket, payload: any) {
+  async function handleAuthedMessage(ws: WebSocket, payload: ClientPayload) {
     const state = connectionState.get(ws);
     if (!state || !state.authenticated || !state.deviceId || !state.userId) {
       await sendJson(ws, { type: "error", code: "auth_failed", message: "Not authenticated" });
@@ -8775,8 +8795,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     await processClientMessage(session, payload);
   }
 
-  // oxlint-disable-next-line typescript/no-explicit-any
-  async function handleAuthedStreamRead(ws: WebSocket, payload: any) {
+  async function handleAuthedStreamRead(ws: WebSocket, payload: ClientPayload) {
     const state = connectionState.get(ws);
     if (!state || !state.authenticated || !state.deviceId || !state.userId) {
       await sendJson(ws, { type: "error", code: "auth_failed", message: "Not authenticated" });
@@ -8842,8 +8861,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
   }
 
-  // oxlint-disable-next-line typescript/no-explicit-any
-  async function handleAuthedInteractiveCallback(ws: WebSocket, payload: any) {
+  async function handleAuthedInteractiveCallback(ws: WebSocket, payload: ClientPayload) {
     const state = connectionState.get(ws);
     if (!state || !state.authenticated || !state.deviceId || !state.userId) {
       await sendJson(ws, { type: "error", code: "auth_failed", message: "Not authenticated" });

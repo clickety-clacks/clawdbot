@@ -250,4 +250,38 @@ describe("qa suite planning helpers", () => {
       }).map((scenario) => scenario.id),
     ).toEqual(["generic", "claude-subscription"]);
   });
+
+  it("filters env-gated scenarios from an implicit live lane", () => {
+    const previous = process.env.OPENCLAW_LIVE_SETUP_TOKEN_VALUE;
+    delete process.env.OPENCLAW_LIVE_SETUP_TOKEN_VALUE;
+    try {
+      const scenarios = [
+        makeQaSuiteTestScenario("generic"),
+        makeQaSuiteTestScenario("anthropic-api-key", {
+          config: { requiredProvider: "anthropic", requiredModel: "claude-opus-4-6" },
+        }),
+        makeQaSuiteTestScenario("anthropic-setup-token", {
+          config: {
+            requiredProvider: "anthropic",
+            requiredModel: "claude-opus-4-6",
+            requiredEnv: "OPENCLAW_LIVE_SETUP_TOKEN_VALUE",
+          },
+        }),
+      ];
+
+      expect(
+        selectQaSuiteScenarios({
+          scenarios,
+          providerMode: "live-frontier",
+          primaryModel: "anthropic/claude-opus-4-6",
+        }).map((scenario) => scenario.id),
+      ).toEqual(["generic", "anthropic-api-key"]);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.OPENCLAW_LIVE_SETUP_TOKEN_VALUE;
+      } else {
+        process.env.OPENCLAW_LIVE_SETUP_TOKEN_VALUE = previous;
+      }
+    }
+  });
 });
