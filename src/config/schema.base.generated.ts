@@ -2945,6 +2945,10 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
                         },
                         additionalProperties: false,
                       },
+                      metadataSource: {
+                        type: "string",
+                        const: "models-add",
+                      },
                     },
                     required: ["id", "name"],
                     additionalProperties: false,
