@@ -1,7 +1,12 @@
 {
   "id": "codex",
   "name": "Codex",
-  "description": "Codex app-server inspection and control commands.",
+  "description": "Codex app-server harness and Codex-managed GPT model catalog.",
+  "providers": ["codex"],
+  "nonSecretAuthMarkers": ["codex-app-server"],
+  "activation": {
+    "onAgentHarnesses": ["codex"]
+  },
   "commandAliases": [
     {
       "name": "codex",
@@ -79,6 +84,19 @@
     }
   },
   "uiHints": {
+    "discovery": {
+      "label": "Model Discovery",
+      "help": "Plugin-owned controls for discovering Codex app-server models."
+    },
+    "discovery.enabled": {
+      "label": "Enable Discovery",
+      "help": "When false, OpenClaw keeps the Codex harness available but uses the bundled fallback model list."
+    },
+    "discovery.timeoutMs": {
+      "label": "Discovery Timeout",
+      "help": "Maximum time to wait for Codex app-server model discovery before falling back to the bundled model list.",
+      "advanced": true
+    },
     "appServer": {
       "label": "App Server",
       "help": "Runtime controls for connecting to Codex app-server.",
