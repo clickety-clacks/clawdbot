@@ -55,6 +55,18 @@ describe("openai codex provider", () => {
     loginOpenAICodexDeviceCodeMock.mockReset();
   });
 
+  it("exposes gpt-5.5 in the Codex OAuth catalog", async () => {
+    const { buildOpenAICodexProvider } = await import("./openai-codex-catalog.js");
+
+    expect(buildOpenAICodexProvider().models).toContainEqual(
+      expect.objectContaining({
+        id: "gpt-5.5",
+        api: "openai-codex-responses",
+        input: ["text", "image"],
+      }),
+    );
+  });
+
   it("falls back to the cached credential when accountId extraction fails", async () => {
     const provider = buildOpenAICodexProviderPlugin();
     const credential = {

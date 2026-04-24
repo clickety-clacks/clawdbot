@@ -293,6 +293,26 @@ describe("handleModelsCommand", () => {
     expect(result?.reply?.text).toContain("- anthropic/claude-opus-4-5");
   });
 
+  it("includes catalog models for /models list <provider> all even with an allowlist", async () => {
+    const result = await handleModelsCommand(
+      buildParams("/models list openai all", {
+        agents: {
+          defaults: {
+            model: { primary: "openai/gpt-4.1" },
+            models: {
+              "openai/gpt-4.1": {},
+            },
+          },
+        },
+      }),
+      true,
+    );
+
+    expect(result?.reply?.text).toContain("Models (openai) — showing 1-2 of 2 (page 1/1)");
+    expect(result?.reply?.text).toContain("- openai/gpt-4.1");
+    expect(result?.reply?.text).toContain("- openai/gpt-4.1-mini");
+  });
+
   it("keeps the auth label on text-surface provider listings", async () => {
     modelAuthLabelMocks.resolveModelAuthLabel.mockReturnValue("target-auth");
     const params = buildParams("/models anthropic");

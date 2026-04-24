@@ -61,6 +61,7 @@ type ParsedModelsCommand =
 export async function buildModelsProviderData(
   cfg: OpenClawConfig,
   agentId?: string,
+  options: { includeAllCatalog?: boolean } = {},
 ): Promise<ModelsProviderData> {
   const resolvedDefault = resolveDefaultModelForAgent({
     cfg,
@@ -127,7 +128,7 @@ export async function buildModelsProviderData(
     }
   };
 
-  for (const entry of allowed.allowedCatalog) {
+  for (const entry of options.includeAllCatalog ? catalog : allowed.allowedCatalog) {
     add(entry.provider, entry.id);
   }
 
@@ -343,6 +344,9 @@ export async function resolveModelsCommandReply(params: {
   const { byProvider, providers, modelNames } = await buildModelsProviderData(
     params.cfg,
     params.agentId,
+    {
+      includeAllCatalog: parsed.action === "list" && parsed.all,
+    },
   );
   const commandPlugin = params.surface ? getChannelPlugin(params.surface) : null;
   const providerInfos = buildProviderInfos({ providers, byProvider });
