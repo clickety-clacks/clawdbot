@@ -11,6 +11,7 @@ import {
 import { resolveConfigWriteTargetFromPath } from "../../channels/plugins/config-writes.js";
 import { getChannelPlugin } from "../../channels/plugins/index.js";
 import { normalizeChannelId } from "../../channels/registry.js";
+import { loadProviderCatalogModelsForList } from "../../commands/models/list.provider-catalog.js";
 import { isModelsWriteEnabled } from "../../config/commands.flags.js";
 import type { SessionEntry } from "../../config/sessions.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
@@ -61,7 +62,7 @@ type ParsedModelsCommand =
 export async function buildModelsProviderData(
   cfg: OpenClawConfig,
   agentId?: string,
-  options: { includeAllCatalog?: boolean } = {},
+  options: { agentDir?: string; includeAllCatalog?: boolean } = {},
 ): Promise<ModelsProviderData> {
   const resolvedDefault = resolveDefaultModelForAgent({
     cfg,
@@ -139,10 +140,25 @@ export async function buildModelsProviderData(
   add(resolvedDefault.provider, resolvedDefault.model);
   addModelConfigEntries();
 
+  const providerCatalog = options.agentDir
+    ? await loadProviderCatalogModelsForList({
+        cfg,
+        agentDir: options.agentDir,
+      })
+    : [];
+  for (const model of providerCatalog) {
+    add(model.provider, model.id);
+  }
+
   const providers = [...byProvider.keys()].toSorted();
 
   const modelNames = new Map<string, string>();
   for (const entry of catalog) {
+    if (entry.name && entry.name !== entry.id) {
+      modelNames.set(`${normalizeProviderId(entry.provider)}/${entry.id}`, entry.name);
+    }
+  }
+  for (const entry of providerCatalog) {
     if (entry.name && entry.name !== entry.id) {
       modelNames.set(`${normalizeProviderId(entry.provider)}/${entry.id}`, entry.name);
     }
@@ -346,6 +362,7 @@ export async function resolveModelsCommandReply(params: {
     params.agentId,
     {
       includeAllCatalog: parsed.action === "list" && parsed.all,
+      agentDir: params.agentDir,
     },
   );
   const commandPlugin = params.surface ? getChannelPlugin(params.surface) : null;

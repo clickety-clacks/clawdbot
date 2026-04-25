@@ -382,6 +382,29 @@ describe("modelsListCommand forward-compat", () => {
       expect(observedExitCode).toBe(1);
       expect(mocks.printModelTable).not.toHaveBeenCalled();
     });
+
+    it("supplements normal configured lists with provider static catalog rows", async () => {
+      mocks.loadProviderCatalogModelsForList.mockResolvedValueOnce([
+        {
+          ...OPENAI_CODEX_MODEL,
+          id: "gpt-5.5",
+          name: "GPT-5.5",
+        },
+      ]);
+      const runtime = createRuntime();
+
+      await modelsListCommand({ json: true, provider: "openai-codex" }, runtime as never);
+
+      expect(mocks.loadProviderCatalogModelsForList).toHaveBeenCalledWith({
+        cfg: mocks.resolvedConfig,
+        agentDir: "/tmp/openclaw-agent",
+        providerFilter: "openai-codex",
+      });
+      expect(lastPrintedRows<{ key: string }>()).toEqual([
+        expect.objectContaining({ key: "openai-codex/gpt-5.4" }),
+        expect.objectContaining({ key: "openai-codex/gpt-5.5" }),
+      ]);
+    });
   });
 
   describe("--all catalog supplementation", () => {

@@ -134,6 +134,11 @@ export async function modelsListCommand(
       modelRegistry: registry,
       context: rowContext,
     });
+    await appendProviderCatalogRows({
+      rows,
+      context: rowContext,
+      seenKeys: new Set(rows.map((row) => row.key)),
+    });
   }
 
   if (rows.length === 0) {

@@ -17,6 +17,10 @@ const modelAuthLabelMocks = vi.hoisted(() => ({
   resolveModelAuthLabel: vi.fn<(params: unknown) => string | undefined>(() => undefined),
 }));
 
+const providerCatalogMocks = vi.hoisted(() => ({
+  loadProviderCatalogModelsForList: vi.fn(),
+}));
+
 const modelsAddMocks = vi.hoisted(() => ({
   addModelToConfig: vi.fn(),
   listAddableProviders: vi.fn<(params: unknown) => string[]>(),
@@ -44,6 +48,10 @@ vi.mock("../../agents/model-catalog.js", () => ({
 
 vi.mock("../../agents/model-auth-label.js", () => ({
   resolveModelAuthLabel: modelAuthLabelMocks.resolveModelAuthLabel,
+}));
+
+vi.mock("../../commands/models/list.provider-catalog.js", () => ({
+  loadProviderCatalogModelsForList: providerCatalogMocks.loadProviderCatalogModelsForList,
 }));
 
 vi.mock("../../channels/plugins/config-writes.js", () => ({
@@ -133,6 +141,8 @@ beforeEach(() => {
   ]);
   modelAuthLabelMocks.resolveModelAuthLabel.mockReset();
   modelAuthLabelMocks.resolveModelAuthLabel.mockReturnValue(undefined);
+  providerCatalogMocks.loadProviderCatalogModelsForList.mockReset();
+  providerCatalogMocks.loadProviderCatalogModelsForList.mockResolvedValue([]);
   modelsAddMocks.addModelToConfig.mockReset();
   modelsAddMocks.addModelToConfig.mockResolvedValue({
     ok: true,
@@ -284,6 +294,37 @@ describe("handleModelsCommand", () => {
     expect(result?.reply?.text).toContain("- openai/gpt-4.1");
     expect(result?.reply?.text).toContain("- openai/gpt-4.1-mini");
     expect(result?.reply?.text).toContain("Switch: /model <provider/model>");
+  });
+
+  it("includes provider static catalog models for /models <provider>", async () => {
+    providerCatalogMocks.loadProviderCatalogModelsForList.mockResolvedValueOnce([
+      {
+        provider: "openai-codex",
+        id: "gpt-5.5",
+        name: "GPT-5.5",
+        api: "openai-codex-responses",
+        baseUrl: "https://chatgpt.com/backend-api",
+        input: ["text"],
+      },
+    ]);
+
+    const result = await handleModelsCommand(
+      buildParams("/models openai-codex", {
+        agents: {
+          defaults: {
+            model: { primary: "openai-codex/gpt-5.4" },
+            models: {
+              "openai-codex/gpt-5.4": {},
+            },
+          },
+        },
+      }),
+      true,
+    );
+
+    expect(result?.reply?.text).toContain("Models (openai-codex) — showing 1-2 of 2 (page 1/1)");
+    expect(result?.reply?.text).toContain("- openai-codex/gpt-5.4");
+    expect(result?.reply?.text).toContain("- openai-codex/gpt-5.5");
   });
 
   it("keeps /models list <provider> as an alias", async () => {
