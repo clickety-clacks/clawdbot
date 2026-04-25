@@ -1,12 +1,31 @@
 {
   "name": "@openclaw/clawline",
-  "version": "2026.3.8",
+  "version": "2026.4.11",
   "description": "OpenClaw Clawline channel plugin",
   "type": "module",
   "dependencies": {
+    "@lydell/node-pty": "1.2.0-beta.12",
+    "@sinclair/typebox": "0.34.49",
     "better-sqlite3": "12.6.2",
     "busboy": "1.6.0",
-    "jsonwebtoken": "9.0.3"
+    "jsonwebtoken": "9.0.3",
+    "undici": "8.1.0",
+    "ws": "^8.20.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@openclaw/plugin-sdk": "workspace:*",
+    "@types/better-sqlite3": "7.6.13",
+    "@types/busboy": "1.5.4",
+    "openclaw": "workspace:*"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.4.11"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
   },
   "openclaw": {
     "extensions": [
@@ -17,21 +36,36 @@
       "id": "clawline",
       "label": "Clawline",
       "selectionLabel": "Clawline (local devices)",
-      "docsPath": "/providers/clawline",
+      "docsPath": "/channels/clawline",
       "docsLabel": "clawline",
       "blurb": "first-party local gateway; enable via config/onboarding.",
-      "order": 10
+      "order": 900
     },
     "install": {
       "npmSpec": "@openclaw/clawline",
       "localPath": "extensions/clawline",
-      "defaultChoice": "local"
+      "defaultChoice": "local",
+      "minHostVersion": ">=2026.4.11"
+    },
+    "compat": {
+      "pluginApi": ">=2026.4.11"
+    },
+    "build": {
+      "openclawVersion": "2026.4.11"
+    },
+    "bundle": {
+      "stageRuntimeDependencies": true
     },
     "releaseChecks": {
       "rootDependencyMirrorAllowlist": [
+        "@lydell/node-pty",
+        "@sinclair/typebox",
         "better-sqlite3",
         "busboy",
-        "jsonwebtoken"
+        "jsonwebtoken",
+        "undici",
+        "ws",
+        "zod"
       ]
     }
   }

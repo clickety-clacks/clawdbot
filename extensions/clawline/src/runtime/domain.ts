@@ -59,6 +59,23 @@ export type StreamDeletedServerMessage = {
   sessionKey: string;
 };
 
+export type StreamReadStateServerMessage = {
+  type: "stream_read_state";
+  sessionKey: string;
+  lastReadMessageId: string;
+};
+
+export type StreamTailState = {
+  lastMessageId: string;
+  lastMessageRole: "user" | "assistant";
+};
+
+export type StreamTailStateServerMessage = {
+  type: "stream_tail_state";
+  sessionKey: string;
+  lastMessageId: string;
+  lastMessageRole: "user" | "assistant";
+};
 export type ClawlineOutboundAttachmentInput = {
   data: string;
   mimeType?: string;
@@ -152,6 +169,7 @@ export interface ProviderConfig {
   sessions: {
     maxMessageBytes: number;
     maxReplayMessages: number;
+    maxReplayMessagesPerStream: number;
     maxPromptMessages: number;
     maxMessagesPerSecond: number;
     maxTypingPerSecond: number;
@@ -194,6 +212,8 @@ export type ClawlineOutboundSendParams = {
   attachments?: ClawlineOutboundAttachmentInput[];
   /** Session key for this delivery (optional; otherwise derived from target). */
   sessionKey?: string;
+  replyToMessageId?: string;
+  replyToClientMessageId?: string;
 };
 
 export type ClawlineOutboundSendResult = {

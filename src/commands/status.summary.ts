@@ -3,7 +3,7 @@ import { hasPotentialConfiguredChannels } from "../channels/config-presence.js";
 import { resolveMainSessionKey } from "../config/sessions/main-session.js";
 import { resolveStorePath } from "../config/sessions/paths.js";
 import { readSessionStoreReadOnly } from "../config/sessions/store-read.js";
-import { resolveFreshSessionTotalTokens, type SessionEntry } from "../config/sessions/types.js";
+import { resolveSessionTotalTokens, type SessionEntry } from "../config/sessions/types.js";
 import type { OpenClawConfig } from "../config/types.js";
 import { listGatewayAgentsBasic } from "../gateway/agent-list.js";
 import { resolveHeartbeatSummaryForAgent } from "../infra/heartbeat-summary.js";
@@ -16,6 +16,9 @@ import type { HeartbeatStatus, SessionStatus, StatusSummary } from "./status.typ
 let channelSummaryModulePromise: Promise<typeof import("../infra/channel-summary.js")> | undefined;
 let linkChannelModulePromise: Promise<typeof import("./status.link-channel.js")> | undefined;
 let configIoModulePromise: Promise<typeof import("../config/io.js")> | undefined;
+let taskRegistryMaintenanceModulePromise:
+  | Promise<typeof import("../tasks/task-registry.maintenance.js")>
+  | undefined;
 
 function loadChannelSummaryModule() {
   channelSummaryModulePromise ??= import("../infra/channel-summary.js");
@@ -35,6 +38,11 @@ const loadStatusSummaryRuntimeModule = createLazyRuntimeSurface(
 function loadConfigIoModule() {
   configIoModulePromise ??= import("../config/io.js");
   return configIoModulePromise;
+}
+
+function loadTaskRegistryMaintenanceModule() {
+  taskRegistryMaintenanceModulePromise ??= import("../tasks/task-registry.maintenance.js");
+  return taskRegistryMaintenanceModulePromise;
 }
 
 const buildFlags = (entry?: SessionEntry): string[] => {
@@ -136,6 +144,9 @@ export async function getStatusSummary(
     : [];
   const mainSessionKey = resolveMainSessionKey(cfg);
   const queuedSystemEvents = peekSystemEvents(mainSessionKey);
+  const taskMaintenanceModule = await loadTaskRegistryMaintenanceModule();
+  const tasks = taskMaintenanceModule.getInspectableTaskRegistrySummary();
+  const taskAudit = taskMaintenanceModule.getInspectableTaskAuditSummary();
 
   const resolved = resolveConfiguredStatusModelRef({
     cfg,
@@ -186,7 +197,7 @@ export async function getStatusSummary(
             fallbackContextTokens: configContextTokens ?? undefined,
             allowAsyncLoad: false,
           }) ?? null;
-        const total = resolveFreshSessionTotalTokens(entry);
+        const total = resolveSessionTotalTokens(entry);
         const totalTokensFresh =
           typeof entry?.totalTokens === "number" ? entry?.totalTokensFresh !== false : false;
         const remaining =
@@ -208,6 +219,7 @@ export async function getStatusSummary(
           thinkingLevel: entry?.thinkingLevel,
           fastMode: entry?.fastMode,
           verboseLevel: entry?.verboseLevel,
+          traceLevel: entry?.traceLevel,
           reasoningLevel: entry?.reasoningLevel,
           elevatedLevel: entry?.elevatedLevel,
           systemSent: entry?.systemSent,
@@ -263,6 +275,8 @@ export async function getStatusSummary(
     },
     channelSummary,
     queuedSystemEvents,
+    tasks,
+    taskAudit,
     sessions: {
       paths: Array.from(paths),
       count: totalSessions,

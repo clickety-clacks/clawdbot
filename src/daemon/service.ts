@@ -1,9 +1,9 @@
+import { normalizeLowercaseStringOrEmpty } from "../shared/string-coerce.js";
 import {
   installLaunchAgent,
   isLaunchAgentLoaded,
   readLaunchAgentProgramArguments,
   readLaunchAgentRuntime,
-  recoverLaunchAgentWithAppBounce,
   restartLaunchAgent,
   stageLaunchAgent,
   stopLaunchAgent,
@@ -72,8 +72,6 @@ export type GatewayService = {
   uninstall: (args: GatewayServiceManageArgs) => Promise<void>;
   stop: (args: GatewayServiceControlArgs) => Promise<void>;
   restart: (args: GatewayServiceControlArgs) => Promise<GatewayServiceRestartResult>;
-  // Clawline: expose the macOS app-bounce recovery path for the launchd restart race.
-  recover?: (args: GatewayServiceControlArgs) => Promise<void>;
   isLoaded: (args: GatewayServiceEnvArgs) => Promise<boolean>;
   readCommand: (env: GatewayServiceEnv) => Promise<GatewayServiceCommandConfig | null>;
   readRuntime: (env: GatewayServiceEnv) => Promise<GatewayServiceRuntime>;
@@ -157,7 +155,7 @@ export function describeGatewayServiceRestart(
     return {
       scheduled: true,
       daemonActionResult: "scheduled",
-      message: `restart scheduled, ${serviceNoun.toLowerCase()} will restart momentarily`,
+      message: `restart scheduled, ${normalizeLowercaseStringOrEmpty(serviceNoun)} will restart momentarily`,
       progressMessage: `${serviceNoun} service restart scheduled.`,
     };
   }
@@ -181,7 +179,6 @@ const GATEWAY_SERVICE_REGISTRY: Record<SupportedGatewayServicePlatform, GatewayS
     uninstall: uninstallLaunchAgent,
     stop: stopLaunchAgent,
     restart: restartLaunchAgent,
-    recover: recoverLaunchAgentWithAppBounce,
     isLoaded: isLaunchAgentLoaded,
     readCommand: readLaunchAgentProgramArguments,
     readRuntime: readLaunchAgentRuntime,

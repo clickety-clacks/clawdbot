@@ -1,11 +1,8 @@
 import os from "node:os";
 import path from "node:path";
-import {
-  DEFAULT_AGENT_WORKSPACE_DIR,
-  type OpenClawConfig,
-  resolveUserPath,
-} from "../runtime-api.js";
+import { type OpenClawConfig, resolveUserPath } from "../runtime-api.js";
 import type { ProviderConfig } from "./domain.js";
+import { CLAWLINE_DEFAULT_AGENT_WORKSPACE_DIR } from "./session-compat.js";
 import { deepMerge } from "./utils/deep-merge.js";
 
 export type ClawlineAdapterOverrides = {
@@ -104,13 +101,14 @@ const DEFAULTS: ResolvedClawlineConfig = {
     maxUploadBytes: 104_857_600,
     unreferencedUploadTtlSeconds: 3600,
   },
-  webRootPath: path.join(DEFAULT_AGENT_WORKSPACE_DIR, "www"),
+  webRootPath: path.join(CLAWLINE_DEFAULT_AGENT_WORKSPACE_DIR, "www"),
   webRoot: {
     followSymlinks: false,
   },
   sessions: {
     maxMessageBytes: 65_536,
     maxReplayMessages: 500,
+    maxReplayMessagesPerStream: 20,
     maxPromptMessages: 200,
     maxMessagesPerSecond: 5,
     maxTypingPerSecond: 2,
@@ -137,7 +135,7 @@ export function resolveClawlineConfig(cfg: OpenClawConfig): ResolvedClawlineConf
     typeof cfg.agents?.defaults?.workspace === "string" &&
     cfg.agents.defaults.workspace.trim().length > 0
       ? resolveUserPath(cfg.agents.defaults.workspace)
-      : DEFAULT_AGENT_WORKSPACE_DIR;
+      : CLAWLINE_DEFAULT_AGENT_WORKSPACE_DIR;
   const defaultWebRootPath = path.join(workspaceDefault, "www");
   merged.webRootPath = resolvePathValue(merged.webRootPath, defaultWebRootPath);
   if (

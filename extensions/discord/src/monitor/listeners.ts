@@ -9,11 +9,14 @@ import {
   type User,
 } from "@buape/carbon";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-runtime";
-import { formatDurationSeconds } from "openclaw/plugin-sdk/infra-runtime";
 import { enqueueSystemEvent } from "openclaw/plugin-sdk/infra-runtime";
 import { resolveAgentRoute } from "openclaw/plugin-sdk/routing";
-import { danger, logVerbose } from "openclaw/plugin-sdk/runtime-env";
-import { createSubsystemLogger } from "openclaw/plugin-sdk/runtime-env";
+import {
+  createSubsystemLogger,
+  danger,
+  formatDurationSeconds,
+  logVerbose,
+} from "openclaw/plugin-sdk/runtime-env";
 import {
   readStoreAllowFromForDmPolicy,
   resolveDmGroupAccessWithLists,
@@ -29,6 +32,7 @@ import {
   resolveDiscordGuildEntry,
   shouldEmitDiscordReactionNotification,
 } from "./allow-list.js";
+import { resolveDiscordChannelInfoSafe } from "./channel-access.js";
 import { formatDiscordReactionEmoji, formatDiscordUserTag } from "./format.js";
 import { resolveDiscordChannelInfo } from "./message-utils.js";
 import { setPresence } from "./presence-cache.js";
@@ -442,9 +446,10 @@ async function handleDiscordReactionEvent(
     if (!channel) {
       return;
     }
-    const channelName = "name" in channel ? (channel.name ?? undefined) : undefined;
+    const channelInfo = resolveDiscordChannelInfoSafe(channel);
+    const channelName = channelInfo.name;
     const channelSlug = channelName ? normalizeDiscordSlug(channelName) : "";
-    const channelType = "type" in channel ? channel.type : undefined;
+    const channelType = channelInfo.type;
     const isDirectMessage = channelType === ChannelType.DM;
     const isGroupDm = channelType === ChannelType.GroupDM;
     const isThreadChannel =
@@ -452,7 +457,7 @@ async function handleDiscordReactionEvent(
       channelType === ChannelType.PrivateThread ||
       channelType === ChannelType.AnnouncementThread;
     const memberRoleIds = Array.isArray(data.rawMember?.roles)
-      ? data.rawMember.roles.map((roleId: string) => String(roleId))
+      ? data.rawMember.roles.map((roleId: string) => roleId)
       : [];
     const reactionIngressBase: Omit<DiscordReactionIngressAuthorizationParams, "channelConfig"> = {
       accountId: params.accountId,

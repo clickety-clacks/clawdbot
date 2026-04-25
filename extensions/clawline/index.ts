@@ -1,15 +1,21 @@
-import { defineChannelPluginEntry } from "openclaw/plugin-sdk/core";
-import { clawlinePlugin } from "./src/channel.js";
-import { startClawlineService } from "./src/runtime/service.js";
+import { defineBundledChannelEntry } from "openclaw/plugin-sdk/channel-entry-contract";
 
-let serviceHandle: Awaited<ReturnType<typeof startClawlineService>> = null;
+type ClawlineServiceHandle = {
+  stop: () => void | Promise<void>;
+};
+
+let serviceHandle: ClawlineServiceHandle | null = null;
 let serviceStart: Promise<void> | null = null;
 
-export default defineChannelPluginEntry({
+export default defineBundledChannelEntry({
   id: "clawline",
   name: "Clawline",
   description: "Clawline channel plugin",
-  plugin: clawlinePlugin,
+  importMetaUrl: import.meta.url,
+  plugin: {
+    specifier: "./channel-plugin-api.js",
+    exportName: "clawlinePlugin",
+  },
   registerFull(api) {
     api.registerService({
       id: "clawline",
@@ -27,6 +33,7 @@ export default defineChannelPluginEntry({
         }
         serviceStart = (async () => {
           try {
+            const { startClawlineService } = await import("./service-api.js");
             serviceHandle = await startClawlineService({ config, logger });
           } catch (err) {
             logger.error?.(`clawline service failed to start: ${String(err)}`);

@@ -1,6 +1,8 @@
+import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
+import { Type } from "@sinclair/typebox";
 import BetterSqlite3 from "better-sqlite3";
 import { jsonResult } from "openclaw/plugin-sdk/agent-runtime";
 import type {
@@ -8,9 +10,23 @@ import type {
   ChannelMessageActionName,
 } from "openclaw/plugin-sdk/channel-contract";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/core";
+import type { NormalizedAttachment } from "./runtime/domain.js";
 import { sendClawlineOutboundMessage } from "./runtime/outbound.js";
 
-const DEFAULT_CLAWLINE_PORT = 18800;
+const TERMINAL_SESSION_MIME = "application/vnd.clawline.terminal-session+json";
+const TERMINAL_BUBBLE_CAPABILITIES = {
+  interactive: true,
+  supportsBinaryFrames: true,
+  supportsResize: true,
+  supportsDetach: true,
+} as const;
+
+type TerminalBubbleRequest = {
+  destination: {
+    address: string;
+  };
+  title?: string;
+};
 
 type EventRow = {
   id: string;
@@ -113,24 +129,150 @@ function readStringParam(params: Record<string, unknown>, keys: string[]): strin
   return undefined;
 }
 
+function decodeBase64OrDataUrl(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.startsWith("data:")) {
+    const commaIndex = trimmed.indexOf(",");
+    if (commaIndex < 0) {
+      throw new Error("Clawline terminal bubble descriptor is not valid base64 JSON");
+    }
+    const metadata = trimmed.slice(5, commaIndex);
+    if (!/;base64(?:;|$)/i.test(metadata)) {
+      throw new Error("Clawline terminal bubble descriptor is not valid base64 JSON");
+    }
+    return Buffer.from(trimmed.slice(commaIndex + 1), "base64").toString("utf8");
+  }
+  return Buffer.from(trimmed, "base64").toString("utf8");
+}
+
+function readTerminalBubbleRequest(params: Record<string, unknown>): TerminalBubbleRequest | null {
+  const rawDestination = params.destination;
+  if (rawDestination === undefined) {
+    return null;
+  }
+  if (!rawDestination || typeof rawDestination !== "object") {
+    throw new Error("Clawline terminal bubble request requires destination.address");
+  }
+  const address =
+    typeof (rawDestination as { address?: unknown }).address === "string"
+      ? (rawDestination as { address: string }).address.trim()
+      : "";
+  if (!address) {
+    throw new Error("Clawline terminal bubble request requires destination.address");
+  }
+  const title = readStringParam(params, ["title"]);
+  return {
+    destination: { address },
+    ...(title ? { title } : {}),
+  };
+}
+
+function buildTerminalBubbleDescriptorRequest(request: TerminalBubbleRequest): string {
+  const terminalSessionId = `term_${randomUUID().replace(/-/g, "")}`;
+  const descriptor = {
+    version: 2,
+    terminalSessionId,
+    title: request.title ?? request.destination.address,
+    destination: request.destination,
+    provider: {
+      wsPath: "/ws/terminal",
+    },
+    capabilities: TERMINAL_BUBBLE_CAPABILITIES,
+    auth: {
+      mode: "chat_token",
+    },
+  };
+  return Buffer.from(JSON.stringify(descriptor), "utf8").toString("base64");
+}
+
+function validateTerminalBubbleAttachment(buffer: string): void {
+  let descriptor: {
+    version?: unknown;
+    terminalSessionId?: unknown;
+    destination?: { address?: unknown } | null;
+  };
+  try {
+    descriptor = JSON.parse(decodeBase64OrDataUrl(buffer)) as {
+      version?: unknown;
+      terminalSessionId?: unknown;
+      destination?: { address?: unknown } | null;
+    };
+  } catch {
+    throw new Error("Clawline terminal bubble descriptor is not valid base64 JSON");
+  }
+
+  const terminalSessionId =
+    typeof descriptor.terminalSessionId === "string" ? descriptor.terminalSessionId.trim() : "";
+  const version =
+    typeof descriptor.version === "number" && Number.isFinite(descriptor.version)
+      ? Math.floor(descriptor.version)
+      : null;
+  const destinationAddress =
+    typeof descriptor.destination?.address === "string"
+      ? descriptor.destination.address.trim()
+      : "";
+
+  if (!terminalSessionId) {
+    throw new Error("Clawline terminal bubble descriptor requires terminalSessionId");
+  }
+  if (version !== 2 || !destinationAddress) {
+    throw new Error("Clawline terminal bubbles now require version 2 with destination.address");
+  }
+}
+
+function resolveSendAttachmentBuffer(params: {
+  params: Record<string, unknown>;
+  mimeType: string;
+}): string {
+  const explicitBuffer =
+    typeof params.params.buffer === "string" ? params.params.buffer.trim() : "";
+  if (params.mimeType !== TERMINAL_SESSION_MIME) {
+    if (!explicitBuffer) {
+      throw new Error("Clawline sendAttachment requires buffer (base64 or data: URL)");
+    }
+    return explicitBuffer;
+  }
+
+  const terminalRequest = readTerminalBubbleRequest(params.params);
+  if (terminalRequest) {
+    if (explicitBuffer) {
+      throw new Error(
+        "Clawline terminal bubble request cannot include both destination routing and a raw descriptor buffer",
+      );
+    }
+    return buildTerminalBubbleDescriptorRequest(terminalRequest);
+  }
+
+  if (!explicitBuffer) {
+    throw new Error("Clawline sendAttachment requires buffer (base64 or data: URL)");
+  }
+  validateTerminalBubbleAttachment(explicitBuffer);
+  return explicitBuffer;
+}
+
 function summarizeOutboundResult(result: Awaited<ReturnType<typeof sendClawlineOutboundMessage>>) {
   // Never echo base64 attachment payloads back to the agent/tool output. They can be large and
   // can cause tool delivery to stall.
   const attachments = Array.isArray(result.attachments)
-    ? result.attachments.map((a: any) => {
-        if (!a || typeof a !== "object") {
-          return { type: "unknown" };
+    ? result.attachments.map((attachment: NormalizedAttachment) => {
+        switch (attachment.type) {
+          case "asset":
+            return { type: "asset", assetId: attachment.assetId };
+          case "image":
+            return {
+              type: "image",
+              mimeType: attachment.mimeType,
+              assetId: attachment.assetId,
+            };
+          case "document":
+            return { type: "document", mimeType: attachment.mimeType };
+          default: {
+            const exhaustiveCheck: never = attachment;
+            throw new Error(
+              `Unsupported Clawline outbound attachment: ${JSON.stringify(exhaustiveCheck)}`,
+            );
+          }
         }
-        if (a.type === "asset") {
-          return { type: "asset", assetId: a.assetId };
-        }
-        if (a.type === "image") {
-          return { type: "image", mimeType: a.mimeType, assetId: a.assetId };
-        }
-        if (a.type === "document") {
-          return { type: "document", mimeType: a.mimeType };
-        }
-        return { type: String(a.type ?? "unknown") };
       })
     : undefined;
 
@@ -232,7 +374,27 @@ export const clawlineMessageActions: ChannelMessageActionAdapter = {
       return null;
     }
     const actions: ChannelMessageActionName[] = ["send", "sendAttachment", "read"];
-    return { actions };
+    return {
+      actions,
+      schema: {
+        properties: {
+          destination: Type.Optional(
+            Type.Object({
+              address: Type.String({
+                description:
+                  "For Clawline terminal bubbles, the per-bubble destination address, for example mike@eezo.",
+              }),
+            }),
+          ),
+          title: Type.Optional(
+            Type.String({
+              description:
+                "Optional Clawline terminal bubble title. When omitted, the provider defaults it from destination.address.",
+            }),
+          ),
+        },
+      },
+    };
   },
   supportsAction: ({ action }) => action === "sendAttachment" || action === "read",
 
@@ -244,15 +406,12 @@ export const clawlineMessageActions: ChannelMessageActionAdapter = {
       if (!to?.trim()) {
         throw new Error("Clawline sendAttachment requires target/to");
       }
-      const buffer = typeof params.buffer === "string" ? params.buffer.trim() : "";
-      if (!buffer) {
-        throw new Error("Clawline sendAttachment requires buffer (base64 or data: URL)");
-      }
       const rawMimeType =
         (typeof params.contentType === "string" ? params.contentType : undefined) ??
         (typeof params.mimeType === "string" ? params.mimeType : undefined) ??
         "application/octet-stream";
       const mimeType = normalizeMimeType(rawMimeType);
+      const buffer = resolveSendAttachmentBuffer({ params, mimeType });
       const caption =
         (typeof params.caption === "string" ? params.caption : undefined) ??
         (typeof params.message === "string" ? params.message : undefined) ??

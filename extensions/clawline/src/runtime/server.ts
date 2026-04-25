@@ -1,6 +1,6 @@
 import { execFile as execFileCb } from "node:child_process";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import type { Dirent, Stats } from "node:fs";
+import type { Stats } from "node:fs";
 import { watch, type FSWatcher, createReadStream } from "node:fs";
 import fs from "node:fs/promises";
 import http from "node:http";
@@ -12,27 +12,22 @@ import { promisify } from "node:util";
 import type { Database as SqliteDatabase, Statement as SqliteStatement } from "better-sqlite3";
 import BetterSqlite3 from "better-sqlite3";
 import jwt from "jsonwebtoken";
+import { loadGatewayTlsRuntime } from "openclaw/plugin-sdk/gateway-runtime";
 import { type Dispatcher } from "undici";
 import WebSocket, { WebSocketServer } from "ws";
-import { isLoopbackHost, isPrivateOrLoopbackHost } from "../../../../src/gateway/net.js";
 import {
-  ADMIN_SCOPE,
   DEFAULT_ACCOUNT_ID,
-  DEFAULT_AGENT_WORKSPACE_DIR,
-  callGateway,
   closeDispatcher,
   createPinnedDispatcher,
   createReplyDispatcherWithTyping,
   detectMime,
-  dispatchReplyFromConfig,
+  dispatchInboundMessage,
   enqueueAnnounce,
-  extractShortModelName,
   finalizeInboundContext,
-  getFollowupQueueDepth,
   hasAlphaChannel,
-  isCronRunSessionKey,
+  isLoopbackHost,
+  isPrivateOrLoopbackHost,
   loadSessionStore,
-  loadGatewayTlsRuntime,
   maxBytesForKind,
   mediaKindFromMime,
   optimizeImageToJpeg,
@@ -40,20 +35,15 @@ import {
   parseAgentSessionKey,
   rawDataToString,
   recordInboundSession,
+  resolveAgentIdentity,
   resolveAgentIdFromSessionKey,
   resolveAllAgentSessionStoreTargetsSync,
   resolveEffectiveMessagesConfig,
   resolveHumanDelayConfig,
-  resolveIdentityName,
-  resolveQueueSettings,
-  resolveSessionTranscriptPath,
   resolveSessionStoreEntry,
   resolvePinnedHostname,
-  type AnnounceQueueItem,
   type PinnedHostname,
   type ReplyPayload,
-  type ResponsePrefixContext,
-  type SessionEntry,
 } from "../runtime-api.js";
 import { clawlineAttachmentsToImages } from "./attachments.js";
 import type { ClawlineAdapterOverrides } from "./config.js";
@@ -79,12 +69,29 @@ import type {
   StreamCreatedServerMessage,
   StreamUpdatedServerMessage,
   StreamDeletedServerMessage,
+  StreamReadStateServerMessage,
+  StreamTailState,
+  StreamTailStateServerMessage,
 } from "./domain.js";
 import { ClientMessageError, HttpError } from "./errors.js";
+import { callClawlineGatewayAgent } from "./gateway-alert-runtime.js";
 import { createAssetHandlers } from "./http-assets.js";
+import { runWithClawlineOutboundCorrelation } from "./outbound.js";
 import { createPerUserTaskQueue } from "./per-user-task-queue.js";
 import { SlidingWindowRateLimiter } from "./rate-limiter.js";
+import {
+  type ClawlineResponsePrefixContext,
+  extractClawlineShortModelName,
+  getClawlineFollowupQueueDepth,
+  resolveClawlineQueueSettings,
+} from "./reply-compat.js";
 import { ClawlineDeliveryTarget } from "./routing.js";
+import {
+  CLAWLINE_DEFAULT_AGENT_WORKSPACE_DIR,
+  isClawlineCronRunSessionKey,
+  resolveClawlineSessionTranscriptPath,
+  type ClawlineSessionEntry,
+} from "./session-compat.js";
 import { resolveSubscribedSessionKeys } from "./session-keys.js";
 import { recordClawlineSessionActivity } from "./session-store.js";
 import { peekSystemEvents } from "./system-events.js";
@@ -93,18 +100,31 @@ import { deepMerge } from "./utils/deep-merge.js";
 export const PROTOCOL_VERSION = 1;
 
 const execFile = promisify(execFileCb);
+type SessionEntry = ClawlineSessionEntry;
+
+type ClientPayload = Record<string, unknown>;
+
+type PtyProcess = {
+  write(data: string): void;
+  resize(cols: number, rows: number): void;
+  kill(): void;
+  onData(callback: (data: string) => void): void;
+  onExit(callback: (event: { exitCode?: number }) => void): void;
+};
+
+function isClientPayload(value: unknown): value is ClientPayload {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
 
 type TerminalTmuxBackend = {
   execTmux(
     args: string[],
     options: { timeout: number; maxBuffer: number },
   ): Promise<{
-    // oxlint-disable-next-line typescript/no-explicit-any
-    stdout: any;
+    stdout: unknown;
   }>;
   spawnAttachPty(params: { sessionName: string; cols: number; rows: number }): Promise<{
-    // oxlint-disable-next-line typescript/no-explicit-any
-    pty: any;
+    pty: PtyProcess;
   }>;
 };
 
@@ -207,8 +227,11 @@ function createTerminalTmuxBackend(
     },
     async spawnAttachPty(params: { sessionName: string; cols: number; rows: number }) {
       const ptyModule = (await import("@lydell/node-pty")) as unknown as {
-        // oxlint-disable-next-line typescript/no-explicit-any
-        spawn: (file: string, args: string[], options: any) => any;
+        spawn: (
+          file: string,
+          args: string[],
+          options: { name: string; cols: number; rows: number },
+        ) => PtyProcess;
       };
       if (!useRemote) {
         const pty = ptyModule.spawn("tmux", ["attach-session", "-t", params.sessionName], {
@@ -233,8 +256,6 @@ function createTerminalTmuxBackend(
   };
 }
 
-// eslint-disable-next-line no-control-regex
-const CONTROL_CHARS_REGEX = /[\u0000-\u001F\u007F]/g;
 const UUID_V4_REGEX =
   /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/;
 const SERVER_EVENT_ID_REGEX =
@@ -253,6 +274,8 @@ const INTERACTIVE_HTML_MIME = "application/vnd.clawline.interactive-html+json";
 const INTERACTIVE_CALLBACK_MIME = "application/vnd.clawline.interactive-callback+json";
 const CLIENT_FEATURE_TERMINAL_BUBBLES_V1 = "terminal_bubbles_v1";
 const SERVER_FEATURE_SESSION_INFO = "session_info";
+const SERVER_FEATURE_STREAM_READ_STATE = "stream_read_state";
+const SERVER_FEATURE_STREAM_TAIL_STATE = "stream_tail_state";
 const TERMINAL_BUBBLES_UNSUPPORTED_NOTICE =
   "Terminal session hidden: this client does not support terminal bubbles yet. Update Clawline to view it.";
 const INLINE_DOCUMENT_MIME_TYPES = new Set([TERMINAL_SESSION_MIME, INTERACTIVE_HTML_MIME]);
@@ -269,7 +292,7 @@ const EXEC_COMPLETION_ALERT_PROMPT =
 const USER_ID_MAX_LENGTH = 48;
 const COMBINING_MARKS_REGEX = /[\u0300-\u036f]/g;
 const WEBROOT_PREFIX = "/www";
-const STREAM_DB_VERSION = 4;
+const STREAM_DB_VERSION = 5;
 const STREAM_SUFFIX_REGEX = /^s_[0-9a-f]{8}$/;
 const STREAM_DISPLAY_NAME_FALLBACK = "Stream";
 const STREAM_IDEMPOTENCY_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
@@ -278,6 +301,33 @@ const STREAM_OPERATION_CREATE = "create_stream";
 const STREAM_OPERATION_DELETE = "delete_stream";
 const MAX_STREAMS_BODY_BYTES = 16 * 1024;
 const STREAM_SESSION_KEY_PATH_DECODE_PASSES = 4;
+
+function stripControlChars(value: string): string {
+  let result = "";
+  for (const char of value) {
+    const code = char.charCodeAt(0);
+    if (code <= 0x1f || code === 0x7f) {
+      continue;
+    }
+    result += char;
+  }
+  return result;
+}
+
+type ClawlineAnnounceQueueItem = {
+  announceId?: string;
+  attachments?: unknown[];
+  prompt: string;
+  summaryLine?: string;
+  enqueuedAt: number;
+  sessionKey: string;
+  origin?: {
+    channel?: string;
+    to?: string;
+    accountId?: string;
+    threadId?: string | number;
+  };
+};
 
 function truncateUtf8(value: string, maxBytes: number): string {
   if (Buffer.byteLength(value, "utf8") <= maxBytes) {
@@ -407,7 +457,11 @@ function countTerminalSessionDocumentAttachments(values?: unknown[]): number {
 }
 
 function buildAuthResultFeatures(session: Session): string[] {
-  const features = [SERVER_FEATURE_SESSION_INFO];
+  const features = [
+    SERVER_FEATURE_SESSION_INFO,
+    SERVER_FEATURE_STREAM_READ_STATE,
+    SERVER_FEATURE_STREAM_TAIL_STATE,
+  ];
   if (session.clientFeatures.has(CLIENT_FEATURE_TERMINAL_BUBBLES_V1)) {
     features.push(CLIENT_FEATURE_TERMINAL_BUBBLES_V1);
   }
@@ -458,7 +512,7 @@ function sanitizeLabel(label?: string): string | undefined {
   if (typeof label !== "string") {
     return undefined;
   }
-  const stripped = label.replace(CONTROL_CHARS_REGEX, "").trim();
+  const stripped = stripControlChars(label).trim();
   if (!stripped) {
     return undefined;
   }
@@ -469,7 +523,7 @@ function sanitizeStreamDisplayName(value: unknown, maxBytes: number): string | n
   if (typeof value !== "string") {
     return null;
   }
-  const stripped = value.replace(CONTROL_CHARS_REGEX, "").trim();
+  const stripped = stripControlChars(value).trim();
   if (!stripped) {
     return null;
   }
@@ -484,7 +538,7 @@ function sanitizeDeviceInfo(info: DeviceInfo): DeviceInfo {
     if (typeof value !== "string") {
       return undefined;
     }
-    const stripped = value.replace(CONTROL_CHARS_REGEX, "").trim();
+    const stripped = stripControlChars(value).trim();
     if (!stripped) {
       return undefined;
     }
@@ -499,15 +553,15 @@ function sanitizeDeviceInfo(info: DeviceInfo): DeviceInfo {
 }
 
 function derivePeerId(entry: AllowlistEntry): string {
-  const sources = [
+  const source = [
     entry.bindingId?.trim(),
     entry.claimedName?.trim(),
     entry.deviceInfo.model?.trim(),
     entry.deviceInfo.platform?.trim(),
     entry.userId.trim(),
     entry.deviceId.trim(),
-  ].filter((value): value is string => Boolean(value && value.length > 0));
-  return sources[0] ?? entry.deviceId;
+  ].find((value): value is string => typeof value === "string" && value.length > 0);
+  return source ?? entry.deviceId;
 }
 
 function normalizeUserIdFromClaimedName(claimedName?: string): string | null {
@@ -818,8 +872,11 @@ function decodeTerminalSessionDescriptorFromBase64(
       return null;
     }
     const version =
-      typeof obj.version === "number" && Number.isFinite(obj.version) ? obj.version : undefined;
-    const title = typeof obj.title === "string" ? obj.title.trim() : undefined;
+      typeof obj.version === "number" && Number.isFinite(obj.version)
+        ? Math.floor(obj.version)
+        : undefined;
+    const title =
+      typeof obj.title === "string" && obj.title.trim().length > 0 ? obj.title.trim() : undefined;
     if (obj.destination == null) {
       if (version === 2) {
         return null;
@@ -988,6 +1045,12 @@ type Session = {
   peerId: string;
   claimedName?: string;
   deviceInfo?: DeviceInfo;
+  replayInProgress: boolean;
+  replayDeliveredMessageIds: Set<string>;
+  replayBufferedMessages: ServerMessage[];
+  replayBarrier: Promise<void>;
+  resolveReplayBarrier: () => void;
+  revoked: boolean;
 };
 
 type ConnectionState = {
@@ -1013,13 +1076,23 @@ type ServerMessage = {
   sessionKey?: string;
   attachments?: unknown[];
   deviceId?: string;
+  clientMessageId?: string;
+  replyToMessageId?: string;
+  replyToClientMessageId?: string;
 };
 
 type StreamServerMessage =
   | StreamSnapshotServerMessage
   | StreamCreatedServerMessage
   | StreamUpdatedServerMessage
-  | StreamDeletedServerMessage;
+  | StreamDeletedServerMessage
+  | StreamReadStateServerMessage
+  | StreamTailStateServerMessage;
+
+type StreamTailStateRow = {
+  sessionKey: string;
+  payloadJson: string;
+};
 
 type TrackableSessionApiEntry = {
   sessionKey: string;
@@ -1044,6 +1117,14 @@ type StreamSessionRow = {
   isBuiltIn: number;
   adopted: number;
   createdAt: number;
+  updatedAt: number;
+};
+
+type StreamReadStateRow = {
+  userId: string;
+  sessionKey: string;
+  lastReadMessageId: string;
+  lastReadSequence: number;
   updatedAt: number;
 };
 
@@ -1121,13 +1202,14 @@ const DEFAULT_CONFIG: ProviderConfig = {
     maxUploadBytes: 104_857_600,
     unreferencedUploadTtlSeconds: 3600,
   },
-  webRootPath: path.join(DEFAULT_AGENT_WORKSPACE_DIR, "www"),
+  webRootPath: path.join(CLAWLINE_DEFAULT_AGENT_WORKSPACE_DIR, "www"),
   webRoot: {
     followSymlinks: false,
   },
   sessions: {
     maxMessageBytes: 65_536,
     maxReplayMessages: 500,
+    maxReplayMessagesPerStream: 20,
     maxPromptMessages: 200,
     maxMessagesPerSecond: 5,
     maxTypingPerSecond: 2,
@@ -1541,7 +1623,7 @@ function hashAttachments(attachments: NormalizedAttachment[]): string {
   if (attachments.length === 0) {
     return sha256("[]");
   }
-  const parts = attachments.map((attachment) => {
+  const parts = attachments.map((attachment): string => {
     switch (attachment.type) {
       case "image":
         return `{"type":"image","mimeType":${quote(attachment.mimeType)},"data":${quote(attachment.data)}}`;
@@ -1549,6 +1631,10 @@ function hashAttachments(attachments: NormalizedAttachment[]): string {
         return `{"type":"document","mimeType":${quote(attachment.mimeType)},"data":${quote(attachment.data)}}`;
       case "asset":
         return `{"type":"asset","assetId":${quote(attachment.assetId)}}`;
+      default: {
+        const exhaustiveCheck: never = attachment;
+        throw new Error(`Unsupported Clawline attachment: ${JSON.stringify(exhaustiveCheck)}`);
+      }
     }
   });
   return sha256(`[${parts.join(",")}]`);
@@ -1587,8 +1673,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const mainSessionKey = options.mainSessionKey?.trim() || "agent:main:main";
   const mainSessionAgentId = resolveAgentIdFromSessionKey(mainSessionKey);
 
+  const resolveIdentityName = (agentId: string) => {
+    const name = resolveAgentIdentity(openClawCfg, agentId)?.name;
+    return typeof name === "string" && name.trim().length > 0 ? name.trim() : undefined;
+  };
   const resolveAssistantSenderName = (sessionKey: string) =>
-    resolveIdentityName(openClawCfg, resolveAgentIdFromSessionKey(sessionKey));
+    resolveIdentityName(resolveAgentIdFromSessionKey(sessionKey));
 
   type SessionInfo = {
     dmScope: string;
@@ -1664,7 +1754,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     session.sessionKey = info.mainSessionKey;
     return info;
   };
-  const sendSessionInfo = async (session: Session, info?: ReturnType<typeof buildSessionInfo>) => {
+  const sendSessionInfo = async (
+    session: Session,
+    info?: ReturnType<typeof buildSessionInfo>,
+  ): Promise<boolean> => {
     const resolved =
       info ?? buildSessionInfo(session.userId, session.isAdmin, session.adoptedSessionKeys);
     const payload = {
@@ -1673,8 +1766,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       isAdmin: session.isAdmin,
       dmScope: resolved.dmScope,
       sessionKeys: resolved.streamSessionKeys,
+      streamReadStates: readStreamReadStatesForUser(session.userId, resolved.streamSessionKeys),
+      streamTailStates: readStreamTailStatesForUser(session.userId, resolved.streamSessionKeys),
     };
-    await sendJson(session.socket, payload).catch(() => {});
+    return sendJson(session.socket, payload).catch(() => false);
   };
   async function notifyGatewayOfPending(entry: PendingEntry) {
     const text = `New device pending approval: ${describePairingEntry(entry)}`;
@@ -1752,16 +1847,17 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   let insertMessageStmt!: SqliteStatement;
   let selectMessageStmt!: SqliteStatement;
   let updateMessageStreamingStmt!: SqliteStatement;
+  let updateActiveMessagesStreamingByDeviceStmt!: SqliteStatement;
   let insertMessageAssetStmt!: SqliteStatement;
   let insertAssetStmt!: SqliteStatement;
   let selectAssetStmt!: SqliteStatement;
   let selectExpiredAssetsStmt!: SqliteStatement;
   let deleteAssetStmt!: SqliteStatement;
-  let selectEventsAfterStmt!: SqliteStatement;
   let selectEventsTailStmt!: SqliteStatement;
+  let selectEventsTailBySessionStmt!: SqliteStatement;
+  let selectEventsAfterBySessionStmt!: SqliteStatement;
   let selectEventByIdStmt!: SqliteStatement;
   let selectEventPayloadForUserStmt!: SqliteStatement;
-  let selectEventsAfterTimestampStmt!: SqliteStatement;
   let selectStreamSessionsByUserStmt!: SqliteStatement;
   let selectStreamSessionByKeyStmt!: SqliteStatement;
   let selectStreamMaxOrderStmt!: SqliteStatement;
@@ -1769,11 +1865,16 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   let updateStreamSessionDisplayNameStmt!: SqliteStatement;
   let updateStreamSessionBuiltInMetadataStmt!: SqliteStatement;
   let deleteStreamSessionStmt!: SqliteStatement;
+  let selectStreamReadStatesByUserStmt!: SqliteStatement;
+  let selectStreamReadStateBySessionStmt!: SqliteStatement;
+  let upsertStreamReadStateStmt!: SqliteStatement;
+  let deleteStreamReadStateBySessionStmt!: SqliteStatement;
   let selectStreamIdempotencyStmt!: SqliteStatement;
   let insertStreamIdempotencyStmt!: SqliteStatement;
   let deleteExpiredStreamIdempotencyStmt!: SqliteStatement;
   let selectAdoptedSessionKeysByUserStmt!: SqliteStatement;
   let insertAdoptedSessionStmt!: SqliteStatement;
+  let selectStreamTailStatesByUserStmt!: SqliteStatement;
   let deleteMessageAssetsBySessionStmt!: SqliteStatement;
   let deleteMessagesBySessionStmt!: SqliteStatement;
   let deleteEventsBySessionStmt!: SqliteStatement;
@@ -1888,6 +1989,125 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         .map((row) => row.sessionKey.trim().toLowerCase())
         .filter((sessionKey) => sessionKey.length > 0),
     );
+  };
+
+  const readStreamReadStateMapForUser = (userId: string, sessionKeys?: Set<string>) => {
+    if (!selectStreamReadStatesByUserStmt) {
+      return {} as Record<string, string>;
+    }
+    const rows = selectStreamReadStatesByUserStmt.all(userId) as StreamReadStateRow[];
+    const result: Record<string, string> = {};
+    for (const row of rows) {
+      if (sessionKeys && !sessionKeys.has(row.sessionKey)) {
+        continue;
+      }
+      if (typeof row.lastReadMessageId !== "string" || row.lastReadMessageId.length === 0) {
+        continue;
+      }
+      result[row.sessionKey] = row.lastReadMessageId;
+    }
+    return result;
+  };
+
+  const updateStreamReadState = ({
+    userId,
+    sessionKey,
+    lastReadMessageId,
+  }: {
+    userId: string;
+    sessionKey: string;
+    lastReadMessageId: string;
+  }) => {
+    const requestedSessionKey = normalizeSessionKey(sessionKey);
+    if (!requestedSessionKey) {
+      throw new ClientMessageError("invalid_session", "Invalid sessionKey");
+    }
+    const existingStream = selectStreamSessionByKeyStmt.get(userId, requestedSessionKey) as
+      | StreamSessionRow
+      | undefined;
+    if (!existingStream) {
+      throw new ClientMessageError("invalid_session", "Unknown sessionKey");
+    }
+    const storedSessionKey = existingStream.sessionKey;
+    const eventRow = selectEventByIdStmt.get(lastReadMessageId) as
+      | { userId: string; sessionKey: string | null; sequence: number }
+      | undefined;
+    if (
+      !eventRow ||
+      eventRow.userId !== userId ||
+      !sessionKeyEq(eventRow.sessionKey ?? "", storedSessionKey)
+    ) {
+      throw new ClientMessageError("invalid_message", "Unknown lastReadMessageId");
+    }
+    const existing = selectStreamReadStateBySessionStmt.get(userId, storedSessionKey) as
+      | StreamReadStateRow
+      | undefined;
+    if (existing && existing.lastReadSequence >= eventRow.sequence) {
+      return {
+        updated: false,
+        sessionKey: storedSessionKey,
+        lastReadMessageId: existing.lastReadMessageId,
+      };
+    }
+    upsertStreamReadStateStmt.run(
+      userId,
+      storedSessionKey,
+      lastReadMessageId,
+      eventRow.sequence,
+      nowMs(),
+    );
+    return {
+      updated: true,
+      sessionKey: storedSessionKey,
+      lastReadMessageId,
+    };
+  };
+
+  const readStreamReadStatesForUser = (
+    userId: string,
+    allowedSessionKeys?: string[],
+  ): Record<string, string> => {
+    const allowed = allowedSessionKeys
+      ? new Set(allowedSessionKeys.map((sessionKey) => normalizeSessionKey(sessionKey)))
+      : null;
+    return readStreamReadStateMapForUser(userId, allowed ?? undefined);
+  };
+
+  const readStreamTailStatesForUser = (
+    userId: string,
+    allowedSessionKeys?: string[],
+  ): Record<string, StreamTailState> => {
+    if (!selectStreamTailStatesByUserStmt) {
+      return {};
+    }
+    const allowed = allowedSessionKeys
+      ? new Set(allowedSessionKeys.map((sessionKey) => normalizeSessionKey(sessionKey)))
+      : null;
+    const rows = selectStreamTailStatesByUserStmt.all(userId, userId) as StreamTailStateRow[];
+    const states: Record<string, StreamTailState> = {};
+    for (const row of rows) {
+      const normalizedSessionKey = normalizeSessionKey(row.sessionKey);
+      if (!normalizedSessionKey) {
+        continue;
+      }
+      if (allowed && !allowed.has(normalizedSessionKey)) {
+        continue;
+      }
+      const parsed = parseServerMessage(row.payloadJson, logger);
+      if (
+        !parsed ||
+        parsed.type !== "message" ||
+        !SERVER_EVENT_ID_REGEX.test(parsed.id) ||
+        (parsed.role !== "user" && parsed.role !== "assistant")
+      ) {
+        continue;
+      }
+      states[row.sessionKey] = {
+        lastMessageId: parsed.id,
+        lastMessageRole: parsed.role,
+      };
+    }
+    return states;
   };
 
   const filterStreamAccess = (streams: StreamSession[], isAdmin: boolean): StreamSession[] => {
@@ -2180,6 +2400,16 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       );
       CREATE INDEX IF NOT EXISTS idx_adopted_sessions_user_created
         ON adopted_sessions(userId, createdAt);
+      CREATE TABLE IF NOT EXISTS stream_read_state (
+        userId TEXT NOT NULL,
+        sessionKey TEXT NOT NULL,
+        lastReadMessageId TEXT NOT NULL,
+        lastReadSequence INTEGER NOT NULL,
+        updatedAt INTEGER NOT NULL,
+        PRIMARY KEY (userId, sessionKey)
+      );
+      CREATE INDEX IF NOT EXISTS idx_stream_read_state_user_updated
+        ON stream_read_state(userId, updatedAt);
     `);
     if (!tableHasColumn("stream_sessions", "adopted")) {
       database.exec(`ALTER TABLE stream_sessions ADD COLUMN adopted INTEGER NOT NULL DEFAULT 0`);
@@ -2545,6 +2775,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     updateMessageStreamingStmt = newDb.prepare(
       `UPDATE messages SET streaming = ? WHERE deviceId = ? AND clientId = ?`,
     );
+    updateActiveMessagesStreamingByDeviceStmt = newDb.prepare(
+      `UPDATE messages
+       SET streaming = ?
+       WHERE deviceId = ? AND streaming IN (${MessageStreamingState.Active}, ${MessageStreamingState.Queued})`,
+    );
     insertMessageAssetStmt = newDb.prepare(
       `INSERT INTO message_assets (deviceId, clientId, assetId) VALUES (?, ?, ?)`,
     );
@@ -2600,6 +2835,28 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     deleteStreamSessionStmt = newDb.prepare(
       `DELETE FROM stream_sessions WHERE userId = ? AND sessionKey = ?`,
     );
+    selectStreamReadStatesByUserStmt = newDb.prepare(
+      `SELECT userId, sessionKey, lastReadMessageId, lastReadSequence, updatedAt
+       FROM stream_read_state
+       WHERE userId = ?`,
+    );
+    selectStreamReadStateBySessionStmt = newDb.prepare(
+      `SELECT userId, sessionKey, lastReadMessageId, lastReadSequence, updatedAt
+       FROM stream_read_state
+       WHERE userId = ? AND sessionKey = ?`,
+    );
+    upsertStreamReadStateStmt = newDb.prepare(
+      `INSERT INTO stream_read_state
+         (userId, sessionKey, lastReadMessageId, lastReadSequence, updatedAt)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(userId, sessionKey) DO UPDATE SET
+         lastReadMessageId = excluded.lastReadMessageId,
+         lastReadSequence = excluded.lastReadSequence,
+         updatedAt = excluded.updatedAt`,
+    );
+    deleteStreamReadStateBySessionStmt = newDb.prepare(
+      `DELETE FROM stream_read_state WHERE userId = ? AND sessionKey = ?`,
+    );
     selectStreamIdempotencyStmt = newDb.prepare(
       `SELECT operation, responseJson FROM stream_idempotency WHERE userId = ? AND idempotencyKey = ?`,
     );
@@ -2619,6 +2876,19 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     insertAdoptedSessionStmt = newDb.prepare(
       `INSERT OR IGNORE INTO adopted_sessions (userId, sessionKey, createdAt)
        VALUES (?, ?, ?)`,
+    );
+    selectStreamTailStatesByUserStmt = newDb.prepare(
+      `SELECT latest.sessionKey, events.payloadJson
+       FROM (
+         SELECT sessionKey, MAX(sequence) as maxSequence
+         FROM events
+         WHERE userId = ? AND eventType = 'message' AND sessionKey IS NOT NULL
+         GROUP BY sessionKey
+       ) AS latest
+       JOIN events
+         ON events.userId = ?
+        AND events.sessionKey = latest.sessionKey
+        AND events.sequence = latest.maxSequence`,
     );
     deleteMessageAssetsBySessionStmt = newDb.prepare(
       `DELETE FROM message_assets
@@ -2718,6 +2988,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           timestamp,
           streaming: false,
           deviceId: session.deviceId,
+          clientMessageId: messageId,
           attachments: attachments.length > 0 ? attachments : undefined,
           sessionKey,
         };
@@ -2753,29 +3024,31 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       },
     );
 
-    selectEventsAfterStmt = newDb.prepare(
-      `SELECT id, payloadJson
-       FROM events
-       WHERE userId = ? AND eventType = 'message' AND sequence > ?
-       ORDER BY sequence ASC`,
-    );
     selectEventsTailStmt = newDb.prepare(
       `SELECT id, payloadJson
        FROM events
        WHERE userId = ? AND eventType = 'message'
        ORDER BY sequence DESC LIMIT ?`,
     );
+    selectEventsTailBySessionStmt = newDb.prepare(
+      `SELECT id, payloadJson, sequence, timestamp
+       FROM events
+       WHERE userId = ? AND eventType = 'message' AND sessionKey = ?
+       ORDER BY sequence DESC LIMIT ?`,
+    );
+    selectEventsAfterBySessionStmt = newDb.prepare(
+      `SELECT id, payloadJson, sequence, timestamp
+       FROM events
+       WHERE userId = ? AND eventType = 'message' AND sessionKey = ? AND sequence > ?
+       ORDER BY sequence DESC LIMIT ?`,
+    );
     selectEventByIdStmt = newDb.prepare(
-      `SELECT id, userId, sequence, timestamp FROM events WHERE id = ? AND eventType = 'message'`,
+      `SELECT id, userId, sessionKey, sequence, timestamp
+       FROM events
+       WHERE id = ? AND eventType = 'message'`,
     );
     selectEventPayloadForUserStmt = newDb.prepare(
       `SELECT payloadJson FROM events WHERE userId = ? AND id = ? AND eventType = 'message'`,
-    );
-    selectEventsAfterTimestampStmt = newDb.prepare(
-      `SELECT id, payloadJson
-       FROM events
-       WHERE userId = ? AND eventType = 'message' AND timestamp > ?
-       ORDER BY sequence ASC`,
     );
     insertEventTx = newDb.transaction(
       (
@@ -2812,10 +3085,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       const orphanCandidates = selectOrphanedAssetsForUserStmt.all(params.userId) as Array<{
         assetId: string;
       }>;
+      deleteStreamReadStateBySessionStmt.run(params.userId, params.sessionKey);
       deleteMessageAssetsBySessionStmt.run(params.userId, params.userId, params.sessionKey);
       deleteMessagesBySessionStmt.run(params.userId, params.userId, params.sessionKey);
       deleteEventsBySessionStmt.run(params.userId, params.sessionKey);
       deleteStreamSessionStmt.run(params.userId, params.sessionKey);
+      deleteStreamReadStateBySessionStmt.run(params.userId, params.sessionKey);
       const deletedAssetIds: string[] = [];
       for (const row of orphanCandidates) {
         const result = deleteOrphanedAssetByIdStmt.run(row.assetId);
@@ -3055,7 +3330,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
   }
 
-  type EventRow = { id: string; payloadJson: string };
+  type EventRow = { id: string; payloadJson: string; sequence?: number; timestamp?: number };
 
   const logHttpRequest = (event: string, info?: Record<string, unknown>) => {
     if (info) {
@@ -3468,18 +3743,15 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     if (!normalizedMessage) {
       throw new HttpError(400, "invalid_message", "Alert message is required");
     }
-    const normalizedSource = resolveAlertSource(source);
-    const text = normalizedSource
-      ? `[${normalizedSource}] ${normalizedMessage}`
-      : normalizedMessage;
-    if (Buffer.byteLength(text, "utf8") > config.sessions.maxMessageBytes) {
+    resolveAlertSource(source);
+    if (Buffer.byteLength(normalizedMessage, "utf8") > config.sessions.maxMessageBytes) {
       throw new HttpError(400, "message_too_large", "Alert message exceeds max size");
     }
-    return text;
+    return normalizedMessage;
   }
 
   function normalizeAlertMessage(value: string): string | null {
-    const cleaned = value.replace(CONTROL_CHARS_REGEX, "").trim();
+    const cleaned = stripControlChars(value).trim();
     if (!cleaned) {
       return null;
     }
@@ -3866,87 +4138,52 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     if (!parsedAgentSessionKey) {
       throw new HttpError(400, "invalid_session_key", "Invalid session key");
     }
-    if (sessionKeyEq(resolvedSessionKey, mainSessionKey)) {
-      return mainSessionKey;
+    const streamSessionKey = await resolveExistingClawlineAlertStreamSessionKey(resolvedSessionKey);
+    if (streamSessionKey) {
+      return streamSessionKey;
     }
-
-    const parsed = parseClawlineUserSessionKey(resolvedSessionKey);
-    if (parsed?.agentId === "main") {
-      const allowlistEntry = allowlist.entries.find(
-        (entry) => entry.userId.toLowerCase() === parsed.userId.toLowerCase(),
-      );
-      if (allowlistEntry) {
-        const normalizedSessionKey = normalizeStreamMutationSessionKeyForUser(
-          allowlistEntry.userId,
-          resolvedSessionKey,
-        );
-        if (normalizedSessionKey) {
-          const streamExists = await runPerUserTask(allowlistEntry.userId, async () =>
-            enqueueWriteTask(() => {
-              const streams = ensureStreamSessionsForUser({
-                userId: allowlistEntry.userId,
-                isAdmin: allowlistEntry.isAdmin,
-              });
-              return streams.some((stream) =>
-                sessionKeyEq(stream.sessionKey, normalizedSessionKey),
-              );
-            }),
-          );
-          if (streamExists) {
-            return normalizedSessionKey;
-          }
-        }
-      }
-    }
-
-    const globalFallbackKey = await resolveGlobalAlertSessionKey(resolvedSessionKey);
-    if (!globalFallbackKey) {
+    const fallbackSessionKey = await resolveAlertFallbackSessionKey(resolvedSessionKey);
+    if (!fallbackSessionKey) {
       throw new HttpError(404, "stream_not_found", "Stream not found");
     }
-    return globalFallbackKey;
+    return fallbackSessionKey;
   }
 
-  async function resolveGlobalSessionKeyFromAgentStores(sessionKey: string): Promise<string> {
-    const normalized = normalizeSessionKey(sessionKey);
-    if (!normalized) {
-      return "";
-    }
-    const agentsDir = path.join(path.dirname(config.statePath), "agents");
-    let agentEntries: Dirent[] = [];
-    try {
-      agentEntries = await fs.readdir(agentsDir, { withFileTypes: true });
-    } catch (err) {
-      const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
-      if (code === "ENOENT") {
-        return "";
+  async function resolveExistingClawlineAlertStreamSessionKey(
+    resolvedSessionKey: string,
+  ): Promise<string | null> {
+    const parsed = parseClawlineUserSessionKey(resolvedSessionKey);
+    const candidateEntries = allowlist.entries.filter((entry) => {
+      if (sessionKeyEq(resolvedSessionKey, mainSessionKey)) {
+        return entry.isAdmin;
       }
-      throw err;
-    }
-    for (const entry of agentEntries) {
-      if (!entry.isDirectory()) {
-        continue;
-      }
-      const storePath = path.join(agentsDir, entry.name, "sessions", "sessions.json");
-      let store: Record<string, { sessionId?: string }>;
-      try {
-        store = loadSessionStore(storePath, { skipCache: true });
-      } catch (err) {
-        const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
-        if (code === "ENOENT") {
-          continue;
-        }
-        throw err;
-      }
-      const matchedKey = Object.keys(store).find((key) => sessionKeyEq(key, normalized));
-      if (matchedKey) {
-        return matchedKey;
+      return parsed?.userId === sanitizeUserId(entry.userId).toLowerCase();
+    });
+    for (const entry of candidateEntries) {
+      const found = await runPerUserTask(entry.userId, async () =>
+        enqueueWriteTask(() => {
+          const normalizedSessionKey = normalizeStreamMutationSessionKeyForUser(
+            entry.userId,
+            resolvedSessionKey,
+          );
+          if (!normalizedSessionKey) {
+            return null;
+          }
+          const streams = ensureStreamSessionsForUser({
+            userId: entry.userId,
+            isAdmin: entry.isAdmin,
+          });
+          return (
+            streams.find((stream) => sessionKeyEq(stream.sessionKey, normalizedSessionKey))
+              ?.sessionKey ?? null
+          );
+        }),
+      );
+      if (found) {
+        return found;
       }
     }
-    return "";
-  }
-
-  async function resolveGlobalAlertSessionKey(sessionKey: string): Promise<string> {
-    return resolveGlobalSessionKeyFromAgentStores(sessionKey);
+    return null;
   }
 
   async function wakeGatewayForAlert(text: string, sessionKey?: string, attachments?: unknown[]) {
@@ -3962,9 +4199,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
       logger.info?.(`[clawline] alert_wake_start sessionKey=${resolvedSessionKey}`);
 
-      const queueSettings = resolveQueueSettings({ cfg: openClawCfg });
+      const queueSettings = resolveClawlineQueueSettings({ cfg: openClawCfg });
       const alertRunId = randomUUID();
-      const sendQueuedAlert = async (item: AnnounceQueueItem) => {
+      const sendQueuedAlert = async (item: ClawlineAnnounceQueueItem) => {
         const correlatedRunId = item.announceId?.trim() || alertRunId;
         const phaseBase = {
           sessionKey: item.sessionKey,
@@ -3976,13 +4213,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         logAlertRunPhase("wake-dispatched", phaseBase);
         logAlertRunPhase("agent-run-start", phaseBase);
         try {
-          const result = await callGateway({
+          const result = await callClawlineGatewayAgent({
             token: gatewayToken,
-            // Alert queue delivery is a system-owned action and must preserve owner-capable
-            // ingress behavior to avoid auth/tool gating differences from origin/main.
-            scopes: [ADMIN_SCOPE],
-            method: "agent",
-            params: {
+            request: {
               sessionKey: item.sessionKey,
               message: item.prompt,
               channel: origin?.channel,
@@ -3993,7 +4226,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               attachments: item.attachments,
               idempotencyKey: correlatedRunId,
             },
-            expectFinal: true,
             timeoutMs: 300_000,
           });
           const payloadCount = countAlertReplyPayloads(result);
@@ -4037,7 +4269,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           enqueuedAt: Date.now(),
           sessionKey: resolvedSessionKey,
           origin: alertOrigin,
-        },
+        } as ClawlineAnnounceQueueItem,
         settings: queueSettings,
         send: sendQueuedAlert,
       });
@@ -4126,9 +4358,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         destination?: TerminalDestinationSnapshot;
         legacyGlobalTmuxFallback?: boolean;
         paneId: string;
-        // node-pty has no great runtime type here; treat as opaque.
-        // oxlint-disable-next-line typescript/no-explicit-any
-        pty: any;
+        tmuxBackend: TerminalTmuxBackend;
+        pty: PtyProcess;
       };
   const terminalConnectionState = new WeakMap<WebSocket, TerminalConnectionState>();
   const terminalSessions = new Map(
@@ -4471,7 +4702,16 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       denylist = next;
       for (const revoked of newlyRevoked) {
         const session = sessionsByDevice.get(revoked.deviceId);
+        updateActiveMessagesStreamingByDeviceStmt?.run(
+          MessageStreamingState.Failed,
+          revoked.deviceId,
+        );
         if (session) {
+          session.revoked = true;
+          session.replayInProgress = false;
+          session.resolveReplayBarrier();
+          removeSession(session);
+          connectionState.delete(session.socket);
           sendJson(session.socket, {
             type: "error",
             code: "token_revoked",
@@ -4598,6 +4838,14 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
   function isDenylisted(deviceId: string) {
     return denylist.some((entry) => entry.deviceId === deviceId);
+  }
+
+  function markMessageFailedIfDeviceRevoked(deviceId: string, clientId: string): boolean {
+    if (!isDenylisted(deviceId)) {
+      return false;
+    }
+    updateMessageStreamingStmt.run(MessageStreamingState.Failed, deviceId, clientId);
+    return true;
   }
 
   function issueToken(entry: AllowlistEntry): string {
@@ -4841,6 +5089,32 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     );
   }
 
+  function buildStreamTailStateEvent(event: ServerMessage): StreamTailStateServerMessage | null {
+    if (
+      event.type !== "message" ||
+      typeof event.sessionKey !== "string" ||
+      event.sessionKey.trim().length === 0 ||
+      !SERVER_EVENT_ID_REGEX.test(event.id) ||
+      (event.role !== "user" && event.role !== "assistant")
+    ) {
+      return null;
+    }
+    return {
+      type: "stream_tail_state",
+      sessionKey: event.sessionKey,
+      lastMessageId: event.id,
+      lastMessageRole: event.role,
+    };
+  }
+
+  async function broadcastStreamTailStateForUser(userId: string, event: ServerMessage) {
+    const payload = buildStreamTailStateEvent(event);
+    if (!payload) {
+      return;
+    }
+    await broadcastStreamEvent(userId, payload);
+  }
+
   function loadStreamRowForUser(userId: string, sessionKey: string): StreamSessionRow | null {
     const row = selectStreamSessionByKeyStmt.get(userId, sessionKey) as
       | StreamSessionRow
@@ -4934,11 +5208,16 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     if (!sessions || sessions.size === 0) {
       return;
     }
-    const sends: Promise<boolean>[] = [];
+    const sends: Array<Promise<{ session: Session; delivered: boolean }>> = [];
     for (const session of sessions) {
-      sends.push(sendJson(session.socket, payload));
+      sends.push(sendJson(session.socket, payload).then((delivered) => ({ session, delivered })));
     }
-    await Promise.allSettled(sends);
+    const results = await Promise.allSettled(sends);
+    for (const result of results) {
+      if (result.status === "fulfilled" && !result.value.delivered) {
+        removeSession(result.value.session);
+      }
+    }
   }
 
   async function handleListStreamsRequest(req: http.IncomingMessage, res: http.ServerResponse) {
@@ -4957,13 +5236,17 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
   function buildTrackableSessionDuplicateMarker(entry: TrackableSessionApiEntry): string {
     const sessionKey = entry.sessionKey.trim();
-    if (isCronRunSessionKey(sessionKey)) {
+    if (isClawlineCronRunSessionKey(sessionKey)) {
       const runId = sessionKey.split(":").at(-1)?.trim() ?? "";
       if (runId) {
         return runId.slice(0, 8);
       }
     }
-    const fallbackSegment = sessionKey.split(":").filter(Boolean).at(-1)?.trim() ?? "";
+    const fallbackSegment =
+      sessionKey
+        .split(":")
+        .findLast((segment) => segment.trim().length > 0)
+        ?.trim() ?? "";
     if (fallbackSegment) {
       return fallbackSegment.slice(0, 12);
     }
@@ -5095,6 +5378,127 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       normalizedSessionKey: resolved.normalizedKey,
       entry: resolved.existing,
     };
+  }
+
+  type AlertSessionStoreSignature = {
+    storePath: string;
+    exists: boolean;
+    size: number;
+    mtimeMs: number;
+  };
+
+  let alertFallbackSessionIndex: {
+    signatures: AlertSessionStoreSignature[];
+    keysByNormalized: Map<string, string>;
+  } | null = null;
+
+  function resolveAlertFallbackStorePaths(): string[] {
+    const storePaths = new Set<string>([sessionStorePath]);
+    const clawlineSessionDiscoveryCfg = {
+      ...openClawCfg,
+      session: {
+        ...openClawCfg.session,
+        store: sessionStorePath,
+      },
+    };
+    for (const target of resolveAllAgentSessionStoreTargetsSync(clawlineSessionDiscoveryCfg)) {
+      storePaths.add(target.storePath);
+    }
+    return [...storePaths].toSorted();
+  }
+
+  async function statAlertFallbackStore(storePath: string): Promise<AlertSessionStoreSignature> {
+    try {
+      const stats = await fs.stat(storePath);
+      return {
+        storePath,
+        exists: true,
+        size: stats.size,
+        mtimeMs: stats.mtimeMs,
+      };
+    } catch (err) {
+      const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+      if (code !== "ENOENT") {
+        logger.warn?.("[clawline] alert_session_store_stat_failed", {
+          storePath,
+          error: formatError(err),
+        });
+      }
+      return {
+        storePath,
+        exists: false,
+        size: 0,
+        mtimeMs: 0,
+      };
+    }
+  }
+
+  function alertFallbackSignaturesEqual(
+    a: AlertSessionStoreSignature[],
+    b: AlertSessionStoreSignature[],
+  ): boolean {
+    if (a.length !== b.length) {
+      return false;
+    }
+    return a.every((left, index) => {
+      const right = b[index];
+      return (
+        right !== undefined &&
+        left.storePath === right.storePath &&
+        left.exists === right.exists &&
+        left.size === right.size &&
+        left.mtimeMs === right.mtimeMs
+      );
+    });
+  }
+
+  async function loadAlertFallbackSessionIndex(): Promise<Map<string, string>> {
+    const signatures = await Promise.all(
+      resolveAlertFallbackStorePaths().map((storePath) => statAlertFallbackStore(storePath)),
+    );
+    if (
+      alertFallbackSessionIndex &&
+      alertFallbackSignaturesEqual(alertFallbackSessionIndex.signatures, signatures)
+    ) {
+      return alertFallbackSessionIndex.keysByNormalized;
+    }
+
+    const keysByNormalized = new Map<string, string>();
+    for (const signature of signatures) {
+      if (!signature.exists) {
+        continue;
+      }
+      try {
+        const contents = await fs.readFile(signature.storePath, "utf8");
+        const parsed = JSON.parse(contents) as unknown;
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          continue;
+        }
+        for (const rawKey of Object.keys(parsed)) {
+          const trimmed = rawKey.trim();
+          if (!trimmed) {
+            continue;
+          }
+          keysByNormalized.set(normalizeSessionKey(trimmed), trimmed);
+        }
+      } catch (err) {
+        logger.warn?.("[clawline] alert_session_store_index_failed", {
+          storePath: signature.storePath,
+          error: formatError(err),
+        });
+      }
+    }
+    alertFallbackSessionIndex = { signatures, keysByNormalized };
+    return keysByNormalized;
+  }
+
+  async function resolveAlertFallbackSessionKey(sessionKey: string): Promise<string | null> {
+    const trimmed = sessionKey.trim();
+    if (!trimmed) {
+      return null;
+    }
+    const index = await loadAlertFallbackSessionIndex();
+    return index.get(normalizeSessionKey(trimmed)) ?? null;
   }
 
   async function handleAdoptSessionRequest(req: http.IncomingMessage, res: http.ServerResponse) {
@@ -5418,7 +5822,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         }
         if (existing.adopted === 1) {
           // Untrack: remove stream row + adopted_sessions row, but don't delete messages/assets
-          deleteStreamSessionStmt!.run(auth.userId, sessionKey);
+          deleteStreamSessionStmt.run(auth.userId, sessionKey);
           db!
             .prepare(`DELETE FROM adopted_sessions WHERE userId = ? AND sessionKey = ?`)
             .run(auth.userId, sessionKey);
@@ -5446,7 +5850,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         const deletedAssetIds = deleteStreamDataTx({
           userId: auth.userId,
           sessionKey,
-        }) as string[];
+        });
         for (const assetId of deletedAssetIds) {
           await safeUnlink(path.join(assetsDir, assetId));
         }
@@ -5484,10 +5888,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
   }
 
-  async function sendReplay(session: Session, lastMessageId: string | null) {
-    // All messages are stored under the real userId; sessionKey determines routing.
-    // Query once to get all messages for this user.
-    const transcriptTargets: Array<{ userId: string }> = [{ userId: session.userId }];
+  async function sendReplay(
+    session: Session,
+    lastMessageId: string | null,
+    replayCursorsBySessionKey: Record<string, unknown>,
+  ) {
     const expectedMainStreamSessionKey = buildClawlinePersonalSessionKey(
       mainSessionAgentId,
       session.userId,
@@ -5518,55 +5923,163 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       }
       event.sessionKey = normalized;
     };
-    let anchor: { userId: string; sequence: number; timestamp: number } | null = null;
-    if (lastMessageId) {
-      const anchorRow = selectEventByIdStmt.get(lastMessageId) as
-        | { id: string; userId: string; sequence: number; timestamp: number }
-        | undefined;
-      if (anchorRow) {
-        anchor = {
-          userId: anchorRow.userId,
-          sequence: anchorRow.sequence,
-          timestamp: anchorRow.timestamp,
-        };
+    const normalizeReplayAnchorSessionKey = (rawSessionKey: string, fallbackUserId: string) => {
+      if (!rawSessionKey.trim()) {
+        return "";
       }
+      const normalizedOpaqueSessionKey = rawSessionKey.trim()
+        ? normalizeSessionKey(rawSessionKey)
+        : "";
+      if (
+        normalizedOpaqueSessionKey &&
+        allowedSessionKeys.has(normalizedOpaqueSessionKey) &&
+        !normalizedOpaqueSessionKey.includes(":clawline:")
+      ) {
+        return normalizedOpaqueSessionKey;
+      }
+      const normalized = normalizeStoredSessionKey(rawSessionKey, fallbackUserId);
+      return normalized && allowedSessionKeys.has(normalizeSessionKey(normalized))
+        ? normalized
+        : "";
+    };
+    type ReplayAnchor = {
+      userId: string;
+      sessionKey: string;
+      sequence: number;
+      timestamp: number;
+    };
+    const loadReplayAnchor = (messageId: string): ReplayAnchor | null => {
+      if (!SERVER_EVENT_ID_REGEX.test(messageId)) {
+        return null;
+      }
+      const anchorRow = selectEventByIdStmt.get(messageId) as
+        | {
+            id: string;
+            userId: string;
+            sessionKey: string | null;
+            sequence: number;
+            timestamp: number;
+          }
+        | undefined;
+      if (!anchorRow) {
+        return null;
+      }
+      const anchorSessionKey = normalizeReplayAnchorSessionKey(
+        anchorRow.sessionKey ?? "",
+        anchorRow.userId,
+      );
+      if (!anchorSessionKey) {
+        return null;
+      }
+      return {
+        userId: anchorRow.userId,
+        sessionKey: anchorSessionKey,
+        sequence: anchorRow.sequence,
+        timestamp: anchorRow.timestamp,
+      };
+    };
+    const legacyAnchor = lastMessageId ? loadReplayAnchor(lastMessageId) : null;
+    const explicitCursorBySessionKey = new Map<
+      string,
+      { cursor: string | null; suppressLegacyFallback: boolean }
+    >();
+    for (const [rawSessionKey, rawCursor] of Object.entries(replayCursorsBySessionKey)) {
+      const normalizedSessionKey = normalizeSessionKey(rawSessionKey);
+      if (!normalizedSessionKey || !allowedSessionKeys.has(normalizedSessionKey)) {
+        continue;
+      }
+      if (typeof rawCursor !== "string") {
+        explicitCursorBySessionKey.set(normalizedSessionKey, {
+          cursor: null,
+          suppressLegacyFallback: true,
+        });
+        continue;
+      }
+      const cursor = rawCursor.trim();
+      if (!cursor) {
+        explicitCursorBySessionKey.set(normalizedSessionKey, {
+          cursor: null,
+          suppressLegacyFallback: true,
+        });
+        continue;
+      }
+      explicitCursorBySessionKey.set(normalizedSessionKey, {
+        cursor,
+        suppressLegacyFallback: true,
+      });
     }
     // Debug logging for duplicate investigation
     logger.info("replay_start", {
       deviceId: session.deviceId,
       userId: session.userId,
       lastMessageId: lastMessageId ?? "(null)",
-      anchorFound: !!anchor,
-      anchorSequence: anchor?.sequence,
+      legacyAnchorFound: !!legacyAnchor,
+      legacyAnchorSequence: legacyAnchor?.sequence,
+      replayCursorCount: explicitCursorBySessionKey.size,
     });
-    const combined: ServerMessage[] = [];
-    for (const target of transcriptTargets) {
-      let rows: EventRow[] = [];
+    const replayCap = config.sessions.maxReplayMessagesPerStream;
+    const replayLimit = Math.max(0, replayCap) + 1;
+    let replayTruncated = false;
+    let historyReset = false;
+    const selected: Array<{ event: ServerMessage; sequence: number }> = [];
+    const replaySessionKeys = dedupeKeys(
+      session.sessionKeys.length > 0 ? session.sessionKeys : session.provisionedSessionKeys,
+    );
+    for (const sessionKey of replaySessionKeys) {
+      const normalizedSessionKey = normalizeSessionKey(sessionKey);
+      const explicitCursor = explicitCursorBySessionKey.get(normalizedSessionKey);
+      const explicitAnchor =
+        explicitCursor?.cursor !== null && explicitCursor?.cursor !== undefined
+          ? loadReplayAnchor(explicitCursor.cursor)
+          : null;
+      const explicitAnchorUsable =
+        explicitAnchor !== null &&
+        explicitAnchor.userId === session.userId &&
+        sessionKeyEq(explicitAnchor.sessionKey, normalizedSessionKey);
+      const legacyAnchorUsable =
+        !explicitCursor?.suppressLegacyFallback &&
+        legacyAnchor !== null &&
+        legacyAnchor.userId === session.userId &&
+        sessionKeyEq(legacyAnchor.sessionKey, normalizedSessionKey);
+      const anchor = explicitAnchorUsable
+        ? explicitAnchor
+        : legacyAnchorUsable
+          ? legacyAnchor
+          : null;
       if (!anchor) {
-        rows = selectEventsTailStmt.all(
-          target.userId,
-          config.sessions.maxReplayMessages,
-        ) as EventRow[];
-      } else if (target.userId === anchor.userId) {
-        rows = selectEventsAfterStmt.all(target.userId, anchor.sequence) as EventRow[];
-      } else {
-        rows = selectEventsAfterTimestampStmt.all(target.userId, anchor.timestamp) as EventRow[];
+        historyReset = true;
+      }
+      const rowsDesc = (
+        anchor
+          ? selectEventsAfterBySessionStmt.all(
+              session.userId,
+              normalizedSessionKey,
+              anchor.sequence,
+              replayLimit,
+            )
+          : selectEventsTailBySessionStmt.all(session.userId, normalizedSessionKey, replayLimit)
+      ) as EventRow[];
+      const rows = rowsDesc.length > replayCap ? rowsDesc.slice(0, replayCap) : rowsDesc;
+      if (rowsDesc.length > replayCap) {
+        replayTruncated = true;
       }
       const parsed = rows
+        .toReversed()
         .map((row) => parseServerMessage(row.payloadJson, logger))
-        .filter((event): event is ServerMessage => Boolean(event))
-        .map((event) => {
+        .map((event, index) => ({ event, row: rows[rows.length - 1 - index] }))
+        .filter(
+          (entry): entry is { event: ServerMessage; row: EventRow } =>
+            Boolean(entry.event) && Boolean(entry.row),
+        )
+        .map(({ event, row }) => {
           event.attachments = canonicalizeReplayAttachments(event.attachments, logger, event.id);
           normalizeEventRouting(event);
-          return event;
+          return { event, sequence: row.sequence ?? 0 };
         });
-      combined.push(...parsed);
+      selected.push(...parsed);
     }
-    combined.sort((a, b) => a.timestamp - b.timestamp);
-    const limited =
-      combined.length > config.sessions.maxReplayMessages
-        ? combined.slice(combined.length - config.sessions.maxReplayMessages)
-        : combined;
+    selected.sort((a, b) => a.event.timestamp - b.event.timestamp || a.sequence - b.sequence);
+    const limited = selected.map(({ event }) => event);
     const sessionInfo = buildSessionInfo(
       session.userId,
       session.isAdmin,
@@ -5579,11 +6092,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       sessionId: session.sessionId,
       isAdmin: session.isAdmin,
       replayCount: limited.length,
-      replayTruncated: combined.length > limited.length,
-      historyReset: !lastMessageId,
+      replayTruncated,
+      historyReset,
       features: buildAuthResultFeatures(session),
       dmScope: sessionInfo.dmScope,
       sessionKeys: sessionInfo.streamSessionKeys,
+      streamReadStates: readStreamReadStatesForUser(session.userId, sessionInfo.streamSessionKeys),
+      streamTailStates: readStreamTailStatesForUser(session.userId, sessionInfo.streamSessionKeys),
     };
     const streams = await runPerUserTask(session.userId, async () =>
       enqueueWriteTask(() => {
@@ -5603,22 +6118,49 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       firstEventId: limited[0]?.id,
       lastEventId: limited[limited.length - 1]?.id,
     });
-    await sendJson(session.socket, payload).catch(() => {});
-    await sendJson(session.socket, { type: "stream_snapshot", streams }).catch(() => {});
-    await sendSessionInfo(session, sessionInfo);
-    for (const event of limited) {
+    const abortReplay = () => {
+      session.replayInProgress = false;
+      session.replayBufferedMessages = [];
+      session.resolveReplayBarrier();
+      removeSession(session);
+      connectionState.delete(session.socket);
+      if (
+        session.socket.readyState !== WebSocket.CLOSED &&
+        session.socket.readyState !== WebSocket.CLOSING
+      ) {
+        session.socket.close();
+      }
+    };
+    if (!(await sendJson(session.socket, payload).catch(() => false))) {
+      abortReplay();
+      return;
+    }
+    if (
+      !(await sendJson(session.socket, { type: "stream_snapshot", streams }).catch(() => false))
+    ) {
+      abortReplay();
+      return;
+    }
+    if (!(await sendSessionInfo(session, sessionInfo))) {
+      abortReplay();
+      return;
+    }
+    const sendReplayMessage = async (event: ServerMessage, replay: boolean): Promise<boolean> => {
+      if (session.replayDeliveredMessageIds.has(event.id)) {
+        return true;
+      }
       const normalized = normalizePayloadForSession(session, event, mainSessionKey.toLowerCase());
       if (!normalized) {
-        continue;
+        return true;
       }
-      logger.info("replay_send", {
+      logger.info(replay ? "replay_send" : "replay_gap_fill_send", {
         deviceId: session.deviceId,
         userId: session.userId,
         messageId: normalized.id,
         sessionKey: normalized.sessionKey,
         streaming: normalized.streaming,
         attachmentCount: Array.isArray(normalized.attachments) ? normalized.attachments.length : 0,
-        replay: true,
+        replay,
       });
       const replayTerminalFilteredCount =
         countTerminalSessionDocumentAttachments(event.attachments) -
@@ -5630,14 +6172,14 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           messageId: normalized.id,
           sessionKey: normalized.sessionKey,
           filteredCount: replayTerminalFilteredCount,
-          replay: true,
+          replay,
           reason: "missing_terminal_bubbles_v1",
         });
       }
       const stats = summarizeAttachmentStats(normalized.attachments);
       if (stats) {
         logger.info?.(
-          `[clawline:http] ws_send_message attachmentCount=${stats.count} inlineBytes=${stats.inlineBytes} assetCount=${stats.assetCount} replay=true`,
+          `[clawline:http] ws_send_message attachmentCount=${stats.count} inlineBytes=${stats.inlineBytes} assetCount=${stats.assetCount} replay=${String(replay)}`,
           {
             deviceId: session.deviceId,
             userId: session.userId,
@@ -5646,12 +6188,41 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             inlineBytes: stats.inlineBytes,
             assetCount: stats.assetCount,
             streaming: normalized.streaming,
-            replay: true,
+            replay,
           },
         );
       }
-      await sendJson(session.socket, normalized).catch(() => {});
+      if (!(await sendJson(session.socket, normalized).catch(() => false))) {
+        return false;
+      }
+      if (!normalized.streaming) {
+        session.replayDeliveredMessageIds.add(normalized.id);
+      }
+      return true;
+    };
+    for (const event of limited) {
+      if (!(await sendReplayMessage(event, true))) {
+        abortReplay();
+        return;
+      }
     }
+    while (session.replayBufferedMessages.length > 0) {
+      const buffered = session.replayBufferedMessages.shift();
+      if (!buffered) {
+        continue;
+      }
+      if (!(await sendReplayMessage(buffered, false))) {
+        abortReplay();
+        return;
+      }
+    }
+    session.replayInProgress = false;
+    session.replayBufferedMessages = [];
+    if (!(await sendJson(session.socket, { type: "sync_complete" }).catch(() => false))) {
+      abortReplay();
+      return;
+    }
+    session.resolveReplayBarrier();
   }
 
   function sendPayloadToSession(session: Session, payload: ServerMessage) {
@@ -5689,13 +6260,14 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         sessionId: session.sessionId,
         socketState: socketStateLabel(session.socket),
       });
+      removeSession(session);
       return;
     }
     logger.info?.("[clawline] outbound_delivery_attempt", {
       payloadMessageId: normalized.id,
       payloadSessionKey: normalized.sessionKey,
       role: normalized.role ?? "assistant",
-      streaming: Boolean(normalized.streaming),
+      streaming: normalized.streaming,
       deviceId: session.deviceId,
       sessionId: session.sessionId,
       subscribedSessionKeys: session.sessionKeys,
@@ -5729,6 +6301,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           socketState: socketStateLabel(session.socket),
           error: formatError(err),
         });
+        removeSession(session);
         session.socket.close();
         return;
       }
@@ -5736,12 +6309,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         payloadMessageId: normalized.id,
         payloadSessionKey: normalized.sessionKey,
         role: normalized.role ?? "assistant",
-        streaming: Boolean(normalized.streaming),
+        streaming: normalized.streaming,
         deviceId: session.deviceId,
         sessionId: session.sessionId,
       });
       const role = normalized.role ?? "assistant";
-      const streaming = Boolean(normalized.streaming);
+      const streaming = normalized.streaming;
       const sessionKey = normalized.sessionKey;
       const messageId = normalized.id;
       const payloadText = typeof normalized.content === "string" ? normalized.content : "";
@@ -5830,11 +6403,31 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     const normalizedKey = payload.sessionKey.toLowerCase();
     let matchedTargets = 0;
     for (const target of sessionsByDevice.values()) {
+      if (target.revoked || isDenylisted(target.deviceId)) {
+        continue;
+      }
       const keys = resolveSubscribedSessionKeys(target);
       if (!keys.some((key) => key.toLowerCase() === normalizedKey)) {
         continue;
       }
       matchedTargets += 1;
+      if (target.replayInProgress) {
+        if (target.replayDeliveredMessageIds.has(payload.id)) {
+          continue;
+        }
+        const existingIndex = target.replayBufferedMessages.findIndex(
+          (message) => message.id === payload.id,
+        );
+        if (existingIndex >= 0) {
+          const existing = target.replayBufferedMessages[existingIndex];
+          if (existing?.streaming || payload.streaming) {
+            target.replayBufferedMessages[existingIndex] = { ...payload };
+          }
+        } else {
+          target.replayBufferedMessages.push({ ...payload });
+        }
+        continue;
+      }
       sendPayloadToSession(target, payload);
     }
     logger.info?.("[clawline] outbound_broadcast_result", {
@@ -5901,7 +6494,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     content: string,
     sessionKey: string,
     attachments?: NormalizedAttachment[],
-    options: { preserveOpaqueSessionKey?: boolean } = {},
+    options: {
+      preserveOpaqueSessionKey?: boolean;
+      replyToMessageId?: string;
+      replyToClientMessageId?: string;
+    } = {},
   ): Promise<ServerMessage> {
     const timestamp = nowMs();
     const filteredAttachments = attachments
@@ -5920,6 +6517,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       timestamp,
       streaming: false,
       sessionKey,
+      replyToMessageId: options.replyToMessageId,
+      replyToClientMessageId: options.replyToClientMessageId,
       attachments:
         filteredAttachments && filteredAttachments.length > 0 ? filteredAttachments : undefined,
     };
@@ -6046,6 +6645,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       timestamp: nowMs(),
       streaming: false,
       sessionKey: normalizedResolvedSessionKey,
+      replyToMessageId: params.replyToMessageId,
+      replyToClientMessageId: params.replyToClientMessageId,
       attachments:
         outboundAttachments.attachments.length > 0 ? outboundAttachments.attachments : undefined,
     };
@@ -6070,6 +6671,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       insertEventTx(event, target.userId);
     });
     broadcastToSessionKey(normalizedResolvedSessionKey, event);
+    await broadcastStreamTailStateForUser(target.userId, event);
     return {
       messageId: event.id,
       userId: target.userId,
@@ -6080,7 +6682,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   }
 
   function removeSession(session: Session) {
-    sessionsByDevice.delete(session.deviceId);
+    if (sessionsByDevice.get(session.deviceId) === session) {
+      sessionsByDevice.delete(session.deviceId);
+    }
     const sessions = userSessions.get(session.userId);
     if (sessions) {
       sessions.delete(session);
@@ -6114,7 +6718,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       storePath: sessionStorePath,
       sessionKey: session.sessionKey,
       sessionId: session.sessionId,
-      sessionFile: resolveSessionTranscriptPath(session.sessionId, mainSessionAgentId),
+      sessionFile: resolveClawlineSessionTranscriptPath(session.sessionId, mainSessionAgentId),
       displayName: session.claimedName ?? session.deviceInfo?.model ?? null,
       logger,
     });
@@ -6239,9 +6843,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     };
   };
 
-  // Clawline WS payloads are runtime-validated; keep `any` here to avoid a huge type layer.
-  // oxlint-disable-next-line typescript/no-explicit-any
-  async function processClientMessage(session: Session, payload: any) {
+  async function processClientMessage(session: Session, payload: ClientPayload) {
     let processStage = "start";
     const markProcessStage = (stage: string) => {
       processStage = stage;
@@ -6259,6 +6861,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       if (typeof payload.id !== "string" || !payload.id.startsWith("c_")) {
         throw new ClientMessageError("invalid_message", "Invalid id");
       }
+      const messageId = payload.id;
       const rawContent = typeof payload.content === "string" ? payload.content : "";
       markProcessStage("normalize_attachments");
       const attachmentsInfo = normalizeAttachmentsInput(payload.attachments, config.media);
@@ -6300,7 +6903,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       const inboundTarget = resolveInboundMessageTarget(session, resolvedSessionKey);
       markProcessStage("route_inbound_message");
       logger.info?.("[clawline] inbound message routing", {
-        messageId: payload.id,
+        messageId,
         payloadSessionKey: payload.sessionKey,
         resolvedSessionKey,
         targetKind: inboundTarget.kind,
@@ -6324,8 +6927,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       await runPerUserTask(
         session.userId,
         async () => {
+          if (isDenylisted(session.deviceId)) {
+            throw new ClientMessageError("token_revoked", "Device revoked");
+          }
           markProcessStage("duplicate_lookup");
-          const existing = selectMessageStmt.get(session.deviceId, payload.id) as
+          const existing = selectMessageStmt.get(session.deviceId, messageId) as
             | {
                 deviceId: string;
                 contentHash: string;
@@ -6346,21 +6952,21 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               throw new ClientMessageError("invalid_message", "Message failed");
             }
             if (existing.ackSent === 0) {
-              session.socket.send(JSON.stringify({ type: "ack", id: payload.id }), (err) => {
+              session.socket.send(JSON.stringify({ type: "ack", id: messageId }), (err) => {
                 if (!err) {
-                  markAckSent(session.deviceId, payload.id);
+                  markAckSent(session.deviceId, messageId);
                   return;
                 }
                 logger.warn?.(`[clawline] ack_send_failed: ${formatError(err)}`, {
-                  messageId: payload.id,
+                  messageId,
                   deviceId: session.deviceId,
                 });
               });
             } else {
-              session.socket.send(JSON.stringify({ type: "ack", id: payload.id }), (err) => {
+              session.socket.send(JSON.stringify({ type: "ack", id: messageId }), (err) => {
                 if (err) {
                   logger.warn?.(`[clawline] duplicate_ack_send_failed: ${formatError(err)}`, {
-                    messageId: payload.id,
+                    messageId,
                     deviceId: session.deviceId,
                   });
                 }
@@ -6387,26 +6993,32 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             assetIds,
             session,
           });
+          if (isDenylisted(session.deviceId)) {
+            throw new ClientMessageError("token_revoked", "Device revoked");
+          }
 
           markProcessStage("persist_user_message");
           const { event } = await persistUserMessage(
             session,
             targetUserId,
-            payload.id,
+            messageId,
             rawContent,
             ownership.attachments,
             attachmentsHash,
             ownership.assetIds,
             resolvedSessionKey,
           );
+          if (markMessageFailedIfDeviceRevoked(session.deviceId, messageId)) {
+            return;
+          }
           markProcessStage("send_ack");
           await new Promise<void>((resolve) => {
-            session.socket.send(JSON.stringify({ type: "ack", id: payload.id }), (err) => {
+            session.socket.send(JSON.stringify({ type: "ack", id: messageId }), (err) => {
               if (!err) {
-                markAckSent(session.deviceId, payload.id);
+                markAckSent(session.deviceId, messageId);
               } else {
                 logger.warn?.(`[clawline] ack_send_failed: ${formatError(err)}`, {
-                  messageId: payload.id,
+                  messageId,
                   deviceId: session.deviceId,
                 });
               }
@@ -6415,6 +7027,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           });
           markProcessStage("broadcast_user_message");
           broadcastToSessionKey(resolvedSessionKey, event);
+          await broadcastStreamTailStateForUser(targetUserId, event);
 
           const attachmentSummary = describeClawlineAttachments(ownership.attachments);
           const inboundBody = attachmentSummary
@@ -6444,7 +7057,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             To: inboundTarget.contextTo,
             SessionKey: route.sessionKey,
             AccountId: route.accountId,
-            MessageSid: payload.id,
+            MessageSid: messageId,
             ChatType: "direct",
             SenderName: session.claimedName ?? session.deviceInfo?.model ?? peerId,
             SenderId: session.userId,
@@ -6468,8 +7081,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           });
 
           const fallbackText = adapterOverrides.responseFallback?.trim() ?? "";
-          const prefixContext: ResponsePrefixContext = {
-            identityName: resolveIdentityName(openClawCfg, route.agentId),
+          const prefixContext: ClawlineResponsePrefixContext = {
+            identityName: resolveIdentityName(route.agentId),
           };
 
           // Track activity state for typing indicator
@@ -6477,7 +7090,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           const sendActivitySignal = async (isActive: boolean) => {
             logger.info?.("[clawline] activity_signal", {
               isActive,
-              messageId: payload.id,
+              messageId,
               sessionKey: route.sessionKey,
             });
             await sendJson(session.socket, {
@@ -6485,7 +7098,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               event: "activity",
               payload: {
                 isActive,
-                messageId: payload.id,
+                messageId,
                 sessionKey: route.sessionKey,
               },
             }).catch(() => {});
@@ -6501,7 +7114,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               const deliverStartedAt = Date.now();
               logger.info?.("[clawline] agent_run_phase", {
                 phase: "deliver_start",
-                messageId: payload.id,
+                messageId,
                 sessionKey: resolvedSessionKey,
                 hasText: Boolean(replyPayload.text?.trim()),
                 mediaUrlCount: replyPayload.mediaUrls?.length ?? (replyPayload.mediaUrl ? 1 : 0),
@@ -6539,18 +7152,26 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               if (assistantText === null) {
                 return;
               }
+              if (markMessageFailedIfDeviceRevoked(session.deviceId, messageId)) {
+                return;
+              }
               const assistantEvent = await persistAssistantMessage(
                 session,
                 targetUserId,
                 assistantText,
                 route.sessionKey,
                 attachments,
-                { preserveOpaqueSessionKey: inboundTarget.kind === "adopted" },
+                {
+                  preserveOpaqueSessionKey: inboundTarget.kind === "adopted",
+                  replyToMessageId: event.id,
+                  replyToClientMessageId: messageId,
+                },
               );
               broadcastToSessionKey(resolvedSessionKey, assistantEvent);
+              await broadcastStreamTailStateForUser(targetUserId, assistantEvent);
               logger.info?.("[clawline] agent_run_phase", {
                 phase: "deliver_done",
-                messageId: payload.id,
+                messageId,
                 sessionKey: resolvedSessionKey,
                 assistantTextLength: assistantText.length,
                 attachmentCount: attachments.length,
@@ -6576,7 +7197,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           runAgentDispatch = async () => {
             markProcessStage("agent_run_start");
             logger.info?.("[clawline] agent_run_start", {
-              messageId: payload.id,
+              messageId,
               sessionId: session.sessionId,
               sessionKey: resolvedSessionKey,
               userId: session.userId,
@@ -6589,32 +7210,39 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             try {
               logger.info?.("[clawline] agent_run_phase", {
                 phase: "dispatch_start",
-                messageId: payload.id,
+                messageId,
                 sessionKey: resolvedSessionKey,
                 imageCount: inboundImages.length,
               });
-              const result = await dispatchReplyFromConfig({
-                ctx: ctxPayload,
-                cfg: openClawCfg,
-                dispatcher,
-                replyOptions: {
-                  ...replyOptions,
-                  images: inboundImages.length > 0 ? inboundImages : undefined,
-                  onModelSelected: (ctx) => {
-                    prefixContext.provider = ctx.provider;
-                    prefixContext.model = extractShortModelName(ctx.model);
-                    prefixContext.modelFull = `${ctx.provider}/${ctx.model}`;
-                    prefixContext.thinkingLevel = ctx.thinkLevel ?? "off";
-                  },
+              const result = await runWithClawlineOutboundCorrelation(
+                {
+                  replyToMessageId: event.id,
+                  replyToClientMessageId: messageId,
                 },
-                replyResolver: options.replyResolver,
-              });
+                () =>
+                  dispatchInboundMessage({
+                    ctx: ctxPayload,
+                    cfg: openClawCfg,
+                    dispatcher,
+                    replyOptions: {
+                      ...replyOptions,
+                      images: inboundImages.length > 0 ? inboundImages : undefined,
+                      onModelSelected: (ctx) => {
+                        prefixContext.provider = ctx.provider;
+                        prefixContext.model = extractClawlineShortModelName(ctx.model);
+                        prefixContext.modelFull = `${ctx.provider}/${ctx.model}`;
+                        prefixContext.thinkingLevel = ctx.thinkLevel ?? "off";
+                      },
+                    },
+                    replyResolver: options.replyResolver,
+                  }),
+              );
               queuedFinal = result.queuedFinal;
               // Count all delivered content (streaming blocks, tool results, and final replies)
               deliveredCount = result.counts.block + result.counts.tool + result.counts.final;
               logger.info?.("[clawline] agent_run_phase", {
                 phase: "dispatch_return",
-                messageId: payload.id,
+                messageId,
                 sessionKey: resolvedSessionKey,
                 queuedFinal,
                 deliveredCount,
@@ -6630,14 +7258,14 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             const waitForIdleStartedAt = Date.now();
             logger.info?.("[clawline] agent_run_phase", {
               phase: "wait_for_idle_start",
-              messageId: payload.id,
+              messageId,
               sessionKey: resolvedSessionKey,
             });
             markDispatchIdle();
             await dispatcher.waitForIdle();
             logger.info?.("[clawline] agent_run_phase", {
               phase: "wait_for_idle_done",
-              messageId: payload.id,
+              messageId,
               sessionKey: resolvedSessionKey,
               elapsedMs: Date.now() - waitForIdleStartedAt,
             });
@@ -6647,18 +7275,21 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               activitySignaled = false;
               void sendActivitySignal(false);
             }
+            if (markMessageFailedIfDeviceRevoked(session.deviceId, messageId)) {
+              return;
+            }
 
             // Check if message was successfully handled:
             // 1. queuedFinal = true means a final reply was sent
             // 2. deliveredCount > 0 means content was streamed (blocks/tools)
             // 3. queueDepth > 0 means message was queued for later processing
             const queueKey = route.sessionKey;
-            const queueDepth = getFollowupQueueDepth(queueKey);
+            const queueDepth = getClawlineFollowupQueueDepth(queueKey);
             const wasDelivered = queuedFinal || deliveredCount > 0;
             const wasQueued = !wasDelivered && queueDepth > 0;
 
             logger.info?.("[clawline] agent_run_end", {
-              messageId: payload.id,
+              messageId,
               sessionId: session.sessionId,
               sessionKey: resolvedSessionKey,
               userId: session.userId,
@@ -6672,7 +7303,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
             if (!wasDelivered && !wasQueued) {
               logger.warn?.("[clawline] agent_run_no_delivery", {
-                messageId: payload.id,
+                messageId,
                 sessionId: session.sessionId,
                 sessionKey: resolvedSessionKey,
                 userId: session.userId,
@@ -6684,16 +7315,16 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               updateMessageStreamingStmt.run(
                 MessageStreamingState.Failed,
                 session.deviceId,
-                payload.id,
+                messageId,
               );
               const errorSent = await sendJson(session.socket, {
                 type: "error",
                 code: "server_error",
                 message: "Unable to deliver reply",
-                messageId: payload.id,
+                messageId,
               }).catch(() => false);
               logger.warn?.("[clawline] agent_run_no_delivery_error_emit", {
-                messageId: payload.id,
+                messageId,
                 sessionKey: resolvedSessionKey,
                 deviceId: session.deviceId,
                 errorSent,
@@ -6705,9 +7336,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             updateMessageStreamingStmt.run(
               wasQueued ? MessageStreamingState.Queued : MessageStreamingState.Finalized,
               session.deviceId,
-              payload.id,
+              messageId,
             );
           };
+          markProcessStage("dispatch_agent_run");
+          await runAgentDispatch();
+          runAgentDispatch = null;
         },
         { streamKey: resolvedSessionKey },
       );
@@ -6753,8 +7387,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
   }
 
-  // oxlint-disable-next-line typescript/no-explicit-any
-  async function processInteractiveCallback(session: Session, payload: any) {
+  async function processInteractiveCallback(session: Session, payload: ClientPayload) {
     try {
       const sourceMessageId = typeof payload.messageId === "string" ? payload.messageId.trim() : "";
       if (!sourceMessageId) {
@@ -6853,11 +7486,17 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       await runPerUserTask(
         session.userId,
         async () => {
+          if (isDenylisted(session.deviceId)) {
+            throw new ClientMessageError("token_revoked", "Device revoked");
+          }
           if (!messageRateLimiter.attempt(session.deviceId)) {
             throw new ClientMessageError("rate_limited", "Too many messages");
           }
 
           const clientId = `c_${randomUUID()}`;
+          if (isDenylisted(session.deviceId)) {
+            throw new ClientMessageError("token_revoked", "Device revoked");
+          }
 
           const { event } = await persistUserMessage(
             session,
@@ -6869,6 +7508,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             assetIds,
             resolvedSessionKey,
           );
+          if (markMessageFailedIfDeviceRevoked(session.deviceId, clientId)) {
+            return;
+          }
           broadcastToSessionKey(resolvedSessionKey, event);
 
           const attachmentSummary = describeClawlineAttachments(attachments);
@@ -6933,8 +7575,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           });
 
           const fallbackText = adapterOverrides.responseFallback?.trim() ?? "";
-          const prefixContext: ResponsePrefixContext = {
-            identityName: resolveIdentityName(openClawCfg, route.agentId),
+          const prefixContext: ClawlineResponsePrefixContext = {
+            identityName: resolveIdentityName(route.agentId),
           };
 
           // Track activity state for typing indicator
@@ -7005,14 +7647,22 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               if (assistantText === null) {
                 return;
               }
+              if (markMessageFailedIfDeviceRevoked(session.deviceId, clientId)) {
+                return;
+              }
               const assistantEvent = await persistAssistantMessage(
                 session,
                 targetUserId,
                 assistantText,
                 route.sessionKey,
                 replyAttachments,
+                {
+                  replyToMessageId: event.id,
+                  replyToClientMessageId: clientId,
+                },
               );
               broadcastToSessionKey(resolvedSessionKey, assistantEvent);
+              await broadcastStreamTailStateForUser(targetUserId, assistantEvent);
               logger.info?.("[clawline] agent_run_phase", {
                 phase: "deliver_done",
                 messageId: clientId,
@@ -7062,22 +7712,29 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
                 sourceMessageId,
                 interactiveAction: action,
               });
-              const result = await dispatchReplyFromConfig({
-                ctx: ctxPayload,
-                cfg: openClawCfg,
-                dispatcher,
-                replyOptions: {
-                  ...replyOptions,
-                  images: inboundImages.length > 0 ? inboundImages : undefined,
-                  onModelSelected: (ctx) => {
-                    prefixContext.provider = ctx.provider;
-                    prefixContext.model = extractShortModelName(ctx.model);
-                    prefixContext.modelFull = `${ctx.provider}/${ctx.model}`;
-                    prefixContext.thinkingLevel = ctx.thinkLevel ?? "off";
-                  },
+              const result = await runWithClawlineOutboundCorrelation(
+                {
+                  replyToMessageId: event.id,
+                  replyToClientMessageId: clientId,
                 },
-                replyResolver: options.replyResolver,
-              });
+                () =>
+                  dispatchInboundMessage({
+                    ctx: ctxPayload,
+                    cfg: openClawCfg,
+                    dispatcher,
+                    replyOptions: {
+                      ...replyOptions,
+                      images: inboundImages.length > 0 ? inboundImages : undefined,
+                      onModelSelected: (ctx) => {
+                        prefixContext.provider = ctx.provider;
+                        prefixContext.model = extractClawlineShortModelName(ctx.model);
+                        prefixContext.modelFull = `${ctx.provider}/${ctx.model}`;
+                        prefixContext.thinkingLevel = ctx.thinkLevel ?? "off";
+                      },
+                    },
+                    replyResolver: options.replyResolver,
+                  }),
+              );
               queuedFinal = result.queuedFinal;
               // Count all delivered content (streaming blocks, tool results, and final replies)
               deliveredCount = result.counts.block + result.counts.tool + result.counts.final;
@@ -7122,9 +7779,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               activitySignaled = false;
               void sendActivitySignal(false);
             }
+            if (markMessageFailedIfDeviceRevoked(session.deviceId, clientId)) {
+              return;
+            }
 
             const queueKey = route.sessionKey;
-            const queueDepth = getFollowupQueueDepth(queueKey);
+            const queueDepth = getClawlineFollowupQueueDepth(queueKey);
             const wasDelivered = queuedFinal || deliveredCount > 0;
             const wasQueued = !wasDelivered && queueDepth > 0;
 
@@ -7164,6 +7824,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               clientId,
             );
           };
+          await runAgentDispatch();
+          runAgentDispatch = null;
         },
         { streamKey: resolvedSessionKey },
       );
@@ -7308,18 +7970,14 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         ),
       };
     }
-    const globalSessionKey = await resolveGlobalSessionKeyFromAgentStores(trimmed);
-    if (!globalSessionKey) {
-      throw new Error("Invalid clawline session key");
-    }
-    const owningUserId = resolveOwningUserIdForSessionKey(globalSessionKey);
+    const owningUserId = resolveOwningUserIdForSessionKey(trimmed);
     if (!owningUserId) {
       throw new Error("Invalid clawline session key");
     }
     return {
       kind: "session",
       userId: owningUserId,
-      sessionKey: globalSessionKey,
+      sessionKey: trimmed,
     };
   }
 
@@ -7381,8 +8039,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       logger.info?.("[clawline:http] ws_message_received", {
         bytes: Buffer.byteLength(rawString, "utf8"),
       });
-      // oxlint-disable-next-line typescript/no-explicit-any
-      let payload: any;
+      let payload: unknown;
       try {
         payload = JSON.parse(rawString);
       } catch {
@@ -7390,7 +8047,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         ws.close();
         return;
       }
-      if (!payload || typeof payload.type !== "string") {
+      if (!isClientPayload(payload) || typeof payload.type !== "string") {
         await sendJson(ws, { type: "error", code: "invalid_message", message: "Missing type" });
         return;
       }
@@ -7407,6 +8064,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           break;
         case "message":
           await handleAuthedMessage(ws, payload);
+          break;
+        case "stream_read":
+          await handleAuthedStreamRead(ws, payload);
           break;
         case "interactive-callback":
           await handleAuthedInteractiveCallback(ws, payload);
@@ -7466,8 +8126,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         return;
       }
       const rawString = rawDataToString(raw);
-      // oxlint-disable-next-line typescript/no-explicit-any
-      let payload: any;
+      let payload: unknown;
       try {
         payload = JSON.parse(rawString);
       } catch {
@@ -7475,10 +8134,14 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         ws.close();
         return;
       }
-      if ("authInProgress" in state && state.authInProgress && payload?.type !== "terminal_auth") {
+      if (
+        "authInProgress" in state &&
+        state.authInProgress &&
+        (!isClientPayload(payload) || payload.type !== "terminal_auth")
+      ) {
         return;
       }
-      if (!payload || payload.type !== "terminal_auth") {
+      if (!isClientPayload(payload) || payload.type !== "terminal_auth") {
         void sendJson(ws, { type: "terminal_error", message: "Expected terminal_auth" });
         ws.close();
         return;
@@ -7514,8 +8177,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
 
     const rawString = rawDataToString(raw);
-    // oxlint-disable-next-line typescript/no-explicit-any
-    let payload: any;
+    let payload: unknown;
     try {
       payload = JSON.parse(rawString);
     } catch {
@@ -7523,7 +8185,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       ws.close();
       return;
     }
-    if (!payload || typeof payload.type !== "string") {
+    if (!isClientPayload(payload) || typeof payload.type !== "string") {
       await sendJson(ws, { type: "terminal_error", message: "Missing type" });
       ws.close();
       return;
@@ -7547,15 +8209,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             ws.close();
             return;
           }
-          void resizeTmuxPane(
-            {
-              destination: state.destination,
-              allowLegacyGlobalFallback: state.legacyGlobalTmuxFallback === true,
-            },
-            state.paneId,
-            cols,
-            rows,
-          );
+          void resizeTmuxPane(state.paneId, cols, rows, state.tmuxBackend, state.destination);
         } else {
           await sendJson(ws, { type: "terminal_error", message: "Invalid terminal resize" });
           ws.close();
@@ -7580,13 +8234,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         break;
       }
       case "terminal_close": {
-        void killTmuxSession(
-          {
-            destination: state.destination,
-            allowLegacyGlobalFallback: state.legacyGlobalTmuxFallback === true,
-          },
-          state.tmuxSessionName,
-        );
+        void killTmuxSession(state.tmuxSessionName, state.tmuxBackend, state.destination);
         try {
           state.pty.kill();
         } catch (err) {
@@ -7610,8 +8258,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
   }
 
-  // oxlint-disable-next-line typescript/no-explicit-any
-  async function handleTerminalAuth(ws: WebSocket, payload: any) {
+  async function handleTerminalAuth(ws: WebSocket, payload: ClientPayload) {
     if (payload.protocolVersion !== PROTOCOL_VERSION) {
       await sendJson(ws, { type: "terminal_error", message: "Unsupported protocol" });
       ws.close();
@@ -7710,6 +8357,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       typeof payload.backfillLines === "number"
         ? Math.max(0, Math.floor(payload.backfillLines))
         : 0;
+    const tmuxBackend = getTerminalTmuxBackend(record);
 
     try {
       logger.info?.("[clawline:terminal] terminal_auth_start", {
@@ -7722,13 +8370,17 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         rows,
         backfillLines,
       });
-      let paneId = await resolveTmuxPaneId(record);
+      let paneId = await resolveTmuxPaneId(record.tmuxSessionName, tmuxBackend, record.destination);
       if (!paneId) {
         // If the session was referenced by a bubble but the tmux session hasn't been created yet,
         // create it on-demand so auth succeeds.
-        const ensured = await ensureTmuxSessionExists(record);
+        const ensured = await ensureTmuxSessionExists(
+          record.tmuxSessionName,
+          tmuxBackend,
+          record.destination,
+        );
         if (ensured) {
-          paneId = await resolveTmuxPaneId(record);
+          paneId = await resolveTmuxPaneId(record.tmuxSessionName, tmuxBackend, record.destination);
         }
       }
       if (!paneId) {
@@ -7750,7 +8402,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       });
 
       if (backfillLines > 0) {
-        const backfill = await captureTmuxBackfill(record, paneId, Math.min(backfillLines, 5000));
+        const backfill = await captureTmuxBackfill(
+          paneId,
+          Math.min(backfillLines, 5000),
+          tmuxBackend,
+          record.destination,
+        );
         if (backfill.length > 0 && ws.readyState === WebSocket.OPEN) {
           // Chunk to avoid giant frames.
           const chunkSize = 32 * 1024;
@@ -7776,6 +8433,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         destination: record.destination,
         ...(record.legacyGlobalTmuxFallback ? { legacyGlobalTmuxFallback: true } : {}),
         paneId,
+        tmuxBackend,
         pty,
       });
       logger.info?.("[clawline:terminal] terminal_auth_ready", {
@@ -7819,18 +8477,22 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
   }
 
-  async function resolveTmuxPaneId(record: TerminalSessionRecord): Promise<string | null> {
+  async function resolveTmuxPaneId(
+    tmuxSessionName: string,
+    tmuxBackend: TerminalTmuxBackend,
+    destination?: TerminalDestinationSnapshot,
+  ): Promise<string | null> {
     try {
-      const { stdout } = await getTerminalTmuxBackend(record).execTmux(
-        ["list-panes", "-t", record.tmuxSessionName, "-F", "#{pane_id}"],
+      const { stdout } = await tmuxBackend.execTmux(
+        ["list-panes", "-t", tmuxSessionName, "-F", "#{pane_id}"],
         { timeout: 2_000, maxBuffer: 1024 * 1024 },
       );
       const paneId = String(stdout).trim().split(/\s+/)[0];
       return paneId ? paneId : null;
     } catch (err) {
       logger.warn?.("[clawline:terminal] tmux_resolve_pane_failed", {
-        tmuxSessionName: record.tmuxSessionName,
-        destinationAddress: record.destination?.address ?? null,
+        tmuxSessionName,
+        destinationAddress: destination?.address ?? null,
         error: formatError(err),
       });
       return null;
@@ -7838,15 +8500,16 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   }
 
   async function captureTmuxBackfill(
-    record: TerminalSessionRecord,
     paneId: string,
     backfillLines: number,
+    tmuxBackend: TerminalTmuxBackend,
+    destination?: TerminalDestinationSnapshot,
   ): Promise<Buffer> {
     if (backfillLines <= 0) {
       return Buffer.alloc(0);
     }
     try {
-      const { stdout } = await getTerminalTmuxBackend(record).execTmux(
+      const { stdout } = await tmuxBackend.execTmux(
         ["capture-pane", "-p", "-e", "-t", paneId, "-S", `-${backfillLines}`],
         { timeout: 3_000, maxBuffer: 10 * 1024 * 1024 },
       );
@@ -7855,21 +8518,25 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       logger.warn?.("[clawline:terminal] tmux_capture_backfill_failed", {
         paneId,
         backfillLines,
-        destinationAddress: record.destination?.address ?? null,
+        destinationAddress: destination?.address ?? null,
         error: formatError(err),
       });
       return Buffer.alloc(0);
     }
   }
 
-  async function ensureTmuxSessionExists(record: TerminalSessionRecord): Promise<boolean> {
-    const name = typeof record.tmuxSessionName === "string" ? record.tmuxSessionName.trim() : "";
+  async function ensureTmuxSessionExists(
+    tmuxSessionName: string,
+    tmuxBackend: TerminalTmuxBackend,
+    destination?: TerminalDestinationSnapshot,
+  ): Promise<boolean> {
+    const name = typeof tmuxSessionName === "string" ? tmuxSessionName.trim() : "";
     if (!name) {
       return false;
     }
 
     try {
-      await getTerminalTmuxBackend(record).execTmux(["has-session", "-t", name], {
+      await tmuxBackend.execTmux(["has-session", "-t", name], {
         timeout: 2_000,
         maxBuffer: 1024 * 1024,
       });
@@ -7885,7 +8552,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       // itself is the persistent foreground process; when the user attaches
       // they land in an interactive shell rather than a dead pane.
       const shell = process.env.SHELL?.trim() || "/bin/sh";
-      await getTerminalTmuxBackend(record).execTmux(["new-session", "-d", "-s", name, shell], {
+      await tmuxBackend.execTmux(["new-session", "-d", "-s", name, shell], {
         timeout: 5_000,
         maxBuffer: 1024 * 1024,
       });
@@ -7893,7 +8560,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     } catch (err) {
       logger.warn?.("[clawline:terminal] tmux_new_session_failed", {
         sessionName: name,
-        destinationAddress: record.destination?.address ?? null,
+        destinationAddress: destination?.address ?? null,
         error: formatError(err),
       });
       return false;
@@ -7901,29 +8568,23 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   }
 
   async function resizeTmuxPane(
-    target: {
-      destination?: TerminalDestinationSnapshot;
-      allowLegacyGlobalFallback: boolean;
-    },
     paneId: string,
     cols: number,
     rows: number,
+    tmuxBackend: TerminalTmuxBackend,
+    destination?: TerminalDestinationSnapshot,
   ) {
     try {
-      await createTerminalTmuxBackend(
+      await tmuxBackend.execTmux(
+        ["resize-pane", "-t", paneId, "-x", String(cols), "-y", String(rows)],
         {
-          destination: target.destination,
-          config,
-          allowLegacyGlobalFallback: target.allowLegacyGlobalFallback,
+          timeout: 2_000,
+          maxBuffer: 1024 * 1024,
         },
-        logger,
-      ).execTmux(["resize-pane", "-t", paneId, "-x", String(cols), "-y", String(rows)], {
-        timeout: 2_000,
-        maxBuffer: 1024 * 1024,
-      });
+      );
     } catch (err) {
       logger.warn?.("[clawline:terminal] tmux_resize_pane_failed", {
-        destinationAddress: target.destination?.address ?? null,
+        destinationAddress: destination?.address ?? null,
         paneId,
         cols,
         rows,
@@ -7933,35 +8594,25 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   }
 
   async function killTmuxSession(
-    target: {
-      destination?: TerminalDestinationSnapshot;
-      allowLegacyGlobalFallback: boolean;
-    },
     tmuxSessionName: string,
+    tmuxBackend: TerminalTmuxBackend,
+    destination?: TerminalDestinationSnapshot,
   ) {
     try {
-      await createTerminalTmuxBackend(
-        {
-          destination: target.destination,
-          config,
-          allowLegacyGlobalFallback: target.allowLegacyGlobalFallback,
-        },
-        logger,
-      ).execTmux(["kill-session", "-t", tmuxSessionName], {
+      await tmuxBackend.execTmux(["kill-session", "-t", tmuxSessionName], {
         timeout: 2_000,
         maxBuffer: 1024 * 1024,
       });
     } catch (err) {
       logger.warn?.("[clawline:terminal] tmux_kill_session_failed", {
-        destinationAddress: target.destination?.address ?? null,
+        destinationAddress: destination?.address ?? null,
         tmuxSessionName,
         error: formatError(err),
       });
     }
   }
 
-  // oxlint-disable-next-line typescript/no-explicit-any
-  async function handlePairRequest(ws: WebSocket, payload: any) {
+  async function handlePairRequest(ws: WebSocket, payload: ClientPayload) {
     logger.info?.("[clawline:http] pair_request_start", {
       deviceId: payload?.deviceId,
       protocolVersion: payload?.protocolVersion,
@@ -8012,7 +8663,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       return;
     }
     // Lowercase the claimed name for consistent routing (case-insensitive login)
-    const sanitizedClaimedName = sanitizeLabel(payload.claimedName)?.toLowerCase();
+    const sanitizedClaimedName = sanitizeLabel(
+      typeof payload.claimedName === "string" ? payload.claimedName : undefined,
+    )?.toLowerCase();
     const normalizedUserId = normalizeUserIdFromClaimedName(sanitizedClaimedName);
     const deviceId = payload.deviceId;
     await refreshAllowlistFromDisk();
@@ -8156,8 +8809,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     );
   }
 
-  // oxlint-disable-next-line typescript/no-explicit-any
-  async function handleAuth(ws: WebSocket, payload: any) {
+  async function handleAuth(ws: WebSocket, payload: ClientPayload) {
     if (payload.protocolVersion !== PROTOCOL_VERSION) {
       await sendJson(ws, {
         type: "error",
@@ -8224,6 +8876,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       ...storedAdoptedSessionKeys,
       ...clientAdoptedSessionKeys,
     ]);
+    let resolveReplayBarrier!: () => void;
+    const replayBarrier = new Promise<void>((resolve) => {
+      resolveReplayBarrier = resolve;
+    });
     const session: Session = {
       socket: ws,
       deviceId: entry.deviceId,
@@ -8242,6 +8898,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       peerId,
       claimedName: entry.claimedName,
       deviceInfo: entry.deviceInfo,
+      replayInProgress: true,
+      replayDeliveredMessageIds: new Set(),
+      replayBufferedMessages: [],
+      replayBarrier,
+      resolveReplayBarrier,
+      revoked: false,
     };
     applySessionInfo(session, entry.isAdmin, adoptedSessionKeys);
     registerSession(session);
@@ -8256,10 +8918,26 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       await updateLastSeen(session.deviceId, nowMs());
       const lastMessageId =
         typeof payload.lastMessageId === "string" ? payload.lastMessageId : null;
+      const replayCursorsBySessionKey =
+        payload.replayCursorsBySessionKey &&
+        typeof payload.replayCursorsBySessionKey === "object" &&
+        !Array.isArray(payload.replayCursorsBySessionKey)
+          ? (payload.replayCursorsBySessionKey as Record<string, unknown>)
+          : {};
+      if (typeof payload.lastMessageId === "string") {
+        logger.warn?.("[clawline] deprecated_replay_auth_field", {
+          deviceId: session.deviceId,
+          userId: session.userId,
+          deprecatedField: "lastMessageId",
+          replacementField: "replayCursorsBySessionKey",
+          lastMessageIdPresent: true,
+        });
+      }
       logger.info("replay_request", {
         deviceId: session.deviceId,
         userId: session.userId,
         lastMessageId: lastMessageId ?? "(null)",
+        replayCursorCount: Object.keys(replayCursorsBySessionKey).length,
       });
       if (
         typeof payload.lastMessageId === "string" &&
@@ -8270,11 +8948,15 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           code: "invalid_message",
           message: "Invalid lastMessageId",
         });
+        session.replayInProgress = false;
+        session.resolveReplayBarrier();
         ws.close();
         return;
       }
-      await sendReplay(session, lastMessageId);
+      await sendReplay(session, lastMessageId, replayCursorsBySessionKey);
     } catch {
+      session.replayInProgress = false;
+      session.resolveReplayBarrier();
       removeSession(session);
       connectionState.delete(ws);
       await sendJson(ws, { type: "error", code: "server_error", message: "Replay failed" }).catch(
@@ -8285,8 +8967,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
   }
 
-  // oxlint-disable-next-line typescript/no-explicit-any
-  async function handleAuthedMessage(ws: WebSocket, payload: any) {
+  async function handleAuthedMessage(ws: WebSocket, payload: ClientPayload) {
     const state = connectionState.get(ws);
     if (!state || !state.authenticated || !state.deviceId || !state.userId) {
       await sendJson(ws, { type: "error", code: "auth_failed", message: "Not authenticated" });
@@ -8296,13 +8977,18 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     const session = sessionsByDevice.get(state.deviceId);
     if (!session) {
       await sendJson(ws, { type: "error", code: "auth_failed", message: "Session missing" });
+      return;
+    }
+    if (session.replayInProgress) {
+      await session.replayBarrier;
+    }
+    if (sessionsByDevice.get(session.deviceId) !== session || session.revoked) {
       return;
     }
     await processClientMessage(session, payload);
   }
 
-  // oxlint-disable-next-line typescript/no-explicit-any
-  async function handleAuthedInteractiveCallback(ws: WebSocket, payload: any) {
+  async function handleAuthedStreamRead(ws: WebSocket, payload: ClientPayload) {
     const state = connectionState.get(ws);
     if (!state || !state.authenticated || !state.deviceId || !state.userId) {
       await sendJson(ws, { type: "error", code: "auth_failed", message: "Not authenticated" });
@@ -8312,6 +8998,78 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     const session = sessionsByDevice.get(state.deviceId);
     if (!session) {
       await sendJson(ws, { type: "error", code: "auth_failed", message: "Session missing" });
+      return;
+    }
+    const sessionKey = typeof payload.sessionKey === "string" ? payload.sessionKey.trim() : "";
+    const lastReadMessageId =
+      typeof payload.lastReadMessageId === "string" ? payload.lastReadMessageId.trim() : "";
+    if (!sessionKey || !lastReadMessageId || !SERVER_EVENT_ID_REGEX.test(lastReadMessageId)) {
+      await sendJson(ws, {
+        type: "error",
+        code: "invalid_message",
+        message: "Invalid stream read payload",
+      }).catch(() => {});
+      return;
+    }
+    const normalizedSessionKey = normalizeSessionKey(sessionKey);
+    const allowedSessionKey = session.sessionKeys.find((candidate) =>
+      sessionKeyEq(candidate, normalizedSessionKey),
+    );
+    if (!allowedSessionKey) {
+      await sendJson(ws, {
+        type: "error",
+        code: "stream_not_found",
+        message: "Stream not found",
+      }).catch(() => {});
+      return;
+    }
+    try {
+      const update = await runPerUserTask(session.userId, async () =>
+        enqueueWriteTask(() =>
+          updateStreamReadState({
+            userId: session.userId,
+            sessionKey: allowedSessionKey,
+            lastReadMessageId,
+          }),
+        ),
+      );
+      if (!update.updated) {
+        return;
+      }
+      await broadcastStreamEvent(session.userId, {
+        type: "stream_read_state",
+        sessionKey: update.sessionKey,
+        lastReadMessageId: update.lastReadMessageId,
+      });
+    } catch (error) {
+      if (error instanceof ClientMessageError) {
+        await sendJson(ws, {
+          type: "error",
+          code: error.code,
+          message: error.message,
+        }).catch(() => {});
+        return;
+      }
+      throw error;
+    }
+  }
+
+  async function handleAuthedInteractiveCallback(ws: WebSocket, payload: ClientPayload) {
+    const state = connectionState.get(ws);
+    if (!state || !state.authenticated || !state.deviceId || !state.userId) {
+      await sendJson(ws, { type: "error", code: "auth_failed", message: "Not authenticated" });
+      ws.close();
+      return;
+    }
+    const session = sessionsByDevice.get(state.deviceId);
+    if (!session) {
+      await sendJson(ws, { type: "error", code: "auth_failed", message: "Session missing" });
+      return;
+    }
+    if (session.replayInProgress) {
+      await session.replayBarrier;
+    }
+    if (sessionsByDevice.get(session.deviceId) !== session || session.revoked) {
       return;
     }
     await processInteractiveCallback(session, payload);
