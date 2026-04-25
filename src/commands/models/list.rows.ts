@@ -177,11 +177,13 @@ export async function appendProviderCatalogRows(params: {
   rows: ModelRow[];
   context: RowBuilderContext;
   seenKeys: Set<string>;
+  staticOnly?: boolean;
 }): Promise<void> {
   for (const model of await loadProviderCatalogModelsForList({
     cfg: params.context.cfg,
     agentDir: params.context.agentDir,
     providerFilter: params.context.filter.provider,
+    staticOnly: params.staticOnly,
   })) {
     if (!matchesRowFilter(params.context.filter, model)) {
       continue;

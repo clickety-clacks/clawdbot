@@ -147,6 +147,61 @@ function dependencyNodeModulesPath(nodeModulesDir, depName) {
   return segments ? path.join(nodeModulesDir, ...segments) : null;
 }
 
+function listPackageRootsInNodeModules(nodeModulesDir) {
+  if (!fs.existsSync(nodeModulesDir)) {
+    return [];
+  }
+  const packageRoots = [];
+  for (const entry of fs.readdirSync(nodeModulesDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+    const entryPath = path.join(nodeModulesDir, entry.name);
+    if (entry.name.startsWith("@")) {
+      for (const scopedEntry of fs.readdirSync(entryPath, { withFileTypes: true })) {
+        if (scopedEntry.isDirectory()) {
+          packageRoots.push(path.join(entryPath, scopedEntry.name));
+        }
+      }
+      continue;
+    }
+    packageRoots.push(entryPath);
+  }
+  return packageRoots;
+}
+
+function findNestedInstalledDependencyRoots(rootNodeModulesDir, depName) {
+  const roots = [];
+  const queue = [rootNodeModulesDir];
+  const seenNodeModulesDirs = new Set();
+  for (let index = 0; index < queue.length; index += 1) {
+    const nodeModulesDir = queue[index];
+    let realNodeModulesDir;
+    try {
+      realNodeModulesDir = fs.realpathSync(nodeModulesDir);
+    } catch {
+      continue;
+    }
+    if (seenNodeModulesDirs.has(realNodeModulesDir)) {
+      continue;
+    }
+    seenNodeModulesDirs.add(realNodeModulesDir);
+
+    const depRoot = dependencyNodeModulesPath(nodeModulesDir, depName);
+    if (depRoot !== null && fs.existsSync(path.join(depRoot, "package.json"))) {
+      roots.push(depRoot);
+    }
+
+    for (const packageRoot of listPackageRootsInNodeModules(nodeModulesDir)) {
+      const childNodeModulesDir = path.join(packageRoot, "node_modules");
+      if (fs.existsSync(childNodeModulesDir)) {
+        queue.push(childNodeModulesDir);
+      }
+    }
+  }
+  return roots;
+}
+
 function dependencyVersionSatisfied(spec, installedVersion) {
   return semverSatisfies(installedVersion, spec, { includePrerelease: false });
 }
@@ -245,6 +300,11 @@ function resolveInstalledDependencyRoot(params) {
   const rootDepRoot = dependencyNodeModulesPath(params.rootNodeModulesDir, params.depName);
   if (rootDepRoot !== null) {
     candidates.push(rootDepRoot);
+  }
+  if (params.enforceSpec !== false) {
+    candidates.push(
+      ...findNestedInstalledDependencyRoots(params.rootNodeModulesDir, params.depName),
+    );
   }
 
   for (const depRoot of candidates) {

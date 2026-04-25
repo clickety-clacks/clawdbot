@@ -1,12 +1,10 @@
 ---
-title: "Release Policy"
 summary: "Public release channels, version naming, and cadence"
+title: "Release policy"
 read_when:
   - Looking for public release channel definitions
   - Looking for version naming and cadence
 ---
-
-# Release Policy
 
 OpenClaw has three public release lanes:
 
@@ -37,6 +35,12 @@ OpenClaw has three public release lanes:
 - Maintainers normally cut releases from a `release/YYYY.M.D` branch created
   from current `main`, so release validation and fixes do not block new
   development on `main`
+- After a release branch is cut, maintainers keep validating that branch instead
+  of rebasing after every new `main` commit. If validation finds a concrete
+  release issue, they may inspect `main` and backport only low-risk fixes that
+  directly address the failure.
+- Stable follows a beta only after published-artifact validation passes,
+  including Docker and Parallels release checks for install/update coverage.
 - If a beta tag has been pushed or published and needs a fix, maintainers cut
   the next `-beta.N` tag instead of deleting or recreating the old beta tag
 - Detailed release procedure, approvals, credentials, and recovery notes are
@@ -90,6 +94,11 @@ OpenClaw has three public release lanes:
   `node --import tsx scripts/openclaw-npm-postpublish-verify.ts YYYY.M.D`
   (or the matching beta/correction version) to verify the published registry
   install path in a fresh temp prefix
+- After a beta npm publish, the experimental `NPM Telegram Beta E2E` workflow
+  (`.github/workflows/npm-telegram-beta-e2e.yml`) can be dispatched with
+  `package_spec=openclaw@YYYY.M.D-beta.N` after npm sees the package. Treat it
+  as extra signal; ignore workflow/infrastructure failure unless it exposes a
+  concrete release bug.
 - Maintainer release automation now uses preflight-then-promote:
   - real npm publish must pass a successful npm `preflight_run_id`
   - the real npm publish must be dispatched from the same `main` or

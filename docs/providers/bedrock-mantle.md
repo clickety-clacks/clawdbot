@@ -6,8 +6,6 @@ read_when:
 title: "Amazon Bedrock Mantle"
 ---
 
-# Amazon Bedrock Mantle
-
 OpenClaw includes a bundled **Amazon Bedrock Mantle** provider that connects to
 the Mantle OpenAI-compatible endpoint. Mantle hosts open-source and
 third-party models (GPT-OSS, Qwen, Kimi, GLM, and similar) through a standard
@@ -132,7 +130,7 @@ If you prefer explicit config instead of auto-discovery:
 }
 ```
 
-## Advanced notes
+## Advanced configuration
 
 <AccordionGroup>
   <Accordion title="Reasoning support">
@@ -173,8 +171,6 @@ If you prefer explicit config instead of auto-discovery:
       },
     }
     ```
-
-    Context-window metadata for discovered Mantle models uses known published limits when available and falls back conservatively for unlisted models, so compaction and overflow handling behave correctly for newer entries without overstating unknown models.
 
   </Accordion>
 

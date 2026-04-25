@@ -47,8 +47,12 @@ export async function modelsListCommand(
   if (providerFilter === null) {
     return;
   }
-  const { ensureAuthProfileStore, ensureOpenClawModelsJson, resolveOpenClawAgentDir } =
-    await import("./list.runtime.js");
+  const {
+    ensureAuthProfileStore,
+    ensureOpenClawModelsJson,
+    hasProviderStaticCatalogForFilter,
+    resolveOpenClawAgentDir,
+  } = await import("./list.runtime.js");
   const { sourceConfig, resolvedConfig: cfg } = await loadModelsConfigWithSource({
     commandName: "models list",
     runtime,
@@ -60,33 +64,32 @@ export async function modelsListCommand(
   let discoveredKeys = new Set<string>();
   let availableKeys: Set<string> | undefined;
   let availabilityErrorMessage: string | undefined;
-  const useProviderCatalogFastPath = Boolean(opts.all && providerFilter === "codex");
-  try {
+  const { entries } = resolveConfiguredEntries(cfg);
+  const configuredByKey = new Map(entries.map((entry) => [entry.key, entry]));
+  const useProviderCatalogFastPath =
+    opts.all && providerFilter
+      ? await hasProviderStaticCatalogForFilter({ cfg, providerFilter })
+      : false;
+  const loadRegistryState = async () => {
     // Keep command behavior explicit: sync models.json from the source config
     // before building the read-only model registry view.
+    await ensureOpenClawModelsJson(sourceConfig ?? cfg);
+    const loaded = await loadListModelRegistry(cfg, { sourceConfig, providerFilter });
+    modelRegistry = loaded.registry;
+    discoveredKeys = loaded.discoveredKeys;
+    availableKeys = loaded.availableKeys;
+    availabilityErrorMessage = loaded.availabilityErrorMessage;
+  };
+  try {
     if (!useProviderCatalogFastPath) {
-      await ensureOpenClawModelsJson(sourceConfig ?? cfg);
-      const loaded = await loadListModelRegistry(cfg, { sourceConfig, providerFilter });
-      modelRegistry = loaded.registry;
-      discoveredKeys = loaded.discoveredKeys;
-      availableKeys = loaded.availableKeys;
-      availabilityErrorMessage = loaded.availabilityErrorMessage;
+      await loadRegistryState();
     }
   } catch (err) {
     runtime.error(`Model registry unavailable:\n${formatErrorWithStack(err)}`);
     process.exitCode = 1;
     return;
   }
-  if (availabilityErrorMessage !== undefined) {
-    runtime.error(
-      `Model availability lookup failed; falling back to auth heuristics for discovered models: ${availabilityErrorMessage}`,
-    );
-  }
-  const { entries } = resolveConfiguredEntries(cfg);
-  const configuredByKey = new Map(entries.map((entry) => [entry.key, entry]));
-
-  const rows: ModelRow[] = [];
-  const rowContext = {
+  const buildRowContext = (skipRuntimeModelSuppression: boolean) => ({
     cfg,
     agentDir,
     authStore,
@@ -97,11 +100,13 @@ export async function modelsListCommand(
       provider: providerFilter,
       local: opts.local,
     },
-    skipRuntimeModelSuppression: useProviderCatalogFastPath,
-  };
+    skipRuntimeModelSuppression,
+  });
+  const rows: ModelRow[] = [];
 
   if (opts.all) {
-    const seenKeys = appendDiscoveredRows({
+    let rowContext = buildRowContext(useProviderCatalogFastPath);
+    let seenKeys = appendDiscoveredRows({
       rows,
       models: modelRegistry?.getAll() ?? [],
       context: rowContext,
@@ -119,7 +124,33 @@ export async function modelsListCommand(
         rows,
         context: rowContext,
         seenKeys,
+        staticOnly: true,
       });
+      if (rows.length === 0) {
+        try {
+          await loadRegistryState();
+        } catch (err) {
+          runtime.error(`Model registry unavailable:\n${formatErrorWithStack(err)}`);
+          process.exitCode = 1;
+          return;
+        }
+        rows.length = 0;
+        const fallbackRegistry = modelRegistry as ModelRegistry | undefined;
+        rowContext = buildRowContext(false);
+        seenKeys = appendDiscoveredRows({
+          rows,
+          models: fallbackRegistry?.getAll() ?? [],
+          context: rowContext,
+        });
+        if (fallbackRegistry) {
+          await appendCatalogSupplementRows({
+            rows,
+            modelRegistry: fallbackRegistry,
+            context: rowContext,
+            seenKeys,
+          });
+        }
+      }
     }
   } else {
     const registry = modelRegistry;
@@ -128,6 +159,7 @@ export async function modelsListCommand(
       process.exitCode = 1;
       return;
     }
+    const rowContext = buildRowContext(false);
     appendConfiguredRows({
       rows,
       entries,
@@ -139,6 +171,12 @@ export async function modelsListCommand(
       context: rowContext,
       seenKeys: new Set(rows.map((row) => row.key)),
     });
+  }
+
+  if (availabilityErrorMessage !== undefined) {
+    runtime.error(
+      `Model availability lookup failed; falling back to auth heuristics for discovered models: ${availabilityErrorMessage}`,
+    );
   }
 
   if (rows.length === 0) {

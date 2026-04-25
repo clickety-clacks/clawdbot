@@ -163,6 +163,22 @@ describe("matrix live qa scenarios", () => {
     ).toBe("@sut:matrix-qa.test reply with only this exact marker: MATRIX_QA_CANARY_TOKEN");
   });
 
+  it("keeps live Matrix model and E2EE waits above observed CI latency", () => {
+    const scenarios = new Map(MATRIX_QA_SCENARIOS.map((scenario) => [scenario.id, scenario]));
+
+    expect(scenarios.get("matrix-subagent-thread-spawn")?.timeoutMs).toBeGreaterThanOrEqual(
+      120_000,
+    );
+    expect(scenarios.get("matrix-room-generated-image-delivery")?.timeoutMs).toBeGreaterThanOrEqual(
+      180_000,
+    );
+    expect(scenarios.get("matrix-e2ee-restart-resume")?.timeoutMs).toBeGreaterThanOrEqual(150_000);
+    expect(scenarios.get("matrix-e2ee-artifact-redaction")?.timeoutMs).toBeGreaterThanOrEqual(
+      150_000,
+    );
+    expect(scenarios.get("matrix-e2ee-media-image")?.timeoutMs).toBeGreaterThanOrEqual(180_000);
+  });
+
   it("requires Matrix replies to match the exact marker body", () => {
     expect(
       scenarioTesting.buildMatrixReplyArtifact(
@@ -979,6 +995,7 @@ describe("matrix live qa scenarios", () => {
     const stateRoot = await mkdtemp(path.join(os.tmpdir(), "matrix-stale-sync-"));
     try {
       const accountDir = path.join(stateRoot, "matrix", "accounts", "sut", "server", "token");
+      const staleSyncRoomId = "!stale-sync:matrix-qa.test";
       const syncStorePath = path.join(accountDir, "bot-storage.json");
       const dedupeStorePath = path.join(accountDir, "inbound-dedupe.json");
       await mkdir(accountDir, { recursive: true });
@@ -1009,7 +1026,7 @@ describe("matrix live qa scenarios", () => {
             version: 1,
             entries: [
               {
-                key: "!restart:matrix-qa.test|$first-trigger",
+                key: `${staleSyncRoomId}|$first-trigger`,
                 ts: Date.now(),
               },
             ],
@@ -1018,7 +1035,7 @@ describe("matrix live qa scenarios", () => {
         return {
           event: {
             kind: "message",
-            roomId: "!restart:matrix-qa.test",
+            roomId: staleSyncRoomId,
             eventId: kind === "fresh" ? "$fresh-reply" : "$first-reply",
             sender: "@sut:matrix-qa.test",
             type: "m.room.message",
@@ -1070,7 +1087,7 @@ describe("matrix live qa scenarios", () => {
             defaultRoomKey: "main",
             rooms: [
               {
-                key: "restart",
+                key: "stale-sync",
                 kind: "group",
                 memberRoles: ["driver", "observer", "sut"],
                 memberUserIds: [
@@ -1078,9 +1095,9 @@ describe("matrix live qa scenarios", () => {
                   "@observer:matrix-qa.test",
                   "@sut:matrix-qa.test",
                 ],
-                name: "Restart room",
+                name: "Stale sync room",
                 requireMention: true,
-                roomId: "!restart:matrix-qa.test",
+                roomId: staleSyncRoomId,
               },
             ],
           },
@@ -1343,7 +1360,12 @@ describe("matrix live qa scenarios", () => {
     });
 
     expect(sendTextMessage).toHaveBeenCalledWith({
-      body: expect.stringContaining("Use sessions_spawn for this QA check"),
+      body: expect.stringContaining("Call sessions_spawn now for this QA check"),
+      mentionUserIds: ["@sut:matrix-qa.test"],
+      roomId: "!main:matrix-qa.test",
+    });
+    expect(sendTextMessage).toHaveBeenCalledWith({
+      body: expect.stringContaining("runTimeoutSeconds=60"),
       mentionUserIds: ["@sut:matrix-qa.test"],
       roomId: "!main:matrix-qa.test",
     });

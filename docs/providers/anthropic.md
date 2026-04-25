@@ -268,11 +268,9 @@ OpenClaw supports Anthropic's prompt caching feature for API-key auth.
 
   </Accordion>
 
-  <Accordion title="Claude Opus 4.7 1M context normalization">
-    Claude Opus 4.7 (`anthropic/claude-opus-4.7`) and its `claude-cli` variant are normalized to a 1M context window in resolved runtime metadata and active-agent status/context reporting. You do not need `params.context1m: true` for Opus 4.7; it no longer inherits the stale 200k fallback.
-
-    Compaction and overflow handling use the 1M window automatically. Other Anthropic models keep their published limits.
-
+  <Accordion title="Claude Opus 4.7 1M context">
+    `anthropic/claude-opus-4.7` and its `claude-cli` variant have a 1M context
+    window by default — no `params.context1m: true` needed.
   </Accordion>
 </AccordionGroup>
 
@@ -280,11 +278,11 @@ OpenClaw supports Anthropic's prompt caching feature for API-key auth.
 
 <AccordionGroup>
   <Accordion title="401 errors / token suddenly invalid">
-    Anthropic token auth can expire or be revoked. For new setups, migrate to an Anthropic API key.
+    Anthropic token auth expires and can be revoked. For new setups, use an Anthropic API key instead.
   </Accordion>
 
   <Accordion title='No API key found for provider "anthropic"'>
-    Auth is **per agent**. New agents don't inherit the main agent's keys. Re-run onboarding for that agent, or configure an API key on the gateway host, then verify with `openclaw models status`.
+    Anthropic auth is **per agent** — new agents do not inherit the main agent's keys. Re-run onboarding for that agent (or configure an API key on the gateway host), then verify with `openclaw models status`.
   </Accordion>
 
   <Accordion title='No credentials found for profile "anthropic:default"'>

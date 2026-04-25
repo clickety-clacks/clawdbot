@@ -1,6 +1,6 @@
 ---
 name: openclaw-release-maintainer
-description: Maintainer workflow for OpenClaw releases, prereleases, changelog release notes, and publish validation. Use when Codex needs to prepare or verify stable or beta release steps, align version naming, assemble release notes, check release auth requirements, or validate publish-time commands and artifacts.
+description: Prepare or verify OpenClaw stable/beta releases, changelogs, release notes, publish commands, and artifacts.
 ---
 
 # OpenClaw Release Maintainer
@@ -25,17 +25,25 @@ Use this skill for release and publish-time workflow. Keep ordinary development 
 - Before release branching, commit any dirty files in coherent groups, push,
   pull/rebase, then run `/changelog` on `main` and commit/push/pull that
   changelog rewrite immediately before creating the release branch.
-- Do not delete or rewrite beta tags after npm publish has completed for that
-  exact beta version. If a beta tag was only pushed to GitHub and no npm package
-  was published for it yet, it may be moved/recreated to include late release
-  fixes when the operator approves that. If npm publish already happened, commit
-  the fix on the release branch and increment to the next `-beta.N`.
+- After the release branch is cut, do not keep rebasing it onto moving `main`.
+  Treat the branch commit as the release base. If validation finds a concrete
+  issue, inspect `main` and backport only the low-risk fix commits that directly
+  address that failure.
+- Beta numbers are consumed by npm publication, not by a local tag or canceled
+  preflight. If a beta tag was pushed but the matching npm package was not
+  published, confirm `npm view openclaw@YYYY.M.D-beta.N` is missing and cancel
+  any in-flight preflight/publish workflows before moving or recreating that
+  beta tag. Once the npm package is published, do not delete or rewrite the
+  beta tag; commit the fix on the release branch and increment to the next
+  `-beta.N`.
 - For a beta release train, run the full pre-npm test roster before publishing
   each beta. After a beta is published, run the smaller published-install roster
-  focused on install/update/Docker/Parallels. If anything fails, fix it on the
-  release branch, commit/push/pull, increment beta number, and repeat. Operators
-  may authorize up to 4 autonomous beta attempts; after 4 failed beta attempts,
-  stop and report.
+  focused on install/update plus all Docker and Parallels release checks. If
+  those published-artifact checks all pass, proceed to the non-beta release only
+  when the operator asked for the full beta-to-stable train. If anything fails,
+  fix it on the release branch, commit/push/pull, increment beta number, and
+  repeat. Operators may authorize up to 4 autonomous beta attempts; after 4
+  failed published beta attempts, stop and report.
 - Use `/changelog` before version/tag preparation so the top changelog section
   is deduped and ordered by user impact.
 - Do not create beta-specific `CHANGELOG.md` headings. Beta releases use the
@@ -72,6 +80,22 @@ Use this skill for release and publish-time workflow. Keep ordinary development 
 - Every stable OpenClaw release ships the npm package and macOS app together.
   Beta releases normally ship npm/package artifacts first and skip mac app
   build/sign/notarize unless the operator requests mac beta validation.
+- Do not let the slower macOS signing/notary path block npm publication once
+  the npm preflight has passed. Keep mac validation/publish running in
+  parallel, publish npm from the successful npm preflight, then start published
+  npm install/update, Docker, and Parallels verification while mac artifacts
+  continue.
+- Mac packaging may be built from a slight release-branch variation of the
+  tagged commit when the delta is mac packaging, signing, workflow, or
+  validation-only release machinery. If mac packaging needs release-branch-only
+  fixes after the stable npm package or GitHub tag is already published, do not
+  create a `vYYYY.M.D-N` correction tag just to change the workflow source.
+  Dispatch the private mac workflows for the original `tag=vYYYY.M.D` with
+  `source_ref=release/YYYY.M.D` and `public_release_branch=release/YYYY.M.D`;
+  provenance checks must prove the source SHA descends from the tag and
+  validation/preflight use the same source. Reserve `vYYYY.M.D-N` correction
+  tags for emergency hotfixes that must publish a new npm package/release
+  identity, not for ordinary mac-only packaging recovery.
 - The production Sparkle feed lives at `https://raw.githubusercontent.com/openclaw/openclaw/main/appcast.xml`, and the canonical published file is `appcast.xml` on `main` in the `openclaw` repo.
 - That shared production Sparkle feed is stable-only. Beta mac releases may
   upload assets to the GitHub prerelease, but they must not replace the shared
@@ -110,14 +134,33 @@ live`; keep it clearly beta and avoid implying stable promotion.
 - Lead with user-visible capabilities, then important integrations, then
   reliability/security/install fixes. Compress "lots of fixes" into one
   readable bullet.
+- Read the full changelog section before drafting. Do not lead with coverage,
+  CI, validation, or internal release mechanics unless the release is explicitly
+  about those. Peter prefers concrete user wins: features, integrations,
+  workflow improvements, and practical reliability fixes.
 - Tone: high-signal, slightly cheeky, confident, not corporate. One joke is
   enough. Avoid punching down, insulting users, or promising what was not
   verified.
-- Length: release tweets are always standard tweets under 280 characters. Trim
-  to 3-4 bullets and count the final text before posting.
-- Links/media: include the GitHub release or changelog link at the end. Add a
-  short docs follow-up reply only when there is a standout feature that needs
-  setup instructions.
+- Peter likes dry, compact taglines when they feel earned. Good example:
+  `Big release, tiny release notes... kidding.` Keep the joke short and let the
+  feature bullets carry the tweet; do not turn the punchline into a second
+  paragraph or a forced bit.
+- Length: release tweets are always standard tweets under 280 characters, with
+  room for one URL. Trim to 3-4 bullets and count the final text before posting.
+- Links/media: include the GitHub release or changelog link at the end of the
+  first release tweet.
+- Thread follow-ups: if doing a thread, keep the first release tweet as the
+  compact launch post, then publish one focused feature explainer per reply.
+  Follow-up replies should not repeat "new in VERSION" or the version number
+  when the thread context already makes it obvious.
+- Every follow-up tweet should include a docs URL for that specific feature.
+  Prefer a bare URL over `Docs: <url>` unless the label is needed for clarity.
+  Keep follow-ups concise: around 160-220 raw characters is usually the sweet
+  spot; under 280 is the hard cap. If a URL makes a tweet fail, trim prose
+  before dropping the URL.
+  Prefer explaining diagnostics, trajectory/export, provider setup, model
+  commands, or other setup-heavy features in follow-ups instead of overloading
+  the first release tweet.
 - Hotfix/correction: be direct and accountable. State what slipped, what is
   fixed, and the new version. Keep jokes out of incident-style posts.
 
@@ -244,6 +287,10 @@ node --import tsx scripts/openclaw-npm-postpublish-verify.ts <published-version>
     coverage or a failure needs local debugging.
 - Post-published beta verification roster:
   - `node --import tsx scripts/openclaw-npm-postpublish-verify.ts <beta-version>`
+  - experimental published npm Telegram lane: dispatch
+    `.github/workflows/npm-telegram-beta-e2e.yml` after the beta is visible on
+    npm, using `package_spec=openclaw@<beta-version>`; if it fails from workflow
+    or infrastructure instability, record it as experimental and continue
   - install/update smoke against the published beta channel
   - Docker install/update coverage that exercises the published beta package
   - Parallels published beta install/update coverage with both OpenAI and
@@ -279,7 +326,14 @@ node --import tsx scripts/openclaw-npm-postpublish-verify.ts <published-version>
   public release assets so the updater feed cannot lag the published binaries.
 - Serialize stable appcast-producing runs across tags so two releases do not
   generate replacement `appcast.xml` files from the same stale seed.
-- For stable releases, confirm the latest beta already passed the broader release workflows before cutting stable.
+- For stable releases, rely primarily on the latest beta's broader release
+  workflow confidence. When promoting the matching non-beta build to npm
+  `latest`, prefer a light time-bounded verification pass: published npm
+  postpublish verify, Docker install/update smoke, macOS-only Parallels
+  install/update smoke, and required QA signal. Do not rerun the full
+  Docker/Parallels matrix unless the beta evidence is stale, the stable build
+  differs materially from beta, or the operator explicitly asks for full
+  retesting.
 - If any required build, packaging step, or release workflow is red, do not say the release is ready.
 
 ## Use the right auth flow
@@ -289,6 +343,22 @@ node --import tsx scripts/openclaw-npm-postpublish-verify.ts <published-version>
   `openclaw/releases-private/.github/workflows/openclaw-npm-dist-tags.yml`
   workflow because `npm dist-tag` management needs `NPM_TOKEN`, while the
   public npm release workflow stays OIDC-only.
+- If the private dist-tag workflow cannot promote because `NPM_TOKEN` is absent
+  or stale, use the local tmux + 1Password fallback:
+  - Start or reuse a tmux session so interactive `npm login` and OTP prompts
+    are observable and recoverable.
+  - Use the 1Password item `op://Private/Npmjs` for npm credentials and OTP.
+    Do not print passwords, tokens, or OTPs to the transcript; send them through
+    tmux buffers, env vars scoped to the tmux command, or `expect` with
+    `log_user 0`.
+  - Re-authenticate npm inside that tmux session with
+    `npm login --auth-type=legacy`, then confirm `npm whoami` reports
+    `steipete`.
+  - Promote with a fresh OTP:
+    `npm dist-tag add openclaw@YYYY.M.D latest --otp "$OTP"`.
+  - Verify with a cache-bypassed registry read, for example:
+    `npm view openclaw dist-tags --json --prefer-online --cache /tmp/openclaw-npm-cache-verify-$$`
+    and `npm view openclaw@latest version dist.tarball --json --prefer-online`.
 - Direct stable publishes can also use that private dist-tag workflow to point
   `beta` at the already-published `latest` version when the operator wants both
   tags aligned immediately.
@@ -453,10 +523,14 @@ node --import tsx scripts/openclaw-npm-postpublish-verify.ts <published-version>
     token from `.profile`.
 25. If the operator requested beta only, stop after beta verification and the
     announcement.
-26. If the stable release was published to `beta`, start the private
+26. If the stable release was published to `beta`, use the light stable
+    promotion roster when the matching beta already carried the full confidence
+    pass: published npm postpublish verify, Docker install/update smoke,
+    macOS-only Parallels install/update smoke, and required QA signal.
+    Then start the private
     `openclaw/releases-private/.github/workflows/openclaw-npm-dist-tags.yml`
-    workflow after beta validation passes to promote that stable version from
-    `beta` to `latest`, then verify `latest` now points at that version.
+    workflow to promote that stable version from `beta` to `latest`, then
+    verify `latest` now points at that version.
 27. If the stable release was published directly to `latest` and `beta` should
     follow it, start that same private dist-tag workflow to point `beta` at the
     stable version, then verify both `latest` and `beta` point at that version.

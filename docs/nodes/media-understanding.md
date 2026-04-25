@@ -3,7 +3,7 @@ summary: "Inbound image/audio/video understanding (optional) with provider + CLI
 read_when:
   - Designing or refactoring media understanding
   - Tuning inbound audio/video/image preprocessing
-title: "Media Understanding"
+title: "Media understanding"
 ---
 
 # Media Understanding - Inbound (2026-01-17)
@@ -81,7 +81,7 @@ Each `models[]` entry can be **provider** or **CLI**:
 {
   type: "provider", // default if omitted
   provider: "openai",
-  model: "gpt-5.4-mini",
+  model: "gpt-5.5",
   prompt: "Describe the image in <= 500 chars.",
   maxChars: 500,
   maxBytes: 10485760,
@@ -222,11 +222,11 @@ If you omit `capabilities`, the entry is eligible for the list it appears in.
 
 ## Provider support matrix (OpenClaw integrations)
 
-| Capability | Provider integration                                                                   | Notes                                                                                                                                    |
-| ---------- | -------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| Image      | OpenAI, OpenRouter, Anthropic, Google, MiniMax, Moonshot, Qwen, Z.AI, config providers | Vendor plugins register image support; MiniMax and MiniMax OAuth both use `MiniMax-VL-01`; image-capable config providers auto-register. |
-| Audio      | OpenAI, Groq, Deepgram, Google, Mistral                                                | Provider transcription (Whisper/Deepgram/Gemini/Voxtral).                                                                                |
-| Video      | Google, Qwen, Moonshot                                                                 | Provider video understanding via vendor plugins; Qwen video understanding uses the Standard DashScope endpoints.                         |
+| Capability | Provider integration                                                                                                         | Notes                                                                                                                                                                                                                                   |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Image      | OpenAI, OpenAI Codex OAuth, Codex app-server, OpenRouter, Anthropic, Google, MiniMax, Moonshot, Qwen, Z.AI, config providers | Vendor plugins register image support; `openai-codex/*` uses OAuth provider plumbing; `codex/*` uses a bounded Codex app-server turn; MiniMax and MiniMax OAuth both use `MiniMax-VL-01`; image-capable config providers auto-register. |
+| Audio      | OpenAI, Groq, Deepgram, Google, Mistral                                                                                      | Provider transcription (Whisper/Deepgram/Gemini/Voxtral).                                                                                                                                                                               |
+| Video      | Google, Qwen, Moonshot                                                                                                       | Provider video understanding via vendor plugins; Qwen video understanding uses the Standard DashScope endpoints.                                                                                                                        |
 
 MiniMax note:
 
@@ -278,7 +278,7 @@ File-attachment extraction behavior:
   tools: {
     media: {
       models: [
-        { provider: "openai", model: "gpt-5.4-mini", capabilities: ["image"] },
+        { provider: "openai", model: "gpt-5.5", capabilities: ["image"] },
         {
           provider: "google",
           model: "gemini-3-flash-preview",
@@ -359,7 +359,7 @@ File-attachment extraction behavior:
         maxBytes: 10485760,
         maxChars: 500,
         models: [
-          { provider: "openai", model: "gpt-5.4-mini" },
+          { provider: "openai", model: "gpt-5.5" },
           { provider: "anthropic", model: "claude-opus-4-6" },
           {
             type: "cli",
@@ -422,7 +422,7 @@ File-attachment extraction behavior:
 When media understanding runs, `/status` includes a short summary line:
 
 ```
-📎 Media: image ok (openai/gpt-5.4-mini) · audio skipped (maxBytes)
+📎 Media: image ok (openai/gpt-5.4) · audio skipped (maxBytes)
 ```
 
 This shows per‑capability outcomes and the chosen provider/model when applicable.

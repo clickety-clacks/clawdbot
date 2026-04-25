@@ -29,8 +29,8 @@ execution:
   kind: flow
   summary: Toggle reasoning display and GPT-5.5 thinking between off/none and max/high, then verify visible reasoning only on the max turn.
   config:
-    requiredProvider: openai
-    requiredModel: gpt-5.5
+    requiredLiveProvider: openai
+    requiredLiveModel: gpt-5.5
     offDirective: /think off
     maxDirective: /think max
     reasoningDirective: /reasoning on
@@ -58,7 +58,7 @@ steps:
         value:
           expr: splitModelRef(env.primaryModel)
       - assert:
-          expr: "env.providerMode !== 'live-frontier' || (selected?.provider === config.requiredProvider && selected?.model === config.requiredModel)"
+          expr: "env.providerMode !== 'live-frontier' || (selected?.provider === config.requiredLiveProvider && selected?.model === config.requiredLiveModel)"
           message:
             expr: "`expected live GPT-5.5, got ${env.primaryModel}`"
       - call: state.addInboundMessage
@@ -153,7 +153,7 @@ steps:
         saveAs: maxAck
         args:
           - lambda:
-              expr: "state.getSnapshot().messages.filter((candidate) => candidate.direction === 'outbound' && candidate.conversation.id === config.conversationId && /Thinking level set to (?:high|xhigh)/i.test(candidate.text)).at(-1)"
+              expr: "state.getSnapshot().messages.filter((candidate) => candidate.direction === 'outbound' && candidate.conversation.id === config.conversationId && /Thinking level set to high/i.test(candidate.text)).at(-1)"
           - expr: liveTurnTimeoutMs(env, 20000)
     detailsExpr: "`max ack=${maxAck.text}`"
   - name: verifies max thinking emits visible reasoning

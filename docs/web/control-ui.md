@@ -6,8 +6,6 @@ read_when:
 title: "Control UI"
 ---
 
-# Control UI (browser)
-
 The Control UI is a small **Vite + Lit** single-page app served by the Gateway:
 
 - default: `http://<host>:18789/`
@@ -78,18 +76,12 @@ you revoke it with `openclaw devices revoke --device <id> --role <role>`. See
 
 ## Personal identity (browser-local)
 
-The Control UI supports a per-browser personal identity — a display name and
-avatar that are attached to outgoing messages for attribution in shared
-sessions. This identity lives in browser storage, is scoped to the current
-browser profile, and does not leave the gateway host unless you explicitly
-submit it with a request.
-
-- Identity is **browser-local only**. It is not synced to other devices and is
-  not part of the gateway config file.
-- Clearing site data or switching browsers resets the identity to empty; the
-  Control UI does not try to reconstruct one from server state.
-- Nothing about the personal identity is persisted server-side beyond the
-  normal transcript authorship metadata on messages you actually send.
+The Control UI supports a per-browser personal identity (display name and
+avatar) attached to outgoing messages for attribution in shared sessions. It
+lives in browser storage, is scoped to the current browser profile, and is not
+synced to other devices or persisted server-side beyond the normal transcript
+authorship metadata on messages you actually send. Clearing site data or
+switching browsers resets it to empty.
 
 ## Runtime config endpoint
 
@@ -97,9 +89,7 @@ The Control UI fetches its runtime settings from
 `/__openclaw/control-ui-config.json`. That endpoint is gated by the same
 gateway auth as the rest of the HTTP surface: unauthenticated browsers cannot
 fetch it, and a successful fetch requires either an already valid gateway
-token/password, Tailscale Serve identity, or a trusted-proxy identity. This
-keeps Control UI feature flags and endpoint metadata from leaking to
-unauthenticated scanners on shared hosts.
+token/password, Tailscale Serve identity, or a trusted-proxy identity.
 
 ## Language support
 
@@ -157,6 +147,7 @@ Cron jobs panel notes:
 - `chat.send` is **non-blocking**: it acks immediately with `{ runId, status: "started" }` and the response streams via `chat` events.
 - Re-sending with the same `idempotencyKey` returns `{ status: "in_flight" }` while running, and `{ status: "ok" }` after completion.
 - `chat.history` responses are size-bounded for UI safety. When transcript entries are too large, Gateway may truncate long text fields, omit heavy metadata blocks, and replace oversized messages with a placeholder (`[chat.history omitted: message too large]`).
+- Assistant/generated images are persisted as managed media references and served back through authenticated Gateway media URLs, so reloads do not depend on raw base64 image payloads staying in the chat history response.
 - `chat.history` also strips display-only inline directive tags from visible assistant text (for example `[[reply_to_*]]` and `[[audio_as_voice]]`), plain-text tool-call XML payloads (including `<tool_call>...</tool_call>`, `<function_call>...</function_call>`, `<tool_calls>...</tool_calls>`, `<function_calls>...</function_calls>`, and truncated tool-call blocks), and leaked ASCII/full-width model control tokens, and omits assistant entries whose whole visible text is only the exact silent token `NO_REPLY` / `no_reply`.
 - `chat.inject` appends an assistant note to the session transcript and broadcasts a `chat` event for UI-only updates (no agent run, no channel delivery).
 - The chat header model and thinking pickers patch the active session immediately through `sessions.patch`; they are persistent session overrides, not one-turn-only send options.

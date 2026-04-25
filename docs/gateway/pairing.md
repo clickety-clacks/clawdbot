@@ -4,7 +4,7 @@ read_when:
   - Implementing node pairing approvals without macOS UI
   - Adding CLI flows for approving remote nodes
   - Extending gateway protocol with node management
-title: "Gateway-Owned Pairing"
+title: "Gateway-owned pairing"
 ---
 
 # Gateway-owned pairing (Option B)
@@ -121,17 +121,20 @@ If silent approval fails, it falls back to the normal “Approve/Reject” promp
 
 When an already paired device reconnects with only non-sensitive metadata
 changes (for example, display name or client platform hints), OpenClaw treats
-that as a `metadata-upgrade` and auto-approves the reconnect without
-prompting. Scope upgrades (read to write/admin) and public key changes are
-**not** eligible for metadata-upgrade auto-approval — they stay as explicit
-re-approval requests.
+that as a `metadata-upgrade`. Silent auto-approval is narrow: it applies only
+to trusted local CLI/helper reconnects that already proved possession of the
+shared token or password over loopback. Browser/Control UI clients and remote
+clients still use the explicit re-approval flow. Scope upgrades (read to
+write/admin) and public key changes are **not** eligible for metadata-upgrade
+auto-approval — they stay as explicit re-approval requests.
 
 ## QR pairing helpers
 
 `/pair qr` renders the pairing payload as structured media so mobile and
-browser clients can scan it directly. Device deletion now also sweeps stale
-pending pairing requests for the same device id, so `nodes pending` no longer
-shows orphaned rows after a revoke.
+browser clients can scan it directly.
+
+Deleting a device also sweeps any stale pending pairing requests for that
+device id, so `nodes pending` does not show orphaned rows after a revoke.
 
 ## Locality and forwarded headers
 

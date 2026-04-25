@@ -127,8 +127,8 @@ describe("qa scenario catalog", () => {
     const scenario = readQaScenarioById("gpt54-thinking-visibility-switch");
     const config = readQaScenarioExecutionConfig("gpt54-thinking-visibility-switch") as
       | {
-          requiredProvider?: string;
-          requiredModel?: string;
+          requiredLiveProvider?: string;
+          requiredLiveModel?: string;
           offDirective?: string;
           maxDirective?: string;
           reasoningDirective?: string;
@@ -136,8 +136,8 @@ describe("qa scenario catalog", () => {
       | undefined;
 
     expect(scenario.sourcePath).toBe("qa/scenarios/models/gpt54-thinking-visibility-switch.md");
-    expect(config?.requiredProvider).toBe("openai");
-    expect(config?.requiredModel).toBe("gpt-5.5");
+    expect(config?.requiredLiveProvider).toBe("openai");
+    expect(config?.requiredLiveModel).toBe("gpt-5.5");
     expect(config?.offDirective).toBe("/think off");
     expect(config?.maxDirective).toBe("/think max");
     expect(config?.reasoningDirective).toBe("/reasoning on");

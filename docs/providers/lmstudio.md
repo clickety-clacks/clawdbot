@@ -6,8 +6,6 @@ read_when:
 title: "LM Studio"
 ---
 
-# LM Studio
-
 LM Studio is a friendly yet powerful app for running open-weight models on your own hardware. It lets you run llama.cpp (GGUF) or MLX models (Apple Silicon). Comes in a GUI package or headless daemon (`llmster`). For product and setup docs, see [lmstudio.ai](https://lmstudio.ai/).
 
 ## Quick start
@@ -104,9 +102,11 @@ Interactive setup can prompt for an optional preferred load context length and a
 
 ### Streaming usage compatibility
 
-OpenClaw marks LM Studio as streaming-usage compatible, so token accounting no longer degrades to unknown or stale totals on streamed completions. OpenClaw also recovers token counts from llama.cpp-style `timings.prompt_n` / `timings.predicted_n` metadata when LM Studio does not emit an OpenAI-shaped `usage` object.
+LM Studio is streaming-usage compatible. When it does not emit an OpenAI-shaped
+`usage` object, OpenClaw recovers token counts from llama.cpp-style
+`timings.prompt_n` / `timings.predicted_n` metadata instead.
 
-Other OpenAI-compatible local backends covered by the same behavior:
+Same behavior applies to these OpenAI-compatible local backends:
 
 - vLLM
 - SGLang

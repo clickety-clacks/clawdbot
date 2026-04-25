@@ -55,18 +55,6 @@ describe("openai codex provider", () => {
     loginOpenAICodexDeviceCodeMock.mockReset();
   });
 
-  it("exposes gpt-5.5 in the Codex OAuth catalog", async () => {
-    const { buildOpenAICodexProvider } = await import("./openai-codex-catalog.js");
-
-    expect(buildOpenAICodexProvider().models).toContainEqual(
-      expect.objectContaining({
-        id: "gpt-5.5",
-        api: "openai-codex-responses",
-        input: ["text", "image"],
-      }),
-    );
-  });
-
   it("falls back to the cached credential when accountId extraction fails", async () => {
     const provider = buildOpenAICodexProviderPlugin();
     const credential = {
@@ -236,7 +224,7 @@ describe("openai codex provider", () => {
           },
         },
       ],
-      defaultModel: "openai-codex/gpt-5.5",
+      defaultModel: "openai/gpt-5.5",
     });
     expect(result?.profiles[0]?.credential).not.toHaveProperty("idToken");
     expect(result?.profiles[0]?.credential).not.toHaveProperty("accountId");
@@ -487,6 +475,11 @@ describe("openai codex provider", () => {
       ],
     } as never);
 
+    expect(entries).not.toContainEqual(
+      expect.objectContaining({
+        id: "gpt-5.5",
+      }),
+    );
     expect(entries).toContainEqual(
       expect.objectContaining({
         id: "gpt-5.5-pro",

@@ -734,6 +734,56 @@ describe("stageBundledPluginRuntimeDeps", () => {
     ).toBe("module.exports = 'transitive';\n");
   });
 
+  it("stages direct deps from nested root node_modules when the top-level hoist has another version", () => {
+    const { pluginDir, repoRoot } = createBundledPluginFixture({
+      packageJson: {
+        name: "@openclaw/fixture-plugin",
+        version: "1.0.0",
+        dependencies: { direct: "2.0.0" },
+        openclaw: { bundle: { stageRuntimeDependencies: true } },
+      },
+    });
+    const rootDirectDir = path.join(repoRoot, "node_modules", "direct");
+    const ownerDir = path.join(repoRoot, "node_modules", "owner");
+    const nestedDirectDir = path.join(ownerDir, "node_modules", "direct");
+    fs.mkdirSync(rootDirectDir, { recursive: true });
+    fs.mkdirSync(nestedDirectDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(rootDirectDir, "package.json"),
+      '{ "name": "direct", "version": "1.0.0" }\n',
+      "utf8",
+    );
+    fs.writeFileSync(path.join(rootDirectDir, "index.js"), "module.exports = 'root';\n", "utf8");
+    fs.writeFileSync(
+      path.join(ownerDir, "package.json"),
+      '{ "name": "owner", "version": "1.0.0" }\n',
+      "utf8",
+    );
+    fs.writeFileSync(
+      path.join(nestedDirectDir, "package.json"),
+      '{ "name": "direct", "version": "2.0.0" }\n',
+      "utf8",
+    );
+    fs.writeFileSync(
+      path.join(nestedDirectDir, "index.js"),
+      "module.exports = 'nested';\n",
+      "utf8",
+    );
+
+    let installCount = 0;
+    stageBundledPluginRuntimeDeps({
+      cwd: repoRoot,
+      installPluginRuntimeDepsImpl: () => {
+        installCount += 1;
+      },
+    });
+
+    expect(installCount).toBe(0);
+    expect(
+      fs.readFileSync(path.join(pluginDir, "node_modules", "direct", "index.js"), "utf8"),
+    ).toBe("module.exports = 'nested';\n");
+  });
+
   it("stages nested dependency trees from installed direct package roots", () => {
     const { pluginDir, repoRoot } = createBundledPluginFixture({
       packageJson: {
