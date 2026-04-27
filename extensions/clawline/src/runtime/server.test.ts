@@ -915,6 +915,71 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("exposes read-only session status and typed unsupported control actions", async () => {
+    const entry = createAllowlistEntry();
+    const sessionKey = "agent:main:clawline:flynn:main";
+    const ctx = await setupTestServer([entry]);
+    try {
+      const pairResult = await performPairRequest(ctx.port, entry.deviceId, {
+        claimedName: entry.claimedName,
+      });
+      const authToken = pairResult.token as string;
+      const { ws } = await authenticateDevice(ctx.port, entry.deviceId, authToken);
+      const authHeader = `Bearer ${authToken}`;
+
+      const statusResponse = await fetch(
+        `http://127.0.0.1:${ctx.port}/api/session-status?sessionKey=${encodeURIComponent(
+          sessionKey,
+        )}`,
+        { headers: { Authorization: authHeader } },
+      );
+      expect(statusResponse.status).toBe(200);
+      expect(await statusResponse.json()).toMatchObject({
+        sessionKey,
+        display: {
+          model: null,
+          provider: null,
+          thinkingLevel: null,
+          verbosity: null,
+        },
+        run: {
+          state: "idle",
+          queueDepth: 0,
+        },
+        capabilities: {
+          cancelCurrentRun: { supported: false },
+          setModel: { supported: false },
+          setReasoning: { supported: false },
+          setMode: { supported: false },
+          setVerbosity: { supported: false },
+        },
+      });
+
+      const controlResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/session-control`, {
+        method: "POST",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ sessionKey, action: "cancel_current_run" }),
+      });
+      expect(controlResponse.status).toBe(200);
+      expect(await controlResponse.json()).toMatchObject({
+        ok: false,
+        sessionKey,
+        action: "cancel_current_run",
+        code: "unsupported",
+        capabilities: {
+          cancelCurrentRun: { supported: false },
+        },
+      });
+
+      ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("includes exact device ids in pending approval alerts", async () => {
     const ctx = await setupTestServer([], {
       alertInstructionsText: "",
