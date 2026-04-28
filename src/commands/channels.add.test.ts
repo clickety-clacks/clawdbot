@@ -259,6 +259,7 @@ describe("channelsAddCommand", () => {
     vi.mocked(ensureChannelSetupPluginInstalled).mockImplementation(async ({ cfg }) => ({
       cfg,
       installed: true,
+      status: "installed",
     }));
     vi.mocked(loadChannelSetupPluginRegistrySnapshotForChannel).mockReset();
     vi.mocked(loadChannelSetupPluginRegistrySnapshotForChannel).mockReturnValue(
@@ -326,6 +327,9 @@ describe("channelsAddCommand", () => {
       expect.objectContaining({ entry: catalogEntry }),
     );
     expect(loadChannelSetupPluginRegistrySnapshotForChannel).toHaveBeenCalledTimes(1);
+    expect(loadChannelSetupPluginRegistrySnapshotForChannel).toHaveBeenCalledWith(
+      expect.objectContaining({ installRuntimeDeps: false }),
+    );
     expectExternalChatEnabledConfigWrite();
     expect(runtime.error).not.toHaveBeenCalled();
     expect(runtime.exit).not.toHaveBeenCalled();
@@ -347,6 +351,9 @@ describe("channelsAddCommand", () => {
 
     expect(ensureChannelSetupPluginInstalled).not.toHaveBeenCalled();
     expect(loadChannelSetupPluginRegistrySnapshotForChannel).toHaveBeenCalledTimes(1);
+    expect(loadChannelSetupPluginRegistrySnapshotForChannel).toHaveBeenCalledWith(
+      expect.objectContaining({ installRuntimeDeps: false }),
+    );
     expectExternalChatEnabledConfigWrite();
   });
 
@@ -372,6 +379,7 @@ describe("channelsAddCommand", () => {
       cfg,
       installed: true,
       pluginId: "@vendor/external-chat-runtime",
+      status: "installed",
     }));
     vi.mocked(loadChannelSetupPluginRegistrySnapshotForChannel).mockReturnValue(
       createTestRegistry([

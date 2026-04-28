@@ -6,6 +6,9 @@ import { pathToFileURL } from "node:url";
 import semverSatisfies from "semver/functions/satisfies.js";
 import { resolveNpmRunner } from "./npm-runner.mjs";
 
+const TRANSIENT_TEMP_REMOVE_ERROR_CODES = new Set(["EBUSY", "ENOTEMPTY", "EPERM"]);
+const TEMP_REMOVE_RETRY_DELAYS_MS = [10, 25, 50];
+
 function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, "utf8"));
 }
@@ -23,6 +26,22 @@ function readOptionalUtf8(filePath) {
 
 function removePathIfExists(targetPath) {
   fs.rmSync(targetPath, { recursive: true, force: true });
+}
+
+function isTransientTempRemoveError(error) {
+  return (
+    !!error &&
+    typeof error === "object" &&
+    typeof error.code === "string" &&
+    TRANSIENT_TEMP_REMOVE_ERROR_CODES.has(error.code)
+  );
+}
+
+function sleepSync(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) {
+    return;
+  }
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 function makeTempDir(parentDir, prefix) {
@@ -128,6 +147,61 @@ function dependencyNodeModulesPath(nodeModulesDir, depName) {
   return segments ? path.join(nodeModulesDir, ...segments) : null;
 }
 
+function listPackageRootsInNodeModules(nodeModulesDir) {
+  if (!fs.existsSync(nodeModulesDir)) {
+    return [];
+  }
+  const packageRoots = [];
+  for (const entry of fs.readdirSync(nodeModulesDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+    const entryPath = path.join(nodeModulesDir, entry.name);
+    if (entry.name.startsWith("@")) {
+      for (const scopedEntry of fs.readdirSync(entryPath, { withFileTypes: true })) {
+        if (scopedEntry.isDirectory()) {
+          packageRoots.push(path.join(entryPath, scopedEntry.name));
+        }
+      }
+      continue;
+    }
+    packageRoots.push(entryPath);
+  }
+  return packageRoots;
+}
+
+function findNestedInstalledDependencyRoots(rootNodeModulesDir, depName) {
+  const roots = [];
+  const queue = [rootNodeModulesDir];
+  const seenNodeModulesDirs = new Set();
+  for (let index = 0; index < queue.length; index += 1) {
+    const nodeModulesDir = queue[index];
+    let realNodeModulesDir;
+    try {
+      realNodeModulesDir = fs.realpathSync(nodeModulesDir);
+    } catch {
+      continue;
+    }
+    if (seenNodeModulesDirs.has(realNodeModulesDir)) {
+      continue;
+    }
+    seenNodeModulesDirs.add(realNodeModulesDir);
+
+    const depRoot = dependencyNodeModulesPath(nodeModulesDir, depName);
+    if (depRoot !== null && fs.existsSync(path.join(depRoot, "package.json"))) {
+      roots.push(depRoot);
+    }
+
+    for (const packageRoot of listPackageRootsInNodeModules(nodeModulesDir)) {
+      const childNodeModulesDir = path.join(packageRoot, "node_modules");
+      if (fs.existsSync(childNodeModulesDir)) {
+        queue.push(childNodeModulesDir);
+      }
+    }
+  }
+  return roots;
+}
+
 function dependencyVersionSatisfied(spec, installedVersion) {
   return semverSatisfies(installedVersion, spec, { includePrerelease: false });
 }
@@ -193,10 +267,10 @@ const defaultStagedRuntimeDepPruneRules = new Map([
 ]);
 const runtimeDepsStagingVersion = 7;
 const exactVersionSpecRe = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u;
-const hostPackageSelfReferenceName = "openclaw";
-const hostPackageSelfReferenceExports = {
-  "./plugin-sdk/*": "./plugin-sdk/*.js",
-};
+
+function isPlainObject(value) {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
 
 function resolveRuntimeDepPruneConfig(params = {}) {
   return {
@@ -226,6 +300,11 @@ function resolveInstalledDependencyRoot(params) {
   const rootDepRoot = dependencyNodeModulesPath(params.rootNodeModulesDir, params.depName);
   if (rootDepRoot !== null) {
     candidates.push(rootDepRoot);
+  }
+  if (params.enforceSpec !== false) {
+    candidates.push(
+      ...findNestedInstalledDependencyRoots(params.rootNodeModulesDir, params.depName),
+    );
   }
 
   for (const depRoot of candidates) {
@@ -324,6 +403,13 @@ function findContainingRealRoot(candidatePath, allowedRealRoots) {
   );
 }
 
+function isNodeModulesBinPath(filePath) {
+  return (
+    path.basename(path.dirname(filePath)) === ".bin" &&
+    path.basename(path.dirname(path.dirname(filePath))) === "node_modules"
+  );
+}
+
 function copyMaterializedDependencyTree(params) {
   const { activeRoots, allowedRealRoots, sourcePath, targetPath } = params;
   const sourceStats = fs.lstatSync(sourcePath);
@@ -333,7 +419,7 @@ function copyMaterializedDependencyTree(params) {
     try {
       resolvedPath = fs.realpathSync(sourcePath);
     } catch {
-      return false;
+      return isNodeModulesBinPath(sourcePath);
     }
     const containingRoot = findContainingRealRoot(resolvedPath, allowedRealRoots);
     if (containingRoot === null) {
@@ -725,6 +811,76 @@ function isSafeRuntimeDependencySpec(spec) {
   return true;
 }
 
+function normalizeNativeRuntimeDependencyLoadPath(depName, value) {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error(`native runtime dependency ${depName} has an invalid load path`);
+  }
+  if (path.isAbsolute(value)) {
+    throw new Error(`native runtime dependency ${depName} load path must be relative: ${value}`);
+  }
+  const segments = value.split(/[\\/]+/u).filter(Boolean);
+  if (segments.length === 0 || segments.some((segment) => segment === "." || segment === "..")) {
+    throw new Error(`native runtime dependency ${depName} load path must stay inside the package`);
+  }
+  return segments.join(path.sep);
+}
+
+function normalizeNativeRuntimeDependencySpec(entry) {
+  if (typeof entry === "string") {
+    if (dependencyPathSegments(entry) === null) {
+      throw new Error(`invalid native runtime dependency name: ${entry}`);
+    }
+    return { name: entry, loadPaths: [] };
+  }
+  if (!isPlainObject(entry) || typeof entry.name !== "string") {
+    throw new Error("native runtime dependency entries must be package names or objects");
+  }
+  if (dependencyPathSegments(entry.name) === null) {
+    throw new Error(`invalid native runtime dependency name: ${entry.name}`);
+  }
+  if (entry.loadPaths !== undefined && !Array.isArray(entry.loadPaths)) {
+    throw new Error(`native runtime dependency ${entry.name} loadPaths must be an array`);
+  }
+  const loadPaths = (entry.loadPaths ?? []).map((loadPath) =>
+    normalizeNativeRuntimeDependencyLoadPath(entry.name, loadPath),
+  );
+  return { name: entry.name, loadPaths };
+}
+
+function collectNativeRuntimeDependencySpecs(packageJson) {
+  const raw = packageJson.openclaw?.bundle?.nativeRuntimeDependencies;
+  if (raw === undefined) {
+    return [];
+  }
+  if (!Array.isArray(raw)) {
+    throw new Error("openclaw.bundle.nativeRuntimeDependencies must be an array");
+  }
+  const runtimeDependencyNames = new Set([
+    ...Object.keys(packageJson.dependencies ?? {}),
+    ...Object.keys(packageJson.optionalDependencies ?? {}),
+  ]);
+  return raw.map((entry) => {
+    const spec = normalizeNativeRuntimeDependencySpec(entry);
+    if (!runtimeDependencyNames.has(spec.name)) {
+      throw new Error(
+        `native runtime dependency ${spec.name} must also be declared as a runtime dependency`,
+      );
+    }
+    return spec;
+  });
+}
+
+function createNativeRuntimeEnvironmentFingerprint(packageJson) {
+  if (collectNativeRuntimeDependencySpecs(packageJson).length === 0) {
+    return null;
+  }
+  return {
+    arch: process.arch,
+    nodeModuleVersion: process.versions.modules ?? null,
+    platform: process.platform,
+  };
+}
+
 function assertSafeRuntimeDependencySpec(depName, spec) {
   if (!isSafeRuntimeDependencySpec(spec)) {
     throw new Error(`disallowed runtime dependency spec for ${depName}: ${spec}`);
@@ -856,66 +1012,17 @@ function runNpmInstall(params) {
   throw new Error(output || "npm install failed");
 }
 
-function resolveRuntimeDepsStampPath(pluginDir) {
+function resolveLegacyRuntimeDepsStampPath(pluginDir) {
   return path.join(pluginDir, ".openclaw-runtime-deps-stamp.json");
 }
 
-function resolveHostPackageSelfReferencePath(nodeModulesDir) {
-  return path.join(nodeModulesDir, hostPackageSelfReferenceName);
-}
-
-function resolveHostPackagePluginSdkDir(repoRoot) {
-  return path.join(repoRoot, "dist", "plugin-sdk");
-}
-
-function resolveHostPackageSelfReferenceTarget(selfReferencePath, repoRoot) {
-  const pluginSdkDir = resolveHostPackagePluginSdkDir(repoRoot);
-  if (process.platform === "win32") {
-    return pluginSdkDir;
-  }
-  return path.relative(selfReferencePath, pluginSdkDir) || ".";
-}
-
-function hostPackageSelfReferenceMatches(nodeModulesDir, repoRoot) {
-  const selfReferencePath = resolveHostPackageSelfReferencePath(nodeModulesDir);
-  try {
-    const packageJson = readJson(path.join(selfReferencePath, "package.json"));
-    return (
-      packageJson.name === hostPackageSelfReferenceName &&
-      packageJson.type === "module" &&
-      JSON.stringify(packageJson.exports) === JSON.stringify(hostPackageSelfReferenceExports) &&
-      fs.realpathSync(path.join(selfReferencePath, "plugin-sdk")) ===
-        fs.realpathSync(resolveHostPackagePluginSdkDir(repoRoot))
-    );
-  } catch {
-    return false;
-  }
-}
-
-function ensureHostPackageSelfReference(nodeModulesDir, repoRoot) {
-  assertPathIsNotSymlink(nodeModulesDir, "write host package self-reference");
-  fs.mkdirSync(nodeModulesDir, { recursive: true });
-  const selfReferencePath = resolveHostPackageSelfReferencePath(nodeModulesDir);
-  removePathIfExists(selfReferencePath);
-  fs.mkdirSync(selfReferencePath, { recursive: true });
-  writeJson(path.join(selfReferencePath, "package.json"), {
-    name: hostPackageSelfReferenceName,
-    private: true,
-    type: "module",
-    exports: hostPackageSelfReferenceExports,
-  });
-  fs.symlinkSync(
-    resolveHostPackageSelfReferenceTarget(selfReferencePath, repoRoot),
-    path.join(selfReferencePath, "plugin-sdk"),
-    process.platform === "win32" ? "junction" : "dir",
+function resolveRuntimeDepsStampPath(repoRoot, pluginId) {
+  return path.join(
+    repoRoot,
+    ".artifacts",
+    "bundled-runtime-deps-stamps",
+    `${sanitizeTempPrefixSegment(pluginId)}.json`,
   );
-}
-
-function writeRuntimeDepsStamp(pluginDir, fingerprint) {
-  writeJsonAtomically(resolveRuntimeDepsStampPath(pluginDir), {
-    fingerprint,
-    generatedAt: new Date().toISOString(),
-  });
 }
 
 function createRuntimeDepsFingerprint(packageJson, pruneConfig, params = {}) {
@@ -934,6 +1041,7 @@ function createRuntimeDepsFingerprint(packageJson, pruneConfig, params = {}) {
         ),
         globalPruneSuffixes: pruneConfig.globalPruneSuffixes,
         packageJson,
+        nativeRuntime: createNativeRuntimeEnvironmentFingerprint(packageJson),
         pruneRules: [...pruneConfig.pruneRules.entries()],
         rootInstalledRuntimeFingerprint: params.rootInstalledRuntimeFingerprint ?? null,
         rootLockfile,
@@ -941,6 +1049,114 @@ function createRuntimeDepsFingerprint(packageJson, pruneConfig, params = {}) {
       }),
     )
     .digest("hex");
+}
+
+function runNodeRequire(modulePath) {
+  const result = spawnSync(process.execPath, ["-e", "require(process.argv[1])", modulePath], {
+    encoding: "utf8",
+    env: process.env,
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: 60 * 1000,
+  });
+  if (result.status === 0) {
+    return { ok: true };
+  }
+  const output = [result.stderr, result.stdout].filter(Boolean).join("\n").trim();
+  return { ok: false, error: output || "native dependency load check failed" };
+}
+
+function verifyNativeRuntimeDependency(params) {
+  const depRoot = dependencyNodeModulesPath(params.nodeModulesDir, params.spec.name);
+  if (depRoot === null) {
+    return { ok: false, error: `invalid native dependency name: ${params.spec.name}` };
+  }
+  if (!fs.existsSync(depRoot)) {
+    if (params.optionalDependencyNames.has(params.spec.name)) {
+      return { ok: true };
+    }
+    return { ok: false, error: `native dependency ${params.spec.name} was not staged` };
+  }
+  const loadPaths =
+    params.spec.loadPaths.length > 0 ? params.spec.loadPaths : [path.join("package.json")];
+  for (const loadPath of loadPaths) {
+    const modulePath = path.join(depRoot, loadPath);
+    if (!fs.existsSync(modulePath)) {
+      return {
+        ok: false,
+        error: `native dependency ${params.spec.name} load path was not staged: ${loadPath}`,
+      };
+    }
+    const result = runNodeRequire(modulePath);
+    if (!result.ok) {
+      return {
+        ok: false,
+        error: `native dependency ${params.spec.name} failed load check at ${loadPath}: ${result.error}`,
+      };
+    }
+  }
+  return { ok: true };
+}
+
+function runNpmRebuild(params) {
+  const npmRunner = resolveNpmRunner({ npmArgs: ["rebuild", params.depName] });
+  const npmEnv = {
+    ...(npmRunner.env ?? process.env),
+    CI: "1",
+    npm_config_audit: "false",
+    npm_config_fund: "false",
+    npm_config_ignore_scripts: "false",
+    npm_config_legacy_peer_deps: "true",
+    npm_config_loglevel: "error",
+    npm_config_package_lock: "false",
+    npm_config_progress: "false",
+    npm_config_save: "false",
+    npm_config_yes: "true",
+  };
+  const result = spawnSync(npmRunner.command, npmRunner.args, {
+    cwd: params.cwd,
+    encoding: "utf8",
+    env: npmEnv,
+    shell: npmRunner.shell,
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: 5 * 60 * 1000,
+    windowsVerbatimArguments: npmRunner.windowsVerbatimArguments,
+  });
+  if (result.status === 0) {
+    return;
+  }
+  const output = [result.stderr, result.stdout].filter(Boolean).join("\n").trim();
+  throw new Error(output || `npm rebuild ${params.depName} failed`);
+}
+
+function repairNativeRuntimeDependencies(params) {
+  const specs = collectNativeRuntimeDependencySpecs(params.packageJson);
+  if (specs.length === 0) {
+    return;
+  }
+  const nodeModulesDir = path.join(params.pluginDir, "node_modules");
+  const optionalDependencyNames = new Set(
+    Object.keys(params.packageJson.optionalDependencies ?? {}),
+  );
+  for (const spec of specs) {
+    const initialCheck = verifyNativeRuntimeDependency({
+      nodeModulesDir,
+      optionalDependencyNames,
+      spec,
+    });
+    if (!initialCheck.ok) {
+      runNpmRebuild({ cwd: params.pluginDir, depName: spec.name });
+      const postRebuildCheck = verifyNativeRuntimeDependency({
+        nodeModulesDir,
+        optionalDependencyNames,
+        spec,
+      });
+      if (!postRebuildCheck.ok) {
+        throw new Error(
+          `failed to repair native runtime dependency for ${params.pluginId}: ${postRebuildCheck.error}`,
+        );
+      }
+    }
+  }
 }
 
 function readRuntimeDepsStamp(stampPath) {
@@ -954,6 +1170,32 @@ function readRuntimeDepsStamp(stampPath) {
   }
 }
 
+function removeStaleRuntimeDepsTempDirs(pluginDir) {
+  if (!fs.existsSync(pluginDir)) {
+    return;
+  }
+  for (const entry of fs.readdirSync(pluginDir, { withFileTypes: true })) {
+    if (entry.name.startsWith(".openclaw-runtime-deps-")) {
+      const targetPath = path.join(pluginDir, entry.name);
+      for (let attempt = 0; attempt <= TEMP_REMOVE_RETRY_DELAYS_MS.length; attempt += 1) {
+        try {
+          removePathIfExists(targetPath);
+          break;
+        } catch (error) {
+          if (!isTransientTempRemoveError(error)) {
+            throw error;
+          }
+          const delay = TEMP_REMOVE_RETRY_DELAYS_MS[attempt];
+          if (delay === undefined) {
+            break;
+          }
+          sleepSync(delay);
+        }
+      }
+    }
+  }
+}
+
 function stageInstalledRootRuntimeDeps(params) {
   const {
     directDependencyPackageRoot = null,
@@ -962,6 +1204,8 @@ function stageInstalledRootRuntimeDeps(params) {
     pluginDir,
     pruneConfig,
     repoRoot,
+    repairNativeRuntimeDependenciesImpl,
+    stampPath,
   } = params;
   const dependencySpecs = {
     ...packageJson.dependencies,
@@ -996,8 +1240,10 @@ function stageInstalledRootRuntimeDeps(params) {
   if (rootsToCopy.length === 0) {
     assertPathIsNotSymlink(nodeModulesDir, "remove runtime deps");
     removePathIfExists(nodeModulesDir);
-    ensureHostPackageSelfReference(nodeModulesDir, repoRoot);
-    writeRuntimeDepsStamp(pluginDir, fingerprint);
+    writeJsonAtomically(stampPath, {
+      fingerprint,
+      generatedAt: new Date().toISOString(),
+    });
     return true;
   }
   const allowedRealRoots = rootsToCopy.map((record) => record.realRoot);
@@ -1033,8 +1279,15 @@ function stageInstalledRootRuntimeDeps(params) {
     pruneStagedRuntimeDependencyCargo(stagedNodeModulesDir, pruneConfig);
 
     replaceDirAtomically(nodeModulesDir, stagedNodeModulesDir);
-    ensureHostPackageSelfReference(nodeModulesDir, repoRoot);
-    writeRuntimeDepsStamp(pluginDir, fingerprint);
+    repairNativeRuntimeDependenciesImpl({
+      packageJson,
+      pluginDir,
+      pluginId: path.basename(pluginDir),
+    });
+    writeJsonAtomically(stampPath, {
+      fingerprint,
+      generatedAt: new Date().toISOString(),
+    });
     return true;
   } finally {
     removePathIfExists(path.dirname(stagedNodeModulesDir));
@@ -1087,6 +1340,8 @@ function installPluginRuntimeDeps(params) {
     pluginId,
     pruneConfig,
     repoRoot,
+    repairNativeRuntimeDependenciesImpl = repairNativeRuntimeDependencies,
+    stampPath,
   } = params;
   const nodeModulesDir = path.join(pluginDir, "node_modules");
   const tempInstallDir = makePluginOwnedTempDir(pluginDir, "install");
@@ -1117,12 +1372,15 @@ function installPluginRuntimeDeps(params) {
     if (fs.existsSync(stagedNodeModulesDir)) {
       pruneStagedRuntimeDependencyCargo(stagedNodeModulesDir, pruneConfig);
       replaceDirAtomically(nodeModulesDir, stagedNodeModulesDir);
+      repairNativeRuntimeDependenciesImpl({ packageJson, pluginDir, pluginId });
     } else {
       assertPathIsNotSymlink(nodeModulesDir, "remove runtime deps");
       removePathIfExists(nodeModulesDir);
     }
-    ensureHostPackageSelfReference(nodeModulesDir, repoRoot);
-    writeRuntimeDepsStamp(pluginDir, fingerprint);
+    writeJsonAtomically(stampPath, {
+      fingerprint,
+      generatedAt: new Date().toISOString(),
+    });
   } finally {
     removePathIfExists(tempInstallDir);
   }
@@ -1134,6 +1392,8 @@ export function stageBundledPluginRuntimeDeps(params = {}) {
     params.installPluginRuntimeDepsImpl ?? installPluginRuntimeDeps;
   const installAttempts = params.installAttempts ?? 3;
   const pruneConfig = resolveRuntimeDepPruneConfig(params);
+  const repairNativeRuntimeDependenciesImpl =
+    params.repairNativeRuntimeDependenciesImpl ?? repairNativeRuntimeDependencies;
   for (const pluginDir of listBundledPluginRuntimeDirs(repoRoot)) {
     const pluginId = path.basename(pluginDir);
     const sourcePluginRoot = resolveInstalledWorkspacePluginRoot(repoRoot, pluginId);
@@ -1142,7 +1402,10 @@ export function stageBundledPluginRuntimeDeps(params = {}) {
       : null;
     const packageJson = sanitizeBundledManifestForRuntimeInstall(pluginDir);
     const nodeModulesDir = path.join(pluginDir, "node_modules");
-    const stampPath = resolveRuntimeDepsStampPath(pluginDir);
+    const stampPath = resolveRuntimeDepsStampPath(repoRoot, pluginId);
+    const legacyStampPath = resolveLegacyRuntimeDepsStampPath(pluginDir);
+    removePathIfExists(legacyStampPath);
+    removeStaleRuntimeDepsTempDirs(pluginDir);
     if (!hasRuntimeDeps(packageJson) || !shouldStageRuntimeDeps(packageJson)) {
       removePathIfExists(nodeModulesDir);
       removePathIfExists(stampPath);
@@ -1158,11 +1421,7 @@ export function stageBundledPluginRuntimeDeps(params = {}) {
       rootInstalledRuntimeFingerprint,
     });
     const stamp = readRuntimeDepsStamp(stampPath);
-    if (
-      fs.existsSync(nodeModulesDir) &&
-      stamp?.fingerprint === fingerprint &&
-      hostPackageSelfReferenceMatches(nodeModulesDir, repoRoot)
-    ) {
+    if (fs.existsSync(nodeModulesDir) && stamp?.fingerprint === fingerprint) {
       continue;
     }
     if (
@@ -1173,6 +1432,8 @@ export function stageBundledPluginRuntimeDeps(params = {}) {
         pluginDir,
         pruneConfig,
         repoRoot,
+        repairNativeRuntimeDependenciesImpl,
+        stampPath,
       })
     ) {
       continue;
@@ -1189,12 +1450,10 @@ export function stageBundledPluginRuntimeDeps(params = {}) {
           pluginId,
           pruneConfig,
           repoRoot,
+          repairNativeRuntimeDependenciesImpl,
+          stampPath,
         },
       });
-      if (installPluginRuntimeDepsImpl !== installPluginRuntimeDeps) {
-        ensureHostPackageSelfReference(nodeModulesDir, repoRoot);
-        writeRuntimeDepsStamp(pluginDir, fingerprint);
-      }
     } catch (error) {
       throw createRootRuntimeStagingError({ packageJson, pluginId, cause: error });
     }

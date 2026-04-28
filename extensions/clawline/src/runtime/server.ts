@@ -1103,6 +1103,16 @@ type TrackableSessionApiEntry = {
   lastTo?: string;
 };
 
+type SessionStatusActiveRun = {
+  runId: string;
+  messageId: string;
+  sessionKey: string;
+  startedAt: number;
+  provider: string | null;
+  model: string | null;
+  thinkingLevel: string | null;
+};
+
 type AdoptedSessionRow = {
   userId: string;
   sessionKey: string;
@@ -1542,7 +1552,9 @@ function isStreamApiPath(pathName: string): boolean {
   return (
     pathName === "/api/streams" ||
     pathName.startsWith("/api/streams/") ||
-    pathName === "/api/trackable-sessions"
+    pathName === "/api/trackable-sessions" ||
+    pathName === "/api/session-status" ||
+    pathName === "/api/session-control"
   );
 }
 
@@ -1679,6 +1691,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   };
   const resolveAssistantSenderName = (sessionKey: string) =>
     resolveIdentityName(resolveAgentIdFromSessionKey(sessionKey));
+  const activeSessionRuns = new Map<string, SessionStatusActiveRun>();
 
   type SessionInfo = {
     dmScope: string;
@@ -3438,6 +3451,14 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         await handleListTrackableSessionsRequest(req, res);
         return;
       }
+      if (req.method === "GET" && parsedUrl.pathname === "/api/session-status") {
+        await handleSessionStatusRequest(req, res);
+        return;
+      }
+      if (req.method === "POST" && parsedUrl.pathname === "/api/session-control") {
+        await handleSessionControlRequest(req, res);
+        return;
+      }
       if (parsedUrl.pathname === "/api/streams") {
         if (req.method === "GET") {
           await handleListStreamsRequest(req, res);
@@ -4932,6 +4953,126 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     res.setHeader("Content-Type", "application/json");
     res.writeHead(status);
     res.end(JSON.stringify({ error: { code, message } }));
+  }
+
+  function sendSessionControlJson(res: http.ServerResponse, status: number, payload: unknown) {
+    res.setHeader("Content-Type", "application/json");
+    res.writeHead(status);
+    res.end(JSON.stringify(payload));
+  }
+
+  function sessionControlCapabilities() {
+    const unsupported = {
+      supported: false,
+      reason: "provider_control_not_available",
+    };
+    return {
+      cancelCurrentRun: unsupported,
+      setModel: unsupported,
+      setReasoning: unsupported,
+      setMode: unsupported,
+      setVerbosity: unsupported,
+    };
+  }
+
+  function assertSessionControlSessionAccess(userId: string, sessionKey: string) {
+    const normalizedSessionKey = normalizeStreamMutationSessionKeyForUser(userId, sessionKey);
+    if (normalizedSessionKey) {
+      return normalizedSessionKey;
+    }
+    const opaqueSessionKey = normalizeSessionKey(sessionKey);
+    const adopted = loadStreamRowForUser(userId, opaqueSessionKey);
+    if (adopted?.adopted === 1) {
+      return opaqueSessionKey;
+    }
+    throw new HttpError(404, "stream_not_found", "Stream not found");
+  }
+
+  function resolveSessionControlSessionKey(req: http.IncomingMessage, userId: string) {
+    const parsedUrl = new URL(req.url ?? "/", "http://localhost");
+    const rawSessionKey = parsedUrl.searchParams.get("sessionKey")?.trim() ?? "";
+    if (!rawSessionKey) {
+      throw new HttpError(400, "invalid_session_key", "sessionKey is required");
+    }
+    return assertSessionControlSessionAccess(userId, rawSessionKey);
+  }
+
+  function buildSessionStatusPayload(sessionKey: string) {
+    const activeRun = activeSessionRuns.get(normalizeSessionKey(sessionKey)) ?? null;
+    const queueDepth = getClawlineFollowupQueueDepth(sessionKey);
+    const provider = activeRun?.provider ?? null;
+    const model = activeRun?.model ?? null;
+    return {
+      sessionKey,
+      display: {
+        model,
+        fallbackModels: null,
+        provider,
+        harness: null,
+        reasoningLevel: null,
+        thinkingLevel: activeRun?.thinkingLevel ?? null,
+        mode: null,
+        verbosity: null,
+      },
+      run: activeRun
+        ? {
+            state: "running",
+            runId: activeRun.runId,
+            messageId: activeRun.messageId,
+            startedAt: activeRun.startedAt,
+            queueDepth,
+          }
+        : {
+            state: queueDepth > 0 ? "queued" : "idle",
+            runId: null,
+            messageId: null,
+            startedAt: null,
+            queueDepth,
+          },
+      context: {
+        available: false,
+        compaction: null,
+      },
+      approval: {
+        state: null,
+      },
+      capabilities: sessionControlCapabilities(),
+    };
+  }
+
+  async function handleSessionStatusRequest(req: http.IncomingMessage, res: http.ServerResponse) {
+    const auth = authenticateHttpRequest(req);
+    const sessionKey = resolveSessionControlSessionKey(req, auth.userId);
+    sendSessionControlJson(res, 200, buildSessionStatusPayload(sessionKey));
+  }
+
+  async function handleSessionControlRequest(req: http.IncomingMessage, res: http.ServerResponse) {
+    const auth = authenticateHttpRequest(req);
+    const body = await parseStreamsRequestBody(req);
+    const rawSessionKey = typeof body.sessionKey === "string" ? body.sessionKey.trim() : "";
+    if (!rawSessionKey) {
+      throw new HttpError(400, "invalid_session_key", "sessionKey is required");
+    }
+    const sessionKey = assertSessionControlSessionAccess(auth.userId, rawSessionKey);
+    const action = typeof body.action === "string" ? body.action.trim() : "";
+    const supportedActions = new Set([
+      "cancel_current_run",
+      "set_model",
+      "set_reasoning",
+      "set_mode",
+      "set_verbosity",
+    ]);
+    if (!supportedActions.has(action)) {
+      throw new HttpError(400, "invalid_action", "Unsupported session control action");
+    }
+    sendSessionControlJson(res, 200, {
+      ok: false,
+      sessionKey,
+      action,
+      code: "unsupported",
+      message: "This provider build exposes read-only session status for this action.",
+      capabilities: sessionControlCapabilities(),
+    });
   }
 
   function normalizeStreamMutationSessionKeyForUser(userId: string, sessionKey: string): string {
@@ -7203,6 +7344,16 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               userId: session.userId,
               deviceId: session.deviceId,
             });
+            const activeRun: SessionStatusActiveRun = {
+              runId: event.id,
+              messageId,
+              sessionKey: resolvedSessionKey,
+              startedAt: Date.now(),
+              provider: null,
+              model: null,
+              thinkingLevel: null,
+            };
+            activeSessionRuns.set(normalizeSessionKey(resolvedSessionKey), activeRun);
 
             let queuedFinal = false;
             let deliveredCount = 0;
@@ -7232,6 +7383,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
                         prefixContext.model = extractClawlineShortModelName(ctx.model);
                         prefixContext.modelFull = `${ctx.provider}/${ctx.model}`;
                         prefixContext.thinkingLevel = ctx.thinkLevel ?? "off";
+                        activeRun.provider = ctx.provider;
+                        activeRun.model = ctx.model;
+                        activeRun.thinkingLevel = ctx.thinkLevel ?? "off";
                       },
                     },
                     replyResolver: options.replyResolver,
@@ -7329,6 +7483,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
                 deviceId: session.deviceId,
                 errorSent,
               });
+              activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
               return;
             }
 
@@ -7338,6 +7493,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               session.deviceId,
               messageId,
             );
+            activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
           };
           markProcessStage("dispatch_agent_run");
           await runAgentDispatch();
@@ -7699,6 +7855,16 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               sourceMessageId,
               interactiveAction: action,
             });
+            const activeRun: SessionStatusActiveRun = {
+              runId: event.id,
+              messageId: clientId,
+              sessionKey: resolvedSessionKey,
+              startedAt: Date.now(),
+              provider: null,
+              model: null,
+              thinkingLevel: null,
+            };
+            activeSessionRuns.set(normalizeSessionKey(resolvedSessionKey), activeRun);
 
             let queuedFinal = false;
             let deliveredCount = 0;
@@ -7730,6 +7896,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
                         prefixContext.model = extractClawlineShortModelName(ctx.model);
                         prefixContext.modelFull = `${ctx.provider}/${ctx.model}`;
                         prefixContext.thinkingLevel = ctx.thinkLevel ?? "off";
+                        activeRun.provider = ctx.provider;
+                        activeRun.model = ctx.model;
+                        activeRun.thinkingLevel = ctx.thinkLevel ?? "off";
                       },
                     },
                     replyResolver: options.replyResolver,
@@ -7815,6 +7984,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
                 message: "Unable to deliver reply",
                 messageId: clientId,
               }).catch(() => {});
+              activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
               return;
             }
 
@@ -7823,6 +7993,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               session.deviceId,
               clientId,
             );
+            activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
           };
           await runAgentDispatch();
           runAgentDispatch = null;
@@ -8738,9 +8909,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         await sendJson(ws, { type: "pair_result", success: false, reason: "pair_pending" });
         ws.close();
         return;
-      } else {
-        logger.info?.("[clawline:http] pair_request_token_redispatch", { deviceId });
       }
+      logger.info?.("[clawline:http] pair_request_token_redispatch", { deviceId });
       const token = issueToken(entry);
       const delivered = await sendJson(ws, {
         type: "pair_result",

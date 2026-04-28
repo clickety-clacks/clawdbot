@@ -1,3 +1,4 @@
+import path from "node:path";
 import { PassThrough } from "node:stream";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -32,6 +33,12 @@ const state = vi.hoisted(() => ({
   stopCode: 1,
   bootoutError: "",
   bootoutCode: 1,
+  runtimePostbuildCalls: [] as Array<{
+    file: string;
+    args: string[];
+    options?: { cwd?: string; env?: Record<string, string | undefined> };
+  }>,
+  runtimePostbuildError: "",
   serviceLoaded: true,
   serviceRunning: true,
   stopLeavesRunning: false,
@@ -117,74 +124,87 @@ function normalizeLaunchctlArgs(file: string, args: string[]): string[] {
 }
 
 vi.mock("./exec-file.js", () => ({
-  execFileUtf8: vi.fn(async (file: string, args: string[]) => {
-    const call = normalizeLaunchctlArgs(file, args);
-    state.launchctlCalls.push(call);
-    if (call[0] === "list") {
-      return { stdout: state.listOutput, stderr: "", code: 0 };
-    }
-    if (call[0] === "print") {
-      if (state.printNotLoadedRemaining > 0) {
-        state.printNotLoadedRemaining -= 1;
-        return { stdout: "", stderr: "Could not find service", code: 113 };
+  execFileUtf8: vi.fn(
+    async (
+      file: string,
+      args: string[],
+      options?: { cwd?: string; env?: Record<string, string | undefined> },
+    ) => {
+      if (file !== "launchctl" && args[0]?.endsWith("runtime-postbuild.mjs")) {
+        state.runtimePostbuildCalls.push({ file, args, options });
+        if (state.runtimePostbuildError) {
+          return { stdout: "", stderr: state.runtimePostbuildError, code: 1 };
+        }
+        return { stdout: "", stderr: "", code: 0 };
       }
-      if (state.printError && state.printFailuresRemaining > 0) {
-        state.printFailuresRemaining -= 1;
-        return { stdout: "", stderr: state.printError, code: state.printCode };
+      const call = normalizeLaunchctlArgs(file, args);
+      state.launchctlCalls.push(call);
+      if (call[0] === "list") {
+        return { stdout: state.listOutput, stderr: "", code: 0 };
       }
-      if (!state.serviceLoaded) {
-        return { stdout: "", stderr: "Could not find service", code: 113 };
+      if (call[0] === "print") {
+        if (state.printNotLoadedRemaining > 0) {
+          state.printNotLoadedRemaining -= 1;
+          return { stdout: "", stderr: "Could not find service", code: 113 };
+        }
+        if (state.printError && state.printFailuresRemaining > 0) {
+          state.printFailuresRemaining -= 1;
+          return { stdout: "", stderr: state.printError, code: state.printCode };
+        }
+        if (!state.serviceLoaded) {
+          return { stdout: "", stderr: "Could not find service", code: 113 };
+        }
+        if (state.printOutput) {
+          return { stdout: state.printOutput, stderr: "", code: 0 };
+        }
+        if (!state.serviceRunning) {
+          return { stdout: ["state = waiting", "pid = 0"].join("\n"), stderr: "", code: 0 };
+        }
+        return { stdout: ["state = running", "pid = 4242"].join("\n"), stderr: "", code: 0 };
       }
-      if (state.printOutput) {
-        return { stdout: state.printOutput, stderr: "", code: 0 };
+      if (call[0] === "disable" && state.disableError) {
+        return { stdout: "", stderr: state.disableError, code: state.disableCode };
       }
-      if (!state.serviceRunning) {
-        return { stdout: ["state = waiting", "pid = 0"].join("\n"), stderr: "", code: 0 };
+      if (call[0] === "stop") {
+        if (state.stopError) {
+          return { stdout: "", stderr: state.stopError, code: state.stopCode };
+        }
+        if (!state.stopLeavesRunning) {
+          state.serviceRunning = false;
+        }
+        return { stdout: "", stderr: "", code: 0 };
       }
-      return { stdout: ["state = running", "pid = 4242"].join("\n"), stderr: "", code: 0 };
-    }
-    if (call[0] === "disable" && state.disableError) {
-      return { stdout: "", stderr: state.disableError, code: state.disableCode };
-    }
-    if (call[0] === "stop") {
-      if (state.stopError) {
-        return { stdout: "", stderr: state.stopError, code: state.stopCode };
-      }
-      if (!state.stopLeavesRunning) {
+      if (call[0] === "bootout") {
+        if (state.bootoutError) {
+          return { stdout: "", stderr: state.bootoutError, code: state.bootoutCode };
+        }
+        state.serviceLoaded = false;
         state.serviceRunning = false;
+        return { stdout: "", stderr: "", code: 0 };
+      }
+      if (call[0] === "enable") {
+        return { stdout: "", stderr: "", code: 0 };
+      }
+      if (call[0] === "bootstrap") {
+        if (state.bootstrapError) {
+          return { stdout: "", stderr: state.bootstrapError, code: state.bootstrapCode };
+        }
+        state.serviceLoaded = true;
+        state.serviceRunning = true;
+        return { stdout: "", stderr: "", code: 0 };
+      }
+      if (call[0] === "kickstart") {
+        if (state.kickstartError && state.kickstartFailuresRemaining > 0) {
+          state.kickstartFailuresRemaining -= 1;
+          return { stdout: "", stderr: state.kickstartError, code: 1 };
+        }
+        state.serviceLoaded = true;
+        state.serviceRunning = true;
+        return { stdout: "", stderr: "", code: 0 };
       }
       return { stdout: "", stderr: "", code: 0 };
-    }
-    if (call[0] === "bootout") {
-      if (state.bootoutError) {
-        return { stdout: "", stderr: state.bootoutError, code: state.bootoutCode };
-      }
-      state.serviceLoaded = false;
-      state.serviceRunning = false;
-      return { stdout: "", stderr: "", code: 0 };
-    }
-    if (call[0] === "enable") {
-      return { stdout: "", stderr: "", code: 0 };
-    }
-    if (call[0] === "bootstrap") {
-      if (state.bootstrapError) {
-        return { stdout: "", stderr: state.bootstrapError, code: state.bootstrapCode };
-      }
-      state.serviceLoaded = true;
-      state.serviceRunning = true;
-      return { stdout: "", stderr: "", code: 0 };
-    }
-    if (call[0] === "kickstart") {
-      if (state.kickstartError && state.kickstartFailuresRemaining > 0) {
-        state.kickstartFailuresRemaining -= 1;
-        return { stdout: "", stderr: state.kickstartError, code: 1 };
-      }
-      state.serviceLoaded = true;
-      state.serviceRunning = true;
-      return { stdout: "", stderr: "", code: 0 };
-    }
-    return { stdout: "", stderr: "", code: 0 };
-  }),
+    },
+  ),
 }));
 
 vi.mock("./launchd-restart-handoff.js", () => ({
@@ -208,6 +228,14 @@ vi.mock("node:fs/promises", async () => {
         return;
       }
       throw new Error(`ENOENT: no such file or directory, access '${key}'`);
+    }),
+    readFile: vi.fn(async (p: string) => {
+      const key = p;
+      const contents = state.files.get(key);
+      if (contents !== undefined) {
+        return contents;
+      }
+      throw new Error(`ENOENT: no such file or directory, open '${key}'`);
     }),
     mkdir: vi.fn(async (p: string, opts?: { mode?: number }) => {
       const key = p;
@@ -267,6 +295,8 @@ beforeEach(() => {
   state.stopCode = 1;
   state.bootoutError = "";
   state.bootoutCode = 1;
+  state.runtimePostbuildCalls = [];
+  state.runtimePostbuildError = "";
   state.serviceLoaded = true;
   state.serviceRunning = true;
   state.stopLeavesRunning = false;
@@ -665,6 +695,67 @@ describe("launchd install", () => {
     expect(state.launchctlCalls).toContainEqual(["kickstart", "-k", serviceId]);
     expect(state.launchctlCalls.some((call) => call[0] === "bootout")).toBe(false);
     expect(state.launchctlCalls.some((call) => call[0] === "bootstrap")).toBe(false);
+  });
+
+  it("runs runtime postbuild with the LaunchAgent Node before kickstart", async () => {
+    const env = createDefaultLaunchdEnv();
+    const runtimeNode = "/opt/homebrew/opt/node@24/bin/node";
+    const entrypoint = "/Users/test/openclaw/dist/index.js";
+    const postbuildScript = "/Users/test/openclaw/scripts/runtime-postbuild.mjs";
+    await installLaunchAgent({
+      env,
+      stdout: new PassThrough(),
+      programArguments: [runtimeNode, entrypoint, "gateway", "--port", "18789"],
+      environment: {
+        PATH: "/usr/bin:/bin",
+      },
+    });
+    state.files.set(postbuildScript, "runtime-postbuild");
+
+    await restartLaunchAgent({
+      env,
+      stdout: new PassThrough(),
+    });
+
+    expect(state.runtimePostbuildCalls).toEqual([
+      {
+        file: runtimeNode,
+        args: [postbuildScript],
+        options: expect.objectContaining({
+          cwd: "/Users/test/openclaw",
+          env: expect.objectContaining({
+            PATH: `/opt/homebrew/opt/node@24/bin${path.delimiter}/usr/bin:/bin${path.delimiter}${process.env.PATH}`,
+          }),
+        }),
+      },
+    ]);
+    const postbuildCallIndex = state.runtimePostbuildCalls.length > 0 ? 0 : -1;
+    const kickstartCallIndex = state.launchctlCalls.findIndex((call) => call[0] === "kickstart");
+    expect(postbuildCallIndex).toBe(0);
+    expect(kickstartCallIndex).toBeGreaterThanOrEqual(0);
+  });
+
+  it("fails restart when LaunchAgent runtime postbuild fails", async () => {
+    const env = createDefaultLaunchdEnv();
+    await installLaunchAgent({
+      env,
+      stdout: new PassThrough(),
+      programArguments: [
+        "/opt/homebrew/opt/node@24/bin/node",
+        "/Users/test/openclaw/dist/index.js",
+        "gateway",
+      ],
+    });
+    state.files.set("/Users/test/openclaw/scripts/runtime-postbuild.mjs", "runtime-postbuild");
+    state.runtimePostbuildError = "native rebuild failed";
+
+    await expect(
+      restartLaunchAgent({
+        env,
+        stdout: new PassThrough(),
+      }),
+    ).rejects.toThrow("LaunchAgent runtime postbuild failed before restart: native rebuild failed");
+    expect(state.launchctlCalls.some((call) => call[0] === "kickstart")).toBe(false);
   });
 
   it("uses the configured gateway port for stale cleanup", async () => {

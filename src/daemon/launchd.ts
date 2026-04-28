@@ -22,6 +22,7 @@ import {
 import { formatLine, toPosixPath, writeFormattedLines } from "./output.js";
 import { resolveHomeDir } from "./paths.js";
 import { resolveGatewayLogPaths } from "./restart-logs.js";
+import { isNodeRuntime } from "./runtime-binary.js";
 import { parseKeyValueOutput } from "./runtime-parse.js";
 import type { GatewayServiceRuntime } from "./service-runtime.js";
 import type {
@@ -402,6 +403,57 @@ function formatLaunchctlResultDetail(res: {
     .slice(0, 1000);
 }
 
+function resolvePackageRootFromDistEntrypoint(entrypoint: string | undefined): string | null {
+  if (!entrypoint) {
+    return null;
+  }
+  const distDir = path.dirname(entrypoint);
+  if (path.basename(distDir) !== "dist") {
+    return null;
+  }
+  return path.dirname(distDir);
+}
+
+async function runLaunchAgentRuntimePostbuildIfAvailable(env: GatewayServiceEnv): Promise<void> {
+  const command = await readLaunchAgentProgramArguments(env).catch(() => null);
+  const programArguments = command?.programArguments;
+  const runtimePath = programArguments?.[0];
+  const entrypointPath = programArguments?.[1];
+  if (!runtimePath || !entrypointPath || !isNodeRuntime(runtimePath)) {
+    return;
+  }
+
+  const packageRoot = resolvePackageRootFromDistEntrypoint(entrypointPath);
+  if (!packageRoot) {
+    return;
+  }
+
+  const postbuildScript = path.join(packageRoot, "scripts", "runtime-postbuild.mjs");
+  try {
+    await fs.access(postbuildScript);
+  } catch {
+    return;
+  }
+
+  const runtimeDir = path.dirname(runtimePath);
+  const result = await execFileUtf8(runtimePath, [postbuildScript], {
+    cwd: packageRoot,
+    env: {
+      ...process.env,
+      ...command?.environment,
+      PATH: [runtimeDir, command?.environment?.PATH, process.env.PATH]
+        .filter((entry): entry is string => Boolean(entry?.trim()))
+        .join(path.delimiter),
+    },
+    timeout: 5 * 60 * 1000,
+  });
+  if (result.code !== 0) {
+    throw new Error(
+      `LaunchAgent runtime postbuild failed before restart: ${formatLaunchctlResultDetail(result)}`,
+    );
+  }
+}
+
 async function bootoutLaunchAgentOrThrow(params: {
   serviceTarget: string;
   warning: string;
@@ -631,6 +683,8 @@ export async function restartLaunchAgent({
   const label = resolveLaunchAgentLabel({ env: serviceEnv });
   const plistPath = resolveLaunchAgentPlistPath(serviceEnv);
   const serviceTarget = `${domain}/${label}`;
+
+  await runLaunchAgentRuntimePostbuildIfAvailable(serviceEnv);
 
   // Restart requests issued from inside the managed gateway process tree need a
   // detached handoff. A direct `kickstart -k` would terminate the caller before

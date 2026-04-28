@@ -1,12 +1,10 @@
 ---
-title: "Release Policy"
 summary: "Public release channels, version naming, and cadence"
+title: "Release policy"
 read_when:
   - Looking for public release channel definitions
   - Looking for version naming and cadence
 ---
-
-# Release Policy
 
 OpenClaw has three public release lanes:
 
@@ -37,6 +35,12 @@ OpenClaw has three public release lanes:
 - Maintainers normally cut releases from a `release/YYYY.M.D` branch created
   from current `main`, so release validation and fixes do not block new
   development on `main`
+- After a release branch is cut, maintainers keep validating that branch instead
+  of rebasing after every new `main` commit. If validation finds a concrete
+  release issue, they may inspect `main` and backport only low-risk fixes that
+  directly address the failure.
+- Stable follows a beta only after published-artifact validation passes,
+  including Docker and Parallels release checks for install/update coverage.
 - If a beta tag has been pushed or published and needs a fix, maintainers cut
   the next `-beta.N` tag instead of deleting or recreating the old beta tag
 - Detailed release procedure, approvals, credentials, and recovery notes are
@@ -54,6 +58,9 @@ OpenClaw has three public release lanes:
 - Run `pnpm release:check` before every tagged release
 - Release checks now run in a separate manual workflow:
   `OpenClaw Release Checks`
+- `OpenClaw Release Checks` also runs the QA Lab mock parity gate plus the live
+  Matrix and Telegram QA lanes before release approval. The live lanes use the
+  `qa-live-shared` environment; Telegram also uses Convex CI credential leases.
 - Cross-OS install and upgrade runtime validation is dispatched from the
   private caller workflow
   `openclaw/releases-private/.github/workflows/openclaw-cross-os-release-checks.yml`,
@@ -87,6 +94,11 @@ OpenClaw has three public release lanes:
   `node --import tsx scripts/openclaw-npm-postpublish-verify.ts YYYY.M.D`
   (or the matching beta/correction version) to verify the published registry
   install path in a fresh temp prefix
+- After a beta npm publish, the experimental `NPM Telegram Beta E2E` workflow
+  (`.github/workflows/npm-telegram-beta-e2e.yml`) can be dispatched with
+  `package_spec=openclaw@YYYY.M.D-beta.N` after npm sees the package. Treat it
+  as extra signal; ignore workflow/infrastructure failure unless it exposes a
+  concrete release bug.
 - Maintainer release automation now uses preflight-then-promote:
   - real npm publish must pass a successful npm `preflight_run_id`
   - the real npm publish must be dispatched from the same `main` or
@@ -109,6 +121,11 @@ OpenClaw has three public release lanes:
 - npm release preflight fails closed unless the tarball includes both
   `dist/control-ui/index.html` and a non-empty `dist/control-ui/assets/` payload
   so we do not ship an empty browser dashboard again
+- Post-publish verification also checks that the published registry install
+  contains non-empty bundled plugin runtime deps under the root `dist/*`
+  layout. A release that ships with missing or empty bundled plugin
+  dependency payloads fails the postpublish verifier and cannot be promoted
+  to `latest`.
 - `pnpm test:install:smoke` also enforces the npm pack `unpackedSize` budget on
   the candidate update tarball, so installer e2e catches accidental pack bloat
   before the release publish path
@@ -165,8 +182,8 @@ When cutting a stable npm release:
 2. Choose `npm_dist_tag=beta` for the normal beta-first flow, or `latest` only
    when you intentionally want a direct stable publish
 3. Run `OpenClaw Release Checks` separately with the same tag or the
-   full current workflow-branch commit SHA when you want live prompt cache
-   coverage
+   full current workflow-branch commit SHA when you want live prompt cache,
+   QA Lab parity, Matrix, and Telegram coverage
    - This is separate on purpose so live coverage stays available without
      recoupling long-running or flaky checks to the publish workflow
 4. Save the successful `preflight_run_id`
