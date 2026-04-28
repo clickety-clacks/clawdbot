@@ -5,7 +5,7 @@ description: Send screenshots, images, logs, or generated files as actual Clawli
 
 # Clawline Attachments
 
-Use this skill when delivering an outbound file, screenshot, or image to Flynn in Clawline.
+Use this skill when delivering an outbound file/screenshot/image to Flynn in Clawline.
 
 ## Rule
 
@@ -19,7 +19,7 @@ Use the `message` tool with `action: "sendAttachment"`.
 2. Prefer a stable local path under the workspace for generated screenshots/artifacts when practical.
 3. Send it with `message.sendAttachment`:
    - `channel: "clawline"`
-   - `target`: current chat id when available from inbound metadata, for example `flynn:s_...`
+   - `target`: current chat id when available from inbound metadata (for example `flynn:s_...`), otherwise the known Clawline target
    - `media`: local file path
    - `filename`: friendly basename
    - `caption`: short human caption when useful
