@@ -89,6 +89,33 @@ export type PendingEntry = {
 
 export type PendingFile = { version: 1; entries: PendingEntry[] };
 
+export type TerminalSshConfig = {
+  /**
+   * SSH target in OpenSSH form (e.g. "user@host" or "host").
+   */
+  target: string;
+  /** Identity file path passed as `ssh -i`. Optional. */
+  identityFile?: string | null;
+  /** SSH port. Optional. */
+  port?: number | null;
+  /** UserKnownHostsFile override. Optional. */
+  knownHostsFile?: string | null;
+  /**
+   * StrictHostKeyChecking mode. Defaults are chosen by the deployment.
+   * Common values: "yes", "no", "accept-new".
+   */
+  strictHostKeyChecking?: "yes" | "no" | "accept-new" | null;
+  /**
+   * Additional raw ssh args (advanced escape hatch).
+   * Example: ["-o", "ProxyCommand=..."]
+   */
+  extraArgs?: string[];
+};
+
+export type TerminalDestinationSnapshot = {
+  address: string;
+};
+
 export interface ProviderConfig {
   port: number;
   statePath: string;
@@ -101,29 +128,7 @@ export interface ProviderConfig {
        * - ssh: provider uses SSH to a remote terminal host and runs tmux there.
        */
       mode: "local" | "ssh";
-      ssh: {
-        /**
-         * SSH target in OpenSSH form (e.g. "user@host" or "host").
-         * Only used when mode="ssh".
-         */
-        target: string;
-        /** Identity file path passed as `ssh -i`. Optional. */
-        identityFile?: string | null;
-        /** SSH port. Optional. */
-        port?: number | null;
-        /** UserKnownHostsFile override. Optional. */
-        knownHostsFile?: string | null;
-        /**
-         * StrictHostKeyChecking mode. Defaults are chosen by the deployment.
-         * Common values: "yes", "no", "accept-new".
-         */
-        strictHostKeyChecking?: "yes" | "no" | "accept-new" | null;
-        /**
-         * Additional raw ssh args (advanced escape hatch).
-         * Example: ["-o", "ProxyCommand=..."]
-         */
-        extraArgs?: string[];
-      };
+      ssh: TerminalSshConfig;
     };
   };
   network: {
