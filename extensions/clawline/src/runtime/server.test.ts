@@ -2113,7 +2113,7 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
-  it("does not crash outbound sends when mediaUrl is an invalid local path", async () => {
+  it("rejects outbound sends when mediaUrl materialization fails", async () => {
     const entry = createAllowlistEntry({
       deviceId: randomUUID(),
       isAdmin: true,
@@ -2121,14 +2121,140 @@ describe.sequential("clawline provider server", () => {
     });
     const ctx = await setupTestServer([entry]);
     try {
-      const result = await ctx.server.sendMessage({
-        target: entry.userId,
-        text: "fallback text",
-        mediaUrl: "/tmp/not-http-url.png",
-      });
-      expect(result.attachments).toEqual([]);
-      expect(result.assetIds).toEqual([]);
+      await expect(
+        ctx.server.sendMessage({
+          target: entry.userId,
+          text: "fallback text",
+          mediaUrl: "/tmp/not-http-url.png",
+        }),
+      ).rejects.toThrow("Invalid mediaUrl");
     } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("rejects outbound sends when attachment data is malformed base64", async () => {
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry]);
+    try {
+      await expect(
+        ctx.server.sendMessage({
+          target: entry.userId,
+          text: "fallback text",
+          attachments: [{ data: "not valid base64", mimeType: "image/png" }],
+        }),
+      ).rejects.toThrow("not valid base64");
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("rejects inbound messages when inline attachment data is malformed base64", async () => {
+    const deviceId = randomUUID();
+    const entry = createAllowlistEntry({
+      deviceId,
+      isAdmin: true,
+      tokenDelivered: false,
+      lastSeenAt: null,
+    });
+    const ctx = await setupTestServer([entry]);
+    let ws: WebSocket | null = null;
+    try {
+      const pair = await performPairRequest(ctx.port, deviceId, { claimedName: "Flynn" });
+      const authed = await authenticateDevice(ctx.port, deviceId, pair.token as string);
+      ws = authed.ws;
+
+      const clientMessageId = `c_${randomUUID()}`;
+      const responsePromise = waitForMessage(ws);
+      ws.send(
+        JSON.stringify({
+          type: "message",
+          id: clientMessageId,
+          content: "bad attachment",
+          attachments: [{ type: "image", mimeType: "image/png", data: "not valid base64" }],
+        }),
+      );
+
+      await expect(responsePromise).resolves.toMatchObject({
+        type: "error",
+        code: "invalid_message",
+        message: "Invalid base64 data",
+      });
+    } finally {
+      ws?.terminate();
+      await ctx.cleanup();
+    }
+  });
+
+  it("marks asset image load failures in the agent-visible inbound body", async () => {
+    const deviceId = randomUUID();
+    const entry = createAllowlistEntry({
+      deviceId,
+      isAdmin: true,
+      tokenDelivered: false,
+      lastSeenAt: null,
+    });
+    let capturedBody = "";
+    const ctx = await setupTestServer([entry], {
+      replyResolver: async (replyCtx) => {
+        capturedBody = replyCtx.Body ?? "";
+        return { text: "ok" };
+      },
+    });
+    let ws: WebSocket | null = null;
+    let queue: ReturnType<typeof createMessageQueue> | null = null;
+    try {
+      const pair = await performPairRequest(ctx.port, deviceId, { claimedName: "Flynn" });
+      const token = pair.token as string;
+      const upload = await uploadAsset(
+        ctx.port,
+        token,
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00]),
+        "image/png",
+      );
+      await fs.unlink(path.join(ctx.mediaPath, "assets", upload.assetId));
+
+      const authed = await authenticateDeviceWithQueue(ctx.port, deviceId, token);
+      ws = authed.ws;
+      queue = authed.queue;
+
+      const clientMessageId = `c_${randomUUID()}`;
+      ws.send(
+        JSON.stringify({
+          type: "message",
+          id: clientMessageId,
+          content: "missing asset file",
+          attachments: [{ type: "asset", assetId: upload.assetId }],
+        }),
+      );
+
+      await waitForQueuedMessageWithTimeout(
+        queue,
+        (value) =>
+          typeof value === "object" &&
+          value !== null &&
+          (value as { type?: string; id?: string }).type === "ack" &&
+          (value as { id?: string }).id === clientMessageId,
+      );
+      await waitForQueuedMessageWithTimeout(
+        queue,
+        (value) =>
+          typeof value === "object" &&
+          value !== null &&
+          (value as { type?: string; role?: string; content?: string }).type === "message" &&
+          (value as { role?: string }).role === "assistant" &&
+          (value as { content?: string }).content === "ok",
+      );
+
+      expect(capturedBody).toContain(`Attachment 1: uploaded asset ${upload.assetId}`);
+      expect(capturedBody).toContain("Attachment image load failed:");
+    } finally {
+      queue?.dispose();
+      ws?.terminate();
       await ctx.cleanup();
     }
   });

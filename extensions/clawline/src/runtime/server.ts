@@ -9,6 +9,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import type { ImageContent } from "@mariozechner/pi-ai";
 import type { Database as SqliteDatabase, Statement as SqliteStatement } from "better-sqlite3";
 import BetterSqlite3 from "better-sqlite3";
 import jwt from "jsonwebtoken";
@@ -605,9 +606,12 @@ function normalizeAttachmentsInput(
       if (!INLINE_IMAGE_MIME_TYPES.has(mime)) {
         throw new ClientMessageError("invalid_message", "Unsupported image type");
       }
+      if (!isStrictBase64(typed.data)) {
+        throw new ClientMessageError("invalid_message", "Invalid base64 data");
+      }
       let decoded: Buffer;
       try {
-        decoded = Buffer.from(typed.data, "base64");
+        decoded = Buffer.from(typed.data.replace(/\s+/g, ""), "base64");
       } catch {
         throw new ClientMessageError("invalid_message", "Invalid base64 data");
       }
@@ -3104,6 +3108,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         throw new Error("Clawline outbound attachment must be an object");
       }
       const { data, mimeType } = normalizeOutboundAttachmentData(attachment);
+      if (!isStrictBase64(data)) {
+        throw new Error("Clawline outbound attachment data is not valid base64");
+      }
       const buffer = Buffer.from(data, "base64");
       if (buffer.length === 0) {
         throw new Error("Clawline outbound attachment is empty");
@@ -3166,7 +3173,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     for (const url of trimmedUrls) {
       const media = await fetchPinnedMedia(url, config.media.maxUploadBytes);
       if (media.buffer.length === 0) {
-        continue;
+        throw new Error("Clawline outbound mediaUrl produced an empty attachment");
       }
       const processed = await clampAndOptimizeMedia({
         buffer: media.buffer,
@@ -3283,7 +3290,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     const asset = selectAssetStmt.get(assetId) as { mimeType: string } | undefined;
     if (!asset) {
       logger.warn?.("[clawline] inbound_asset_row_missing", { assetId });
-      return null;
+      throw new Error(`Clawline inbound asset row missing: ${assetId}`);
     }
     const mimeType = typeof asset?.mimeType === "string" ? asset.mimeType.trim().toLowerCase() : "";
     if (!mimeType.startsWith("image/")) {
@@ -3293,7 +3300,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     try {
       const buffer = await fs.readFile(assetPath);
       if (buffer.length === 0) {
-        return null;
+        throw new Error(`Clawline inbound asset image is empty: ${assetId}`);
       }
       return {
         mimeType,
@@ -3301,7 +3308,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       };
     } catch (err) {
       logger.warn?.(`[clawline] asset_image_read_failed: ${formatError(err)}`, { assetId });
-      return null;
+      throw err;
     }
   }
 
@@ -6838,25 +6845,17 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       assetIds: [] as string[],
     };
     if (rawAttachments.length > 0) {
-      try {
-        outboundAttachments = await materializeOutboundAttachments({
-          attachments: rawAttachments,
-          ownerUserId: target.userId,
-          uploaderDeviceId: target.kind === "device" ? target.deviceId : "server",
-        });
-      } catch (err) {
-        logger.warn?.(`[clawline] outbound_attachment_materialize_failed: ${formatError(err)}`);
-      }
+      outboundAttachments = await materializeOutboundAttachments({
+        attachments: rawAttachments,
+        ownerUserId: target.userId,
+        uploaderDeviceId: target.kind === "device" ? target.deviceId : "server",
+      });
     } else if (mediaUrl) {
-      try {
-        outboundAttachments = await materializeOutboundMediaUrls({
-          mediaUrls: [mediaUrl],
-          ownerUserId: target.userId,
-          uploaderDeviceId: target.kind === "device" ? target.deviceId : "server",
-        });
-      } catch (err) {
-        logger.warn?.(`[clawline] outbound_media_attachment_failed: ${formatError(err)}`);
-      }
+      outboundAttachments = await materializeOutboundMediaUrls({
+        mediaUrls: [mediaUrl],
+        ownerUserId: target.userId,
+        uploaderDeviceId: target.kind === "device" ? target.deviceId : "server",
+      });
     }
 
     outboundAttachments.attachments = await filterOutboundAttachmentsForTerminalPolicy({
@@ -7258,14 +7257,30 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           broadcastToSessionKey(resolvedSessionKey, event);
           await broadcastStreamTailStateForUser(targetUserId, event);
 
-          const attachmentSummary = describeClawlineAttachments(ownership.attachments);
-          const inboundBody = attachmentSummary
-            ? `${rawContent}\n\n${attachmentSummary}`
-            : rawContent;
           markProcessStage("load_inbound_images");
-          const inboundImages = await clawlineAttachmentsToImages(ownership.attachments, {
-            loadAssetImage: loadInboundAssetImage,
-          });
+          let inboundImages: ImageContent[] = [];
+          let attachmentLoadFailure: string | null = null;
+          try {
+            inboundImages = await clawlineAttachmentsToImages(ownership.attachments, {
+              loadAssetImage: loadInboundAssetImage,
+            });
+          } catch (err) {
+            const formatted = formatError(err);
+            logger.warn?.(`[clawline] inbound_attachment_image_load_failed: ${formatted}`, {
+              messageId,
+              deviceId: session.deviceId,
+            });
+            attachmentLoadFailure = `Attachment image load failed: ${formatted}`;
+          }
+          const attachmentSummary = describeClawlineAttachments(ownership.attachments);
+          const inboundBodyParts = [rawContent];
+          if (attachmentSummary) {
+            inboundBodyParts.push(attachmentSummary);
+          }
+          if (attachmentLoadFailure) {
+            inboundBodyParts.push(attachmentLoadFailure);
+          }
+          const inboundBody = inboundBodyParts.join("\n\n");
 
           markProcessStage("build_delivery_context");
           const routeSessionKey = resolvedSessionKey;
@@ -7359,6 +7374,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
                   ? [replyPayload.mediaUrl]
                   : [];
               let attachments: NormalizedAttachment[] = [];
+              let mediaAttachmentFailed = false;
               const trimmedText = replyPayload.text?.trim();
               if (mediaUrls.length > 0) {
                 try {
@@ -7369,11 +7385,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
                   });
                   attachments = materialized.attachments;
                 } catch (err) {
+                  mediaAttachmentFailed = true;
                   logger.warn?.(`[clawline] reply_media_attachment_failed: ${formatError(err)}`);
                 }
               }
-              const assistantText =
-                trimmedText && trimmedText.length > 0
+              const assistantText = mediaAttachmentFailed
+                ? buildAssistantTextFromPayload(replyPayload, fallbackText)
+                : trimmedText && trimmedText.length > 0
                   ? trimmedText
                   : attachments.length > 0
                     ? ""
@@ -7766,13 +7784,29 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           }
           broadcastToSessionKey(resolvedSessionKey, event);
 
+          let inboundImages: ImageContent[] = [];
+          let attachmentLoadFailure: string | null = null;
+          try {
+            inboundImages = await clawlineAttachmentsToImages(attachments, {
+              loadAssetImage: loadInboundAssetImage,
+            });
+          } catch (err) {
+            const formatted = formatError(err);
+            logger.warn?.(`[clawline] inbound_attachment_image_load_failed: ${formatted}`, {
+              clientId,
+              deviceId: session.deviceId,
+            });
+            attachmentLoadFailure = `Attachment image load failed: ${formatted}`;
+          }
           const attachmentSummary = describeClawlineAttachments(attachments);
-          const inboundBody = attachmentSummary
-            ? `${rawContent}\n\n${attachmentSummary}`
-            : rawContent;
-          const inboundImages = await clawlineAttachmentsToImages(attachments, {
-            loadAssetImage: loadInboundAssetImage,
-          });
+          const inboundBodyParts = [rawContent];
+          if (attachmentSummary) {
+            inboundBodyParts.push(attachmentSummary);
+          }
+          if (attachmentLoadFailure) {
+            inboundBodyParts.push(attachmentLoadFailure);
+          }
+          const inboundBody = inboundBodyParts.join("\n\n");
 
           const channelLabel = "clawline";
           const routeSessionKey = resolvedSessionKey;
@@ -7878,6 +7912,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
                   ? [replyPayload.mediaUrl]
                   : [];
               let replyAttachments: NormalizedAttachment[] = [];
+              let mediaAttachmentFailed = false;
               const trimmedText = replyPayload.text?.trim();
               if (mediaUrls.length > 0) {
                 try {
@@ -7888,11 +7923,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
                   });
                   replyAttachments = materialized.attachments;
                 } catch (err) {
+                  mediaAttachmentFailed = true;
                   logger.warn?.(`[clawline] reply_media_attachment_failed: ${formatError(err)}`);
                 }
               }
-              const assistantText =
-                trimmedText && trimmedText.length > 0
+              const assistantText = mediaAttachmentFailed
+                ? buildAssistantTextFromPayload(replyPayload, fallbackText)
+                : trimmedText && trimmedText.length > 0
                   ? trimmedText
                   : replyAttachments.length > 0
                     ? ""
