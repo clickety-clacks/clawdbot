@@ -42,6 +42,8 @@ import {
   resolveHumanDelayConfig,
   resolveSessionStoreEntry,
   resolvePinnedHostname,
+  updateSessionStore,
+  applySessionsPatchToStore,
   type PinnedHostname,
   type ReplyPayload,
 } from "../runtime-api.js";
@@ -1092,6 +1094,14 @@ type SessionStatusActiveRun = {
   provider: string | null;
   model: string | null;
   thinkingLevel: string | null;
+  fastMode: boolean | null;
+};
+
+type SessionStatusRuntimeSnapshot = {
+  provider: string | null;
+  model: string | null;
+  thinkingLevel: string | null;
+  fastMode: boolean | null;
 };
 
 type AdoptedSessionRow = {
@@ -1645,6 +1655,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const resolveAssistantSenderName = (sessionKey: string) =>
     resolveIdentityName(resolveAgentIdFromSessionKey(sessionKey));
   const activeSessionRuns = new Map<string, SessionStatusActiveRun>();
+  const sessionRuntimeStatusSnapshots = new Map<string, SessionStatusRuntimeSnapshot>();
 
   type SessionInfo = {
     dmScope: string;
@@ -4792,17 +4803,54 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   }
 
   function sessionControlCapabilities() {
+    const supported = {
+      supported: true,
+    };
+    return {
+      cancelCurrentRun: {
+        supported: false,
+        reason: "provider_abort_seam_not_available",
+      },
+      setModel: {
+        supported: false,
+        reason: "model_catalog_control_not_available",
+      },
+      setThinking: supported,
+      setReasoning: supported,
+      setFastMode: supported,
+      setMode: supported,
+      setVerbosity: supported,
+      readOnlyStatus: false,
+    };
+  }
+
+  function mutableSessionControlCapabilities() {
+    return sessionControlCapabilities();
+  }
+
+  function adoptedSessionControlCapabilities() {
     const unsupported = {
       supported: false,
-      reason: "provider_control_not_available",
+      reason: "adopted_session_read_only",
     };
     return {
       cancelCurrentRun: unsupported,
       setModel: unsupported,
+      setThinking: unsupported,
       setReasoning: unsupported,
+      setFastMode: unsupported,
       setMode: unsupported,
       setVerbosity: unsupported,
+      readOnlyStatus: true,
     };
+  }
+
+  function sessionControlCapabilitiesForSession(userId: string, sessionKey: string) {
+    const row = loadStreamRowForUser(userId, normalizeSessionKey(sessionKey));
+    if (row?.adopted === 1) {
+      return adoptedSessionControlCapabilities();
+    }
+    return mutableSessionControlCapabilities();
   }
 
   function assertSessionControlSessionAccess(userId: string, sessionKey: string) {
@@ -4827,22 +4875,69 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     return assertSessionControlSessionAccess(userId, rawSessionKey);
   }
 
-  function buildSessionStatusPayload(sessionKey: string) {
-    const activeRun = activeSessionRuns.get(normalizeSessionKey(sessionKey)) ?? null;
+  function normalizeStatusString(value: unknown): string | null {
+    return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+  }
+
+  function resolveStatusModel(
+    entry: SessionEntry | undefined,
+    snapshot: SessionStatusRuntimeSnapshot | null,
+  ) {
+    const provider =
+      normalizeStatusString(entry?.providerOverride) ??
+      normalizeStatusString(entry?.modelProvider) ??
+      snapshot?.provider ??
+      null;
+    const model =
+      normalizeStatusString(entry?.modelOverride) ??
+      normalizeStatusString(entry?.model) ??
+      snapshot?.model ??
+      null;
+    return { provider, model };
+  }
+
+  function resolveStatusFastMode(
+    entry: SessionEntry | undefined,
+    snapshot: SessionStatusRuntimeSnapshot | null,
+  ) {
+    if (typeof entry?.fastMode === "boolean") {
+      return entry.fastMode;
+    }
+    return snapshot?.fastMode ?? null;
+  }
+
+  function rememberSessionRuntimeStatus(
+    sessionKey: string,
+    snapshot: SessionStatusRuntimeSnapshot,
+  ) {
+    sessionRuntimeStatusSnapshots.set(normalizeSessionKey(sessionKey), snapshot);
+  }
+
+  function buildSessionStatusPayload(userId: string, sessionKey: string) {
+    const normalizedSessionKey = normalizeSessionKey(sessionKey);
+    const activeRun = activeSessionRuns.get(normalizedSessionKey) ?? null;
+    const snapshot = sessionRuntimeStatusSnapshots.get(normalizedSessionKey) ?? null;
+    const { entry } = loadSessionStoreEntryForKey(sessionKey);
     const queueDepth = getClawlineFollowupQueueDepth(sessionKey);
-    const provider = activeRun?.provider ?? null;
-    const model = activeRun?.model ?? null;
+    const modelStatus = resolveStatusModel(entry, activeRun ?? snapshot);
+    const thinkingLevel =
+      normalizeStatusString(entry?.thinkingLevel) ??
+      activeRun?.thinkingLevel ??
+      snapshot?.thinkingLevel ??
+      null;
+    const fastMode = resolveStatusFastMode(entry, activeRun ?? snapshot);
     return {
       sessionKey,
       display: {
-        model,
+        model: modelStatus.model,
         fallbackModels: null,
-        provider,
+        provider: modelStatus.provider,
         harness: null,
-        reasoningLevel: null,
-        thinkingLevel: activeRun?.thinkingLevel ?? null,
-        mode: null,
-        verbosity: null,
+        reasoningLevel: normalizeStatusString(entry?.reasoningLevel),
+        thinkingLevel,
+        fastMode,
+        mode: fastMode == null ? null : fastMode ? "fast" : "normal",
+        verbosity: normalizeStatusString(entry?.verboseLevel),
       },
       run: activeRun
         ? {
@@ -4866,14 +4961,126 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       approval: {
         state: null,
       },
-      capabilities: sessionControlCapabilities(),
+      capabilities: sessionControlCapabilitiesForSession(userId, sessionKey),
     };
   }
 
   async function handleSessionStatusRequest(req: http.IncomingMessage, res: http.ServerResponse) {
     const auth = authenticateHttpRequest(req);
     const sessionKey = resolveSessionControlSessionKey(req, auth.userId);
-    sendSessionControlJson(res, 200, buildSessionStatusPayload(sessionKey));
+    sendSessionControlJson(res, 200, buildSessionStatusPayload(auth.userId, sessionKey));
+  }
+
+  function rejectUnsupportedSessionControl(
+    res: http.ServerResponse,
+    sessionKey: string,
+    action: string,
+    code: string,
+    message: string,
+    capabilities: unknown,
+  ) {
+    sendSessionControlJson(res, 200, {
+      ok: false,
+      sessionKey,
+      action,
+      code,
+      message,
+      capabilities,
+    });
+  }
+
+  function controlString(body: ClientPayload, key: string): string | null | undefined {
+    if (!(key in body)) {
+      return undefined;
+    }
+    const value = body[key];
+    if (value === null) {
+      return null;
+    }
+    return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+  }
+
+  function pickControlString(
+    body: ClientPayload,
+    keys: readonly string[],
+  ): string | null | undefined {
+    for (const key of keys) {
+      if (key in body) {
+        return controlString(body, key);
+      }
+    }
+    return undefined;
+  }
+
+  function controlBoolean(body: ClientPayload, key: string): boolean | null | undefined {
+    if (!(key in body)) {
+      return undefined;
+    }
+    const value = body[key];
+    if (value === null) {
+      return null;
+    }
+    if (typeof value === "boolean") {
+      return value;
+    }
+    return undefined;
+  }
+
+  function resolveSessionControlPatch(body: ClientPayload, action: string) {
+    switch (action) {
+      case "set_thinking":
+        return { thinkingLevel: controlString(body, "thinkingLevel") };
+      case "set_reasoning":
+        return {
+          reasoningLevel: pickControlString(body, ["reasoningLevel", "level"]),
+        };
+      case "set_fast_mode": {
+        const fastMode = controlBoolean(body, "fastMode");
+        if (fastMode !== undefined) {
+          return { fastMode };
+        }
+        const enabled = controlBoolean(body, "enabled");
+        return { fastMode: enabled };
+      }
+      case "set_mode": {
+        const mode = controlString(body, "mode")?.toLowerCase();
+        if (mode === "fast") {
+          return { fastMode: true };
+        }
+        if (mode === "normal") {
+          return { fastMode: false };
+        }
+        return { fastMode: undefined };
+      }
+      case "set_verbosity":
+        return {
+          verboseLevel: pickControlString(body, ["verbosity", "verboseLevel"]),
+        };
+      default:
+        return null;
+    }
+  }
+
+  async function applySessionControlPatch(sessionKey: string, patch: Record<string, unknown>) {
+    let result:
+      | Awaited<ReturnType<typeof applySessionsPatchToStore>>
+      | { ok: false; error: { code: string; message: string } } = {
+      ok: false,
+      error: { code: "invalid_request", message: "No mutation was requested" },
+    };
+    await updateSessionStore(sessionStorePath, async (store) => {
+      const resolved = resolveSessionStoreEntry({ store, sessionKey });
+      result = await applySessionsPatchToStore({
+        cfg: openClawCfg,
+        store,
+        storeKey: resolved.normalizedKey,
+        patch: {
+          key: resolved.normalizedKey,
+          ...patch,
+        },
+      });
+    });
+    return result;
   }
 
   async function handleSessionControlRequest(req: http.IncomingMessage, res: http.ServerResponse) {
@@ -4888,20 +5095,71 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     const supportedActions = new Set([
       "cancel_current_run",
       "set_model",
+      "set_thinking",
       "set_reasoning",
+      "set_fast_mode",
       "set_mode",
       "set_verbosity",
     ]);
     if (!supportedActions.has(action)) {
       throw new HttpError(400, "invalid_action", "Unsupported session control action");
     }
+    const capabilities = sessionControlCapabilitiesForSession(auth.userId, sessionKey);
+    if (capabilities.readOnlyStatus) {
+      rejectUnsupportedSessionControl(
+        res,
+        sessionKey,
+        action,
+        "unsupported",
+        "This session is read-only from the provider control plane.",
+        capabilities,
+      );
+      return;
+    }
+    if (action === "cancel_current_run") {
+      rejectUnsupportedSessionControl(
+        res,
+        sessionKey,
+        action,
+        "unsupported",
+        "The current Clawline provider dispatch path does not expose a per-session abort seam.",
+        capabilities,
+      );
+      return;
+    }
+    if (action === "set_model") {
+      rejectUnsupportedSessionControl(
+        res,
+        sessionKey,
+        action,
+        "unsupported",
+        "Model mutation requires a provider-side model catalog control seam.",
+        capabilities,
+      );
+      return;
+    }
+    const patch = resolveSessionControlPatch(body, action);
+    if (!patch || Object.values(patch).some((value) => value === undefined)) {
+      throw new HttpError(400, "invalid_control_payload", "Invalid session control payload");
+    }
+    const result = await applySessionControlPatch(sessionKey, patch);
+    if (!result.ok) {
+      sendSessionControlJson(res, 200, {
+        ok: false,
+        sessionKey,
+        action,
+        code: result.error.code,
+        message: result.error.message,
+        capabilities,
+      });
+      return;
+    }
     sendSessionControlJson(res, 200, {
-      ok: false,
+      ok: true,
       sessionKey,
       action,
-      code: "unsupported",
-      message: "This provider build exposes read-only session status for this action.",
-      capabilities: sessionControlCapabilities(),
+      status: buildSessionStatusPayload(auth.userId, sessionKey),
+      capabilities,
     });
   }
 
@@ -7182,6 +7440,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               provider: null,
               model: null,
               thinkingLevel: null,
+              fastMode: null,
             };
             activeSessionRuns.set(normalizeSessionKey(resolvedSessionKey), activeRun);
 
@@ -7213,9 +7472,17 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
                         prefixContext.model = extractClawlineShortModelName(ctx.model);
                         prefixContext.modelFull = `${ctx.provider}/${ctx.model}`;
                         prefixContext.thinkingLevel = ctx.thinkLevel ?? "off";
+                        prefixContext.fastMode = ctx.fastMode;
                         activeRun.provider = ctx.provider;
                         activeRun.model = ctx.model;
                         activeRun.thinkingLevel = ctx.thinkLevel ?? "off";
+                        activeRun.fastMode = ctx.fastMode ?? null;
+                        rememberSessionRuntimeStatus(resolvedSessionKey, {
+                          provider: ctx.provider,
+                          model: ctx.model,
+                          thinkingLevel: ctx.thinkLevel ?? "off",
+                          fastMode: ctx.fastMode ?? null,
+                        });
                       },
                     },
                     replyResolver: options.replyResolver,
@@ -7693,6 +7960,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               provider: null,
               model: null,
               thinkingLevel: null,
+              fastMode: null,
             };
             activeSessionRuns.set(normalizeSessionKey(resolvedSessionKey), activeRun);
 
@@ -7726,9 +7994,17 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
                         prefixContext.model = extractClawlineShortModelName(ctx.model);
                         prefixContext.modelFull = `${ctx.provider}/${ctx.model}`;
                         prefixContext.thinkingLevel = ctx.thinkLevel ?? "off";
+                        prefixContext.fastMode = ctx.fastMode;
                         activeRun.provider = ctx.provider;
                         activeRun.model = ctx.model;
                         activeRun.thinkingLevel = ctx.thinkLevel ?? "off";
+                        activeRun.fastMode = ctx.fastMode ?? null;
+                        rememberSessionRuntimeStatus(resolvedSessionKey, {
+                          provider: ctx.provider,
+                          model: ctx.model,
+                          thinkingLevel: ctx.thinkLevel ?? "off",
+                          fastMode: ctx.fastMode ?? null,
+                        });
                       },
                     },
                     replyResolver: options.replyResolver,

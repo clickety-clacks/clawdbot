@@ -15,6 +15,7 @@ export type ModelSelectedContext = {
   provider: string;
   model: string;
   thinkLevel: string | undefined;
+  fastMode?: boolean;
 };
 
 export type TypingPolicy =

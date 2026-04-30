@@ -149,6 +149,7 @@ export {
   updateSessionStore,
   resolveSessionStoreEntry,
 } from "../config/sessions/store.js";
+export { applySessionsPatchToStore } from "../gateway/sessions-patch.js";
 export { resolveSessionKey } from "../config/sessions/session-key.js";
 export { resolveStorePath } from "../config/sessions/paths.js";
 export type { SessionResetMode } from "../config/sessions/reset.js";

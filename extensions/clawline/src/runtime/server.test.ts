@@ -915,11 +915,30 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
-  it("exposes read-only session status and typed unsupported control actions", async () => {
+  it("exposes session status and typed control capabilities", async () => {
     const entry = createAllowlistEntry();
     const sessionKey = "agent:main:clawline:flynn:main";
     const ctx = await setupTestServer([entry]);
     try {
+      await fs.writeFile(
+        ctx.sessionStorePath,
+        JSON.stringify(
+          {
+            [sessionKey]: {
+              sessionId: "session-status-test",
+              updatedAt: Date.now(),
+              modelProvider: "anthropic",
+              model: "claude-opus-4-6",
+              thinkingLevel: "high",
+              fastMode: false,
+              verboseLevel: "off",
+              reasoningLevel: "on",
+            },
+          },
+          null,
+          2,
+        ),
+      );
       const pairResult = await performPairRequest(ctx.port, entry.deviceId, {
         claimedName: entry.claimedName,
       });
@@ -937,10 +956,13 @@ describe.sequential("clawline provider server", () => {
       expect(await statusResponse.json()).toMatchObject({
         sessionKey,
         display: {
-          model: null,
-          provider: null,
-          thinkingLevel: null,
-          verbosity: null,
+          model: "claude-opus-4-6",
+          provider: "anthropic",
+          thinkingLevel: "high",
+          fastMode: false,
+          mode: "normal",
+          verbosity: "off",
+          reasoningLevel: "on",
         },
         run: {
           state: "idle",
@@ -949,9 +971,11 @@ describe.sequential("clawline provider server", () => {
         capabilities: {
           cancelCurrentRun: { supported: false },
           setModel: { supported: false },
-          setReasoning: { supported: false },
-          setMode: { supported: false },
-          setVerbosity: { supported: false },
+          setThinking: { supported: true },
+          setReasoning: { supported: true },
+          setFastMode: { supported: true },
+          setMode: { supported: true },
+          setVerbosity: { supported: true },
         },
       });
 
@@ -971,6 +995,60 @@ describe.sequential("clawline provider server", () => {
         code: "unsupported",
         capabilities: {
           cancelCurrentRun: { supported: false },
+        },
+      });
+
+      const thinkingResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/session-control`, {
+        method: "POST",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ sessionKey, action: "set_thinking", thinkingLevel: "low" }),
+      });
+      expect(thinkingResponse.status).toBe(200);
+      expect(await thinkingResponse.json()).toMatchObject({
+        ok: true,
+        sessionKey,
+        action: "set_thinking",
+        status: {
+          display: {
+            thinkingLevel: "low",
+          },
+        },
+      });
+
+      const fastResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/session-control`, {
+        method: "POST",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ sessionKey, action: "set_fast_mode", fastMode: true }),
+      });
+      expect(fastResponse.status).toBe(200);
+      expect(await fastResponse.json()).toMatchObject({
+        ok: true,
+        status: {
+          display: {
+            fastMode: true,
+            mode: "fast",
+          },
+        },
+      });
+
+      const updatedStatusResponse = await fetch(
+        `http://127.0.0.1:${ctx.port}/api/session-status?sessionKey=${encodeURIComponent(
+          sessionKey,
+        )}`,
+        { headers: { Authorization: authHeader } },
+      );
+      expect(updatedStatusResponse.status).toBe(200);
+      expect(await updatedStatusResponse.json()).toMatchObject({
+        display: {
+          thinkingLevel: "low",
+          fastMode: true,
+          mode: "fast",
         },
       });
 

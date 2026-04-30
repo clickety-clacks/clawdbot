@@ -14,6 +14,7 @@ export {
   loadSessionStore,
   resolveSessionStoreEntry,
   resolveStorePath,
+  applySessionsPatchToStore,
 } from "openclaw/plugin-sdk/config-runtime";
 export { recordInboundSession } from "openclaw/plugin-sdk/conversation-runtime";
 export {

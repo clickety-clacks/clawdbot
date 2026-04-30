@@ -866,6 +866,7 @@ export async function runAgentTurnWithFallback(params: {
             provider,
             model,
             thinkLevel: params.followupRun.run.thinkLevel,
+            fastMode: (params.followupRun.run as { fastMode?: boolean }).fastMode,
           });
           let rollbackFallbackCandidateSelection: (() => Promise<void>) | undefined;
           try {
