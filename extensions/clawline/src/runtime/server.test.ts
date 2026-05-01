@@ -2190,7 +2190,7 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
-  it("marks asset image load failures in the agent-visible inbound body", async () => {
+  it("marks asset image load failures without dropping other valid images", async () => {
     const deviceId = randomUUID();
     const entry = createAllowlistEntry({
       deviceId,
@@ -2199,10 +2199,17 @@ describe.sequential("clawline provider server", () => {
       lastSeenAt: null,
     });
     let capturedBody = "";
+    const infoCalls: Array<[string, Record<string, unknown> | undefined]> = [];
+    const warnCalls: Array<[string, Record<string, unknown> | undefined]> = [];
     const ctx = await setupTestServer([entry], {
       replyResolver: async (replyCtx) => {
         capturedBody = replyCtx.Body ?? "";
         return { text: "ok" };
+      },
+      logger: {
+        info: (message, meta) => infoCalls.push([message, meta]),
+        warn: (message, meta) => warnCalls.push([message, meta]),
+        error: () => {},
       },
     });
     let ws: WebSocket | null = null;
@@ -2210,13 +2217,19 @@ describe.sequential("clawline provider server", () => {
     try {
       const pair = await performPairRequest(ctx.port, deviceId, { claimedName: "Flynn" });
       const token = pair.token as string;
-      const upload = await uploadAsset(
+      const validUpload = await uploadAsset(
+        ctx.port,
+        token,
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x01, 0x02]),
+        "image/png",
+      );
+      const missingUpload = await uploadAsset(
         ctx.port,
         token,
         Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00]),
         "image/png",
       );
-      await fs.unlink(path.join(ctx.mediaPath, "assets", upload.assetId));
+      await fs.unlink(path.join(ctx.mediaPath, "assets", missingUpload.assetId));
 
       const authed = await authenticateDeviceWithQueue(ctx.port, deviceId, token);
       ws = authed.ws;
@@ -2228,7 +2241,10 @@ describe.sequential("clawline provider server", () => {
           type: "message",
           id: clientMessageId,
           content: "missing asset file",
-          attachments: [{ type: "asset", assetId: upload.assetId }],
+          attachments: [
+            { type: "asset", assetId: validUpload.assetId },
+            { type: "asset", assetId: missingUpload.assetId },
+          ],
         }),
       );
 
@@ -2250,8 +2266,25 @@ describe.sequential("clawline provider server", () => {
           (value as { content?: string }).content === "ok",
       );
 
-      expect(capturedBody).toContain(`Attachment 1: uploaded asset ${upload.assetId}`);
-      expect(capturedBody).toContain("Attachment image load failed:");
+      expect(capturedBody).toContain(`Attachment 1: uploaded asset ${validUpload.assetId}`);
+      expect(capturedBody).toContain(`Attachment 2: uploaded asset ${missingUpload.assetId}`);
+      expect(capturedBody).toContain(
+        `Attachment image load failed: uploaded asset ${missingUpload.assetId} could not be loaded.`,
+      );
+      expect(capturedBody).not.toContain(ctx.mediaPath);
+      expect(capturedBody).not.toContain("ENOENT");
+      expect(capturedBody).not.toContain("Error:");
+      expect(
+        infoCalls.some(
+          ([message, meta]) =>
+            message === "[clawline] agent_run_phase" &&
+            meta?.phase === "dispatch_start" &&
+            meta.imageCount === 1,
+        ),
+      ).toBe(true);
+      expect(
+        warnCalls.some(([message]) => message.includes("[clawline] asset_image_read_failed")),
+      ).toBe(true);
     } finally {
       queue?.dispose();
       ws?.terminate();

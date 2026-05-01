@@ -3312,6 +3312,33 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
   }
 
+  async function materializeInboundAttachmentImages(
+    attachments: NormalizedAttachment[],
+    logContext: Record<string, unknown>,
+  ): Promise<{ images: ImageContent[]; failureMarkers: string[] }> {
+    const images: ImageContent[] = [];
+    const failureMarkers: string[] = [];
+    for (const attachment of attachments) {
+      try {
+        const materialized = await clawlineAttachmentsToImages([attachment], {
+          loadAssetImage: loadInboundAssetImage,
+        });
+        images.push(...materialized);
+      } catch (err) {
+        const formatted = formatError(err);
+        logger.warn?.(`[clawline] inbound_attachment_image_load_failed: ${formatted}`, logContext);
+        if (attachment.type === "asset") {
+          failureMarkers.push(
+            `Attachment image load failed: uploaded asset ${attachment.assetId} could not be loaded.`,
+          );
+        } else {
+          failureMarkers.push("Attachment image load failed: attachment could not be loaded.");
+        }
+      }
+    }
+    return { images, failureMarkers };
+  }
+
   type EventRow = { id: string; payloadJson: string; sequence?: number; timestamp?: number };
 
   const logHttpRequest = (event: string, info?: Record<string, unknown>) => {
@@ -7258,28 +7285,17 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           await broadcastStreamTailStateForUser(targetUserId, event);
 
           markProcessStage("load_inbound_images");
-          let inboundImages: ImageContent[] = [];
-          let attachmentLoadFailure: string | null = null;
-          try {
-            inboundImages = await clawlineAttachmentsToImages(ownership.attachments, {
-              loadAssetImage: loadInboundAssetImage,
-            });
-          } catch (err) {
-            const formatted = formatError(err);
-            logger.warn?.(`[clawline] inbound_attachment_image_load_failed: ${formatted}`, {
+          const { images: inboundImages, failureMarkers: attachmentLoadFailures } =
+            await materializeInboundAttachmentImages(ownership.attachments, {
               messageId,
               deviceId: session.deviceId,
             });
-            attachmentLoadFailure = `Attachment image load failed: ${formatted}`;
-          }
           const attachmentSummary = describeClawlineAttachments(ownership.attachments);
           const inboundBodyParts = [rawContent];
           if (attachmentSummary) {
             inboundBodyParts.push(attachmentSummary);
           }
-          if (attachmentLoadFailure) {
-            inboundBodyParts.push(attachmentLoadFailure);
-          }
+          inboundBodyParts.push(...attachmentLoadFailures);
           const inboundBody = inboundBodyParts.join("\n\n");
 
           markProcessStage("build_delivery_context");
@@ -7784,28 +7800,17 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           }
           broadcastToSessionKey(resolvedSessionKey, event);
 
-          let inboundImages: ImageContent[] = [];
-          let attachmentLoadFailure: string | null = null;
-          try {
-            inboundImages = await clawlineAttachmentsToImages(attachments, {
-              loadAssetImage: loadInboundAssetImage,
-            });
-          } catch (err) {
-            const formatted = formatError(err);
-            logger.warn?.(`[clawline] inbound_attachment_image_load_failed: ${formatted}`, {
+          const { images: inboundImages, failureMarkers: attachmentLoadFailures } =
+            await materializeInboundAttachmentImages(attachments, {
               clientId,
               deviceId: session.deviceId,
             });
-            attachmentLoadFailure = `Attachment image load failed: ${formatted}`;
-          }
           const attachmentSummary = describeClawlineAttachments(attachments);
           const inboundBodyParts = [rawContent];
           if (attachmentSummary) {
             inboundBodyParts.push(attachmentSummary);
           }
-          if (attachmentLoadFailure) {
-            inboundBodyParts.push(attachmentLoadFailure);
-          }
+          inboundBodyParts.push(...attachmentLoadFailures);
           const inboundBody = inboundBodyParts.join("\n\n");
 
           const channelLabel = "clawline";
