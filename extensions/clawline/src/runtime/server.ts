@@ -965,6 +965,29 @@ function buildAssistantTextFromPayload(payload: ReplyPayload, fallback: string):
   return fallbackText || null;
 }
 
+function buildAssistantTextWithMediaFailureMarker(
+  payload: ReplyPayload,
+  fallback: string,
+  failureCount: number,
+): string | null {
+  const parts: string[] = [];
+  const text = payload.text?.trim();
+  if (text) {
+    parts.push(text);
+  }
+  parts.push(
+    failureCount === 1
+      ? "Media attachment failed to load."
+      : `${failureCount} media attachments failed to load.`,
+  );
+  const combined = parts.join("\n\n").trim();
+  if (combined) {
+    return combined;
+  }
+  const fallbackText = fallback.trim();
+  return fallbackText || null;
+}
+
 function timingSafeStringEqual(a: string, b: string): boolean {
   const bufA = Buffer.from(a);
   const bufB = Buffer.from(b);
@@ -3164,14 +3187,14 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   }): Promise<{
     attachments: NormalizedAttachment[];
     assetIds: string[];
-    failedMediaUrls: string[];
+    failedMediaCount: number;
   }> {
     if (params.mediaUrls.length === 0) {
-      return { attachments: [], assetIds: [], failedMediaUrls: [] };
+      return { attachments: [], assetIds: [], failedMediaCount: 0 };
     }
     const resolved: NormalizedAttachment[] = [];
     const assetIds: string[] = [];
-    const failedMediaUrls: string[] = [];
+    let failedMediaCount = 0;
     let firstFailure: unknown = null;
     const trimmedUrls = params.mediaUrls
       .map((url) => (typeof url === "string" ? url.trim() : ""))
@@ -3212,16 +3235,14 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         assetIds.push(assetId);
       } catch (err) {
         firstFailure ??= err;
-        failedMediaUrls.push(url);
-        logger.warn?.(`[clawline] outbound_media_url_materialize_failed: ${formatError(err)}`, {
-          url,
-        });
+        failedMediaCount += 1;
+        logger.warn?.(`[clawline] outbound_media_url_materialize_failed: ${formatError(err)}`);
       }
     }
-    if (resolved.length === 0 && failedMediaUrls.length > 0) {
+    if (resolved.length === 0 && failedMediaCount > 0) {
       throw firstFailure ?? new Error("Clawline outbound mediaUrl materialization failed");
     }
-    return { attachments: resolved, assetIds, failedMediaUrls };
+    return { attachments: resolved, assetIds, failedMediaCount };
   }
 
   async function materializeInlineAttachments(params: {
@@ -7407,7 +7428,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
                   ? [replyPayload.mediaUrl]
                   : [];
               let attachments: NormalizedAttachment[] = [];
-              let mediaAttachmentFailed = false;
+              let mediaAttachmentFailureCount = 0;
               const trimmedText = replyPayload.text?.trim();
               if (mediaUrls.length > 0) {
                 try {
@@ -7417,19 +7438,24 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
                     uploaderDeviceId: session.deviceId,
                   });
                   attachments = materialized.attachments;
-                  mediaAttachmentFailed = materialized.failedMediaUrls.length > 0;
+                  mediaAttachmentFailureCount = materialized.failedMediaCount;
                 } catch (err) {
-                  mediaAttachmentFailed = true;
+                  mediaAttachmentFailureCount = mediaUrls.length;
                   logger.warn?.(`[clawline] reply_media_attachment_failed: ${formatError(err)}`);
                 }
               }
-              const assistantText = mediaAttachmentFailed
-                ? buildAssistantTextFromPayload(replyPayload, fallbackText)
-                : trimmedText && trimmedText.length > 0
-                  ? trimmedText
-                  : attachments.length > 0
-                    ? ""
-                    : buildAssistantTextFromPayload(replyPayload, fallbackText);
+              const assistantText =
+                mediaAttachmentFailureCount > 0
+                  ? buildAssistantTextWithMediaFailureMarker(
+                      replyPayload,
+                      fallbackText,
+                      mediaAttachmentFailureCount,
+                    )
+                  : trimmedText && trimmedText.length > 0
+                    ? trimmedText
+                    : attachments.length > 0
+                      ? ""
+                      : buildAssistantTextFromPayload(replyPayload, fallbackText);
               if (assistantText === null) {
                 return;
               }
@@ -7935,7 +7961,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
                   ? [replyPayload.mediaUrl]
                   : [];
               let replyAttachments: NormalizedAttachment[] = [];
-              let mediaAttachmentFailed = false;
+              let mediaAttachmentFailureCount = 0;
               const trimmedText = replyPayload.text?.trim();
               if (mediaUrls.length > 0) {
                 try {
@@ -7945,19 +7971,24 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
                     uploaderDeviceId: session.deviceId,
                   });
                   replyAttachments = materialized.attachments;
-                  mediaAttachmentFailed = materialized.failedMediaUrls.length > 0;
+                  mediaAttachmentFailureCount = materialized.failedMediaCount;
                 } catch (err) {
-                  mediaAttachmentFailed = true;
+                  mediaAttachmentFailureCount = mediaUrls.length;
                   logger.warn?.(`[clawline] reply_media_attachment_failed: ${formatError(err)}`);
                 }
               }
-              const assistantText = mediaAttachmentFailed
-                ? buildAssistantTextFromPayload(replyPayload, fallbackText)
-                : trimmedText && trimmedText.length > 0
-                  ? trimmedText
-                  : replyAttachments.length > 0
-                    ? ""
-                    : buildAssistantTextFromPayload(replyPayload, fallbackText);
+              const assistantText =
+                mediaAttachmentFailureCount > 0
+                  ? buildAssistantTextWithMediaFailureMarker(
+                      replyPayload,
+                      fallbackText,
+                      mediaAttachmentFailureCount,
+                    )
+                  : trimmedText && trimmedText.length > 0
+                    ? trimmedText
+                    : replyAttachments.length > 0
+                      ? ""
+                      : buildAssistantTextFromPayload(replyPayload, fallbackText);
               if (assistantText === null) {
                 return;
               }
