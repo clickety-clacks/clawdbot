@@ -17,6 +17,7 @@ import { type Dispatcher } from "undici";
 import WebSocket, { WebSocketServer } from "ws";
 import {
   DEFAULT_ACCOUNT_ID,
+  abortAgentHarnessRun,
   closeDispatcher,
   createPinnedDispatcher,
   createReplyDispatcherWithTyping,
@@ -37,6 +38,7 @@ import {
   recordInboundSession,
   resolveAgentIdentity,
   resolveAgentIdFromSessionKey,
+  resolveActiveAgentHarnessRunSessionId,
   resolveAllAgentSessionStoreTargetsSync,
   resolveEffectiveMessagesConfig,
   resolveHumanDelayConfig,
@@ -1090,11 +1092,13 @@ type SessionStatusActiveRun = {
   runId: string;
   messageId: string;
   sessionKey: string;
+  agentSessionId: string | null;
   startedAt: number;
   provider: string | null;
   model: string | null;
   thinkingLevel: string | null;
   fastMode: boolean | null;
+  cancelRequested: boolean;
 };
 
 type SessionStatusRuntimeSnapshot = {
@@ -4807,10 +4811,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       supported: true,
     };
     return {
-      cancelCurrentRun: {
-        supported: false,
-        reason: "provider_abort_seam_not_available",
-      },
+      cancelCurrentRun: supported,
       setModel: {
         supported: false,
         reason: "model_catalog_control_not_available",
@@ -4989,6 +4990,69 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     });
   }
 
+  function resolveActiveRunAgentSessionId(sessionKey: string, activeRun: SessionStatusActiveRun) {
+    const liveSessionId = resolveActiveAgentHarnessRunSessionId(sessionKey);
+    if (liveSessionId) {
+      return liveSessionId;
+    }
+    if (activeRun.agentSessionId) {
+      return activeRun.agentSessionId;
+    }
+    const { entry } = loadSessionStoreEntryForKey(sessionKey);
+    return normalizeStatusString(entry?.sessionId);
+  }
+
+  function cancelCurrentSessionRun(
+    res: http.ServerResponse,
+    userId: string,
+    sessionKey: string,
+    capabilities: ReturnType<typeof sessionControlCapabilitiesForSession>,
+  ) {
+    const activeRun = activeSessionRuns.get(normalizeSessionKey(sessionKey)) ?? null;
+    if (!activeRun) {
+      sendSessionControlJson(res, 200, {
+        ok: false,
+        sessionKey,
+        action: "cancel_current_run",
+        code: "no_active_run",
+        message: "No active run is currently cancellable for this session.",
+        capabilities,
+      });
+      return;
+    }
+    const agentSessionId = resolveActiveRunAgentSessionId(sessionKey, activeRun);
+    if (!agentSessionId) {
+      rejectUnsupportedSessionControl(
+        res,
+        sessionKey,
+        "cancel_current_run",
+        "unsupported",
+        "The current Clawline provider dispatch path does not expose a per-session abort seam.",
+        capabilities,
+      );
+      return;
+    }
+    const aborted = abortAgentHarnessRun(agentSessionId);
+    if (!aborted) {
+      sendSessionControlJson(res, 200, {
+        ok: false,
+        sessionKey,
+        action: "cancel_current_run",
+        code: "no_active_run",
+        message: "No active run is currently cancellable for this session.",
+        capabilities,
+      });
+      return;
+    }
+    activeRun.cancelRequested = true;
+    sendSessionControlJson(res, 200, {
+      ok: true,
+      sessionKey,
+      action: "cancel_current_run",
+      status: buildSessionStatusPayload(userId, sessionKey),
+    });
+  }
+
   function controlString(body: ClientPayload, key: string): string | null | undefined {
     if (!(key in body)) {
       return undefined;
@@ -5117,14 +5181,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       return;
     }
     if (action === "cancel_current_run") {
-      rejectUnsupportedSessionControl(
-        res,
-        sessionKey,
-        action,
-        "unsupported",
-        "The current Clawline provider dispatch path does not expose a per-session abort seam.",
-        capabilities,
-      );
+      cancelCurrentSessionRun(res, auth.userId, sessionKey, capabilities);
       return;
     }
     if (action === "set_model") {
@@ -7436,11 +7493,15 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               runId: event.id,
               messageId,
               sessionKey: resolvedSessionKey,
+              agentSessionId: normalizeStatusString(
+                loadSessionStoreEntryForKey(resolvedSessionKey).entry?.sessionId,
+              ),
               startedAt: Date.now(),
               provider: null,
               model: null,
               thinkingLevel: null,
               fastMode: null,
+              cancelRequested: false,
             };
             activeSessionRuns.set(normalizeSessionKey(resolvedSessionKey), activeRun);
 
@@ -7527,6 +7588,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               void sendActivitySignal(false);
             }
             if (markMessageFailedIfDeviceRevoked(session.deviceId, messageId)) {
+              activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
               return;
             }
 
@@ -7553,6 +7615,15 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             });
 
             if (!wasDelivered && !wasQueued) {
+              if (activeRun.cancelRequested) {
+                updateMessageStreamingStmt.run(
+                  MessageStreamingState.Finalized,
+                  session.deviceId,
+                  messageId,
+                );
+                activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
+                return;
+              }
               logger.warn?.("[clawline] agent_run_no_delivery", {
                 messageId,
                 sessionId: session.sessionId,
@@ -7956,11 +8027,15 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               runId: event.id,
               messageId: clientId,
               sessionKey: resolvedSessionKey,
+              agentSessionId: normalizeStatusString(
+                loadSessionStoreEntryForKey(resolvedSessionKey).entry?.sessionId,
+              ),
               startedAt: Date.now(),
               provider: null,
               model: null,
               thinkingLevel: null,
               fastMode: null,
+              cancelRequested: false,
             };
             activeSessionRuns.set(normalizeSessionKey(resolvedSessionKey), activeRun);
 
@@ -8055,6 +8130,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               void sendActivitySignal(false);
             }
             if (markMessageFailedIfDeviceRevoked(session.deviceId, clientId)) {
+              activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
               return;
             }
 
@@ -8079,6 +8155,15 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             });
 
             if (!wasDelivered && !wasQueued) {
+              if (activeRun.cancelRequested) {
+                updateMessageStreamingStmt.run(
+                  MessageStreamingState.Finalized,
+                  session.deviceId,
+                  clientId,
+                );
+                activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
+                return;
+              }
               updateMessageStreamingStmt.run(
                 MessageStreamingState.Failed,
                 session.deviceId,
