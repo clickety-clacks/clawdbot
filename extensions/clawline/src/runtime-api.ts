@@ -3,7 +3,10 @@
 // public `openclaw/plugin-sdk/*` subpaths.
 
 export {
+  buildAllowedModelSet,
   enqueueAnnounce,
+  loadModelCatalog,
+  resolveDefaultModelForAgent,
   resolveAgentIdentity,
   resolveEffectiveMessagesConfig,
   resolveHumanDelayConfig,

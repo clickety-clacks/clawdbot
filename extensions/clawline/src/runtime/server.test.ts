@@ -24,6 +24,7 @@ import { enqueueSystemEvent, resetSystemEventsForTest } from "./system-events.js
 
 const gatewayCallMock = vi.fn();
 const enqueueAnnounceMock = vi.fn();
+const loadModelCatalogMock = vi.fn();
 const loadSessionStoreMock = vi.fn();
 vi.mock("../runtime-api.js", async () => {
   const actual = await vi.importActual("../runtime-api.js");
@@ -38,6 +39,7 @@ vi.mock("../runtime-api.js", async () => {
         }
       ).loadSessionStore(...args);
     },
+    loadModelCatalog: (...args: unknown[]) => loadModelCatalogMock(...args),
   };
 });
 
@@ -278,6 +280,25 @@ beforeEach(() => {
   gatewayCallMock.mockResolvedValue({ ok: true });
   enqueueAnnounceMock.mockReset();
   enqueueAnnounceMock.mockReturnValue(true);
+  loadModelCatalogMock.mockReset();
+  loadModelCatalogMock.mockResolvedValue([
+    {
+      id: "gpt-5",
+      name: "GPT-5",
+      provider: "openai",
+      contextWindow: 400000,
+      reasoning: true,
+      input: ["text"],
+    },
+    {
+      id: "claude-sonnet-4-6",
+      name: "Claude Sonnet 4.6",
+      provider: "anthropic",
+      contextWindow: 200000,
+      reasoning: true,
+      input: ["text", "image"],
+    },
+  ]);
   loadSessionStoreMock.mockClear();
   sendMessageMock.mockReset();
   sendMessageMock.mockResolvedValue({
@@ -355,6 +376,7 @@ async function setupTestServer(
     seedLegacyDatabase?: (dbPath: string) => Promise<void>;
     replyResolver?: typeof getReplyFromConfig;
     logger?: Logger;
+    openClawConfig?: OpenClawConfig;
     terminalTmux?: {
       mode?: "local" | "ssh";
       sshTarget?: string;
@@ -435,7 +457,7 @@ async function setupTestServer(
           }
         : {}),
     },
-    openClawConfig: testOpenClawConfig,
+    openClawConfig: options.openClawConfig ?? testOpenClawConfig,
     replyResolver: options.replyResolver ?? testReplyResolver,
     logger: options.logger ?? silentLogger,
     sessionStorePath,
@@ -918,7 +940,23 @@ describe.sequential("clawline provider server", () => {
   it("exposes session status and typed control capabilities", async () => {
     const entry = createAllowlistEntry();
     const sessionKey = "agent:main:clawline:flynn:main";
-    const ctx = await setupTestServer([entry]);
+    const adoptedSessionKey = "agent:heimdal:main";
+    const ctx = await setupTestServer([entry], {
+      openClawConfig: {
+        agents: {
+          default: "main",
+          defaults: {
+            model: { primary: "openai/gpt-5" },
+            models: {
+              "openai/gpt-5": {},
+              "anthropic/claude-sonnet-4-6": {},
+            },
+          },
+          list: [{ id: "main" }],
+        },
+        bindings: [],
+      } as OpenClawConfig,
+    });
     try {
       await fs.writeFile(
         ctx.sessionStorePath,
@@ -933,6 +971,12 @@ describe.sequential("clawline provider server", () => {
               fastMode: false,
               verboseLevel: "off",
               reasoningLevel: "on",
+            },
+            [adoptedSessionKey]: {
+              sessionId: "adopted-session-status-test",
+              updatedAt: Date.now(),
+              modelProvider: "openai",
+              model: "gpt-5",
             },
           },
           null,
@@ -953,7 +997,8 @@ describe.sequential("clawline provider server", () => {
         { headers: { Authorization: authHeader } },
       );
       expect(statusResponse.status).toBe(200);
-      expect(await statusResponse.json()).toMatchObject({
+      const statusJson = await statusResponse.json();
+      expect(statusJson).toMatchObject({
         sessionKey,
         display: {
           model: "claude-opus-4-6",
@@ -970,12 +1015,27 @@ describe.sequential("clawline provider server", () => {
         },
         capabilities: {
           cancelCurrentRun: { supported: false },
-          setModel: { supported: false },
+          setModel: { supported: true },
           setThinking: { supported: true },
           setReasoning: { supported: true },
           setFastMode: { supported: true },
           setMode: { supported: true },
           setVerbosity: { supported: true },
+        },
+        modelCatalog: {
+          available: true,
+          models: expect.arrayContaining([
+            expect.objectContaining({
+              id: "gpt-5",
+              provider: "openai",
+              name: "GPT-5",
+            }),
+            expect.objectContaining({
+              id: "claude-sonnet-4-6",
+              provider: "anthropic",
+              name: "Claude Sonnet 4.6",
+            }),
+          ]),
         },
       });
 
@@ -995,6 +1055,40 @@ describe.sequential("clawline provider server", () => {
         code: "unsupported",
         capabilities: {
           cancelCurrentRun: { supported: false },
+        },
+      });
+
+      const adoptResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams/adopt`, {
+        method: "POST",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ sessionKey: adoptedSessionKey }),
+      });
+      expect(adoptResponse.status).toBe(200);
+
+      const adoptedModelResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/session-control`, {
+        method: "POST",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          sessionKey: adoptedSessionKey,
+          action: "set_model",
+          model: "openai/gpt-5",
+        }),
+      });
+      expect(adoptedModelResponse.status).toBe(200);
+      expect(await adoptedModelResponse.json()).toMatchObject({
+        ok: false,
+        sessionKey: adoptedSessionKey,
+        action: "set_model",
+        code: "unsupported",
+        capabilities: {
+          readOnlyStatus: true,
+          setModel: { supported: false, reason: "adopted_session_read_only" },
         },
       });
 
@@ -1037,6 +1131,65 @@ describe.sequential("clawline provider server", () => {
         },
       });
 
+      const nullModelResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/session-control`, {
+        method: "POST",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ sessionKey, action: "set_model", model: null }),
+      });
+      expect(nullModelResponse.status).toBe(400);
+      expect(await nullModelResponse.json()).toMatchObject({
+        error: {
+          code: "invalid_control_payload",
+        },
+      });
+
+      const badModelResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/session-control`, {
+        method: "POST",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ sessionKey, action: "set_model", model: "anthropic/not-real" }),
+      });
+      expect(badModelResponse.status).toBe(200);
+      expect(await badModelResponse.json()).toMatchObject({
+        ok: false,
+        sessionKey,
+        action: "set_model",
+        code: "INVALID_REQUEST",
+      });
+
+      const modelResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/session-control`, {
+        method: "POST",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          sessionKey,
+          action: "set_model",
+          model: "anthropic/claude-sonnet-4-6",
+        }),
+      });
+      expect(modelResponse.status).toBe(200);
+      expect(await modelResponse.json()).toMatchObject({
+        ok: true,
+        sessionKey,
+        action: "set_model",
+        status: {
+          display: {
+            model: "claude-sonnet-4-6",
+            provider: "anthropic",
+          },
+        },
+        capabilities: {
+          setModel: { supported: true },
+        },
+      });
+
       const updatedStatusResponse = await fetch(
         `http://127.0.0.1:${ctx.port}/api/session-status?sessionKey=${encodeURIComponent(
           sessionKey,
@@ -1046,6 +1199,8 @@ describe.sequential("clawline provider server", () => {
       expect(updatedStatusResponse.status).toBe(200);
       expect(await updatedStatusResponse.json()).toMatchObject({
         display: {
+          model: "claude-sonnet-4-6",
+          provider: "anthropic",
           thinkingLevel: "low",
           fastMode: true,
           mode: "fast",

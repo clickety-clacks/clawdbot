@@ -38,12 +38,15 @@ import {
   resolveAgentIdentity,
   resolveAgentIdFromSessionKey,
   resolveAllAgentSessionStoreTargetsSync,
+  resolveDefaultModelForAgent,
   resolveEffectiveMessagesConfig,
   resolveHumanDelayConfig,
   resolveSessionStoreEntry,
   resolvePinnedHostname,
   updateSessionStore,
   applySessionsPatchToStore,
+  buildAllowedModelSet,
+  loadModelCatalog,
   type PinnedHostname,
   type ReplyPayload,
 } from "../runtime-api.js";
@@ -4802,6 +4805,22 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     res.end(JSON.stringify(payload));
   }
 
+  type SessionControlModelCatalogStatus =
+    | {
+        available: true;
+        models: Array<{
+          id: string;
+          provider: string;
+          name: string;
+          alias?: string;
+        }>;
+      }
+    | {
+        available: false;
+        reason: string;
+        models: [];
+      };
+
   function sessionControlCapabilities() {
     const supported = {
       supported: true,
@@ -4812,8 +4831,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         reason: "provider_abort_seam_not_available",
       },
       setModel: {
-        supported: false,
-        reason: "model_catalog_control_not_available",
+        supported: true,
       },
       setThinking: supported,
       setReasoning: supported,
@@ -4851,6 +4869,44 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       return adoptedSessionControlCapabilities();
     }
     return mutableSessionControlCapabilities();
+  }
+
+  async function loadSessionControlModelCatalog(
+    sessionKey: string,
+  ): Promise<SessionControlModelCatalogStatus> {
+    try {
+      const catalog = await loadModelCatalog({ config: openClawCfg });
+      const agentId = resolveAgentIdFromSessionKey(sessionKey);
+      const defaultModel = resolveDefaultModelForAgent({ cfg: openClawCfg, agentId });
+      const allowed = buildAllowedModelSet({
+        cfg: openClawCfg,
+        catalog,
+        defaultProvider: defaultModel.provider,
+        defaultModel: defaultModel.model,
+        agentId,
+      });
+      const models = allowed.allowedCatalog.map((entry) => {
+        const model: SessionControlModelCatalogStatus["models"][number] = {
+          id: entry.id,
+          provider: entry.provider,
+          name: entry.name,
+        };
+        if (entry.alias) {
+          model.alias = entry.alias;
+        }
+        return model;
+      });
+      return { available: true, models };
+    } catch (err) {
+      logger.warn?.(
+        `[clawline:session-control] failed to load model catalog for ${sessionKey}: ${String(err)}`,
+      );
+      return {
+        available: false,
+        reason: "model_catalog_unavailable",
+        models: [],
+      };
+    }
   }
 
   function assertSessionControlSessionAccess(userId: string, sessionKey: string) {
@@ -4913,7 +4969,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     sessionRuntimeStatusSnapshots.set(normalizeSessionKey(sessionKey), snapshot);
   }
 
-  function buildSessionStatusPayload(userId: string, sessionKey: string) {
+  async function buildSessionStatusPayload(userId: string, sessionKey: string) {
     const normalizedSessionKey = normalizeSessionKey(sessionKey);
     const activeRun = activeSessionRuns.get(normalizedSessionKey) ?? null;
     const snapshot = sessionRuntimeStatusSnapshots.get(normalizedSessionKey) ?? null;
@@ -4926,6 +4982,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       snapshot?.thinkingLevel ??
       null;
     const fastMode = resolveStatusFastMode(entry, activeRun ?? snapshot);
+    const modelCatalog = await loadSessionControlModelCatalog(sessionKey);
     return {
       sessionKey,
       display: {
@@ -4962,13 +5019,14 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         state: null,
       },
       capabilities: sessionControlCapabilitiesForSession(userId, sessionKey),
+      modelCatalog,
     };
   }
 
   async function handleSessionStatusRequest(req: http.IncomingMessage, res: http.ServerResponse) {
     const auth = authenticateHttpRequest(req);
     const sessionKey = resolveSessionControlSessionKey(req, auth.userId);
-    sendSessionControlJson(res, 200, buildSessionStatusPayload(auth.userId, sessionKey));
+    sendSessionControlJson(res, 200, await buildSessionStatusPayload(auth.userId, sessionKey));
   }
 
   function rejectUnsupportedSessionControl(
@@ -5028,6 +5086,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
   function resolveSessionControlPatch(body: ClientPayload, action: string) {
     switch (action) {
+      case "set_model":
+        return {
+          model: typeof body.model === "string" ? body.model.trim() || undefined : undefined,
+        };
       case "set_thinking":
         return { thinkingLevel: controlString(body, "thinkingLevel") };
       case "set_reasoning":
@@ -5078,6 +5140,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           key: resolved.normalizedKey,
           ...patch,
         },
+        loadGatewayModelCatalog: () => loadModelCatalog({ config: openClawCfg }),
       });
     });
     return result;
@@ -5127,17 +5190,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       );
       return;
     }
-    if (action === "set_model") {
-      rejectUnsupportedSessionControl(
-        res,
-        sessionKey,
-        action,
-        "unsupported",
-        "Model mutation requires a provider-side model catalog control seam.",
-        capabilities,
-      );
-      return;
-    }
     const patch = resolveSessionControlPatch(body, action);
     if (!patch || Object.values(patch).some((value) => value === undefined)) {
       throw new HttpError(400, "invalid_control_payload", "Invalid session control payload");
@@ -5158,7 +5210,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       ok: true,
       sessionKey,
       action,
-      status: buildSessionStatusPayload(auth.userId, sessionKey),
+      status: await buildSessionStatusPayload(auth.userId, sessionKey),
       capabilities,
     });
   }
