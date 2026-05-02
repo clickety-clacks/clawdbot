@@ -53,6 +53,7 @@ export {
   abortEmbeddedPiRun as abortAgentHarnessRun,
   clearActiveEmbeddedRun,
   queueEmbeddedPiMessage as queueAgentHarnessMessage,
+  resolveActiveEmbeddedRunSessionId as resolveActiveAgentHarnessRunSessionId,
   setActiveEmbeddedRun,
 } from "../agents/pi-embedded-runner/runs.js";
 export { disposeRegisteredAgentHarnesses } from "../agents/harness/registry.js";

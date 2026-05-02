@@ -24,11 +24,16 @@ import { enqueueSystemEvent, resetSystemEventsForTest } from "./system-events.js
 
 const gatewayCallMock = vi.fn();
 const enqueueAnnounceMock = vi.fn();
+const abortAgentHarnessRunMock = vi.fn();
+const resolveActiveAgentHarnessRunSessionIdMock = vi.fn();
 const loadSessionStoreMock = vi.fn();
 vi.mock("../runtime-api.js", async () => {
   const actual = await vi.importActual("../runtime-api.js");
   return {
     ...actual,
+    abortAgentHarnessRun: (...args: unknown[]) => abortAgentHarnessRunMock(...args),
+    resolveActiveAgentHarnessRunSessionId: (...args: unknown[]) =>
+      resolveActiveAgentHarnessRunSessionIdMock(...args),
     enqueueAnnounce: (...args: unknown[]) => enqueueAnnounceMock(...args),
     loadSessionStore: (...args: unknown[]) => {
       loadSessionStoreMock(...args);
@@ -278,6 +283,10 @@ beforeEach(() => {
   gatewayCallMock.mockResolvedValue({ ok: true });
   enqueueAnnounceMock.mockReset();
   enqueueAnnounceMock.mockReturnValue(true);
+  abortAgentHarnessRunMock.mockReset();
+  abortAgentHarnessRunMock.mockReturnValue(false);
+  resolveActiveAgentHarnessRunSessionIdMock.mockReset();
+  resolveActiveAgentHarnessRunSessionIdMock.mockReturnValue(undefined);
   loadSessionStoreMock.mockClear();
   sendMessageMock.mockReset();
   sendMessageMock.mockResolvedValue({
@@ -969,7 +978,7 @@ describe.sequential("clawline provider server", () => {
           queueDepth: 0,
         },
         capabilities: {
-          cancelCurrentRun: { supported: false },
+          cancelCurrentRun: { supported: true },
           setModel: { supported: false },
           setThinking: { supported: true },
           setReasoning: { supported: true },
@@ -992,11 +1001,12 @@ describe.sequential("clawline provider server", () => {
         ok: false,
         sessionKey,
         action: "cancel_current_run",
-        code: "unsupported",
+        code: "no_active_run",
         capabilities: {
-          cancelCurrentRun: { supported: false },
+          cancelCurrentRun: { supported: true },
         },
       });
+      expect(abortAgentHarnessRunMock).not.toHaveBeenCalled();
 
       const thinkingResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/session-control`, {
         method: "POST",
@@ -1053,6 +1063,144 @@ describe.sequential("clawline provider server", () => {
       });
 
       ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("cancels an in-flight session run through the provider abort seam", async () => {
+    const entry = createAllowlistEntry();
+    const sessionKey = "agent:main:clawline:flynn:main";
+    let releaseReply: (() => void) | undefined;
+    const replyResolver: typeof testReplyResolver = async () => {
+      await new Promise<void>((resolve) => {
+        releaseReply = resolve;
+      });
+      return { text: "" };
+    };
+    const ctx = await setupTestServer([entry], { replyResolver });
+    try {
+      await fs.writeFile(
+        ctx.sessionStorePath,
+        JSON.stringify(
+          {
+            [sessionKey]: {
+              sessionId: "session-cancel-test",
+              updatedAt: Date.now(),
+              channel: "clawline",
+              lastChannel: "clawline",
+              lastTo: "device:test",
+            },
+          },
+          null,
+          2,
+        ),
+      );
+      abortAgentHarnessRunMock.mockReturnValue(true);
+      resolveActiveAgentHarnessRunSessionIdMock.mockReturnValue("session-cancel-live");
+      const pairResult = await performPairRequest(ctx.port, entry.deviceId, {
+        claimedName: entry.claimedName,
+      });
+      const authToken = pairResult.token as string;
+      const { ws, queue } = await authenticateDeviceWithQueue(ctx.port, entry.deviceId, authToken);
+      const messageId = `c_${randomUUID()}`;
+      try {
+        ws.send(
+          JSON.stringify({
+            type: "message",
+            id: messageId,
+            sessionKey,
+            content: "cancel me",
+          }),
+        );
+        await waitForQueuedMessage(queue, (value) => {
+          const typed = value as { type?: string; id?: string };
+          return typed?.type === "ack" && typed.id === messageId;
+        });
+
+        let runningStatus: Record<string, unknown> | undefined;
+        for (let attempt = 0; attempt < 100; attempt += 1) {
+          const response = await fetch(
+            `http://127.0.0.1:${ctx.port}/api/session-status?sessionKey=${encodeURIComponent(
+              sessionKey,
+            )}`,
+            { headers: { Authorization: `Bearer ${authToken}` } },
+          );
+          const status = (await response.json()) as Record<string, unknown>;
+          if ((status.run as { state?: string } | undefined)?.state === "running") {
+            runningStatus = status;
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        expect(runningStatus).toMatchObject({
+          capabilities: {
+            cancelCurrentRun: { supported: true },
+          },
+          run: {
+            state: "running",
+            messageId,
+          },
+        });
+
+        const controlResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/session-control`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${authToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ sessionKey, action: "cancel_current_run" }),
+        });
+        expect(controlResponse.status).toBe(200);
+        expect(await controlResponse.json()).toMatchObject({
+          ok: true,
+          sessionKey,
+          action: "cancel_current_run",
+        });
+        expect(resolveActiveAgentHarnessRunSessionIdMock).toHaveBeenCalledWith(sessionKey);
+        expect(abortAgentHarnessRunMock).toHaveBeenCalledWith("session-cancel-live");
+
+        releaseReply?.();
+        releaseReply = undefined;
+        let idleStatus: Record<string, unknown> | undefined;
+        for (let attempt = 0; attempt < 20; attempt += 1) {
+          const response = await fetch(
+            `http://127.0.0.1:${ctx.port}/api/session-status?sessionKey=${encodeURIComponent(
+              sessionKey,
+            )}`,
+            { headers: { Authorization: `Bearer ${authToken}` } },
+          );
+          const status = (await response.json()) as Record<string, unknown>;
+          if ((status.run as { state?: string } | undefined)?.state === "idle") {
+            idleStatus = status;
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        expect(idleStatus).toMatchObject({
+          run: {
+            state: "idle",
+          },
+        });
+        await expect(
+          waitForQueuedMessageWithTimeout(
+            queue,
+            (value) => {
+              const typed = value as { type?: string; code?: string; messageId?: string };
+              return (
+                typed?.type === "error" &&
+                typed.code === "server_error" &&
+                typed.messageId === messageId
+              );
+            },
+            { attempts: 2, timeoutMs: 50 },
+          ),
+        ).rejects.toThrow(/Timed out|Did not receive/);
+      } finally {
+        releaseReply?.();
+        queue.dispose();
+        ws.terminate();
+      }
     } finally {
       await ctx.cleanup();
     }
