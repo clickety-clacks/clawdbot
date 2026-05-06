@@ -52,29 +52,6 @@
     },
     "build": {
       "openclawVersion": "2026.4.11"
-    },
-    "bundle": {
-      "stageRuntimeDependencies": true,
-      "nativeRuntimeDependencies": [
-        {
-          "name": "better-sqlite3",
-          "loadPaths": [
-            "build/Release/better_sqlite3.node"
-          ]
-        }
-      ]
-    },
-    "releaseChecks": {
-      "rootDependencyMirrorAllowlist": [
-        "@lydell/node-pty",
-        "@sinclair/typebox",
-        "better-sqlite3",
-        "busboy",
-        "jsonwebtoken",
-        "undici",
-        "ws",
-        "zod"
-      ]
     }
   }
 }

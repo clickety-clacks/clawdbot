@@ -388,6 +388,7 @@ function describeMSTeamsMessageTool({
     capabilities: enabled ? ["presentation"] : [],
     schema: enabled
       ? {
+          actions: ["unpin"],
           properties: {
             pinnedMessageId: Type.Optional(
               Type.String({
@@ -449,6 +450,7 @@ export const msteamsPlugin: ChannelPlugin<ResolvedMSTeamsAccount, ProbeMSTeamsRe
       },
       setup: msteamsSetupAdapter,
       messaging: {
+        targetPrefixes: ["msteams", "teams"],
         normalizeTarget: normalizeMSTeamsMessagingTarget,
         resolveOutboundSessionRoute: (params) => resolveMSTeamsOutboundSessionRoute(params),
         targetResolver: {

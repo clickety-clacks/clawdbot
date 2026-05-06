@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import { danger } from "../globals.js";
 import { listBundledPackageChannelMetadata } from "../plugins/bundled-package-channel-metadata.js";
 import { defaultRuntime } from "../runtime.js";
+import { createLazyImportLoader } from "../shared/lazy-promise.js";
 import { formatDocsLink } from "../terminal/links.js";
 import { theme } from "../terminal/theme.js";
 import { runChannelLogin, runChannelLogout } from "./channel-auth.js";
@@ -9,16 +10,18 @@ import { formatCliChannelOptions } from "./channel-options.js";
 import { runCommandWithRuntime } from "./cli-utils.js";
 import { hasExplicitOptions } from "./command-options.js";
 import { formatHelpExamples } from "./help-format.js";
+import { applyParentDefaultHelpAction } from "./program/parent-default-help.js";
 
 type ChannelsCommandsModule = typeof import("../commands/channels.js");
 
 const optionNamesRemove = ["channel", "account", "delete"] as const;
 
-let channelsCommandsPromise: Promise<ChannelsCommandsModule> | undefined;
+const channelsCommandsLoader = createLazyImportLoader<ChannelsCommandsModule>(
+  () => import("../commands/channels.js"),
+);
 
 function loadChannelsCommands(): Promise<ChannelsCommandsModule> {
-  channelsCommandsPromise ??= import("../commands/channels.js");
-  return channelsCommandsPromise;
+  return channelsCommandsLoader.load();
 }
 
 function runChannelsCommand(action: () => Promise<void>) {
@@ -169,12 +172,16 @@ export function registerChannelsCli(program: Command) {
       .option("--name <name>", "Display name for this account")
       .option("--token <token>", "Channel token or credential payload")
       .option("--token-file <path>", "Read channel token or credential payload from file")
+      .option("--secret <secret>", "Channel shared secret")
+      .option("--secret-file <path>", "Read channel shared secret from file")
       .option("--bot-token <token>", "Bot token")
       .option("--app-token <token>", "App token")
       .option("--password <password>", "Channel password or login secret")
       .option("--cli-path <path>", "Channel CLI path")
       .option("--url <url>", "Channel setup URL")
+      .option("--base-url <url>", "Channel base URL")
       .option("--http-url <url>", "Channel HTTP service URL")
+      .option("--auth-dir <path>", "Channel auth directory override")
       .option("--use-env", "Use env-backed credentials when supported", false),
   ).action(async (opts, command) => {
     await runChannelsCommand(async () => {
@@ -233,4 +240,6 @@ export function registerChannelsCli(program: Command) {
         );
       }, "Channel logout failed");
     });
+
+  applyParentDefaultHelpAction(channels);
 }

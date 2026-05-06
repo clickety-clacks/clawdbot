@@ -28,7 +28,6 @@ execution:
   config:
     requiredProvider: anthropic
     requiredModel: claude-opus-4-6
-    requiredEnv: OPENCLAW_LIVE_SETUP_TOKEN_VALUE
     profileId: "anthropic:qa-setup-token"
     chatPrompt: "Anthropic Opus setup-token smoke. Reply exactly: ANTHROPIC-OPUS-SETUP-TOKEN-OK"
     chatExpected: ANTHROPIC-OPUS-SETUP-TOKEN-OK

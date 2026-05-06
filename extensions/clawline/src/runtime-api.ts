@@ -24,7 +24,7 @@ export {
   getReplyFromConfig,
   type ReplyPayload,
 } from "openclaw/plugin-sdk/reply-runtime";
-export { isLoopbackHost, rawDataToString } from "openclaw/plugin-sdk/browser-node-runtime";
+export { isLoopbackHost, rawDataToString } from "openclaw/plugin-sdk/gateway-runtime";
 export {
   closeDispatcher,
   createPinnedDispatcher,

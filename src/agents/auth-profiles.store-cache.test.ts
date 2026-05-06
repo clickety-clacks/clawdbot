@@ -2,14 +2,19 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { clearRuntimeAuthProfileStoreSnapshots, ensureAuthProfileStore } from "./auth-profiles.js";
 import { AUTH_STORE_VERSION } from "./auth-profiles/constants.js";
+import {
+  clearRuntimeAuthProfileStoreSnapshots,
+  ensureAuthProfileStore,
+} from "./auth-profiles/store.js";
 import type { OAuthCredential } from "./auth-profiles/types.js";
 
 type RuntimeOnlyOverlay = { profileId: string; credential: OAuthCredential };
 
 const mocks = vi.hoisted(() => ({
-  resolveExternalCliAuthProfiles: vi.fn<() => RuntimeOnlyOverlay[]>(() => []),
+  resolveExternalCliAuthProfiles: vi.fn<
+    (store?: unknown, options?: unknown) => RuntimeOnlyOverlay[]
+  >(() => []),
 }));
 
 vi.mock("./auth-profiles/external-cli-sync.js", () => ({
@@ -123,6 +128,32 @@ describe("auth profile store cache", () => {
         key: "sk-test-2",
       });
     });
+  });
+
+  it("isolates cached auth stores without structuredClone", async () => {
+    const structuredCloneSpy = vi.spyOn(globalThis, "structuredClone");
+    await withAgentDirEnv("openclaw-auth-store-isolated-", (agentDir) => {
+      writeAuthStore(agentDir, "sk-test");
+
+      const first = ensureAuthProfileStore(agentDir);
+      const profile = first.profiles["openai:default"];
+      if (profile?.type === "api_key") {
+        profile.key = "sk-mutated";
+      }
+      first.profiles["anthropic:default"] = {
+        type: "api_key",
+        provider: "anthropic",
+        key: "sk-added",
+      };
+
+      const second = ensureAuthProfileStore(agentDir);
+      expect(second.profiles["openai:default"]).toMatchObject({
+        key: "sk-test",
+      });
+      expect(second.profiles["anthropic:default"]).toBeUndefined();
+      expect(structuredCloneSpy).not.toHaveBeenCalled();
+    });
+    structuredCloneSpy.mockRestore();
   });
 
   it("keeps runtime-only external auth out of persisted auth-profiles.json files", async () => {
