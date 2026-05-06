@@ -672,6 +672,82 @@ function maybeEncodeJsonDocumentPayload(data: string, mimeType: string): string 
   return Buffer.from(trimmed, "utf8").toString("base64");
 }
 
+function decodeBase64Utf8Payload(data: string, label: string): string {
+  const compact = data.replace(/\s+/g, "");
+  if (!isStrictBase64(compact)) {
+    throw new Error(`${label} is not valid base64 JSON`);
+  }
+  try {
+    return Buffer.from(compact, "base64").toString("utf8");
+  } catch {
+    throw new Error(`${label} is not valid base64 JSON`);
+  }
+}
+
+class InteractiveHTMLAttachmentError extends Error {}
+
+function metaTags(html: string): string[] {
+  return html.match(/<meta\b[^>]*>/gi) ?? [];
+}
+
+function hasMetaAttribute(tag: string, attribute: string, value: string): boolean {
+  const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(
+    `\\b${attribute}\\s*=\\s*(?:"${escaped}"|'${escaped}'|${escaped})(?:\\s|/?>)`,
+    "i",
+  ).test(tag);
+}
+
+function hasViewportMeta(html: string): boolean {
+  return metaTags(html).some((tag) => hasMetaAttribute(tag, "name", "viewport"));
+}
+
+function hasCustomCSPMeta(html: string): boolean {
+  return metaTags(html).some((tag) =>
+    hasMetaAttribute(tag, "http-equiv", "Content-Security-Policy"),
+  );
+}
+
+function validateInteractiveHTMLDescriptorPayload(data: string): void {
+  let descriptor: unknown;
+  try {
+    descriptor = JSON.parse(
+      decodeBase64Utf8Payload(data, "Clawline interactive HTML descriptor"),
+    ) as unknown;
+  } catch {
+    throw new InteractiveHTMLAttachmentError(
+      "Clawline interactive HTML descriptor is not valid base64 JSON",
+    );
+  }
+  if (!descriptor || typeof descriptor !== "object" || Array.isArray(descriptor)) {
+    throw new InteractiveHTMLAttachmentError(
+      "Clawline interactive HTML descriptor must be a JSON object",
+    );
+  }
+  const typed = descriptor as { version?: unknown; html?: unknown };
+  if (typed.version !== 1) {
+    throw new InteractiveHTMLAttachmentError(
+      "Clawline interactive HTML descriptor requires version 1",
+    );
+  }
+  const html = typeof typed.html === "string" ? typed.html.trim() : "";
+  if (!html) {
+    throw new InteractiveHTMLAttachmentError(
+      "Clawline interactive HTML descriptor requires non-empty html",
+    );
+  }
+  if (!hasViewportMeta(html)) {
+    throw new InteractiveHTMLAttachmentError(
+      "Clawline interactive HTML descriptor requires viewport meta tag",
+    );
+  }
+  if (hasCustomCSPMeta(html)) {
+    throw new InteractiveHTMLAttachmentError(
+      "Clawline interactive HTML descriptor must not include custom CSP",
+    );
+  }
+}
+
 function normalizeOutboundAttachmentData(input: ClawlineOutboundAttachmentInput): {
   data: string;
   mimeType: string;
@@ -3131,9 +3207,14 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             throw new Error("Clawline terminal session descriptor exceeds maxInlineBytes");
           }
           if (mimeType === INTERACTIVE_HTML_MIME) {
-            throw new Error("Clawline interactive HTML descriptor exceeds maxInlineBytes");
+            throw new InteractiveHTMLAttachmentError(
+              "Clawline interactive HTML descriptor exceeds maxInlineBytes",
+            );
           }
           throw new Error("Clawline inline document descriptor exceeds maxInlineBytes");
+        }
+        if (mimeType === INTERACTIVE_HTML_MIME) {
+          validateInteractiveHTMLDescriptorPayload(data);
         }
         resolved.push({ type: "document", mimeType, data });
         continue;
@@ -6970,6 +7051,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         });
       } catch (err) {
         logger.warn?.(`[clawline] outbound_attachment_materialize_failed: ${formatError(err)}`);
+        if (err instanceof InteractiveHTMLAttachmentError) {
+          throw err;
+        }
       }
     } else if (mediaUrl) {
       try {
