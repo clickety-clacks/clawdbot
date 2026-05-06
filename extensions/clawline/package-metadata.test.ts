@@ -8,8 +8,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const extensionRoot = __dirname;
 const repoRoot = path.resolve(extensionRoot, "../..");
 
-function readJsonFile<T>(filePath: string): T {
-  return JSON.parse(fs.readFileSync(filePath, "utf8")) as T;
+function readJsonFile(filePath: string): unknown {
+  return JSON.parse(fs.readFileSync(filePath, "utf8"));
 }
 
 function readWorkspaceOnlyBuiltDependencies(): string[] {
@@ -34,7 +34,7 @@ function readWorkspaceOnlyBuiltDependencies(): string[] {
 
 describe("Clawline package metadata", () => {
   it("is synced to the OpenClaw v2026.5.4 plugin/runtime contract", () => {
-    const manifest = readJsonFile<{
+    const manifest = readJsonFile(path.join(extensionRoot, "package.json")) as {
       version?: string;
       dependencies?: Record<string, string>;
       peerDependencies?: Record<string, string>;
@@ -43,7 +43,7 @@ describe("Clawline package metadata", () => {
         compat?: { pluginApi?: string };
         build?: { openclawVersion?: string };
       };
-    }>(path.join(extensionRoot, "package.json"));
+    };
 
     expect(manifest.version).toBe("2026.5.4");
     expect(manifest.peerDependencies?.openclaw).toBe(">=2026.5.4");
