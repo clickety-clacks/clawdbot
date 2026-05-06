@@ -46,6 +46,13 @@ describe("clawlineMessageActions", () => {
 
   it("sendAttachment returns a small summary (no base64 attachment data)", async () => {
     const cfg: OpenClawConfig = { channels: { clawline: { enabled: true } } };
+    const payload = Buffer.from(
+      JSON.stringify({
+        version: 1,
+        html: '<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"></head><body>Hello</body></html>',
+      }),
+      "utf8",
+    ).toString("base64");
     vi.mocked(sendClawlineOutboundMessage).mockResolvedValueOnce({
       messageId: "msg-1",
       userId: "flynn",
@@ -54,7 +61,7 @@ describe("clawlineMessageActions", () => {
         {
           type: "document",
           mimeType: "application/vnd.clawline.interactive-html+json",
-          data: "AAAABASE64PAYLOAD",
+          data: payload,
         },
       ],
       assetIds: [],
@@ -64,7 +71,7 @@ describe("clawlineMessageActions", () => {
       action: "sendAttachment",
       params: {
         target: "flynn:main",
-        buffer: "AAAABASE64PAYLOAD",
+        buffer: payload,
         mimeType: "application/vnd.clawline.interactive-html+json; charset=utf-8",
       },
       cfg,
@@ -90,23 +97,125 @@ describe("clawlineMessageActions", () => {
     expect(vi.mocked(sendClawlineOutboundMessage).mock.calls[0]?.[0]).toEqual({
       target: "flynn:main",
       text: "",
-      attachments: [
-        { data: "AAAABASE64PAYLOAD", mimeType: "application/vnd.clawline.interactive-html+json" },
-      ],
+      attachments: [{ data: payload, mimeType: "application/vnd.clawline.interactive-html+json" }],
     });
+  });
+
+  it("sendAttachment rejects malformed interactive HTML descriptors before outbound delivery", async () => {
+    const cfg: OpenClawConfig = { channels: { clawline: { enabled: true } } };
+    const malformed = Buffer.from(String.raw`{"version":1,"html":"bad \u201\V"}`, "utf8").toString(
+      "base64",
+    );
+
+    await expect(
+      runClawlineAction({
+        action: "sendAttachment",
+        params: {
+          target: "flynn:main",
+          buffer: malformed,
+          mimeType: "application/vnd.clawline.interactive-html+json",
+        },
+        cfg,
+        accountId: null,
+      }),
+    ).rejects.toThrow(/interactive HTML descriptor is not valid base64 JSON/i);
+
+    expect(sendClawlineOutboundMessage).not.toHaveBeenCalled();
+  });
+
+  it("sendAttachment rejects interactive HTML descriptors with non-base64 suffixes", async () => {
+    const cfg: OpenClawConfig = { channels: { clawline: { enabled: true } } };
+    const valid = Buffer.from(
+      JSON.stringify({
+        version: 1,
+        html: '<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"></head><body>Hello</body></html>',
+      }),
+      "utf8",
+    ).toString("base64");
+
+    await expect(
+      runClawlineAction({
+        action: "sendAttachment",
+        params: {
+          target: "flynn:main",
+          buffer: `${valid}!`,
+          mimeType: "application/vnd.clawline.interactive-html+json",
+        },
+        cfg,
+        accountId: null,
+      }),
+    ).rejects.toThrow(/interactive HTML descriptor is not valid base64 JSON/i);
+
+    expect(sendClawlineOutboundMessage).not.toHaveBeenCalled();
+  });
+
+  it("sendAttachment rejects interactive HTML descriptors without viewport meta", async () => {
+    const cfg: OpenClawConfig = { channels: { clawline: { enabled: true } } };
+    const missingViewport = Buffer.from(
+      JSON.stringify({ version: 1, html: "<html><body>No viewport</body></html>" }),
+      "utf8",
+    ).toString("base64");
+
+    await expect(
+      runClawlineAction({
+        action: "sendAttachment",
+        params: {
+          target: "flynn:main",
+          buffer: missingViewport,
+          mimeType: "application/vnd.clawline.interactive-html+json",
+        },
+        cfg,
+        accountId: null,
+      }),
+    ).rejects.toThrow(/requires viewport meta tag/i);
+
+    expect(sendClawlineOutboundMessage).not.toHaveBeenCalled();
+  });
+
+  it("sendAttachment rejects interactive HTML descriptors with custom CSP meta", async () => {
+    const cfg: OpenClawConfig = { channels: { clawline: { enabled: true } } };
+    const customCSP = Buffer.from(
+      JSON.stringify({
+        version: 1,
+        html: '<!doctype html><html><head><meta name=viewport content="width=device-width, initial-scale=1"><meta content="default-src \'none\'" http-equiv=Content-Security-Policy></head><body>Nope</body></html>',
+      }),
+      "utf8",
+    ).toString("base64");
+
+    await expect(
+      runClawlineAction({
+        action: "sendAttachment",
+        params: {
+          target: "flynn:main",
+          buffer: customCSP,
+          mimeType: "application/vnd.clawline.interactive-html+json",
+        },
+        cfg,
+        accountId: null,
+      }),
+    ).rejects.toThrow(/must not include custom CSP/i);
+
+    expect(sendClawlineOutboundMessage).not.toHaveBeenCalled();
   });
 
   it("sendAttachment times out instead of hanging forever", async () => {
     vi.useFakeTimers();
     try {
       const cfg: OpenClawConfig = { channels: { clawline: { enabled: true } } };
+      const payload = Buffer.from(
+        JSON.stringify({
+          version: 1,
+          html: '<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"></head><body>Hello</body></html>',
+        }),
+        "utf8",
+      ).toString("base64");
       vi.mocked(sendClawlineOutboundMessage).mockImplementationOnce(() => new Promise(() => {}));
 
       const promise = runClawlineAction({
         action: "sendAttachment",
         params: {
           target: "flynn:main",
-          buffer: "AAAABASE64PAYLOAD",
+          buffer: payload,
           mimeType: "application/vnd.clawline.interactive-html+json",
         },
         cfg,
