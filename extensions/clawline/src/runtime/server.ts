@@ -4815,6 +4815,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         models: Array<{
           id: string;
           provider: string;
+          ref: string;
           name: string;
           alias?: string;
         }>;
@@ -4825,6 +4826,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         models: [];
       };
 
+  type SessionControlCapability = {
+    supported: boolean;
+    reason?: string;
+  };
+
   function sessionControlCapabilities() {
     const supported = {
       supported: true,
@@ -4833,7 +4839,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       cancelCurrentRun: supported,
       setModel: {
         supported: true,
-      },
+      } as SessionControlCapability,
       setThinking: supported,
       setReasoning: supported,
       setFastMode: supported,
@@ -4890,6 +4896,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         const model: SessionControlModelCatalogStatus["models"][number] = {
           id: entry.id,
           provider: entry.provider,
+          ref: `${entry.provider}/${entry.id}`,
           name: entry.name,
         };
         if (entry.alias) {
@@ -4984,6 +4991,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       null;
     const fastMode = resolveStatusFastMode(entry, activeRun ?? snapshot);
     const modelCatalog = await loadSessionControlModelCatalog(sessionKey);
+    const capabilities = sessionControlCapabilitiesForSession(userId, sessionKey);
+    if (!modelCatalog.available && !capabilities.readOnlyStatus) {
+      capabilities.setModel = {
+        supported: false,
+        reason: modelCatalog.reason,
+      };
+    }
     return {
       sessionKey,
       display: {
@@ -5019,7 +5033,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       approval: {
         state: null,
       },
-      capabilities: sessionControlCapabilitiesForSession(userId, sessionKey),
+      capabilities,
       modelCatalog,
     };
   }
@@ -5092,17 +5106,18 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
     const aborted = abortAgentHarnessRun(agentSessionId);
     if (!aborted) {
-      sendSessionControlJson(res, 200, {
-        ok: false,
+      rejectUnsupportedSessionControl(
+        res,
         sessionKey,
-        action: "cancel_current_run",
-        code: "no_active_run",
-        message: "No active run is currently cancellable for this session.",
+        "cancel_current_run",
+        "unsupported",
+        "The active run is not registered with the provider abort seam.",
         capabilities,
-      });
+      );
       return;
     }
     activeRun.cancelRequested = true;
+    activeSessionRuns.delete(normalizeSessionKey(sessionKey));
     sendSessionControlJson(res, 200, {
       ok: true,
       sessionKey,

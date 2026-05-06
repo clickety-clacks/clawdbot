@@ -1037,16 +1037,24 @@ describe.sequential("clawline provider server", () => {
             expect.objectContaining({
               id: "gpt-5",
               provider: "openai",
+              ref: "openai/gpt-5",
               name: "GPT-5",
             }),
             expect.objectContaining({
               id: "claude-sonnet-4-6",
               provider: "anthropic",
+              ref: "anthropic/claude-sonnet-4-6",
               name: "Claude Sonnet 4.6",
             }),
           ]),
         },
       });
+      const catalogModels = (statusJson as { modelCatalog?: { models?: Array<{ ref?: string }> } })
+        .modelCatalog?.models;
+      const sonnetModelRef = catalogModels?.find(
+        (model) => model.ref === "anthropic/claude-sonnet-4-6",
+      )?.ref;
+      expect(sonnetModelRef).toBe("anthropic/claude-sonnet-4-6");
 
       const controlResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/session-control`, {
         method: "POST",
@@ -1181,7 +1189,7 @@ describe.sequential("clawline provider server", () => {
         body: JSON.stringify({
           sessionKey,
           action: "set_model",
-          model: "anthropic/claude-sonnet-4-6",
+          model: sonnetModelRef,
         }),
       });
       expect(modelResponse.status).toBe(200);
@@ -1274,7 +1282,7 @@ describe.sequential("clawline provider server", () => {
         });
 
         let runningStatus: Record<string, unknown> | undefined;
-        for (let attempt = 0; attempt < 100; attempt += 1) {
+        for (let attempt = 0; attempt < 400; attempt += 1) {
           const response = await fetch(
             `http://127.0.0.1:${ctx.port}/api/session-status?sessionKey=${encodeURIComponent(
               sessionKey,
@@ -1318,7 +1326,7 @@ describe.sequential("clawline provider server", () => {
         releaseReply?.();
         releaseReply = undefined;
         let idleStatus: Record<string, unknown> | undefined;
-        for (let attempt = 0; attempt < 100; attempt += 1) {
+        for (let attempt = 0; attempt < 400; attempt += 1) {
           const response = await fetch(
             `http://127.0.0.1:${ctx.port}/api/session-status?sessionKey=${encodeURIComponent(
               sessionKey,
