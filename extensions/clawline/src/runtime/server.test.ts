@@ -1707,7 +1707,7 @@ describe.sequential("clawline provider server", () => {
     try {
       const descriptor = {
         version: 1,
-        html: "<div>Hello</div>",
+        html: '<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"></head><body><div>Hello</div></body></html>',
         metadata: { title: "Card", height: 80 },
       };
       const base64 = Buffer.from(JSON.stringify(descriptor), "utf8").toString("base64");
@@ -1730,6 +1730,162 @@ describe.sequential("clawline provider server", () => {
           data: base64,
         },
       ]);
+      expect(result.assetIds).toEqual([]);
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("rejects outbound interactive HTML attachments with malformed descriptor JSON", async () => {
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry]);
+    try {
+      const base64 = Buffer.from(String.raw`{"version":1,"html":"bad \u201\V"}`, "utf8").toString(
+        "base64",
+      );
+
+      await expect(
+        ctx.server.sendMessage({
+          target: entry.userId,
+          text: "",
+          attachments: [
+            {
+              data: base64,
+              mimeType: "application/vnd.clawline.interactive-html+json",
+            },
+          ],
+        }),
+      ).rejects.toThrow(/interactive HTML descriptor is not valid base64 JSON/i);
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("rejects outbound interactive HTML attachments with non-base64 suffixes", async () => {
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry]);
+    try {
+      const descriptor = {
+        version: 1,
+        html: '<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"></head><body><div>Hello</div></body></html>',
+      };
+      const base64 = Buffer.from(JSON.stringify(descriptor), "utf8").toString("base64");
+
+      await expect(
+        ctx.server.sendMessage({
+          target: entry.userId,
+          text: "",
+          attachments: [
+            {
+              data: `${base64}!`,
+              mimeType: "application/vnd.clawline.interactive-html+json",
+            },
+          ],
+        }),
+      ).rejects.toThrow(/interactive HTML descriptor is not valid base64 JSON/i);
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("rejects outbound interactive HTML attachments with custom CSP meta", async () => {
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry]);
+    try {
+      const descriptor = {
+        version: 1,
+        html: '<!doctype html><html><head><meta name=viewport content="width=device-width, initial-scale=1"><meta content="default-src \'none\'" http-equiv=Content-Security-Policy></head><body>Nope</body></html>',
+      };
+      const base64 = Buffer.from(JSON.stringify(descriptor), "utf8").toString("base64");
+
+      await expect(
+        ctx.server.sendMessage({
+          target: entry.userId,
+          text: "",
+          attachments: [
+            {
+              data: base64,
+              mimeType: "application/vnd.clawline.interactive-html+json",
+            },
+          ],
+        }),
+      ).rejects.toThrow(/must not include custom CSP/i);
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("rejects outbound interactive HTML data URIs with malformed descriptor JSON", async () => {
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry]);
+    try {
+      const base64 = Buffer.from(String.raw`{"version":1,"html":"bad \u201\V"}`, "utf8").toString(
+        "base64",
+      );
+
+      await expect(
+        ctx.server.sendMessage({
+          target: entry.userId,
+          text: "",
+          attachments: [
+            {
+              data: `data:application/vnd.clawline.interactive-html+json;base64,${base64}`,
+            },
+          ],
+        }),
+      ).rejects.toThrow(/interactive HTML descriptor is not valid base64 JSON/i);
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("keeps existing best-effort behavior when an unrelated mixed attachment fails", async () => {
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry]);
+    try {
+      const descriptor = {
+        version: 1,
+        html: '<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"></head><body><div>Hello</div></body></html>',
+      };
+      const base64 = Buffer.from(JSON.stringify(descriptor), "utf8").toString("base64");
+      const oversizedImage = Buffer.alloc(8_000_001, 1).toString("base64");
+
+      const result = await ctx.server.sendMessage({
+        target: entry.userId,
+        text: "fallback text",
+        attachments: [
+          {
+            data: base64,
+            mimeType: "application/vnd.clawline.interactive-html+json",
+          },
+          {
+            data: oversizedImage,
+            mimeType: "image/png",
+          },
+        ],
+      });
+
+      expect(result.attachments).toEqual([]);
       expect(result.assetIds).toEqual([]);
     } finally {
       await ctx.cleanup();
@@ -2390,7 +2546,7 @@ describe.sequential("clawline provider server", () => {
 
       const descriptor = {
         version: 1,
-        html: "<button>Hi</button>",
+        html: '<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"></head><body><button>Hi</button></body></html>',
         metadata: { title: "Test" },
       };
       const base64 = Buffer.from(JSON.stringify(descriptor), "utf8").toString("base64");
