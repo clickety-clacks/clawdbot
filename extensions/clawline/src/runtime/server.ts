@@ -17,6 +17,7 @@ import { type Dispatcher } from "undici";
 import WebSocket, { WebSocketServer } from "ws";
 import {
   DEFAULT_ACCOUNT_ID,
+  abortAgentHarnessRun,
   closeDispatcher,
   createPinnedDispatcher,
   createReplyDispatcherWithTyping,
@@ -37,13 +38,17 @@ import {
   recordInboundSession,
   resolveAgentIdentity,
   resolveAgentIdFromSessionKey,
+  resolveActiveAgentHarnessRunSessionId,
   resolveAllAgentSessionStoreTargetsSync,
+  resolveDefaultModelForAgent,
   resolveEffectiveMessagesConfig,
   resolveHumanDelayConfig,
   resolveSessionStoreEntry,
   resolvePinnedHostname,
   updateSessionStore,
   applySessionsPatchToStore,
+  buildAllowedModelSet,
+  loadModelCatalog,
   type PinnedHostname,
   type ReplyPayload,
 } from "../runtime-api.js";
@@ -1090,11 +1095,13 @@ type SessionStatusActiveRun = {
   runId: string;
   messageId: string;
   sessionKey: string;
+  agentSessionId: string | null;
   startedAt: number;
   provider: string | null;
   model: string | null;
   thinkingLevel: string | null;
   fastMode: boolean | null;
+  cancelRequested: boolean;
 };
 
 type SessionStatusRuntimeSnapshot = {
@@ -4802,19 +4809,37 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     res.end(JSON.stringify(payload));
   }
 
+  type SessionControlModelCatalogStatus =
+    | {
+        available: true;
+        models: Array<{
+          id: string;
+          provider: string;
+          ref: string;
+          name: string;
+          alias?: string;
+        }>;
+      }
+    | {
+        available: false;
+        reason: string;
+        models: [];
+      };
+
+  type SessionControlCapability = {
+    supported: boolean;
+    reason?: string;
+  };
+
   function sessionControlCapabilities() {
     const supported = {
       supported: true,
     };
     return {
-      cancelCurrentRun: {
-        supported: false,
-        reason: "provider_abort_seam_not_available",
-      },
+      cancelCurrentRun: supported,
       setModel: {
-        supported: false,
-        reason: "model_catalog_control_not_available",
-      },
+        supported: true,
+      } as SessionControlCapability,
       setThinking: supported,
       setReasoning: supported,
       setFastMode: supported,
@@ -4851,6 +4876,45 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       return adoptedSessionControlCapabilities();
     }
     return mutableSessionControlCapabilities();
+  }
+
+  async function loadSessionControlModelCatalog(
+    sessionKey: string,
+  ): Promise<SessionControlModelCatalogStatus> {
+    try {
+      const catalog = await loadModelCatalog({ config: openClawCfg });
+      const agentId = resolveAgentIdFromSessionKey(sessionKey);
+      const defaultModel = resolveDefaultModelForAgent({ cfg: openClawCfg, agentId });
+      const allowed = buildAllowedModelSet({
+        cfg: openClawCfg,
+        catalog,
+        defaultProvider: defaultModel.provider,
+        defaultModel: defaultModel.model,
+        agentId,
+      });
+      const models = allowed.allowedCatalog.map((entry) => {
+        const model: SessionControlModelCatalogStatus["models"][number] = {
+          id: entry.id,
+          provider: entry.provider,
+          ref: `${entry.provider}/${entry.id}`,
+          name: entry.name,
+        };
+        if (entry.alias) {
+          model.alias = entry.alias;
+        }
+        return model;
+      });
+      return { available: true, models };
+    } catch (err) {
+      logger.warn?.(
+        `[clawline:session-control] failed to load model catalog for ${sessionKey}: ${String(err)}`,
+      );
+      return {
+        available: false,
+        reason: "model_catalog_unavailable",
+        models: [],
+      };
+    }
   }
 
   function assertSessionControlSessionAccess(userId: string, sessionKey: string) {
@@ -4913,7 +4977,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     sessionRuntimeStatusSnapshots.set(normalizeSessionKey(sessionKey), snapshot);
   }
 
-  function buildSessionStatusPayload(userId: string, sessionKey: string) {
+  async function buildSessionStatusPayload(userId: string, sessionKey: string) {
     const normalizedSessionKey = normalizeSessionKey(sessionKey);
     const activeRun = activeSessionRuns.get(normalizedSessionKey) ?? null;
     const snapshot = sessionRuntimeStatusSnapshots.get(normalizedSessionKey) ?? null;
@@ -4926,6 +4990,14 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       snapshot?.thinkingLevel ??
       null;
     const fastMode = resolveStatusFastMode(entry, activeRun ?? snapshot);
+    const modelCatalog = await loadSessionControlModelCatalog(sessionKey);
+    const capabilities = sessionControlCapabilitiesForSession(userId, sessionKey);
+    if (!modelCatalog.available && !capabilities.readOnlyStatus) {
+      capabilities.setModel = {
+        supported: false,
+        reason: modelCatalog.reason,
+      };
+    }
     return {
       sessionKey,
       display: {
@@ -4961,14 +5033,15 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       approval: {
         state: null,
       },
-      capabilities: sessionControlCapabilitiesForSession(userId, sessionKey),
+      capabilities,
+      modelCatalog,
     };
   }
 
   async function handleSessionStatusRequest(req: http.IncomingMessage, res: http.ServerResponse) {
     const auth = authenticateHttpRequest(req);
     const sessionKey = resolveSessionControlSessionKey(req, auth.userId);
-    sendSessionControlJson(res, 200, buildSessionStatusPayload(auth.userId, sessionKey));
+    sendSessionControlJson(res, 200, await buildSessionStatusPayload(auth.userId, sessionKey));
   }
 
   function rejectUnsupportedSessionControl(
@@ -4986,6 +5059,70 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       code,
       message,
       capabilities,
+    });
+  }
+
+  function resolveActiveRunAgentSessionId(sessionKey: string, activeRun: SessionStatusActiveRun) {
+    const liveSessionId = resolveActiveAgentHarnessRunSessionId(sessionKey);
+    if (liveSessionId) {
+      return liveSessionId;
+    }
+    if (activeRun.agentSessionId) {
+      return activeRun.agentSessionId;
+    }
+    const { entry } = loadSessionStoreEntryForKey(sessionKey);
+    return normalizeStatusString(entry?.sessionId);
+  }
+
+  async function cancelCurrentSessionRun(
+    res: http.ServerResponse,
+    userId: string,
+    sessionKey: string,
+    capabilities: ReturnType<typeof sessionControlCapabilitiesForSession>,
+  ) {
+    const activeRun = activeSessionRuns.get(normalizeSessionKey(sessionKey)) ?? null;
+    if (!activeRun) {
+      sendSessionControlJson(res, 200, {
+        ok: false,
+        sessionKey,
+        action: "cancel_current_run",
+        code: "no_active_run",
+        message: "No active run is currently cancellable for this session.",
+        capabilities,
+      });
+      return;
+    }
+    const agentSessionId = resolveActiveRunAgentSessionId(sessionKey, activeRun);
+    if (!agentSessionId) {
+      rejectUnsupportedSessionControl(
+        res,
+        sessionKey,
+        "cancel_current_run",
+        "unsupported",
+        "The current Clawline provider dispatch path does not expose a per-session abort seam.",
+        capabilities,
+      );
+      return;
+    }
+    const aborted = abortAgentHarnessRun(agentSessionId);
+    if (!aborted) {
+      rejectUnsupportedSessionControl(
+        res,
+        sessionKey,
+        "cancel_current_run",
+        "unsupported",
+        "The active run is not registered with the provider abort seam.",
+        capabilities,
+      );
+      return;
+    }
+    activeRun.cancelRequested = true;
+    activeSessionRuns.delete(normalizeSessionKey(sessionKey));
+    sendSessionControlJson(res, 200, {
+      ok: true,
+      sessionKey,
+      action: "cancel_current_run",
+      status: await buildSessionStatusPayload(userId, sessionKey),
     });
   }
 
@@ -5028,6 +5165,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
   function resolveSessionControlPatch(body: ClientPayload, action: string) {
     switch (action) {
+      case "set_model":
+        return {
+          model: typeof body.model === "string" ? body.model.trim() || undefined : undefined,
+        };
       case "set_thinking":
         return { thinkingLevel: controlString(body, "thinkingLevel") };
       case "set_reasoning":
@@ -5078,6 +5219,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           key: resolved.normalizedKey,
           ...patch,
         },
+        loadGatewayModelCatalog: () => loadModelCatalog({ config: openClawCfg }),
       });
     });
     return result;
@@ -5117,25 +5259,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       return;
     }
     if (action === "cancel_current_run") {
-      rejectUnsupportedSessionControl(
-        res,
-        sessionKey,
-        action,
-        "unsupported",
-        "The current Clawline provider dispatch path does not expose a per-session abort seam.",
-        capabilities,
-      );
-      return;
-    }
-    if (action === "set_model") {
-      rejectUnsupportedSessionControl(
-        res,
-        sessionKey,
-        action,
-        "unsupported",
-        "Model mutation requires a provider-side model catalog control seam.",
-        capabilities,
-      );
+      await cancelCurrentSessionRun(res, auth.userId, sessionKey, capabilities);
       return;
     }
     const patch = resolveSessionControlPatch(body, action);
@@ -5158,7 +5282,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       ok: true,
       sessionKey,
       action,
-      status: buildSessionStatusPayload(auth.userId, sessionKey),
+      status: await buildSessionStatusPayload(auth.userId, sessionKey),
       capabilities,
     });
   }
@@ -7436,11 +7560,15 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               runId: event.id,
               messageId,
               sessionKey: resolvedSessionKey,
+              agentSessionId: normalizeStatusString(
+                loadSessionStoreEntryForKey(resolvedSessionKey).entry?.sessionId,
+              ),
               startedAt: Date.now(),
               provider: null,
               model: null,
               thinkingLevel: null,
               fastMode: null,
+              cancelRequested: false,
             };
             activeSessionRuns.set(normalizeSessionKey(resolvedSessionKey), activeRun);
 
@@ -7527,6 +7655,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               void sendActivitySignal(false);
             }
             if (markMessageFailedIfDeviceRevoked(session.deviceId, messageId)) {
+              activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
               return;
             }
 
@@ -7553,6 +7682,15 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             });
 
             if (!wasDelivered && !wasQueued) {
+              if (activeRun.cancelRequested) {
+                updateMessageStreamingStmt.run(
+                  MessageStreamingState.Finalized,
+                  session.deviceId,
+                  messageId,
+                );
+                activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
+                return;
+              }
               logger.warn?.("[clawline] agent_run_no_delivery", {
                 messageId,
                 sessionId: session.sessionId,
@@ -7956,11 +8094,15 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               runId: event.id,
               messageId: clientId,
               sessionKey: resolvedSessionKey,
+              agentSessionId: normalizeStatusString(
+                loadSessionStoreEntryForKey(resolvedSessionKey).entry?.sessionId,
+              ),
               startedAt: Date.now(),
               provider: null,
               model: null,
               thinkingLevel: null,
               fastMode: null,
+              cancelRequested: false,
             };
             activeSessionRuns.set(normalizeSessionKey(resolvedSessionKey), activeRun);
 
@@ -8055,6 +8197,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               void sendActivitySignal(false);
             }
             if (markMessageFailedIfDeviceRevoked(session.deviceId, clientId)) {
+              activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
               return;
             }
 
@@ -8079,6 +8222,15 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             });
 
             if (!wasDelivered && !wasQueued) {
+              if (activeRun.cancelRequested) {
+                updateMessageStreamingStmt.run(
+                  MessageStreamingState.Finalized,
+                  session.deviceId,
+                  clientId,
+                );
+                activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
+                return;
+              }
               updateMessageStreamingStmt.run(
                 MessageStreamingState.Failed,
                 session.deviceId,
