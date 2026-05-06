@@ -42,6 +42,7 @@ onlyBuiltDependencies:
   - "@whiskeysockets/baileys"
   - "@whiskeysockets/libsignal-node"
   - authenticate-pam
+  - better-sqlite3
   - esbuild
   - node-llama-cpp
   - protobufjs

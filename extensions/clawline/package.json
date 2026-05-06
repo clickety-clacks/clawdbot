@@ -1,6 +1,6 @@
 {
   "name": "@openclaw/clawline",
-  "version": "2026.4.11",
+  "version": "2026.5.4",
   "description": "OpenClaw Clawline channel plugin",
   "type": "module",
   "dependencies": {
@@ -20,7 +20,7 @@
     "openclaw": "workspace:*"
   },
   "peerDependencies": {
-    "openclaw": ">=2026.4.11"
+    "openclaw": ">=2026.5.4"
   },
   "peerDependenciesMeta": {
     "openclaw": {
@@ -45,13 +45,13 @@
       "npmSpec": "@openclaw/clawline",
       "localPath": "extensions/clawline",
       "defaultChoice": "local",
-      "minHostVersion": ">=2026.4.11"
+      "minHostVersion": ">=2026.5.4"
     },
     "compat": {
-      "pluginApi": ">=2026.4.11"
+      "pluginApi": ">=2026.5.4"
     },
     "build": {
-      "openclawVersion": "2026.4.11"
+      "openclawVersion": "2026.5.4"
     }
   }
 }
