@@ -1058,6 +1058,77 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("surfaces fastMode from the model-selected callback in runtime session status", async () => {
+    const entry = createAllowlistEntry();
+    const sessionKey = "agent:main:clawline:flynn:main";
+    const replyResolver: typeof testReplyResolver = async (_ctx, opts) => {
+      opts?.onModelSelected?.({
+        provider: "anthropic",
+        model: "claude-sonnet-4-6",
+        thinkLevel: "medium",
+        fastMode: true,
+      });
+      return { text: "fast status ok" };
+    };
+    const ctx = await setupTestServer([entry], { replyResolver });
+    try {
+      const pairResult = await performPairRequest(ctx.port, entry.deviceId, {
+        claimedName: entry.claimedName,
+      });
+      const authToken = pairResult.token as string;
+      const { ws } = await authenticateDevice(ctx.port, entry.deviceId, authToken);
+      const queue = createMessageQueue(ws);
+      const messageId = `c_${randomUUID()}`;
+
+      ws.send(
+        JSON.stringify({
+          type: "message",
+          id: messageId,
+          content: "report fast status",
+        }),
+      );
+
+      await waitForQueuedMessage(queue, (value) => {
+        const typed = value as { type?: string; id?: string };
+        return typed.type === "ack" && typed.id === messageId;
+      });
+      await waitForQueuedMessage(queue, (value) => {
+        const typed = value as { type?: string; role?: string; content?: string };
+        return (
+          typed.type === "message" &&
+          typed.role === "assistant" &&
+          typed.content === "fast status ok"
+        );
+      });
+
+      const statusResponse = await fetch(
+        `http://127.0.0.1:${ctx.port}/api/session-status?sessionKey=${encodeURIComponent(
+          sessionKey,
+        )}`,
+        { headers: { Authorization: `Bearer ${authToken}` } },
+      );
+      expect(statusResponse.status).toBe(200);
+      expect(await statusResponse.json()).toMatchObject({
+        sessionKey,
+        display: {
+          provider: "anthropic",
+          model: "claude-sonnet-4-6",
+          thinkingLevel: "medium",
+          fastMode: true,
+          mode: "fast",
+        },
+        run: {
+          state: "idle",
+        },
+      });
+
+      queue.dispose();
+      ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("includes exact device ids in pending approval alerts", async () => {
     const ctx = await setupTestServer([], {
       alertInstructionsText: "",
