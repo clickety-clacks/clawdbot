@@ -257,6 +257,7 @@ const explicitNeverBundleDependencies = [
   "@lancedb/lancedb",
   "@larksuiteoapi/node-sdk",
   "@matrix-org/matrix-sdk-crypto-nodejs",
+  "better-sqlite3",
   "matrix-js-sdk",
   "qrcode-terminal",
 ].toSorted((left, right) => left.localeCompare(right));

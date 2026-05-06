@@ -57,6 +57,12 @@ describe("Clawline package metadata", () => {
     expect(readWorkspaceOnlyBuiltDependencies()).toContain("better-sqlite3");
   });
 
+  it("keeps the native sqlite runtime external to the ESM gateway bundle", () => {
+    const tsdownConfig = fs.readFileSync(path.join(repoRoot, "tsdown.config.ts"), "utf8");
+
+    expect(tsdownConfig).toContain('"better-sqlite3"');
+  });
+
   it("can load the better-sqlite3 native runtime used by Clawline", () => {
     const db = new BetterSqlite3(":memory:");
     try {
