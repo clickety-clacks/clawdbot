@@ -3,11 +3,18 @@
 // public `openclaw/plugin-sdk/*` subpaths.
 
 export {
+  buildAllowedModelSet,
   enqueueAnnounce,
+  loadModelCatalog,
+  resolveDefaultModelForAgent,
   resolveAgentIdentity,
   resolveEffectiveMessagesConfig,
   resolveHumanDelayConfig,
 } from "openclaw/plugin-sdk/agent-runtime";
+export {
+  abortAgentHarnessRun,
+  resolveActiveAgentHarnessRunSessionId,
+} from "openclaw/plugin-sdk/agent-harness-runtime";
 export type { OpenClawConfig } from "openclaw/plugin-sdk/core";
 export { resolveUserPath } from "openclaw/plugin-sdk/account-resolution";
 export {

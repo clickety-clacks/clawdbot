@@ -2692,6 +2692,7 @@ Docs: https://docs.openclaw.ai
 ### Fixes
 
 - Agents/bootstrap: repair completed workspaces that still have a stale `BOOTSTRAP.md` by detecting customized identity/profile files, deleting the stale bootstrap file, and recording setup completion (#71230). Thanks @Patrick-Erichsen.
+- Clawline: wire typed `cancel_current_run` session control to the embedded provider abort seam, so supported in-flight prompts cancel without injecting `/stop` chat text.
 - Codex harness: route native `request_user_input` prompts back to the originating chat, preserve queued follow-up answers, and honor newer app-server command approval amendment decisions.
 - Codex harness/context-engine: redact context-engine assembly failures before logging, so fallback warnings do not serialize raw error objects. (#70809) Thanks @jalehman.
 - WhatsApp/onboarding: keep first-run setup entry loading off the Baileys runtime dependency path, so packaged QuickStart installs can show WhatsApp setup before runtime deps are staged. Fixes #70932.

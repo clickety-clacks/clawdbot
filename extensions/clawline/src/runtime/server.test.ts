@@ -24,11 +24,17 @@ import { enqueueSystemEvent, resetSystemEventsForTest } from "./system-events.js
 
 const gatewayCallMock = vi.fn();
 const enqueueAnnounceMock = vi.fn();
+const abortAgentHarnessRunMock = vi.fn();
+const resolveActiveAgentHarnessRunSessionIdMock = vi.fn();
+const loadModelCatalogMock = vi.fn();
 const loadSessionStoreMock = vi.fn();
 vi.mock("../runtime-api.js", async () => {
   const actual = await vi.importActual("../runtime-api.js");
   return {
     ...actual,
+    abortAgentHarnessRun: (...args: unknown[]) => abortAgentHarnessRunMock(...args),
+    resolveActiveAgentHarnessRunSessionId: (...args: unknown[]) =>
+      resolveActiveAgentHarnessRunSessionIdMock(...args),
     enqueueAnnounce: (...args: unknown[]) => enqueueAnnounceMock(...args),
     loadSessionStore: (...args: unknown[]) => {
       loadSessionStoreMock(...args);
@@ -38,6 +44,7 @@ vi.mock("../runtime-api.js", async () => {
         }
       ).loadSessionStore(...args);
     },
+    loadModelCatalog: (...args: unknown[]) => loadModelCatalogMock(...args),
   };
 });
 
@@ -278,6 +285,29 @@ beforeEach(() => {
   gatewayCallMock.mockResolvedValue({ ok: true });
   enqueueAnnounceMock.mockReset();
   enqueueAnnounceMock.mockReturnValue(true);
+  abortAgentHarnessRunMock.mockReset();
+  abortAgentHarnessRunMock.mockReturnValue(false);
+  resolveActiveAgentHarnessRunSessionIdMock.mockReset();
+  resolveActiveAgentHarnessRunSessionIdMock.mockReturnValue(undefined);
+  loadModelCatalogMock.mockReset();
+  loadModelCatalogMock.mockResolvedValue([
+    {
+      id: "gpt-5",
+      name: "GPT-5",
+      provider: "openai",
+      contextWindow: 400000,
+      reasoning: true,
+      input: ["text"],
+    },
+    {
+      id: "claude-sonnet-4-6",
+      name: "Claude Sonnet 4.6",
+      provider: "anthropic",
+      contextWindow: 200000,
+      reasoning: true,
+      input: ["text", "image"],
+    },
+  ]);
   loadSessionStoreMock.mockClear();
   sendMessageMock.mockReset();
   sendMessageMock.mockResolvedValue({
@@ -355,6 +385,7 @@ async function setupTestServer(
     seedLegacyDatabase?: (dbPath: string) => Promise<void>;
     replyResolver?: typeof getReplyFromConfig;
     logger?: Logger;
+    openClawConfig?: OpenClawConfig;
     terminalTmux?: {
       mode?: "local" | "ssh";
       sshTarget?: string;
@@ -435,7 +466,7 @@ async function setupTestServer(
           }
         : {}),
     },
-    openClawConfig: testOpenClawConfig,
+    openClawConfig: options.openClawConfig ?? testOpenClawConfig,
     replyResolver: options.replyResolver ?? testReplyResolver,
     logger: options.logger ?? silentLogger,
     sessionStorePath,
@@ -918,7 +949,23 @@ describe.sequential("clawline provider server", () => {
   it("exposes session status and typed control capabilities", async () => {
     const entry = createAllowlistEntry();
     const sessionKey = "agent:main:clawline:flynn:main";
-    const ctx = await setupTestServer([entry]);
+    const adoptedSessionKey = "agent:heimdal:main";
+    const ctx = await setupTestServer([entry], {
+      openClawConfig: {
+        agents: {
+          default: "main",
+          defaults: {
+            model: { primary: "openai/gpt-5" },
+            models: {
+              "openai/gpt-5": {},
+              "anthropic/claude-sonnet-4-6": {},
+            },
+          },
+          list: [{ id: "main" }],
+        },
+        bindings: [],
+      } as OpenClawConfig,
+    });
     try {
       await fs.writeFile(
         ctx.sessionStorePath,
@@ -933,6 +980,12 @@ describe.sequential("clawline provider server", () => {
               fastMode: false,
               verboseLevel: "off",
               reasoningLevel: "on",
+            },
+            [adoptedSessionKey]: {
+              sessionId: "adopted-session-status-test",
+              updatedAt: Date.now(),
+              modelProvider: "openai",
+              model: "gpt-5",
             },
           },
           null,
@@ -953,7 +1006,8 @@ describe.sequential("clawline provider server", () => {
         { headers: { Authorization: authHeader } },
       );
       expect(statusResponse.status).toBe(200);
-      expect(await statusResponse.json()).toMatchObject({
+      const statusJson = await statusResponse.json();
+      expect(statusJson).toMatchObject({
         sessionKey,
         display: {
           model: "claude-opus-4-6",
@@ -969,15 +1023,38 @@ describe.sequential("clawline provider server", () => {
           queueDepth: 0,
         },
         capabilities: {
-          cancelCurrentRun: { supported: false },
-          setModel: { supported: false },
+          cancelCurrentRun: { supported: true },
+          setModel: { supported: true },
           setThinking: { supported: true },
           setReasoning: { supported: true },
           setFastMode: { supported: true },
           setMode: { supported: true },
           setVerbosity: { supported: true },
         },
+        modelCatalog: {
+          available: true,
+          models: expect.arrayContaining([
+            expect.objectContaining({
+              id: "gpt-5",
+              provider: "openai",
+              ref: "openai/gpt-5",
+              name: "GPT-5",
+            }),
+            expect.objectContaining({
+              id: "claude-sonnet-4-6",
+              provider: "anthropic",
+              ref: "anthropic/claude-sonnet-4-6",
+              name: "Claude Sonnet 4.6",
+            }),
+          ]),
+        },
       });
+      const catalogModels = (statusJson as { modelCatalog?: { models?: Array<{ ref?: string }> } })
+        .modelCatalog?.models;
+      const sonnetModelRef = catalogModels?.find(
+        (model) => model.ref === "anthropic/claude-sonnet-4-6",
+      )?.ref;
+      expect(sonnetModelRef).toBe("anthropic/claude-sonnet-4-6");
 
       const controlResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/session-control`, {
         method: "POST",
@@ -992,9 +1069,44 @@ describe.sequential("clawline provider server", () => {
         ok: false,
         sessionKey,
         action: "cancel_current_run",
+        code: "no_active_run",
+        capabilities: {
+          cancelCurrentRun: { supported: true },
+        },
+      });
+      expect(abortAgentHarnessRunMock).not.toHaveBeenCalled();
+
+      const adoptResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams/adopt`, {
+        method: "POST",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ sessionKey: adoptedSessionKey }),
+      });
+      expect(adoptResponse.status).toBe(200);
+
+      const adoptedModelResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/session-control`, {
+        method: "POST",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          sessionKey: adoptedSessionKey,
+          action: "set_model",
+          model: "openai/gpt-5",
+        }),
+      });
+      expect(adoptedModelResponse.status).toBe(200);
+      expect(await adoptedModelResponse.json()).toMatchObject({
+        ok: false,
+        sessionKey: adoptedSessionKey,
+        action: "set_model",
         code: "unsupported",
         capabilities: {
-          cancelCurrentRun: { supported: false },
+          readOnlyStatus: true,
+          setModel: { supported: false, reason: "adopted_session_read_only" },
         },
       });
 
@@ -1037,6 +1149,65 @@ describe.sequential("clawline provider server", () => {
         },
       });
 
+      const nullModelResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/session-control`, {
+        method: "POST",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ sessionKey, action: "set_model", model: null }),
+      });
+      expect(nullModelResponse.status).toBe(400);
+      expect(await nullModelResponse.json()).toMatchObject({
+        error: {
+          code: "invalid_control_payload",
+        },
+      });
+
+      const badModelResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/session-control`, {
+        method: "POST",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ sessionKey, action: "set_model", model: "anthropic/not-real" }),
+      });
+      expect(badModelResponse.status).toBe(200);
+      expect(await badModelResponse.json()).toMatchObject({
+        ok: false,
+        sessionKey,
+        action: "set_model",
+        code: "INVALID_REQUEST",
+      });
+
+      const modelResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/session-control`, {
+        method: "POST",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          sessionKey,
+          action: "set_model",
+          model: sonnetModelRef,
+        }),
+      });
+      expect(modelResponse.status).toBe(200);
+      expect(await modelResponse.json()).toMatchObject({
+        ok: true,
+        sessionKey,
+        action: "set_model",
+        status: {
+          display: {
+            model: "claude-sonnet-4-6",
+            provider: "anthropic",
+          },
+        },
+        capabilities: {
+          setModel: { supported: true },
+        },
+      });
+
       const updatedStatusResponse = await fetch(
         `http://127.0.0.1:${ctx.port}/api/session-status?sessionKey=${encodeURIComponent(
           sessionKey,
@@ -1046,6 +1217,8 @@ describe.sequential("clawline provider server", () => {
       expect(updatedStatusResponse.status).toBe(200);
       expect(await updatedStatusResponse.json()).toMatchObject({
         display: {
+          model: "claude-sonnet-4-6",
+          provider: "anthropic",
           thinkingLevel: "low",
           fastMode: true,
           mode: "fast",
@@ -1076,54 +1249,192 @@ describe.sequential("clawline provider server", () => {
         claimedName: entry.claimedName,
       });
       const authToken = pairResult.token as string;
-      const { ws } = await authenticateDevice(ctx.port, entry.deviceId, authToken);
-      const queue = createMessageQueue(ws);
+      const { ws, queue } = await authenticateDeviceWithQueue(ctx.port, entry.deviceId, authToken);
       const messageId = `c_${randomUUID()}`;
-
-      ws.send(
-        JSON.stringify({
-          type: "message",
-          id: messageId,
-          content: "report fast status",
-        }),
-      );
-
-      await waitForQueuedMessage(queue, (value) => {
-        const typed = value as { type?: string; id?: string };
-        return typed.type === "ack" && typed.id === messageId;
-      });
-      await waitForQueuedMessage(queue, (value) => {
-        const typed = value as { type?: string; role?: string; content?: string };
-        return (
-          typed.type === "message" &&
-          typed.role === "assistant" &&
-          typed.content === "fast status ok"
+      try {
+        ws.send(
+          JSON.stringify({
+            type: "message",
+            id: messageId,
+            content: "report fast status",
+          }),
         );
-      });
 
-      const statusResponse = await fetch(
-        `http://127.0.0.1:${ctx.port}/api/session-status?sessionKey=${encodeURIComponent(
+        await waitForQueuedMessage(queue, (value) => {
+          const typed = value as { type?: string; id?: string };
+          return typed.type === "ack" && typed.id === messageId;
+        });
+        await waitForQueuedMessage(queue, (value) => {
+          const typed = value as { type?: string; role?: string; content?: string };
+          return (
+            typed.type === "message" &&
+            typed.role === "assistant" &&
+            typed.content === "fast status ok"
+          );
+        });
+
+        const statusResponse = await fetch(
+          `http://127.0.0.1:${ctx.port}/api/session-status?sessionKey=${encodeURIComponent(
+            sessionKey,
+          )}`,
+          { headers: { Authorization: `Bearer ${authToken}` } },
+        );
+        expect(statusResponse.status).toBe(200);
+        expect(await statusResponse.json()).toMatchObject({
           sessionKey,
-        )}`,
-        { headers: { Authorization: `Bearer ${authToken}` } },
-      );
-      expect(statusResponse.status).toBe(200);
-      expect(await statusResponse.json()).toMatchObject({
-        sessionKey,
-        display: {
-          provider: "anthropic",
-          model: "claude-sonnet-4-6",
-          thinkingLevel: "medium",
-          fastMode: true,
-          mode: "fast",
-        },
-        run: {
-          state: "idle",
-        },
-      });
+          display: {
+            provider: "anthropic",
+            model: "claude-sonnet-4-6",
+            thinkingLevel: "medium",
+            fastMode: true,
+            mode: "fast",
+          },
+          run: {
+            state: "idle",
+          },
+        });
+      } finally {
+        queue.dispose();
+        ws.terminate();
+      }
+    } finally {
+      await ctx.cleanup();
+    }
+  });
 
-      queue.dispose();
-      ws.terminate();
+  it("cancels an in-flight session run through the provider abort seam", async () => {
+    const entry = createAllowlistEntry();
+    const sessionKey = "agent:main:clawline:flynn:main";
+    let releaseReply: (() => void) | undefined;
+    const replyResolver: typeof testReplyResolver = async () => {
+      await new Promise<void>((resolve) => {
+        releaseReply = resolve;
+      });
+      return { text: "" };
+    };
+    const ctx = await setupTestServer([entry], { replyResolver });
+    try {
+      await fs.writeFile(
+        ctx.sessionStorePath,
+        JSON.stringify(
+          {
+            [sessionKey]: {
+              sessionId: "session-cancel-test",
+              updatedAt: Date.now(),
+              channel: "clawline",
+              lastChannel: "clawline",
+              lastTo: "device:test",
+            },
+          },
+          null,
+          2,
+        ),
+      );
+      abortAgentHarnessRunMock.mockReturnValue(true);
+      resolveActiveAgentHarnessRunSessionIdMock.mockReturnValue("session-cancel-live");
+      const pairResult = await performPairRequest(ctx.port, entry.deviceId, {
+        claimedName: entry.claimedName,
+      });
+      const authToken = pairResult.token as string;
+      const { ws, queue } = await authenticateDeviceWithQueue(ctx.port, entry.deviceId, authToken);
+      const messageId = `c_${randomUUID()}`;
+      try {
+        ws.send(
+          JSON.stringify({
+            type: "message",
+            id: messageId,
+            sessionKey,
+            content: "cancel me",
+          }),
+        );
+        await waitForQueuedMessage(queue, (value) => {
+          const typed = value as { type?: string; id?: string };
+          return typed?.type === "ack" && typed.id === messageId;
+        });
+
+        let runningStatus: Record<string, unknown> | undefined;
+        for (let attempt = 0; attempt < 400; attempt += 1) {
+          const response = await fetch(
+            `http://127.0.0.1:${ctx.port}/api/session-status?sessionKey=${encodeURIComponent(
+              sessionKey,
+            )}`,
+            { headers: { Authorization: `Bearer ${authToken}` } },
+          );
+          const status = (await response.json()) as Record<string, unknown>;
+          if ((status.run as { state?: string } | undefined)?.state === "running") {
+            runningStatus = status;
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        expect(runningStatus).toMatchObject({
+          capabilities: {
+            cancelCurrentRun: { supported: true },
+          },
+          run: {
+            state: "running",
+            messageId,
+          },
+        });
+
+        const controlResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/session-control`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${authToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ sessionKey, action: "cancel_current_run" }),
+        });
+        expect(controlResponse.status).toBe(200);
+        expect(await controlResponse.json()).toMatchObject({
+          ok: true,
+          sessionKey,
+          action: "cancel_current_run",
+        });
+        expect(resolveActiveAgentHarnessRunSessionIdMock).toHaveBeenCalledWith(sessionKey);
+        expect(abortAgentHarnessRunMock).toHaveBeenCalledWith("session-cancel-live");
+
+        releaseReply?.();
+        releaseReply = undefined;
+        let idleStatus: Record<string, unknown> | undefined;
+        for (let attempt = 0; attempt < 400; attempt += 1) {
+          const response = await fetch(
+            `http://127.0.0.1:${ctx.port}/api/session-status?sessionKey=${encodeURIComponent(
+              sessionKey,
+            )}`,
+            { headers: { Authorization: `Bearer ${authToken}` } },
+          );
+          const status = (await response.json()) as Record<string, unknown>;
+          if ((status.run as { state?: string } | undefined)?.state === "idle") {
+            idleStatus = status;
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        expect(idleStatus).toMatchObject({
+          run: {
+            state: "idle",
+          },
+        });
+        await expect(
+          waitForQueuedMessageWithTimeout(
+            queue,
+            (value) => {
+              const typed = value as { type?: string; code?: string; messageId?: string };
+              return (
+                typed?.type === "error" &&
+                typed.code === "server_error" &&
+                typed.messageId === messageId
+              );
+            },
+            { attempts: 2, timeoutMs: 50 },
+          ),
+        ).rejects.toThrow(/Timed out|Did not receive/);
+      } finally {
+        releaseReply?.();
+        queue.dispose();
+        ws.terminate();
+      }
     } finally {
       await ctx.cleanup();
     }
