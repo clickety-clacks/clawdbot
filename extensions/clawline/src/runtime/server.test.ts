@@ -2957,6 +2957,220 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("exposes a per-user DM stream when dmScope is not main", async () => {
+    const deviceId = randomUUID();
+    const entry = createAllowlistEntry({
+      deviceId,
+      userId: "flynn",
+      isAdmin: false,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry], {
+      openClawConfig: {
+        ...testOpenClawConfig,
+        session: { dmScope: "per-peer" },
+      } as OpenClawConfig,
+    });
+    try {
+      const pair = await performPairRequest(ctx.port, deviceId);
+      const { ws, streamSnapshot, sessionInfo } = await authenticateDevice(
+        ctx.port,
+        deviceId,
+        pair.token as string,
+      );
+
+      expect((sessionInfo as { dmScope?: string; sessionKeys?: string[] } | null)?.dmScope).toBe(
+        "per-peer",
+      );
+      expect((sessionInfo as { sessionKeys?: string[] } | null)?.sessionKeys).toEqual([
+        "agent:main:clawline:flynn:main",
+        "agent:main:clawline:flynn:dm",
+      ]);
+      expect(streamSnapshot.streams).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            sessionKey: "agent:main:clawline:flynn:dm",
+            displayName: "flynn DM",
+            kind: "dm",
+          }),
+        ]),
+      );
+
+      ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("retires stale built-in DM streams when dmScope rolls back to main", async () => {
+    const deviceId = randomUUID();
+    const entry = createAllowlistEntry({
+      deviceId,
+      userId: "flynn",
+      isAdmin: false,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry], {
+      seedLegacyDatabase: async (dbPath) => {
+        const seededDb = new BetterSqlite3(dbPath);
+        seededDb.exec(`
+          CREATE TABLE stream_sessions (
+            userId TEXT NOT NULL,
+            sessionKey TEXT NOT NULL,
+            displayName TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            orderIndex INTEGER NOT NULL,
+            isBuiltIn INTEGER NOT NULL,
+            adopted INTEGER NOT NULL DEFAULT 0,
+            createdAt INTEGER NOT NULL,
+            updatedAt INTEGER NOT NULL,
+            PRIMARY KEY (userId, sessionKey),
+            UNIQUE (userId, orderIndex)
+          );
+          INSERT INTO stream_sessions
+            (userId, sessionKey, displayName, kind, orderIndex, isBuiltIn, adopted, createdAt, updatedAt)
+          VALUES
+            ('flynn', 'agent:main:clawline:flynn:main', 'Personal', 'main', 0, 1, 0, 1, 1),
+            ('flynn', 'agent:main:clawline:flynn:dm', 'flynn DM', 'dm', 1, 1, 0, 1, 1);
+        `);
+        seededDb.close();
+      },
+    });
+    try {
+      const pair = await performPairRequest(ctx.port, deviceId);
+      const { ws, streamSnapshot, sessionInfo } = await authenticateDevice(
+        ctx.port,
+        deviceId,
+        pair.token as string,
+      );
+      const staleDmKey = "agent:main:clawline:flynn:dm";
+
+      expect((sessionInfo as { dmScope?: string; sessionKeys?: string[] } | null)?.dmScope).toBe(
+        "main",
+      );
+      expect((sessionInfo as { sessionKeys?: string[] } | null)?.sessionKeys).toEqual([
+        "agent:main:clawline:flynn:main",
+      ]);
+      expect(streamSnapshot.streams).not.toEqual(
+        expect.arrayContaining([expect.objectContaining({ sessionKey: staleDmKey })]),
+      );
+
+      const queue = createMessageQueue(ws);
+      const messageId = `c_${randomUUID()}`;
+      ws.send(
+        JSON.stringify({
+          type: "message",
+          id: messageId,
+          sessionKey: staleDmKey,
+          content: "should reject stale dm",
+        }),
+      );
+      await expect(
+        waitForQueuedMessageWithTimeout(
+          queue,
+          (value) => {
+            const typed = value as { type?: string; code?: string };
+            return typed.type === "error" && typed.code === "stream_not_found";
+          },
+          { timeoutMs: 1_000 },
+        ),
+      ).resolves.toMatchObject({
+        type: "error",
+        code: "stream_not_found",
+      });
+
+      queue.dispose();
+      ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("preserves admin global streams when a non-admin device for the same user connects", async () => {
+    const adminDeviceId = randomUUID();
+    const userDeviceId = randomUUID();
+    const baseEntry = {
+      claimedName: "Flynn",
+      userId: "flynn",
+      tokenDelivered: true,
+      createdAt: Date.now() - 1_000,
+      lastSeenAt: Date.now() - 500,
+      deviceInfo: {
+        platform: "iOS",
+        model: "iPhone",
+        osVersion: "17.0",
+        appVersion: "1.0",
+      },
+    };
+    const ctx = await setupTestServer(
+      [
+        {
+          ...baseEntry,
+          deviceId: adminDeviceId,
+          isAdmin: true,
+        },
+        {
+          ...baseEntry,
+          deviceId: userDeviceId,
+          isAdmin: false,
+        },
+      ],
+      {
+        seedLegacyDatabase: async (dbPath) => {
+          const seededDb = new BetterSqlite3(dbPath);
+          seededDb.exec(`
+            CREATE TABLE stream_sessions (
+              userId TEXT NOT NULL,
+              sessionKey TEXT NOT NULL,
+              displayName TEXT NOT NULL,
+              kind TEXT NOT NULL,
+              orderIndex INTEGER NOT NULL,
+              isBuiltIn INTEGER NOT NULL,
+              adopted INTEGER NOT NULL DEFAULT 0,
+              createdAt INTEGER NOT NULL,
+              updatedAt INTEGER NOT NULL,
+              PRIMARY KEY (userId, sessionKey),
+              UNIQUE (userId, orderIndex)
+            );
+            INSERT INTO stream_sessions
+              (userId, sessionKey, displayName, kind, orderIndex, isBuiltIn, adopted, createdAt, updatedAt)
+            VALUES
+              ('flynn', 'agent:main:clawline:flynn:main', 'Personal', 'main', 0, 1, 0, 1, 1),
+              ('flynn', 'agent:main:main', 'Global DM', 'global_dm', 1, 1, 0, 1, 1);
+          `);
+          seededDb.close();
+        },
+      },
+    );
+    try {
+      const userPair = await performPairRequest(ctx.port, userDeviceId);
+      const { ws: userWs, sessionInfo: userSessionInfo } = await authenticateDevice(
+        ctx.port,
+        userDeviceId,
+        userPair.token as string,
+      );
+      expect((userSessionInfo as { sessionKeys?: string[] } | null)?.sessionKeys).toEqual([
+        "agent:main:clawline:flynn:main",
+      ]);
+
+      const adminPair = await performPairRequest(ctx.port, adminDeviceId);
+      const { ws: adminWs, sessionInfo: adminSessionInfo } = await authenticateDevice(
+        ctx.port,
+        adminDeviceId,
+        adminPair.token as string,
+      );
+      expect((adminSessionInfo as { sessionKeys?: string[] } | null)?.sessionKeys).toEqual([
+        "agent:main:clawline:flynn:main",
+        "agent:main:main",
+      ]);
+
+      userWs.terminate();
+      adminWs.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("echoes terminal_bubbles_v1 in auth_result when client advertises support", async () => {
     const entry = createAllowlistEntry({
       deviceId: randomUUID(),

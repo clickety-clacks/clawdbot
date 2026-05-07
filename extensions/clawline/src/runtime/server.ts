@@ -2285,7 +2285,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     userId: string;
     isAdmin: boolean;
   }): StreamSession[] => {
-    if (!selectStreamSessionsByUserStmt || !insertStreamSessionStmt || !selectStreamMaxOrderStmt) {
+    if (
+      !selectStreamSessionsByUserStmt ||
+      !insertStreamSessionStmt ||
+      !selectStreamMaxOrderStmt ||
+      !deleteStreamSessionStmt
+    ) {
       const fallback: StreamSession[] = [
         {
           sessionKey: buildClawlinePersonalSessionKey(mainSessionAgentId, params.userId),
@@ -2363,7 +2368,23 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     const streamByKey = new Map(
       streams.map((stream) => [normalizeSessionKey(stream.sessionKey), stream] as const),
     );
+    const builtInKeySet = new Set(builtIns.map((stream) => normalizeSessionKey(stream.sessionKey)));
     let changed = false;
+    const dmBuiltInKey = normalizeSessionKey(
+      buildClawlineUserStreamSessionKey(mainSessionAgentId, params.userId, "dm"),
+    );
+    for (const stream of streams) {
+      const normalizedStreamKey = normalizeSessionKey(stream.sessionKey);
+      if (
+        stream.isBuiltIn &&
+        normalizedStreamKey === dmBuiltInKey &&
+        !builtInKeySet.has(normalizedStreamKey)
+      ) {
+        deleteStreamSessionStmt.run(params.userId, stream.sessionKey);
+        streamByKey.delete(normalizedStreamKey);
+        changed = true;
+      }
+    }
     for (const builtIn of builtIns) {
       const existing = streamByKey.get(normalizeSessionKey(builtIn.sessionKey));
       if (!existing) {
