@@ -4962,7 +4962,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     };
     return {
       cancelCurrentRun: unsupported,
-      setModel: unsupported,
+      setModel: {
+        supported: true,
+      } as SessionControlCapability,
       setThinking: unsupported,
       setReasoning: unsupported,
       setFastMode: unsupported,
@@ -5048,17 +5050,22 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   function resolveStatusModel(
     entry: SessionEntry | undefined,
     snapshot: SessionStatusRuntimeSnapshot | null,
+    sessionKey: string,
   ) {
+    const defaultModel = resolveDefaultModelForAgent({
+      cfg: openClawCfg,
+      agentId: resolveAgentIdFromSessionKey(sessionKey),
+    });
     const provider =
       normalizeStatusString(entry?.providerOverride) ??
       normalizeStatusString(entry?.modelProvider) ??
       snapshot?.provider ??
-      null;
+      defaultModel.provider;
     const model =
       normalizeStatusString(entry?.modelOverride) ??
       normalizeStatusString(entry?.model) ??
       snapshot?.model ??
-      null;
+      defaultModel.model;
     return { provider, model };
   }
 
@@ -5085,7 +5092,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     const snapshot = sessionRuntimeStatusSnapshots.get(normalizedSessionKey) ?? null;
     const { entry } = loadSessionStoreEntryForKey(sessionKey);
     const queueDepth = getClawlineFollowupQueueDepth(sessionKey);
-    const modelStatus = resolveStatusModel(entry, activeRun ?? snapshot);
+    const modelStatus = resolveStatusModel(entry, activeRun ?? snapshot, sessionKey);
     const thinkingLevel =
       normalizeStatusString(entry?.thinkingLevel) ??
       activeRun?.thinkingLevel ??
@@ -5094,7 +5101,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     const fastMode = resolveStatusFastMode(entry, activeRun ?? snapshot);
     const modelCatalog = await loadSessionControlModelCatalog(sessionKey);
     const capabilities = sessionControlCapabilitiesForSession(userId, sessionKey);
-    if (!modelCatalog.available && !capabilities.readOnlyStatus) {
+    if (!modelCatalog.available) {
       capabilities.setModel = {
         supported: false,
         reason: modelCatalog.reason,
@@ -5349,7 +5356,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       throw new HttpError(400, "invalid_action", "Unsupported session control action");
     }
     const capabilities = sessionControlCapabilitiesForSession(auth.userId, sessionKey);
-    if (capabilities.readOnlyStatus) {
+    if (capabilities.readOnlyStatus && action !== "set_model") {
       rejectUnsupportedSessionControl(
         res,
         sessionKey,

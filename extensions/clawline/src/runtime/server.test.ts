@@ -300,6 +300,14 @@ beforeEach(() => {
       input: ["text"],
     },
     {
+      id: "gpt-5.5",
+      name: "GPT-5.5",
+      provider: "openai",
+      contextWindow: 400000,
+      reasoning: true,
+      input: ["text"],
+    },
+    {
       id: "claude-sonnet-4-6",
       name: "Claude Sonnet 4.6",
       provider: "anthropic",
@@ -955,9 +963,10 @@ describe.sequential("clawline provider server", () => {
         agents: {
           default: "main",
           defaults: {
-            model: { primary: "openai/gpt-5" },
+            model: { primary: "openai/gpt-5.5" },
             models: {
               "openai/gpt-5": {},
+              "openai/gpt-5.5": { alias: "5.5" },
               "anthropic/claude-sonnet-4-6": {},
             },
           },
@@ -1041,6 +1050,13 @@ describe.sequential("clawline provider server", () => {
               name: "GPT-5",
             }),
             expect.objectContaining({
+              id: "gpt-5.5",
+              provider: "openai",
+              ref: "openai/gpt-5.5",
+              name: "GPT-5.5",
+              alias: "5.5",
+            }),
+            expect.objectContaining({
               id: "claude-sonnet-4-6",
               provider: "anthropic",
               ref: "anthropic/claude-sonnet-4-6",
@@ -1055,6 +1071,8 @@ describe.sequential("clawline provider server", () => {
         (model) => model.ref === "anthropic/claude-sonnet-4-6",
       )?.ref;
       expect(sonnetModelRef).toBe("anthropic/claude-sonnet-4-6");
+      const gpt55ModelRef = catalogModels?.find((model) => model.ref === "openai/gpt-5.5")?.ref;
+      expect(gpt55ModelRef).toBe("openai/gpt-5.5");
 
       const controlResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/session-control`, {
         method: "POST",
@@ -1100,13 +1118,19 @@ describe.sequential("clawline provider server", () => {
       });
       expect(adoptedModelResponse.status).toBe(200);
       expect(await adoptedModelResponse.json()).toMatchObject({
-        ok: false,
+        ok: true,
         sessionKey: adoptedSessionKey,
         action: "set_model",
-        code: "unsupported",
+        status: {
+          display: {
+            model: "gpt-5",
+            provider: "openai",
+          },
+        },
         capabilities: {
           readOnlyStatus: true,
-          setModel: { supported: false, reason: "adopted_session_read_only" },
+          setModel: { supported: true },
+          setThinking: { supported: false, reason: "adopted_session_read_only" },
         },
       });
 
@@ -1208,6 +1232,31 @@ describe.sequential("clawline provider server", () => {
         },
       });
 
+      const gpt55Response = await fetch(`http://127.0.0.1:${ctx.port}/api/session-control`, {
+        method: "POST",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          sessionKey,
+          action: "set_model",
+          model: gpt55ModelRef,
+        }),
+      });
+      expect(gpt55Response.status).toBe(200);
+      expect(await gpt55Response.json()).toMatchObject({
+        ok: true,
+        sessionKey,
+        action: "set_model",
+        status: {
+          display: {
+            model: "gpt-5.5",
+            provider: "openai",
+          },
+        },
+      });
+
       const updatedStatusResponse = await fetch(
         `http://127.0.0.1:${ctx.port}/api/session-status?sessionKey=${encodeURIComponent(
           sessionKey,
@@ -1217,8 +1266,8 @@ describe.sequential("clawline provider server", () => {
       expect(updatedStatusResponse.status).toBe(200);
       expect(await updatedStatusResponse.json()).toMatchObject({
         display: {
-          model: "claude-sonnet-4-6",
-          provider: "anthropic",
+          model: "gpt-5.5",
+          provider: "openai",
           thinkingLevel: "low",
           fastMode: true,
           mode: "fast",
