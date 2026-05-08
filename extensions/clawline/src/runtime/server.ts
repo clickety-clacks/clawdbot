@@ -259,6 +259,8 @@ const INLINE_IMAGE_MIME_TYPES = new Set([
 const TERMINAL_SESSION_MIME = "application/vnd.clawline.terminal-session+json";
 const INTERACTIVE_HTML_MIME = "application/vnd.clawline.interactive-html+json";
 const INTERACTIVE_CALLBACK_MIME = "application/vnd.clawline.interactive-callback+json";
+const DEVICE_APPROVAL_APPROVE_ACTION = "clawline.deviceApproval.approve";
+const DEVICE_APPROVAL_DENY_ACTION = "clawline.deviceApproval.deny";
 const CLIENT_FEATURE_TERMINAL_BUBBLES_V1 = "terminal_bubbles_v1";
 const SERVER_FEATURE_SESSION_INFO = "session_info";
 const SERVER_FEATURE_STREAM_READ_STATE = "stream_read_state";
@@ -1447,6 +1449,19 @@ function describePairingEntry(entry: {
   return `${name} (${surface}) [deviceId: ${entry.deviceId}]`;
 }
 
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function jsonForHtmlScript(value: unknown): string {
+  return JSON.stringify(value).replace(/</g, "\\u003c");
+}
+
 const CLAWLINE_ALLOWED_ORIGINS_SETTING = "channels.clawline.network.allowedOrigins";
 
 type ClawlineBrowserOriginCheckResult =
@@ -1833,6 +1848,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   };
   async function notifyGatewayOfPending(entry: PendingEntry) {
     const text = `New device pending approval: ${describePairingEntry(entry)}`;
+    await notifyAdminsOfPendingDevice(entry).catch((err) =>
+      logger.warn?.("[clawline:http] pending_device_card_notify_failed", {
+        deviceId: entry.deviceId,
+        error: err instanceof Error ? err.message : String(err),
+      }),
+    );
     await wakeGatewayForAlert(text, mainSessionKey);
   }
   const alertInstructionsPath =
@@ -4718,6 +4739,206 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     return pendingFile.entries.find((entry) => entry.deviceId === deviceId);
   }
 
+  function userIdForPendingEntry(entry: PendingEntry): string {
+    const normalized = normalizeUserIdFromClaimedName(entry.claimedName);
+    if (normalized) {
+      return normalized;
+    }
+    const compactDeviceId = entry.deviceId.replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+    return `device_${compactDeviceId.slice(0, Math.max(1, USER_ID_MAX_LENGTH - 7))}`;
+  }
+
+  function adminDefaultForPendingEntry(entry: PendingEntry): boolean {
+    return userIdForPendingEntry(entry) === "flynn";
+  }
+
+  function createAllowlistEntryFromPending(entry: PendingEntry): AllowlistEntry {
+    const userId = userIdForPendingEntry(entry);
+    return {
+      deviceId: entry.deviceId,
+      claimedName: entry.claimedName,
+      deviceInfo: entry.deviceInfo,
+      userId,
+      isAdmin: userId === "flynn",
+      tokenDelivered: false,
+      createdAt: nowMs(),
+      lastSeenAt: null,
+    };
+  }
+
+  function buildDeviceApprovalAttachment(entry: PendingEntry): ClawlineOutboundAttachmentInput {
+    const claimedName = entry.claimedName?.trim() || "New device";
+    const platform = entry.deviceInfo.platform?.trim() || "Unknown platform";
+    const model = entry.deviceInfo.model?.trim();
+    const surface = model && model !== platform ? `${platform}/${model}` : platform;
+    const userId = userIdForPendingEntry(entry);
+    const approvalData = {
+      deviceId: entry.deviceId,
+      requestedAt: entry.requestedAt,
+      claimedName: entry.claimedName ?? "",
+      platform: entry.deviceInfo.platform ?? "",
+      model: entry.deviceInfo.model ?? "",
+    };
+    const denyMessage = {
+      action: DEVICE_APPROVAL_DENY_ACTION,
+      data: approvalData,
+      summary: `Denied ${entry.deviceId}`,
+    };
+    const approveMessage = {
+      action: DEVICE_APPROVAL_APPROVE_ACTION,
+      data: approvalData,
+      summary: `Approved ${entry.deviceId}`,
+    };
+    const html = `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root { color-scheme: light dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+body { margin: 0; padding: 14px; background: transparent; color: CanvasText; }
+.card { border: 1px solid color-mix(in srgb, CanvasText 18%, transparent); border-radius: 8px; padding: 14px; max-width: 520px; }
+h1 { font-size: 16px; line-height: 1.25; margin: 0 0 12px; font-weight: 650; }
+.row { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 8px; font-size: 13px; line-height: 1.35; margin: 6px 0; }
+.label { color: color-mix(in srgb, CanvasText 62%, transparent); }
+.value { overflow-wrap: anywhere; }
+.actions { display: flex; gap: 8px; margin-top: 14px; }
+button { border: 0; border-radius: 7px; padding: 9px 13px; font: inherit; font-weight: 650; cursor: pointer; }
+button.approve { background: #147a42; color: white; }
+button.deny { background: #9b1c31; color: white; }
+.hint { margin-top: 10px; font-size: 12px; color: color-mix(in srgb, CanvasText 62%, transparent); }
+</style>
+</head>
+<body>
+<section class="card" aria-label="Device approval request">
+<h1>New device pending approval</h1>
+<div class="row"><div class="label">Name</div><div class="value">${escapeHtml(claimedName)}</div></div>
+<div class="row"><div class="label">Platform</div><div class="value">${escapeHtml(surface)}</div></div>
+<div class="row"><div class="label">Device ID</div><div class="value">${escapeHtml(entry.deviceId)}</div></div>
+<div class="row"><div class="label">User ID</div><div class="value">${escapeHtml(userId)}</div></div>
+<div class="row"><div class="label">Admin</div><div class="value">${adminDefaultForPendingEntry(entry) ? "yes" : "no"}</div></div>
+<div class="actions">
+<button class="approve" type="button" data-action="approve">Approve</button>
+<button class="deny" type="button" data-action="deny">Deny</button>
+</div>
+<div class="hint">Approval applies only to this exact pending request.</div>
+</section>
+<script>
+(() => {
+  const messages = {
+    approve: ${jsonForHtmlScript(approveMessage)},
+    deny: ${jsonForHtmlScript(denyMessage)}
+  };
+  function post(message) {
+    const bridge = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.clawline;
+    if (bridge && typeof bridge.postMessage === "function") {
+      bridge.postMessage({ action: message.action, data: message.data });
+      bridge.postMessage({ action: "_close", summary: message.summary });
+      return;
+    }
+  }
+  document.querySelectorAll("button[data-action]").forEach((button) => {
+    button.addEventListener("click", () => post(messages[button.dataset.action]));
+  });
+})();
+</script>
+</body>
+</html>`;
+    const descriptor = { version: 1, html };
+    return {
+      mimeType: INTERACTIVE_HTML_MIME,
+      data: Buffer.from(JSON.stringify(descriptor), "utf8").toString("base64"),
+    };
+  }
+
+  async function persistDeviceApprovalCardForAdmin(params: {
+    userId: string;
+    entry: PendingEntry;
+    attachment: ClawlineOutboundAttachmentInput;
+    broadcast: boolean;
+  }) {
+    let outboundAttachments = {
+      attachments: [] as NormalizedAttachment[],
+      assetIds: [] as string[],
+    };
+    try {
+      outboundAttachments = await materializeOutboundAttachments({
+        attachments: [params.attachment],
+        ownerUserId: params.userId,
+        uploaderDeviceId: "server",
+      });
+    } catch (err) {
+      logger.warn?.("[clawline:http] pending_device_card_materialize_failed", {
+        deviceId: params.entry.deviceId,
+        userId: params.userId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
+    outboundAttachments.attachments = await filterOutboundAttachmentsForTerminalPolicy({
+      attachments: outboundAttachments.attachments,
+      ownerUserId: params.userId,
+      sessionKey: mainSessionKey,
+    });
+    const event: ServerMessage = {
+      type: "message",
+      id: generateServerMessageId(),
+      role: "assistant",
+      sender: resolveAssistantSenderName(mainSessionKey),
+      content: `Device approval requested: ${describePairingEntry(params.entry)}`,
+      timestamp: nowMs(),
+      streaming: false,
+      sessionKey: mainSessionKey,
+      attachments:
+        outboundAttachments.attachments.length > 0 ? outboundAttachments.attachments : undefined,
+    };
+    await enqueueWriteTask(() => {
+      const streams = ensureStreamSessionsForUser({
+        userId: params.userId,
+        isAdmin: true,
+      });
+      syncUserSessionSubscriptions(params.userId, streams);
+      insertEventTx(event, params.userId);
+    });
+    if (params.broadcast) {
+      broadcastToSessionKey(mainSessionKey, event);
+    }
+    await broadcastStreamTailStateForUser(params.userId, event);
+  }
+
+  async function notifyAdminsOfPendingDevice(entry: PendingEntry) {
+    const adminUserIds: string[] = [];
+    const seen = new Set<string>();
+    for (const allowlistEntry of allowlist.entries) {
+      if (!allowlistEntry.isAdmin) {
+        continue;
+      }
+      const userId = sanitizeUserId(allowlistEntry.userId);
+      const key = userId.toLowerCase();
+      if (!userId || seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      adminUserIds.push(userId);
+    }
+    if (adminUserIds.length === 0) {
+      return;
+    }
+    const attachment = buildDeviceApprovalAttachment(entry);
+    const broadcastUserId =
+      adminUserIds.find((userId) => userId.toLowerCase() === "flynn") ?? adminUserIds[0];
+    await Promise.all(
+      adminUserIds.map((userId) =>
+        persistDeviceApprovalCardForAdmin({
+          userId,
+          entry,
+          attachment,
+          broadcast: userId === broadcastUserId,
+        }),
+      ),
+    );
+  }
+
   async function upsertPendingEntry(entry: PendingEntry) {
     const idx = pendingFile.entries.findIndex((existing) => existing.deviceId === entry.deviceId);
     if (idx >= 0) {
@@ -4735,6 +4956,169 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
     pendingFile = { ...pendingFile, entries: next };
     await persistPendingFile();
+  }
+
+  type DeviceApprovalCallbackData = {
+    deviceId: string;
+    requestedAt: number;
+    claimedName: string;
+    platform: string;
+    model: string;
+  };
+
+  function parseDeviceApprovalCallbackData(dataValue: unknown): DeviceApprovalCallbackData {
+    const data =
+      dataValue && typeof dataValue === "object" && !Array.isArray(dataValue)
+        ? (dataValue as Record<string, unknown>)
+        : null;
+    const deviceId = typeof data?.deviceId === "string" ? data.deviceId.trim() : "";
+    const requestedAt = typeof data?.requestedAt === "number" ? data.requestedAt : Number.NaN;
+    const claimedName = typeof data?.claimedName === "string" ? data.claimedName : "";
+    const platform = typeof data?.platform === "string" ? data.platform : "";
+    const model = typeof data?.model === "string" ? data.model : "";
+    if (!validateDeviceId(deviceId) || !Number.isFinite(requestedAt)) {
+      throw new ClientMessageError("invalid_message", "Invalid device approval payload");
+    }
+    return { deviceId, requestedAt, claimedName, platform, model };
+  }
+
+  function pendingEntryMatchesDeviceApproval(
+    entry: PendingEntry,
+    data: DeviceApprovalCallbackData,
+  ): boolean {
+    return (
+      entry.deviceId === data.deviceId &&
+      entry.requestedAt === data.requestedAt &&
+      (entry.claimedName ?? "") === data.claimedName &&
+      (entry.deviceInfo.platform ?? "") === data.platform &&
+      (entry.deviceInfo.model ?? "") === data.model
+    );
+  }
+
+  function pendingApprovalDetailsEqual(left: PendingEntry, right: PendingEntry): boolean {
+    return (
+      left.deviceId === right.deviceId &&
+      (left.claimedName ?? "") === (right.claimedName ?? "") &&
+      (left.deviceInfo.platform ?? "") === (right.deviceInfo.platform ?? "") &&
+      (left.deviceInfo.model ?? "") === (right.deviceInfo.model ?? "")
+    );
+  }
+
+  function closeActiveSessionForAllowlistReplacement(deviceId: string) {
+    const session = sessionsByDevice.get(deviceId);
+    if (!session) {
+      return;
+    }
+    session.revoked = true;
+    session.replayInProgress = false;
+    session.resolveReplayBarrier();
+    removeSession(session);
+    connectionState.delete(session.socket);
+    void sendJson(session.socket, {
+      type: "error",
+      code: "token_revoked",
+      message: "Device approval changed; reconnect required",
+    })
+      .catch(() => {})
+      .finally(() => session.socket.close(1008));
+  }
+
+  async function approvePendingDeviceFromCallback(
+    data: DeviceApprovalCallbackData,
+  ): Promise<string> {
+    await refreshPendingFile();
+    await refreshAllowlistFromDisk();
+    const pendingEntry = findPendingEntry(data.deviceId);
+    const existingAllowlistEntry = findAllowlistEntry(data.deviceId);
+    if (!pendingEntry) {
+      if (existingAllowlistEntry) {
+        await removePendingEntry(data.deviceId);
+        await refreshPendingFile();
+        return `Device already approved: ${describePairingEntry(existingAllowlistEntry)}. Pending queue verified clear.`;
+      }
+      return `Device approval request is no longer pending for deviceId ${data.deviceId}. No changes made.`;
+    }
+    if (!pendingEntryMatchesDeviceApproval(pendingEntry, data)) {
+      return `Device approval request changed for deviceId ${data.deviceId}. No changes made.`;
+    }
+
+    const approvedEntry = createAllowlistEntryFromPending(pendingEntry);
+    const existingAllowlistIndex = allowlist.entries.findIndex(
+      (entry) => entry.deviceId === data.deviceId,
+    );
+    if (existingAllowlistIndex >= 0) {
+      closeActiveSessionForAllowlistReplacement(data.deviceId);
+      allowlist.entries[existingAllowlistIndex] = approvedEntry;
+    } else {
+      allowlist.entries.push(approvedEntry);
+    }
+    await persistAllowlist();
+    await removePendingEntry(data.deviceId);
+    await refreshAllowlistFromDisk();
+    await refreshPendingFile();
+    const verifiedAllowlistEntry = findAllowlistEntry(data.deviceId);
+    const verifiedPendingEntry = findPendingEntry(data.deviceId);
+    if (!verifiedAllowlistEntry || verifiedPendingEntry) {
+      throw new Error("device approval state verification failed");
+    }
+    return `Approved ${describePairingEntry(verifiedAllowlistEntry)} for userId=${verifiedAllowlistEntry.userId} isAdmin=${verifiedAllowlistEntry.isAdmin}. Pending removed and state verified.`;
+  }
+
+  async function denyPendingDeviceFromCallback(data: DeviceApprovalCallbackData): Promise<string> {
+    await refreshPendingFile();
+    await refreshAllowlistFromDisk();
+    const pendingEntry = findPendingEntry(data.deviceId);
+    if (!pendingEntry) {
+      const existingAllowlistEntry = findAllowlistEntry(data.deviceId);
+      if (existingAllowlistEntry) {
+        return `Device already approved: ${describePairingEntry(existingAllowlistEntry)}. No deny action taken.`;
+      }
+      return `Device approval request is no longer pending for deviceId ${data.deviceId}. No changes made.`;
+    }
+    if (!pendingEntryMatchesDeviceApproval(pendingEntry, data)) {
+      return `Device approval request changed for deviceId ${data.deviceId}. No changes made.`;
+    }
+    await removePendingEntry(data.deviceId);
+    reconcilePendingSocketsWithFile();
+    await refreshPendingFile();
+    if (findPendingEntry(data.deviceId)) {
+      throw new Error("device denial state verification failed");
+    }
+    return `Denied ${describePairingEntry(pendingEntry)}. Pending removed and state verified. No denylist entry was added.`;
+  }
+
+  async function handleDeviceApprovalCallback(
+    session: Session,
+    sourceMessageId: string,
+    action: string,
+    dataValue: unknown,
+  ): Promise<boolean> {
+    if (action !== DEVICE_APPROVAL_APPROVE_ACTION && action !== DEVICE_APPROVAL_DENY_ACTION) {
+      return false;
+    }
+    if (!session.isAdmin) {
+      throw new ClientMessageError("forbidden", "Device approval requires admin access");
+    }
+    if (isDenylisted(session.deviceId)) {
+      throw new ClientMessageError("token_revoked", "Device revoked");
+    }
+    const data = parseDeviceApprovalCallbackData(dataValue);
+    const content =
+      action === DEVICE_APPROVAL_APPROVE_ACTION
+        ? await approvePendingDeviceFromCallback(data)
+        : await denyPendingDeviceFromCallback(data);
+    const callbackSessionKey = mainSessionKey;
+    const event = await persistAssistantMessage(
+      session,
+      session.userId,
+      content,
+      callbackSessionKey,
+      [],
+      { replyToMessageId: sourceMessageId },
+    );
+    broadcastToSessionKey(callbackSessionKey, event);
+    await broadcastStreamTailStateForUser(session.userId, event);
+    return true;
   }
 
   function handleAllowlistChanged() {
@@ -7958,6 +8342,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         throw new ClientMessageError("forbidden", "Admin channel requires admin access");
       }
 
+      if (await handleDeviceApprovalCallback(session, sourceMessageId, action, dataValue)) {
+        return;
+      }
+
       const callbackEnvelope = {
         messageId: sourceMessageId,
         payload: { action, data: dataValue === undefined ? null : dataValue },
@@ -9252,7 +9640,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           requestedAt: existingPendingEntry ? existingPendingEntry.requestedAt : nowMs(),
         };
         await upsertPendingEntry(pendingEntry);
-        await notifyGatewayOfPending(pendingEntry).catch(() => {});
+        if (!existingPendingEntry) {
+          await notifyGatewayOfPending(pendingEntry).catch(() => {});
+        } else if (!pendingApprovalDetailsEqual(existingPendingEntry, pendingEntry)) {
+          await notifyAdminsOfPendingDevice(pendingEntry).catch(() => {});
+        }
         await sendJson(ws, { type: "pair_result", success: false, reason: "pair_pending" });
         ws.close();
         return;
@@ -9298,18 +9690,37 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     logger.info?.(
       `[clawline:http] pair_request_pending_persisted ${describePairingEntry(pendingEntry)} pendingEntries=${pendingFile.entries.length}`,
     );
-    notifyGatewayOfPending(pendingEntry)
-      .then(() =>
-        logger.info?.(
-          `[clawline:http] pair_request_pending_notified ${describePairingEntry(pendingEntry)}`,
-        ),
-      )
-      .catch((err) =>
-        logger.warn?.("[clawline:http] pair_request_pending_notify_failed", {
-          deviceId,
-          error: err.message,
-        }),
+    if (!existingPendingEntry) {
+      notifyGatewayOfPending(pendingEntry)
+        .then(() =>
+          logger.info?.(
+            `[clawline:http] pair_request_pending_notified ${describePairingEntry(pendingEntry)}`,
+          ),
+        )
+        .catch((err) =>
+          logger.warn?.("[clawline:http] pair_request_pending_notify_failed", {
+            deviceId,
+            error: err.message,
+          }),
+        );
+    } else if (!pendingApprovalDetailsEqual(existingPendingEntry, pendingEntry)) {
+      notifyAdminsOfPendingDevice(pendingEntry)
+        .then(() =>
+          logger.info?.(
+            `[clawline:http] pair_request_pending_card_refreshed ${describePairingEntry(pendingEntry)} pendingEntries=${pendingFile.entries.length}`,
+          ),
+        )
+        .catch((err) =>
+          logger.warn?.("[clawline:http] pair_request_pending_card_refresh_failed", {
+            deviceId,
+            error: err instanceof Error ? err.message : String(err),
+          }),
+        );
+    } else {
+      logger.info?.(
+        `[clawline:http] pair_request_pending_coalesced ${describePairingEntry(pendingEntry)} pendingEntries=${pendingFile.entries.length}`,
       );
+    }
     const existingSocket = pendingSockets.get(deviceId);
     if (existingSocket) {
       existingSocket.socket.close(1000);
