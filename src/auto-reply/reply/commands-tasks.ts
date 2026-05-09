@@ -19,11 +19,16 @@ const MAX_VISIBLE_TASKS = 5;
 
 const TASK_STATUS_ICONS: Record<TaskRecord["status"], string> = {
   queued: "🟡",
+  submitting: "🟡",
+  submitted_unacked: "🟡",
   running: "🟢",
+  owner_check_required: "🟠",
+  blocked: "⛔️",
   succeeded: "✅",
   failed: "🔴",
   timed_out: "⏱️",
   cancelled: "⚪️",
+  replaced: "⚪️",
   lost: "⚠️",
 };
 
@@ -32,6 +37,7 @@ const TASK_RUNTIME_LABELS: Record<TaskRecord["runtime"], string> = {
   acp: "ACP",
   cli: "CLI",
   cron: "Cron",
+  "external-tmux": "External tmux",
 };
 
 function formatTaskHeadline(snapshot: ReturnType<typeof buildTaskStatusSnapshot>): string {

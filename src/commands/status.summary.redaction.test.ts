@@ -36,11 +36,16 @@ describe("redactSensitiveStatusSummary", () => {
         failures: 1,
         byStatus: {
           queued: 1,
+          submitting: 0,
+          submitted_unacked: 0,
           running: 0,
+          owner_check_required: 0,
+          blocked: 0,
           succeeded: 0,
           failed: 1,
           timed_out: 0,
           cancelled: 0,
+          replaced: 0,
           lost: 0,
         },
         byRuntime: {
@@ -48,6 +53,7 @@ describe("redactSensitiveStatusSummary", () => {
           acp: 1,
           cli: 0,
           cron: 1,
+          "external-tmux": 0,
         },
       },
       taskAudit: {

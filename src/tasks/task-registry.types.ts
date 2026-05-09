@@ -1,14 +1,19 @@
 import type { DeliveryContext } from "../utils/delivery-context.types.js";
 
-export type TaskRuntime = "subagent" | "acp" | "cli" | "cron";
+export type TaskRuntime = "subagent" | "acp" | "cli" | "cron" | "external-tmux";
 
 export type TaskStatus =
   | "queued"
+  | "submitting"
+  | "submitted_unacked"
   | "running"
+  | "owner_check_required"
+  | "blocked"
   | "succeeded"
   | "failed"
   | "timed_out"
   | "cancelled"
+  | "replaced"
   | "lost";
 
 export type TaskDeliveryStatus =

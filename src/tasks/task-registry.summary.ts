@@ -8,11 +8,16 @@ import type {
 function createEmptyTaskStatusCounts(): TaskStatusCounts {
   return {
     queued: 0,
+    submitting: 0,
+    submitted_unacked: 0,
     running: 0,
+    owner_check_required: 0,
+    blocked: 0,
     succeeded: 0,
     failed: 0,
     timed_out: 0,
     cancelled: 0,
+    replaced: 0,
     lost: 0,
   };
 }
@@ -23,6 +28,7 @@ function createEmptyTaskRuntimeCounts(): TaskRuntimeCounts {
     acp: 0,
     cli: 0,
     cron: 0,
+    "external-tmux": 0,
   };
 }
 
@@ -43,12 +49,23 @@ export function summarizeTaskRecords(records: Iterable<TaskRecord>): TaskRegistr
     summary.total += 1;
     summary.byStatus[task.status] += 1;
     summary.byRuntime[task.runtime] += 1;
-    if (task.status === "queued" || task.status === "running") {
+    if (
+      task.status === "queued" ||
+      task.status === "submitting" ||
+      task.status === "submitted_unacked" ||
+      task.status === "running" ||
+      task.status === "owner_check_required"
+    ) {
       summary.active += 1;
     } else {
       summary.terminal += 1;
     }
-    if (task.status === "failed" || task.status === "timed_out" || task.status === "lost") {
+    if (
+      task.status === "failed" ||
+      task.status === "timed_out" ||
+      task.status === "lost" ||
+      task.status === "blocked"
+    ) {
       summary.failures += 1;
     }
   }
