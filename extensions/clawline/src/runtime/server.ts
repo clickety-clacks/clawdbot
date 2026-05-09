@@ -25,9 +25,11 @@ import {
   dispatchInboundMessage,
   enqueueAnnounce,
   finalizeInboundContext,
+  getDefaultLocalRoots,
   hasAlphaChannel,
   isLoopbackHost,
   isPrivateOrLoopbackHost,
+  loadWebMedia,
   loadSessionStore,
   maxBytesForKind,
   mediaKindFromMime,
@@ -38,6 +40,7 @@ import {
   recordInboundSession,
   resolveAgentIdentity,
   resolveAgentIdFromSessionKey,
+  resolveAgentWorkspaceDir,
   resolveActiveAgentHarnessRunSessionId,
   resolveAllAgentSessionStoreTargetsSync,
   resolveDefaultModelForAgent,
@@ -265,6 +268,7 @@ const SERVER_FEATURE_STREAM_READ_STATE = "stream_read_state";
 const SERVER_FEATURE_STREAM_TAIL_STATE = "stream_tail_state";
 const TERMINAL_BUBBLES_UNSUPPORTED_NOTICE =
   "Terminal session hidden: this client does not support terminal bubbles yet. Update Clawline to view it.";
+const MEDIA_ATTACHMENT_FAILED_TEXT = "[Media attachment failed]";
 const INLINE_DOCUMENT_MIME_TYPES = new Set([TERMINAL_SESSION_MIME, INTERACTIVE_HTML_MIME]);
 const SUPPORTED_CLIENT_FEATURES = new Set([CLIENT_FEATURE_TERMINAL_BUBBLES_V1]);
 const MAX_INTERACTIVE_ACTION_CHARS = 128;
@@ -1040,6 +1044,30 @@ function buildAssistantTextFromPayload(payload: ReplyPayload, fallback: string):
   }
   const fallbackText = fallback.trim();
   return fallbackText || null;
+}
+
+function withMediaFailureIndicator(text: string): string {
+  const trimmed = text.trim();
+  return trimmed ? `${trimmed}\n\n${MEDIA_ATTACHMENT_FAILED_TEXT}` : MEDIA_ATTACHMENT_FAILED_TEXT;
+}
+
+function buildAssistantTextFromMediaOutcome(params: {
+  payload: ReplyPayload;
+  fallback: string;
+  attachments: NormalizedAttachment[];
+  mediaFailed: boolean;
+}): string | null {
+  const trimmedText = params.payload.text?.trim();
+  if (trimmedText && trimmedText.length > 0) {
+    return params.mediaFailed ? withMediaFailureIndicator(trimmedText) : trimmedText;
+  }
+  if (params.attachments.length > 0) {
+    return "";
+  }
+  if (params.mediaFailed) {
+    return MEDIA_ATTACHMENT_FAILED_TEXT;
+  }
+  return buildAssistantTextFromPayload(params.payload, params.fallback);
 }
 
 function timingSafeStringEqual(a: string, b: string): boolean {
@@ -3259,8 +3287,89 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     return { attachments: resolved, assetIds };
   }
 
+  async function storeOutboundMediaBuffer(params: {
+    buffer: Buffer;
+    contentType?: string;
+    ownerUserId: string;
+    uploaderDeviceId: string;
+  }): Promise<{ attachment: NormalizedAttachment | null; assetId?: string }> {
+    if (params.buffer.length === 0) {
+      return { attachment: null };
+    }
+    const mimeType = (params.contentType ?? "application/octet-stream").toLowerCase();
+    const isInlineImage = INLINE_IMAGE_MIME_TYPES.has(mimeType);
+    if (isInlineImage && params.buffer.length <= config.media.maxInlineBytes) {
+      return {
+        attachment: { type: "image", mimeType, data: params.buffer.toString("base64") },
+      };
+    }
+    const assetId = `a_${randomUUID()}`;
+    const assetPath = path.join(assetsDir, assetId);
+    await fs.writeFile(assetPath, params.buffer);
+    await enqueueWriteTask(() =>
+      insertAssetStmt.run(
+        assetId,
+        params.ownerUserId,
+        mimeType,
+        params.buffer.length,
+        nowMs(),
+        params.uploaderDeviceId,
+      ),
+    );
+    return { attachment: { type: "asset", assetId }, assetId };
+  }
+
+  function resolveOutboundMediaWorkspaceDir(agentId: string): string {
+    return path.resolve(resolveAgentWorkspaceDir(openClawCfg, agentId));
+  }
+
+  function stripAgentMediaDirective(rawUrl: string): string {
+    const trimmed = rawUrl.trim();
+    if (/^\s*media:\/\//i.test(trimmed)) {
+      return trimmed;
+    }
+    return trimmed.replace(/^\s*MEDIA\s*:\s*/i, "").trim();
+  }
+
+  function resolveOutboundMediaReference(rawUrl: string, workspaceDir: string): string {
+    const stripped = stripAgentMediaDirective(rawUrl);
+    if (stripped === "/workspace") {
+      return workspaceDir;
+    }
+    if (stripped.startsWith("/workspace/")) {
+      return path.join(workspaceDir, stripped.slice("/workspace/".length));
+    }
+    if (stripped.startsWith("file://")) {
+      try {
+        const parsed = new URL(stripped);
+        const isLocalFileUrl =
+          parsed.protocol === "file:" && (!parsed.hostname || parsed.hostname === "localhost");
+        if (isLocalFileUrl && parsed.pathname === "/workspace") {
+          return workspaceDir;
+        }
+        if (isLocalFileUrl && parsed.pathname.startsWith("/workspace/")) {
+          return path.join(
+            workspaceDir,
+            decodeURIComponent(parsed.pathname.slice("/workspace/".length)),
+          );
+        }
+      } catch {}
+    }
+    return stripped;
+  }
+
+  function outboundMediaLocalRoots(workspaceDir: string): string[] {
+    return Array.from(
+      new Set([
+        ...getDefaultLocalRoots().map((root) => path.resolve(root)),
+        path.resolve(workspaceDir),
+      ]),
+    );
+  }
+
   async function materializeOutboundMediaUrls(params: {
     mediaUrls: string[];
+    agentId: string;
     ownerUserId: string;
     uploaderDeviceId: string;
   }): Promise<{ attachments: NormalizedAttachment[]; assetIds: string[] }> {
@@ -3272,39 +3381,42 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     const trimmedUrls = params.mediaUrls
       .map((url) => (typeof url === "string" ? url.trim() : ""))
       .filter((url) => url.length > 0);
+    const workspaceDir = resolveOutboundMediaWorkspaceDir(params.agentId);
     for (const url of trimmedUrls) {
-      const media = await fetchPinnedMedia(url, config.media.maxUploadBytes);
-      if (media.buffer.length === 0) {
+      const resolvedUrl = resolveOutboundMediaReference(url, workspaceDir);
+      const media = /^https?:\/\//i.test(resolvedUrl)
+        ? await (async () => {
+            const fetched = await fetchPinnedMedia(resolvedUrl, config.media.maxUploadBytes);
+            if (fetched.buffer.length === 0) {
+              return null;
+            }
+            return await clampAndOptimizeMedia({
+              buffer: fetched.buffer,
+              contentType: fetched.contentType,
+              fileName: fetched.fileName,
+              maxBytes: config.media.maxUploadBytes,
+            });
+          })()
+        : await loadWebMedia(resolvedUrl, {
+            maxBytes: config.media.maxUploadBytes,
+            workspaceDir,
+            localRoots: outboundMediaLocalRoots(workspaceDir),
+          });
+      if (!media) {
         continue;
       }
-      const processed = await clampAndOptimizeMedia({
+      const stored = await storeOutboundMediaBuffer({
         buffer: media.buffer,
         contentType: media.contentType,
-        fileName: media.fileName,
-        maxBytes: config.media.maxUploadBytes,
+        ownerUserId: params.ownerUserId,
+        uploaderDeviceId: params.uploaderDeviceId,
       });
-      const mimeType = (processed.contentType ?? "application/octet-stream").toLowerCase();
-      const buffer = processed.buffer;
-      const isInlineImage = INLINE_IMAGE_MIME_TYPES.has(mimeType);
-      if (isInlineImage && buffer.length <= config.media.maxInlineBytes) {
-        resolved.push({ type: "image", mimeType, data: buffer.toString("base64") });
-        continue;
+      if (stored.attachment) {
+        resolved.push(stored.attachment);
       }
-      const assetId = `a_${randomUUID()}`;
-      const assetPath = path.join(assetsDir, assetId);
-      await fs.writeFile(assetPath, buffer);
-      await enqueueWriteTask(() =>
-        insertAssetStmt.run(
-          assetId,
-          params.ownerUserId,
-          mimeType,
-          buffer.length,
-          nowMs(),
-          params.uploaderDeviceId,
-        ),
-      );
-      resolved.push({ type: "asset", assetId });
-      assetIds.push(assetId);
+      if (stored.assetId) {
+        assetIds.push(stored.assetId);
+      }
     }
     return { attachments: resolved, assetIds };
   }
@@ -7070,6 +7182,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       attachments: [] as NormalizedAttachment[],
       assetIds: [] as string[],
     };
+    let outboundMediaFailed = false;
     if (rawAttachments.length > 0) {
       try {
         outboundAttachments = await materializeOutboundAttachments({
@@ -7087,10 +7200,13 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       try {
         outboundAttachments = await materializeOutboundMediaUrls({
           mediaUrls: [mediaUrl],
+          agentId: resolveAgentIdFromSessionKey(normalizedResolvedSessionKey),
           ownerUserId: target.userId,
           uploaderDeviceId: target.kind === "device" ? target.deviceId : "server",
         });
+        outboundMediaFailed = outboundAttachments.attachments.length === 0;
       } catch (err) {
+        outboundMediaFailed = true;
         logger.warn?.(`[clawline] outbound_media_attachment_failed: ${formatError(err)}`);
       }
     }
@@ -7106,7 +7222,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       id: generateServerMessageId(),
       role: "assistant",
       sender: resolveAssistantSenderName(normalizedResolvedSessionKey),
-      content: text,
+      content: outboundMediaFailed ? withMediaFailureIndicator(text) : text,
       timestamp: nowMs(),
       streaming: false,
       sessionKey: normalizedResolvedSessionKey,
@@ -7595,25 +7711,28 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
                   ? [replyPayload.mediaUrl]
                   : [];
               let attachments: NormalizedAttachment[] = [];
-              const trimmedText = replyPayload.text?.trim();
+              let mediaFailed = false;
               if (mediaUrls.length > 0) {
                 try {
                   const materialized = await materializeOutboundMediaUrls({
                     mediaUrls,
+                    agentId: route.agentId,
                     ownerUserId: targetUserId,
                     uploaderDeviceId: session.deviceId,
                   });
                   attachments = materialized.attachments;
+                  mediaFailed = attachments.length === 0;
                 } catch (err) {
+                  mediaFailed = true;
                   logger.warn?.(`[clawline] reply_media_attachment_failed: ${formatError(err)}`);
                 }
               }
-              const assistantText =
-                trimmedText && trimmedText.length > 0
-                  ? trimmedText
-                  : attachments.length > 0
-                    ? ""
-                    : buildAssistantTextFromPayload(replyPayload, fallbackText);
+              const assistantText = buildAssistantTextFromMediaOutcome({
+                payload: replyPayload,
+                fallback: fallbackText,
+                attachments,
+                mediaFailed,
+              });
               if (assistantText === null) {
                 return;
               }
@@ -8128,25 +8247,28 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
                   ? [replyPayload.mediaUrl]
                   : [];
               let replyAttachments: NormalizedAttachment[] = [];
-              const trimmedText = replyPayload.text?.trim();
+              let mediaFailed = false;
               if (mediaUrls.length > 0) {
                 try {
                   const materialized = await materializeOutboundMediaUrls({
                     mediaUrls,
+                    agentId: route.agentId,
                     ownerUserId: targetUserId,
                     uploaderDeviceId: session.deviceId,
                   });
                   replyAttachments = materialized.attachments;
+                  mediaFailed = replyAttachments.length === 0;
                 } catch (err) {
+                  mediaFailed = true;
                   logger.warn?.(`[clawline] reply_media_attachment_failed: ${formatError(err)}`);
                 }
               }
-              const assistantText =
-                trimmedText && trimmedText.length > 0
-                  ? trimmedText
-                  : replyAttachments.length > 0
-                    ? ""
-                    : buildAssistantTextFromPayload(replyPayload, fallbackText);
+              const assistantText = buildAssistantTextFromMediaOutcome({
+                payload: replyPayload,
+                fallback: fallbackText,
+                attachments: replyAttachments,
+                mediaFailed,
+              });
               if (assistantText === null) {
                 return;
               }

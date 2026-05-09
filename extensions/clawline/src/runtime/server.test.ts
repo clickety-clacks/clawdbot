@@ -11,6 +11,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import type { getReplyFromConfig } from "../../../../src/auto-reply/reply.js";
 import type { OpenClawConfig } from "../../../../src/config/config.js";
+import { resolvePreferredOpenClawTmpDir } from "../../../../src/infra/tmp-openclaw-dir.js";
 import { clawlineMessageActions } from "../actions.js";
 import type {
   AllowlistEntry,
@@ -73,6 +74,11 @@ const silentLogger: Logger = {
 const testReplyResolver: typeof getReplyFromConfig = async () => ({ text: "ok" });
 const withMainAlertReplyRequirement = (text: string) =>
   `${text}\n\n${MAIN_SESSION_ALERT_REPLY_TEXT}`;
+const tinyPngBytes = () =>
+  Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAwUBAQGzL2zQAAAAAElFTkSuQmCC",
+    "base64",
+  );
 
 const testOpenClawConfig = {
   agents: { default: "main", list: [{ id: "main" }] },
@@ -2700,14 +2706,158 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
-  it("does not crash outbound sends when mediaUrl is an invalid local path", async () => {
+  it("renders agent MEDIA workspace references as native attachments", async () => {
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const workspaceDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawline-agent-workspace-"));
+    const ctx = await setupTestServer([entry], {
+      webRootPathRelative: "custom-web-ui",
+      openClawConfig: {
+        ...testOpenClawConfig,
+        agents: {
+          default: "main",
+          defaults: { workspace: workspaceDir },
+          list: [{ id: "main" }],
+        },
+      } as OpenClawConfig,
+      replyResolver: async () => ({
+        text: "caption",
+        mediaUrl: "MEDIA:/workspace/out/image.png",
+      }),
+    });
+    let ws: WebSocket | null = null;
+    let queue: ReturnType<typeof createMessageQueue> | null = null;
+    try {
+      const outputPath = path.join(workspaceDir, "out", "image.png");
+      await fs.mkdir(path.dirname(outputPath), { recursive: true });
+      await fs.writeFile(outputPath, tinyPngBytes());
+
+      const pair = await performPairRequest(ctx.port, entry.deviceId);
+      const authed = await authenticateDeviceWithQueue(
+        ctx.port,
+        entry.deviceId,
+        pair.token as string,
+      );
+      ws = authed.ws;
+      queue = authed.queue;
+
+      const inboundId = `c_${randomUUID()}`;
+      ws.send(
+        JSON.stringify({
+          type: "message",
+          id: inboundId,
+          content: "make media",
+        }),
+      );
+      await waitForQueuedMessage(queue, (value) => {
+        const typed = value as { type?: string; id?: string };
+        return typed.type === "ack" && typed.id === inboundId;
+      });
+      const reply = await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const typed = value as { type?: string; role?: string; content?: string };
+        return typed.type === "message" && typed.role === "assistant";
+      });
+
+      expect(reply.content).toBe("caption");
+      expect(JSON.stringify(reply)).not.toContain("MEDIA:");
+      expect(reply.attachments).toHaveLength(1);
+      const attachment = (reply.attachments as Array<Record<string, unknown>>)[0];
+      expect(attachment).toMatchObject({
+        type: "image",
+        mimeType: expect.stringMatching(/^image\//),
+      });
+      expect(typeof attachment.data).toBe("string");
+    } finally {
+      queue?.dispose();
+      ws?.terminate();
+      await ctx.cleanup();
+      await fs.rm(workspaceDir, { recursive: true, force: true });
+    }
+  });
+
+  it("renders normalized outbound-media store paths as native attachments", async () => {
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const mediaRoot = await fs.mkdtemp(
+      path.join(resolvePreferredOpenClawTmpDir(), "clawline-outbound-media-"),
+    );
+    const outputPath = path.join(mediaRoot, "image.png");
+    const ctx = await setupTestServer([entry], {
+      replyResolver: async () => ({
+        text: "caption",
+        mediaUrl: outputPath,
+      }),
+    });
+    let ws: WebSocket | null = null;
+    let queue: ReturnType<typeof createMessageQueue> | null = null;
+    try {
+      await fs.writeFile(outputPath, tinyPngBytes());
+
+      const pair = await performPairRequest(ctx.port, entry.deviceId);
+      const authed = await authenticateDeviceWithQueue(
+        ctx.port,
+        entry.deviceId,
+        pair.token as string,
+      );
+      ws = authed.ws;
+      queue = authed.queue;
+
+      const inboundId = `c_${randomUUID()}`;
+      ws.send(
+        JSON.stringify({
+          type: "message",
+          id: inboundId,
+          content: "make normalized media",
+        }),
+      );
+      await waitForQueuedMessage(queue, (value) => {
+        const typed = value as { type?: string; id?: string };
+        return typed.type === "ack" && typed.id === inboundId;
+      });
+      const reply = await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const typed = value as { type?: string; role?: string; content?: string };
+        return typed.type === "message" && typed.role === "assistant";
+      });
+
+      expect(reply.content).toBe("caption");
+      expect(reply.attachments).toHaveLength(1);
+      expect((reply.attachments as Array<Record<string, unknown>>)[0]).toMatchObject({
+        type: "image",
+        mimeType: expect.stringMatching(/^image\//),
+      });
+    } finally {
+      queue?.dispose();
+      ws?.terminate();
+      await ctx.cleanup();
+      await fs.rm(mediaRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("adds an explicit media failure indicator for mixed text and failed mediaUrl", async () => {
     const entry = createAllowlistEntry({
       deviceId: randomUUID(),
       isAdmin: true,
       tokenDelivered: true,
     });
     const ctx = await setupTestServer([entry]);
+    let ws: WebSocket | null = null;
+    let queue: ReturnType<typeof createMessageQueue> | null = null;
     try {
+      const pair = await performPairRequest(ctx.port, entry.deviceId);
+      const authed = await authenticateDeviceWithQueue(
+        ctx.port,
+        entry.deviceId,
+        pair.token as string,
+      );
+      ws = authed.ws;
+      queue = authed.queue;
+
       const result = await ctx.server.sendMessage({
         target: entry.userId,
         text: "fallback text",
@@ -2715,7 +2865,14 @@ describe.sequential("clawline provider server", () => {
       });
       expect(result.attachments).toEqual([]);
       expect(result.assetIds).toEqual([]);
+      const delivered = await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const typed = value as { type?: string; id?: string };
+        return typed.type === "message" && typed.id === result.messageId;
+      });
+      expect(delivered.content).toBe("fallback text\n\n[Media attachment failed]");
     } finally {
+      queue?.dispose();
+      ws?.terminate();
       await ctx.cleanup();
     }
   });
