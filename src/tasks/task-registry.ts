@@ -128,11 +128,7 @@ function isActiveTaskStatus(status: TaskStatus): boolean {
 
 function isTerminalFlowStatus(status: TaskFlowRecord["status"]): boolean {
   return (
-    status === "blocked" ||
-    status === "succeeded" ||
-    status === "failed" ||
-    status === "cancelled" ||
-    status === "lost"
+    status === "succeeded" || status === "failed" || status === "cancelled" || status === "lost"
   );
 }
 
