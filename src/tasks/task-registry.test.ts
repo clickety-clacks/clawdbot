@@ -580,9 +580,7 @@ describe("task-registry", () => {
         byStatus: {
           queued: 1,
           submitting: 0,
-          submitted_unacked: 0,
           running: 1,
-          owner_check_required: 0,
           blocked: 0,
           succeeded: 0,
           failed: 0,
@@ -596,7 +594,6 @@ describe("task-registry", () => {
           acp: 1,
           cli: 0,
           cron: 1,
-          "external-tmux": 0,
         },
       });
     });

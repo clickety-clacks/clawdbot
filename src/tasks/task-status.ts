@@ -6,13 +6,7 @@ import { sanitizeUserFacingText } from "../agents/pi-embedded-helpers/sanitize-u
 import { truncateUtf16Safe } from "../utils.js";
 import type { TaskRecord } from "./task-registry.types.js";
 
-const ACTIVE_TASK_STATUSES = new Set([
-  "queued",
-  "submitting",
-  "submitted_unacked",
-  "running",
-  "owner_check_required",
-]);
+const ACTIVE_TASK_STATUSES = new Set(["queued", "submitting", "running"]);
 const FAILURE_TASK_STATUSES = new Set(["failed", "timed_out", "lost", "blocked"]);
 export const TASK_STATUS_RECENT_WINDOW_MS = 5 * 60_000;
 export const TASK_STATUS_TITLE_MAX_CHARS = 80;
