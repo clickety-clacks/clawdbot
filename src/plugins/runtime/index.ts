@@ -43,6 +43,15 @@ export {
   setGatewayNodesRuntime,
   setGatewaySubagentRuntime,
 } from "./gateway-bindings.js";
+export { ForemanTaskFlowController } from "../foreman-controller.js";
+export type {
+  ForemanAssignmentInput,
+  ForemanAttemptPhase,
+  ForemanEventResult,
+  ForemanPaneRef,
+  ForemanWorkerEvent,
+  ForemanWorkerEventType,
+} from "../foreman-controller.js";
 
 const loadTtsRuntime = createLazyRuntimeModule(() => import("../../tts/tts.js"));
 const loadMediaUnderstandingRuntime = createLazyRuntimeModule(
