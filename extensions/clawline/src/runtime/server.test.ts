@@ -6,13 +6,12 @@ import os from "node:os";
 import path from "node:path";
 import BetterSqlite3 from "better-sqlite3";
 import jwt from "jsonwebtoken";
+import { resolvePreferredOpenClawTmpDir } from "openclaw/plugin-sdk/runtime-env";
 import { FormData, fetch, getGlobalDispatcher } from "undici";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
-import type { getReplyFromConfig } from "../../../../src/auto-reply/reply.js";
-import type { OpenClawConfig } from "../../../../src/config/config.js";
-import { resolvePreferredOpenClawTmpDir } from "../../../../src/infra/tmp-openclaw-dir.js";
 import { clawlineMessageActions } from "../actions.js";
+import type { getReplyFromConfig, OpenClawConfig } from "../runtime-api.js";
 import type {
   AllowlistEntry,
   ClawlineOutboundSendResult,

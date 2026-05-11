@@ -24,7 +24,6 @@ import {
   getTaskFlowById,
   syncFlowFromTask,
   updateFlowRecordByIdExpectedRevision,
-  type TaskFlowUpdateResult,
 } from "./task-flow-runtime-internal.js";
 import type { TaskRegistryControlRuntime } from "./task-registry-control.types.js";
 import {
@@ -923,11 +922,10 @@ function syncManagedFlowCancellationFromTask(task: TaskRecord): void {
     if (result.applied) {
       return;
     }
-    const failedResult = result as Extract<TaskFlowUpdateResult, { applied: false }>;
-    if (failedResult.reason === "not_found") {
+    if (result.reason === "not_found") {
       return;
     }
-    flow = failedResult.current;
+    flow = result.current;
     if (
       !flow ||
       flow.syncMode !== "managed" ||
