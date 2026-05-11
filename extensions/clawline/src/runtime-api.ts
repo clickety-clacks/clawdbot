@@ -19,11 +19,11 @@ export {
 export type { OpenClawConfig } from "openclaw/plugin-sdk/core";
 export { resolveUserPath } from "openclaw/plugin-sdk/account-resolution";
 export {
+  applySessionsPatchToStore,
   loadSessionStore,
   resolveSessionStoreEntry,
   resolveStorePath,
-  applySessionsPatchToStore,
-} from "openclaw/plugin-sdk/config-runtime";
+} from "openclaw/plugin-sdk/session-store-runtime";
 export { recordInboundSession } from "openclaw/plugin-sdk/conversation-runtime";
 export {
   createReplyDispatcherWithTyping,
@@ -63,7 +63,7 @@ export {
 export {
   resolveAllAgentSessionStoreTargetsSync,
   updateSessionStore,
-} from "openclaw/plugin-sdk/config-runtime";
+} from "openclaw/plugin-sdk/session-store-runtime";
 
 // Remaining gaps after T187:
 // - Clawline runtime production code no longer reaches into repo `src/**`.
