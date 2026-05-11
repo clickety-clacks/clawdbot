@@ -63,6 +63,31 @@ describe("createReplyMediaPathNormalizer", () => {
     );
   });
 
+  it("stages /workspace alias media through the configured agent workspace", async () => {
+    const normalize = createReplyMediaPathNormalizer({
+      cfg: {},
+      sessionKey: "session-key",
+      workspaceDir: "/tmp/agent-workspace",
+    });
+
+    const result = await normalize({
+      mediaUrls: ["/workspace/out/photo.png"],
+    });
+
+    expect(result).toMatchObject({
+      mediaUrl: "/tmp/outbound-media/photo.png",
+      mediaUrls: ["/tmp/outbound-media/photo.png"],
+    });
+    expect(resolveOutboundAttachmentFromUrl).toHaveBeenCalledWith(
+      path.join("/tmp/agent-workspace", "out", "photo.png"),
+      5 * 1024 * 1024,
+      expect.objectContaining({
+        mediaAccess: expect.objectContaining({
+          workspaceDir: "/tmp/agent-workspace",
+        }),
+      }),
+    );
+  });
   it("maps sandbox-relative media back to the host sandbox workspace before staging", async () => {
     ensureSandboxWorkspaceForSession.mockResolvedValue({
       workspaceDir: "/tmp/sandboxes/session-1",

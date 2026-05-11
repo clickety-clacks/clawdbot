@@ -56,6 +56,16 @@ function formatBlockedReplyMediaWarning(): string {
   return "⚠️ Media failed.";
 }
 
+function resolveWorkspaceAliasMediaSource(media: string, workspaceDir: string): string | null {
+  if (media === "/workspace") {
+    return workspaceDir;
+  }
+  if (media.startsWith("/workspace/")) {
+    return path.join(workspaceDir, media.slice("/workspace/".length));
+  }
+  return null;
+}
+
 export function createReplyMediaPathNormalizer(params: {
   cfg: OpenClawConfig;
   sessionKey?: string;
@@ -155,6 +165,10 @@ export function createReplyMediaPathNormalizer(params: {
     assertMediaNotDataUrl(media);
     if (isPassThroughRemoteMediaSource(media)) {
       return media;
+    }
+    const workspaceAliasMedia = resolveWorkspaceAliasMediaSource(media, params.workspaceDir);
+    if (workspaceAliasMedia) {
+      return await persistLocalReplyMedia(workspaceAliasMedia);
     }
     const isRelativeLocalMedia =
       isLikelyLocalMediaSource(media) &&
