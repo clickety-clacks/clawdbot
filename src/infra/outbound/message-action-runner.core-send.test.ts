@@ -143,7 +143,7 @@ describe("runMessageAction core send routing", () => {
             messaging: {
               targetResolver: {
                 looksLikeId: (raw) => /^-?\d+:topic:\d+$/.test(raw),
-                resolveTarget: ({ normalized }) => ({
+                resolveTarget: async ({ normalized }) => ({
                   to: `telegram:${normalized}`,
                   kind: "group",
                   source: "normalized",
