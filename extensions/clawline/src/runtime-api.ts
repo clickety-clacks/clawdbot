@@ -34,14 +34,11 @@ export {
 } from "openclaw/plugin-sdk/reply-runtime";
 export { isLoopbackHost, rawDataToString } from "openclaw/plugin-sdk/gateway-runtime";
 export {
-  closeDispatcher,
-  createPinnedDispatcher,
   enqueueSystemEvent,
   peekSystemEvents,
   resetSystemEventsForTest,
-  resolvePinnedHostname,
-  type PinnedHostname,
-} from "openclaw/plugin-sdk/infra-runtime";
+} from "openclaw/plugin-sdk/system-event-runtime";
+export { fetchWithSsrFGuard, resolvePinnedHostname } from "openclaw/plugin-sdk/ssrf-runtime";
 export {
   detectMime,
   hasAlphaChannel,
