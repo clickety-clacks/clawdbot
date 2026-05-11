@@ -121,9 +121,13 @@ function stableHash(value: string): string {
 }
 
 function asForemanState(value: JsonValue | null | undefined): ForemanFlowState | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
   const candidate = value as Partial<ForemanFlowState>;
-  if (candidate.foremanVersion !== 1 || typeof candidate.activeAttemptId !== "string") return null;
+  if (candidate.foremanVersion !== 1 || typeof candidate.activeAttemptId !== "string") {
+    return null;
+  }
   return candidate as ForemanFlowState;
 }
 
@@ -138,20 +142,34 @@ function nextStateWithEvent(
   event: ForemanWorkerEvent,
   now: number,
 ): { state?: ForemanFlowState; reason?: ForemanEventRejectReason } {
-  if (state.eventDedupe.seenEventIds.includes(event.eventId)) return { reason: "duplicate_event" };
+  if (state.eventDedupe.seenEventIds.includes(event.eventId)) {
+    return { reason: "duplicate_event" };
+  }
   const attempt = state.attempts[event.attemptId];
-  if (!attempt) return { reason: "attempt_not_found" };
+  if (!attempt) {
+    return { reason: "attempt_not_found" };
+  }
   const seqKey = `${event.hostId}:${event.attemptId}`;
   const lastSeq = state.eventDedupe.lastSeqByAttempt[seqKey] ?? 0;
-  if (event.workerSeq <= lastSeq) return { reason: "stale_event" };
-  if (event.workerSeq !== lastSeq + 1) return { reason: "out_of_order_event" };
+  if (event.workerSeq <= lastSeq) {
+    return { reason: "stale_event" };
+  }
+  if (event.workerSeq !== lastSeq + 1) {
+    return { reason: "out_of_order_event" };
+  }
 
   const eventAt = event.occurredAt ?? now;
   let phase: ForemanAttemptPhase = attempt.phase;
   let blockedReason = attempt.blockedReason ?? null;
-  if (event.eventType === "agent.prompt_accepted") phase = "accepted";
-  if (event.eventType === "agent.started_work") phase = "running";
-  if (event.eventType === "agent.idle_after_work") phase = "waiting_for_owner_check";
+  if (event.eventType === "agent.prompt_accepted") {
+    phase = "accepted";
+  }
+  if (event.eventType === "agent.started_work") {
+    phase = "running";
+  }
+  if (event.eventType === "agent.idle_after_work") {
+    phase = "waiting_for_owner_check";
+  }
   if (
     event.eventType === "agent.session_not_found" ||
     event.eventType === "agent.agent_not_detected" ||
@@ -188,7 +206,7 @@ function nextStateWithEvent(
       workers: {
         ...state.workers,
         [event.hostId]: {
-          ...(state.workers[event.hostId] ?? {}),
+          ...state.workers[event.hostId],
           lastEventAt: eventAt,
           lastKnownReachability: "reachable",
           lastError: blockedReason,
@@ -265,18 +283,24 @@ export class ForemanTaskFlowController {
   ): ForemanEventResult {
     const runtime = this.taskFlows.bindSession({ sessionKey: ownerSessionKey });
     const flow = runtime.get(event.flowId);
-    if (!flow) return { applied: false, reason: "flow_not_found" };
-    if (flow.syncMode !== "managed") return { applied: false, reason: "not_managed" };
+    if (!flow) {
+      return { applied: false, reason: "flow_not_found" };
+    }
+    if (flow.syncMode !== "managed") {
+      return { applied: false, reason: "not_managed" };
+    }
     const state = asForemanState(flow.stateJson);
-    if (!state)
+    if (!state) {
       return { applied: false, reason: "attempt_not_found", flow: flow as ManagedTaskFlowRecord };
+    }
     const next = nextStateWithEvent(state, event, now);
-    if (!next.state)
+    if (!next.state) {
       return {
         applied: false,
         reason: next.reason ?? "attempt_not_found",
         flow: flow as ManagedTaskFlowRecord,
       };
+    }
 
     if (event.eventType === "agent.idle_after_work") {
       const waiting = runtime.setWaiting({
@@ -312,12 +336,13 @@ export class ForemanTaskFlowController {
         }),
         updatedAt: now,
       });
-      if (!waiting.applied)
+      if (!waiting.applied) {
         return {
           applied: false,
           reason: waiting.code === "revision_conflict" ? "revision_conflict" : "flow_not_found",
           flow: flow as ManagedTaskFlowRecord,
         };
+      }
       return { applied: true, flow: waiting.flow };
     }
 
@@ -332,12 +357,13 @@ export class ForemanTaskFlowController {
       stateJson: toJson(next.state),
       updatedAt: now,
     });
-    if (!resumed.applied)
+    if (!resumed.applied) {
       return {
         applied: false,
         reason: resumed.code === "revision_conflict" ? "revision_conflict" : "flow_not_found",
         flow: flow as ManagedTaskFlowRecord,
       };
+    }
     return { applied: true, flow: resumed.flow };
   }
 
@@ -355,7 +381,9 @@ export class ForemanTaskFlowController {
     | undefined {
     const runtime = this.taskFlows.bindSession({ sessionKey: ownerSessionKey });
     const flow = runtime.get(flowId);
-    if (!flow || flow.syncMode !== "managed") return undefined;
+    if (!flow || flow.syncMode !== "managed") {
+      return undefined;
+    }
     const state = asForemanState(flow.stateJson);
     return {
       flowId: flow.flowId,

@@ -19,7 +19,7 @@ import {
   shouldAutoDeliverTaskTerminalUpdate,
   shouldSuppressDuplicateTerminalDelivery,
 } from "./task-executor-policy.js";
-import type { JsonValue, TaskFlowRecord } from "./task-flow-registry.types.js";
+import type { TaskFlowRecord } from "./task-flow-registry.types.js";
 import {
   getTaskFlowById,
   syncFlowFromTask,

@@ -88,7 +88,9 @@ describe("Foreman plugin-managed TaskFlow controller", () => {
         },
       },
     });
-    if (!idle.applied) throw new Error("idle event was not applied");
+    if (!idle.applied) {
+      throw new Error("idle event was not applied");
+    }
     expect(idle.flow.stateJson).toMatchObject({
       activeAttemptId: "attempt-1",
       attempts: {
