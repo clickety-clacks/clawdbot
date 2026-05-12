@@ -16,14 +16,33 @@ private func mountScreen(_ screen: ScreenController) throws -> (ScreenWebViewCoo
         let (coordinator, webView) = try mountScreen(screen)
         defer { coordinator.teardown() }
 
-        #expect(webView.isOpaque == true)
-        #expect(webView.backgroundColor == .black)
+        let expectedStyle = ScreenWebViewCoordinator.backgroundStyle()
+        #expect(webView.isOpaque == expectedStyle.isOpaque)
+        #expect(webView.backgroundColor == expectedStyle.color)
 
         let scrollView = webView.scrollView
-        #expect(scrollView.backgroundColor == .black)
+        #expect(scrollView.backgroundColor == expectedStyle.color)
         #expect(scrollView.contentInsetAdjustmentBehavior == .never)
         #expect(scrollView.isScrollEnabled == false)
         #expect(scrollView.bounces == false)
+    }
+
+    @Test @MainActor func spatialRuntimeUsesTransparentBackgroundStyle() {
+        let style = ScreenWebViewCoordinator.backgroundStyle(
+            classResolver: { $0 == "UIWindowSceneGeometryPreferencesVision" ? NSObject.self : nil },
+            isMacCatalystApp: false)
+
+        #expect(style.isOpaque == false)
+        #expect(style.color == .clear)
+    }
+
+    @Test @MainActor func macCatalystKeepsOpaqueBackgroundStyle() {
+        let style = ScreenWebViewCoordinator.backgroundStyle(
+            classResolver: { $0 == "UIWindowSceneGeometryPreferencesVision" ? NSObject.self : nil },
+            isMacCatalystApp: true)
+
+        #expect(style.isOpaque == true)
+        #expect(style.color == .black)
     }
 
     @Test @MainActor func navigateEnablesScrollForWebPages() throws {

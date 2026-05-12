@@ -24,6 +24,11 @@ struct ScreenWebView: UIViewRepresentable {
 
 @MainActor
 final class ScreenWebViewCoordinator: NSObject {
+    struct BackgroundStyle {
+        let isOpaque: Bool
+        let color: UIColor
+    }
+
     private weak var controller: ScreenController?
     private let navigationDelegate = ScreenNavigationDelegate()
     private let a2uiActionHandler = CanvasA2UIActionMessageHandler()
@@ -44,10 +49,14 @@ final class ScreenWebViewCoordinator: NSObject {
             return containerView
         }
 
-        let container = UIView(frame: .zero)
-        container.backgroundColor = .black
+        let backgroundStyle = Self.backgroundStyle()
 
-        let webView = Self.makeWebView(userContentController: self.userContentController)
+        let container = UIView(frame: .zero)
+        container.backgroundColor = backgroundStyle.color
+
+        let webView = Self.makeWebView(
+            userContentController: self.userContentController,
+            backgroundStyle: backgroundStyle)
         webView.navigationDelegate = self.navigationDelegate
         self.installA2UIHandlers()
 
@@ -90,24 +99,42 @@ final class ScreenWebViewCoordinator: NSObject {
         self.containerView = nil
     }
 
-    private static func makeWebView(userContentController: WKUserContentController) -> WKWebView {
+    private static func makeWebView(
+        userContentController: WKUserContentController,
+        backgroundStyle: BackgroundStyle) -> WKWebView
+    {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .nonPersistent()
         config.userContentController = userContentController
 
         let webView = WKWebView(frame: .zero, configuration: config)
-        // Canvas scaffold is a fully self-contained HTML page; avoid relying on transparency underlays.
-        webView.isOpaque = true
-        webView.backgroundColor = .black
+        webView.isOpaque = backgroundStyle.isOpaque
+        webView.backgroundColor = backgroundStyle.color
 
         let scrollView = webView.scrollView
-        scrollView.backgroundColor = .black
+        scrollView.backgroundColor = backgroundStyle.color
         scrollView.contentInsetAdjustmentBehavior = .never
         scrollView.contentInset = .zero
         scrollView.scrollIndicatorInsets = .zero
         scrollView.automaticallyAdjustsScrollIndicatorInsets = false
 
         return webView
+    }
+
+    static func backgroundStyle(
+        classResolver: (String) -> AnyClass? = NSClassFromString,
+        isMacCatalystApp: Bool = ProcessInfo.processInfo.isMacCatalystApp) -> BackgroundStyle
+    {
+        if isMacCatalystApp {
+            return BackgroundStyle(isOpaque: true, color: .black)
+        }
+        // Designed-for-iPad apps on visionOS expose vision-specific UIKit classes even though
+        // the app still reports itself as iPadOS. Use that runtime seam to keep only Spatial
+        // windows transparent without changing normal iOS/Catalyst rendering.
+        if classResolver("UIWindowSceneGeometryPreferencesVision") != nil {
+            return BackgroundStyle(isOpaque: false, color: .clear)
+        }
+        return BackgroundStyle(isOpaque: true, color: .black)
     }
 
     private func installA2UIHandlers() {
