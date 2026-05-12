@@ -2,6 +2,8 @@
 
 export { loadSessionStore } from "../config/sessions/store-load.js";
 export { resolveSessionStoreEntry } from "../config/sessions/store-entry.js";
+export { resolveAllAgentSessionStoreTargetsSync } from "../config/sessions.js";
+export { applySessionsPatchToStore } from "../gateway/sessions-patch.js";
 export { resolveSessionTranscriptPathInDir, resolveStorePath } from "../config/sessions/paths.js";
 export { resolveAndPersistSessionFile } from "../config/sessions/session-file.js";
 export { resolveSessionKey } from "../config/sessions/session-key.js";

@@ -4,11 +4,14 @@ export type TaskRuntime = "subagent" | "acp" | "cli" | "cron";
 
 export type TaskStatus =
   | "queued"
+  | "submitting"
   | "running"
+  | "blocked"
   | "succeeded"
   | "failed"
   | "timed_out"
   | "cancelled"
+  | "replaced"
   | "lost";
 
 export type TaskDeliveryStatus =

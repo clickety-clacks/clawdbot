@@ -19,11 +19,11 @@ export {
 export type { OpenClawConfig } from "openclaw/plugin-sdk/core";
 export { resolveUserPath } from "openclaw/plugin-sdk/account-resolution";
 export {
+  applySessionsPatchToStore,
   loadSessionStore,
   resolveSessionStoreEntry,
   resolveStorePath,
-  applySessionsPatchToStore,
-} from "openclaw/plugin-sdk/config-runtime";
+} from "openclaw/plugin-sdk/session-store-runtime";
 export { recordInboundSession } from "openclaw/plugin-sdk/conversation-runtime";
 export {
   createReplyDispatcherWithTyping,
@@ -34,14 +34,11 @@ export {
 } from "openclaw/plugin-sdk/reply-runtime";
 export { isLoopbackHost, rawDataToString } from "openclaw/plugin-sdk/gateway-runtime";
 export {
-  closeDispatcher,
-  createPinnedDispatcher,
   enqueueSystemEvent,
   peekSystemEvents,
   resetSystemEventsForTest,
-  resolvePinnedHostname,
-  type PinnedHostname,
-} from "openclaw/plugin-sdk/infra-runtime";
+} from "openclaw/plugin-sdk/system-event-runtime";
+export { fetchWithSsrFGuard, resolvePinnedHostname } from "openclaw/plugin-sdk/ssrf-runtime";
 export {
   detectMime,
   hasAlphaChannel,
@@ -63,7 +60,7 @@ export {
 export {
   resolveAllAgentSessionStoreTargetsSync,
   updateSessionStore,
-} from "openclaw/plugin-sdk/config-runtime";
+} from "openclaw/plugin-sdk/session-store-runtime";
 
 // Remaining gaps after T187:
 // - Clawline runtime production code no longer reaches into repo `src/**`.

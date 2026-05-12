@@ -1,7 +1,7 @@
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import type { OpenClawConfig } from "../../../../src/config/config.js";
+import type { OpenClawConfig } from "../runtime-api.js";
 import { resolveClawlineConfig } from "./config.js";
 
 describe("resolveClawlineConfig", () => {

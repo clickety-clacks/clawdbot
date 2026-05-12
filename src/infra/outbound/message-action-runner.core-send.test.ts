@@ -125,7 +125,35 @@ describe("runMessageAction core send routing", () => {
   });
 
   it("accepts Telegram numeric forum topic targets through plugin-owned grammar", async () => {
-    setActivePluginRegistry(createTestRegistry([]));
+    setActivePluginRegistry(
+      createTestRegistry([
+        {
+          pluginId: "telegram",
+          source: "test",
+          plugin: createOutboundTestPlugin({
+            id: "telegram",
+            outbound: {
+              deliveryMode: "direct",
+              sendText: vi.fn().mockResolvedValue({
+                channel: "telegram",
+                messageId: "t1",
+                chatId: "-1001234567890",
+              }),
+            },
+            messaging: {
+              targetResolver: {
+                looksLikeId: (raw) => /^-?\d+:topic:\d+$/.test(raw),
+                resolveTarget: async ({ normalized }) => ({
+                  to: `telegram:${normalized}`,
+                  kind: "group",
+                  source: "normalized",
+                }),
+              },
+            },
+          }),
+        },
+      ]),
+    );
 
     const result = await runMessageAction({
       cfg: {

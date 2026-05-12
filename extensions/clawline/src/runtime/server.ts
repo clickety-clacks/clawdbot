@@ -13,13 +13,10 @@ import type { Database as SqliteDatabase, Statement as SqliteStatement } from "b
 import BetterSqlite3 from "better-sqlite3";
 import jwt from "jsonwebtoken";
 import { loadGatewayTlsRuntime } from "openclaw/plugin-sdk/gateway-runtime";
-import { type Dispatcher } from "undici";
 import WebSocket, { WebSocketServer } from "ws";
 import {
   DEFAULT_ACCOUNT_ID,
   abortAgentHarnessRun,
-  closeDispatcher,
-  createPinnedDispatcher,
   createReplyDispatcherWithTyping,
   detectMime,
   dispatchInboundMessage,
@@ -47,12 +44,12 @@ import {
   resolveEffectiveMessagesConfig,
   resolveHumanDelayConfig,
   resolveSessionStoreEntry,
+  fetchWithSsrFGuard,
   resolvePinnedHostname,
   updateSessionStore,
   applySessionsPatchToStore,
   buildAllowedModelSet,
   loadModelCatalog,
-  type PinnedHostname,
   type ReplyPayload,
 } from "../runtime-api.js";
 import { clawlineAttachmentsToImages } from "./attachments.js";
@@ -275,7 +272,6 @@ const MAX_INTERACTIVE_ACTION_CHARS = 128;
 const MAX_INTERACTIVE_DATA_BYTES = 64 * 1024;
 const MAX_ALERT_BODY_BYTES = 4 * 1024;
 const MAX_MEDIA_REDIRECTS = 5;
-const REDIRECT_STATUS_CODES = new Set([301, 302, 303, 307, 308]);
 const MEDIA_FETCH_TIMEOUT_MS = 30_000;
 const DEFAULT_ALERT_SOURCE = "notify";
 const EXEC_COMPLETION_ALERT_PROMPT =
@@ -1432,21 +1428,26 @@ function triggerFaceSpeak(
     messageId: meta?.messageId,
   });
   void (async () => {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 1500);
+    let guarded: Awaited<ReturnType<typeof fetchWithSsrFGuard>> | undefined;
     try {
-      await fetch(resolvedEndpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: capped }),
-        signal: controller.signal,
+      guarded = await fetchWithSsrFGuard({
+        url: resolvedEndpoint,
+        init: {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: capped }),
+        },
+        timeoutMs: 1500,
+        policy: { allowPrivateNetwork: true },
+        auditContext: "clawline.face_speak",
       });
+      await guarded.response.body?.cancel();
     } catch (err) {
       logger.info?.("[clawline] face_speak_failed", {
         error: err instanceof Error ? err.message : String(err),
       });
     } finally {
-      clearTimeout(timeout);
+      await guarded?.release();
     }
   })();
 }
@@ -3967,10 +3968,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     return cleaned ?? DEFAULT_ALERT_SOURCE;
   }
 
-  function isRedirectStatus(status: number): boolean {
-    return REDIRECT_STATUS_CODES.has(status);
-  }
-
   function stripQuotes(value: string): string {
     return value.replace(/^["']|["']$/g, "");
   }
@@ -4043,9 +4040,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     );
   }
 
-  async function validateOutboundMediaUrl(
-    rawUrl: string,
-  ): Promise<{ url: string; pinned: PinnedHostname }> {
+  async function validateOutboundMediaUrl(rawUrl: string): Promise<{ url: string }> {
     let parsed: URL;
     try {
       parsed = new URL(rawUrl);
@@ -4059,112 +4054,77 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     if (hostname === "localhost" || hostname.endsWith(".localhost")) {
       throw new ClientMessageError("invalid_message", "mediaUrl points to localhost");
     }
-    let pinned;
     try {
-      pinned = await resolvePinnedHostname(hostname);
+      await resolvePinnedHostname(hostname);
     } catch {
       throw new ClientMessageError(
         "invalid_message",
         "mediaUrl hostname could not be resolved or is blocked",
       );
     }
-    return { url: parsed.toString(), pinned };
+    return { url: parsed.toString() };
   }
 
   async function fetchPinnedMedia(
     rawUrl: string,
     maxBytes: number,
   ): Promise<{ buffer: Buffer; contentType?: string; fileName?: string }> {
-    let currentUrl = rawUrl;
-    let redirectCount = 0;
-
-    while (true) {
-      const validated = await validateOutboundMediaUrl(currentUrl);
-      const dispatcher = createPinnedDispatcher(validated.pinned);
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), MEDIA_FETCH_TIMEOUT_MS);
-      let res: Response;
-      try {
-        res = await fetch(validated.url, {
-          dispatcher,
-          signal: controller.signal,
-          redirect: "manual",
-        } as RequestInit & { dispatcher: Dispatcher });
-      } catch (err) {
-        clearTimeout(timeoutId);
-        await closeDispatcher(dispatcher);
-        throw err;
+    const validated = await validateOutboundMediaUrl(rawUrl);
+    let guarded: Awaited<ReturnType<typeof fetchWithSsrFGuard>>;
+    try {
+      guarded = await fetchWithSsrFGuard({
+        url: validated.url,
+        timeoutMs: MEDIA_FETCH_TIMEOUT_MS,
+        maxRedirects: MAX_MEDIA_REDIRECTS,
+        auditContext: "clawline.media_fetch",
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (/too many redirects/i.test(message)) {
+        throw new ClientMessageError("invalid_message", "mediaUrl redirects too many times");
       }
+      throw err;
+    }
 
-      if (isRedirectStatus(res.status)) {
-        const location = res.headers.get("location");
-        if (!location) {
-          clearTimeout(timeoutId);
-          await closeDispatcher(dispatcher);
-          throw new ClientMessageError("invalid_message", "mediaUrl redirect missing location");
-        }
-        if (res.body) {
-          try {
-            await res.body.cancel();
-          } catch {}
-        }
-        clearTimeout(timeoutId);
-        await closeDispatcher(dispatcher);
-        redirectCount += 1;
-        if (redirectCount > MAX_MEDIA_REDIRECTS) {
-          throw new ClientMessageError("invalid_message", "mediaUrl redirects too many times");
-        }
-        currentUrl = new URL(location, validated.url).toString();
-        continue;
-      }
+    const res = guarded.response;
+    if (!res.ok) {
+      await guarded.release();
+      throw new ClientMessageError("invalid_message", `mediaUrl fetch failed (HTTP ${res.status})`);
+    }
 
-      if (!res.ok) {
-        clearTimeout(timeoutId);
-        await closeDispatcher(dispatcher);
+    const contentLength = res.headers.get("content-length");
+    if (contentLength) {
+      const length = Number(contentLength);
+      if (Number.isFinite(length) && length > maxBytes) {
+        await guarded.release();
         throw new ClientMessageError(
-          "invalid_message",
-          `mediaUrl fetch failed (HTTP ${res.status})`,
+          "payload_too_large",
+          `mediaUrl payload exceeds maxBytes ${maxBytes}`,
         );
       }
-
-      const contentLength = res.headers.get("content-length");
-      if (contentLength) {
-        const length = Number(contentLength);
-        if (Number.isFinite(length) && length > maxBytes) {
-          clearTimeout(timeoutId);
-          await closeDispatcher(dispatcher);
-          throw new ClientMessageError(
-            "payload_too_large",
-            `mediaUrl payload exceeds maxBytes ${maxBytes}`,
-          );
-        }
-      }
-
-      let buffer: Buffer;
-      try {
-        buffer = await readResponseWithLimit(res, maxBytes);
-      } finally {
-        clearTimeout(timeoutId);
-        await closeDispatcher(dispatcher);
-      }
-
-      const headerFileName = parseContentDispositionFileName(
-        res.headers.get("content-disposition"),
-      );
-      let fileNameFromUrl: string | undefined;
-      try {
-        const parsed = new URL(validated.url);
-        const base = path.basename(parsed.pathname);
-        fileNameFromUrl = base || undefined;
-      } catch {
-        fileNameFromUrl = undefined;
-      }
-      return {
-        buffer,
-        contentType: res.headers.get("content-type") ?? undefined,
-        fileName: headerFileName || fileNameFromUrl,
-      };
     }
+
+    let buffer: Buffer;
+    try {
+      buffer = await readResponseWithLimit(res, maxBytes);
+    } finally {
+      await guarded.release();
+    }
+
+    const headerFileName = parseContentDispositionFileName(res.headers.get("content-disposition"));
+    let fileNameFromUrl: string | undefined;
+    try {
+      const parsed = new URL(guarded.finalUrl);
+      const base = path.basename(parsed.pathname);
+      fileNameFromUrl = base || undefined;
+    } catch {
+      fileNameFromUrl = undefined;
+    }
+    return {
+      buffer,
+      contentType: res.headers.get("content-type") ?? undefined,
+      fileName: headerFileName || fileNameFromUrl,
+    };
   }
 
   async function clampAndOptimizeMedia(params: {

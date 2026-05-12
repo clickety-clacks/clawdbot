@@ -3,10 +3,12 @@ import { formatTaskStatusTitleText, sanitizeTaskStatusText } from "./task-status
 
 export function isTerminalTaskStatus(status: TaskStatus): boolean {
   return (
+    status === "blocked" ||
     status === "succeeded" ||
     status === "failed" ||
     status === "timed_out" ||
     status === "cancelled" ||
+    status === "replaced" ||
     status === "lost"
   );
 }
