@@ -7,6 +7,7 @@ export {
   enqueueAnnounce,
   loadModelCatalog,
   resolveDefaultModelForAgent,
+  resolveAgentWorkspaceDir,
   resolveAgentIdentity,
   resolveEffectiveMessagesConfig,
   resolveHumanDelayConfig,
@@ -47,7 +48,12 @@ export {
   maxBytesForKind,
   mediaKindFromMime,
 } from "openclaw/plugin-sdk/media-runtime";
-export { optimizeImageToJpeg, optimizeImageToPng } from "openclaw/plugin-sdk/web-media";
+export {
+  getDefaultLocalRoots,
+  loadWebMedia,
+  optimizeImageToJpeg,
+  optimizeImageToPng,
+} from "openclaw/plugin-sdk/web-media";
 export { isPrivateOrLoopbackHost } from "openclaw/plugin-sdk/ssrf-runtime";
 export {
   DEFAULT_ACCOUNT_ID,
