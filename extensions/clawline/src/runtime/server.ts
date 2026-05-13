@@ -4476,7 +4476,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const terminalSessions = new Map<string, TerminalSessionRecord>();
   const TERMINAL_DB_LOOKUP_LIMIT = 300;
   const pendingSockets = new Map<string, PendingConnection>();
-  const pendingDeviceNotificationKeys = new Map<string, string>();
+  const pendingDeviceNotificationDeviceIds = new Set<string>();
   const faceSpeakPending = new Map<string, string>();
   const faceSpeakDedupe = new Map<string, number>();
   const sessionsByDevice = new Map<string, Session>();
@@ -4741,6 +4741,30 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     return pendingFile.entries.find((entry) => entry.deviceId === deviceId);
   }
 
+  function buildPendingEntryForPairRequest(params: {
+    existingPendingEntry: PendingEntry | undefined;
+    deviceId: string;
+    claimedName: string | undefined;
+    deviceInfo: DeviceInfo;
+    now: number;
+  }): PendingEntry {
+    if (params.existingPendingEntry) {
+      return {
+        ...params.existingPendingEntry,
+        lastSeenAt: params.now,
+        requestCount: Math.max(1, params.existingPendingEntry.requestCount ?? 1) + 1,
+      };
+    }
+    return {
+      deviceId: params.deviceId,
+      claimedName: params.claimedName,
+      deviceInfo: params.deviceInfo,
+      requestedAt: params.now,
+      lastSeenAt: params.now,
+      requestCount: 1,
+    };
+  }
+
   function userIdForPendingEntry(entry: PendingEntry): string {
     const normalized = normalizeUserIdFromClaimedName(entry.claimedName);
     if (normalized) {
@@ -4952,7 +4976,7 @@ button.deny { background: #9b1c31; color: white; }
   }
 
   async function removePendingEntry(deviceId: string) {
-    pendingDeviceNotificationKeys.delete(deviceId);
+    pendingDeviceNotificationDeviceIds.delete(deviceId);
     const next = pendingFile.entries.filter((entry) => entry.deviceId !== deviceId);
     if (next.length === pendingFile.entries.length) {
       return;
@@ -4998,24 +5022,14 @@ button.deny { background: #9b1c31; color: white; }
     );
   }
 
-  type PendingDeviceNotificationDecision = "notify" | "refresh-card" | "coalesce";
-
-  function pendingDeviceNotificationKey(entry: PendingEntry): string {
-    return JSON.stringify({
-      claimedName: entry.claimedName ?? "",
-      platform: entry.deviceInfo.platform ?? "",
-      model: entry.deviceInfo.model ?? "",
-    });
-  }
+  type PendingDeviceNotificationDecision = "notify" | "coalesce";
 
   function markPendingDeviceNotification(entry: PendingEntry): PendingDeviceNotificationDecision {
-    const nextKey = pendingDeviceNotificationKey(entry);
-    const previousKey = pendingDeviceNotificationKeys.get(entry.deviceId);
-    if (previousKey === nextKey) {
+    if (pendingDeviceNotificationDeviceIds.has(entry.deviceId)) {
       return "coalesce";
     }
-    pendingDeviceNotificationKeys.set(entry.deviceId, nextKey);
-    return previousKey ? "refresh-card" : "notify";
+    pendingDeviceNotificationDeviceIds.add(entry.deviceId);
+    return "notify";
   }
 
   function prunePendingDeviceNotificationKeysFromPendingFile() {
@@ -5023,15 +5037,15 @@ button.deny { background: #9b1c31; color: white; }
     for (const entry of pendingFile.entries) {
       pendingDeviceIds.add(entry.deviceId);
     }
-    for (const deviceId of pendingDeviceNotificationKeys.keys()) {
+    for (const deviceId of pendingDeviceNotificationDeviceIds) {
       if (!pendingDeviceIds.has(deviceId)) {
-        pendingDeviceNotificationKeys.delete(deviceId);
+        pendingDeviceNotificationDeviceIds.delete(deviceId);
       }
     }
   }
 
   for (const entry of pendingFile.entries) {
-    pendingDeviceNotificationKeys.set(entry.deviceId, pendingDeviceNotificationKey(entry));
+    pendingDeviceNotificationDeviceIds.add(entry.deviceId);
   }
 
   function closeActiveSessionForAllowlistReplacement(deviceId: string) {
@@ -9663,18 +9677,18 @@ button.deny { background: #9b1c31; color: white; }
           });
           return;
         }
-        const pendingEntry: PendingEntry = {
+        const now = nowMs();
+        const pendingEntry = buildPendingEntryForPairRequest({
+          existingPendingEntry,
           deviceId,
           claimedName: sanitizedClaimedName,
           deviceInfo: sanitizedInfo,
-          requestedAt: existingPendingEntry ? existingPendingEntry.requestedAt : nowMs(),
-        };
+          now,
+        });
         await upsertPendingEntry(pendingEntry);
         const notificationDecision = markPendingDeviceNotification(pendingEntry);
         if (notificationDecision === "notify") {
           await notifyGatewayOfPending(pendingEntry).catch(() => {});
-        } else if (notificationDecision === "refresh-card") {
-          await notifyAdminsOfPendingDevice(pendingEntry).catch(() => {});
         } else {
           logger.info?.(
             `[clawline:http] pair_request_pending_coalesced ${describePairingEntry(pendingEntry)} pendingEntries=${pendingFile.entries.length}`,
@@ -9712,12 +9726,13 @@ button.deny { background: #9b1c31; color: white; }
       return;
     }
     const now = nowMs();
-    const pendingEntry: PendingEntry = {
+    const pendingEntry = buildPendingEntryForPairRequest({
+      existingPendingEntry,
       deviceId,
       claimedName: sanitizedClaimedName,
       deviceInfo: sanitizedInfo,
-      requestedAt: existingPendingEntry ? existingPendingEntry.requestedAt : now,
-    };
+      now,
+    });
     logger.info?.(
       `[clawline:http] pair_request_upsert_pending ${describePairingEntry(pendingEntry)} pendingCount=${pendingFile.entries.length + (existingPendingEntry ? 0 : 1)}`,
     );
@@ -9737,19 +9752,6 @@ button.deny { background: #9b1c31; color: white; }
           logger.warn?.("[clawline:http] pair_request_pending_notify_failed", {
             deviceId,
             error: err.message,
-          }),
-        );
-    } else if (notificationDecision === "refresh-card") {
-      notifyAdminsOfPendingDevice(pendingEntry)
-        .then(() =>
-          logger.info?.(
-            `[clawline:http] pair_request_pending_card_refreshed ${describePairingEntry(pendingEntry)} pendingEntries=${pendingFile.entries.length}`,
-          ),
-        )
-        .catch((err) =>
-          logger.warn?.("[clawline:http] pair_request_pending_card_refresh_failed", {
-            deviceId,
-            error: err instanceof Error ? err.message : String(err),
           }),
         );
     } else {

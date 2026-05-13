@@ -85,6 +85,8 @@ export type PendingEntry = {
   claimedName?: string;
   deviceInfo: DeviceInfo;
   requestedAt: number;
+  lastSeenAt?: number;
+  requestCount?: number;
 };
 
 export type PendingFile = { version: 1; entries: PendingEntry[] };

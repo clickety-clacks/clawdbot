@@ -1933,13 +1933,19 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
-  it("refreshes inline approval cards when pending device details change", async () => {
+  it("coalesces pending approval retries when device details change", async () => {
     const adminEntry = createAllowlistEntry({ deviceId: randomUUID(), isAdmin: true });
     const pendingDeviceId = randomUUID();
     const ctx = await setupTestServer([adminEntry]);
     try {
       const firstResponse = await performPairRequest(ctx.port, pendingDeviceId, {
         claimedName: "QA Sim",
+        deviceInfo: {
+          platform: "Web",
+          model: "MacIntel",
+          osVersion: "macOS",
+          appVersion: "web",
+        },
       });
       expect(firstResponse).toMatchObject({ success: false, reason: "pair_pending" });
       const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
@@ -1962,31 +1968,47 @@ describe.sequential("clawline provider server", () => {
 
       const secondResponse = await performPairRequest(ctx.port, pendingDeviceId, {
         claimedName: "Flynn",
+        deviceInfo: {
+          platform: "Web",
+          model: "Linux x86_64",
+          osVersion: "Linux",
+          appVersion: "web",
+        },
       });
       expect(secondResponse).toMatchObject({ success: false, reason: "pair_pending" });
-      let latestPayload: { content?: string } | undefined;
-      await vi.waitFor(() => {
-        const db = new BetterSqlite3(dbPath, { readonly: true });
-        try {
-          const rows = db
-            .prepare(
-              `SELECT payloadJson
-                 FROM events
-                WHERE userId = ?
-                  AND payloadJson LIKE ?
-                ORDER BY sequence ASC`,
-            )
-            .all("flynn", `%${INTERACTIVE_HTML_MIME}%`) as Array<{ payloadJson: string }>;
-          expect(rows).toHaveLength(2);
-          latestPayload = JSON.parse(rows.at(-1)!.payloadJson) as { content?: string };
-        } finally {
-          db.close();
-        }
-      });
-      expect(latestPayload?.content).toBe(
-        `Device approval requested: flynn (iOS/iPhone) [deviceId: ${pendingDeviceId}]`,
-      );
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const db = new BetterSqlite3(dbPath, { readonly: true });
+      try {
+        const count = db
+          .prepare(
+            `SELECT COUNT(*) AS count
+               FROM events
+              WHERE userId = ?
+                AND payloadJson LIKE ?`,
+          )
+          .get("flynn", `%${INTERACTIVE_HTML_MIME}%`) as { count: number };
+        expect(count.count).toBe(1);
+      } finally {
+        db.close();
+      }
       expect(enqueueAnnounceMock).toHaveBeenCalledTimes(1);
+      const pendingFile = JSON.parse(await fs.readFile(ctx.pendingPath, "utf8")) as {
+        entries: Array<{
+          deviceId: string;
+          claimedName?: string;
+          deviceInfo?: { platform?: string; model?: string };
+          requestedAt?: number;
+          lastSeenAt?: number;
+          requestCount?: number;
+        }>;
+      };
+      const pendingEntry = pendingFile.entries.find((entry) => entry.deviceId === pendingDeviceId);
+      expect(pendingEntry).toMatchObject({
+        claimedName: "qa sim",
+        deviceInfo: { platform: "Web", model: "MacIntel" },
+        requestCount: 2,
+      });
+      expect(pendingEntry?.lastSeenAt).toBeGreaterThanOrEqual(pendingEntry?.requestedAt ?? 0);
     } finally {
       await ctx.cleanup();
     }
