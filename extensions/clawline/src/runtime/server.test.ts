@@ -17,6 +17,7 @@ import type {
   AllowlistEntry,
   ClawlineOutboundSendResult,
   Logger,
+  PendingEntry,
   ProviderConfig,
   ProviderServer,
 } from "./domain.js";
@@ -84,6 +85,9 @@ const testOpenClawConfig = {
   agents: { default: "main", list: [{ id: "main" }] },
   bindings: [],
 } as OpenClawConfig;
+const INTERACTIVE_HTML_MIME = "application/vnd.clawline.interactive-html+json";
+const DEVICE_APPROVAL_APPROVE_ACTION = "clawline.deviceApproval.approve";
+const DEVICE_APPROVAL_DENY_ACTION = "clawline.deviceApproval.deny";
 
 type ParsedWsFrame = Record<string, unknown>;
 
@@ -397,6 +401,7 @@ async function setupTestServer(
     webRootFollowSymlinks?: boolean;
     webRootPathRelative?: string;
     seedLegacyDatabase?: (dbPath: string) => Promise<void>;
+    initialPending?: PendingEntry[];
     replyResolver?: typeof getReplyFromConfig;
     logger?: Logger;
     openClawConfig?: OpenClawConfig;
@@ -431,7 +436,10 @@ async function setupTestServer(
     JSON.stringify({ version: 1, entries: initialAllowlist }, null, 2),
   );
   const pendingPath = path.join(statePath, "pending.json");
-  await fs.writeFile(pendingPath, JSON.stringify({ version: 1, entries: [] }, null, 2));
+  await fs.writeFile(
+    pendingPath,
+    JSON.stringify({ version: 1, entries: options.initialPending ?? [] }, null, 2),
+  );
   await fs.writeFile(path.join(statePath, "denylist.json"), "[]");
   const dbPath = path.join(statePath, "clawline.sqlite");
   if (typeof options.seedLegacyDatabase === "function") {
@@ -517,6 +525,12 @@ async function setupTestServer(
 
 type PairRequestOverrides = {
   claimedName?: string;
+  deviceInfo?: Partial<{
+    platform: string;
+    model: string;
+    osVersion: string;
+    appVersion: string;
+  }>;
 };
 
 function createPairRequestPayload(deviceId: string, overrides: PairRequestOverrides = {}) {
@@ -529,6 +543,7 @@ function createPairRequestPayload(deviceId: string, overrides: PairRequestOverri
       model: "iPhone",
       osVersion: "17.0",
       appVersion: "1.0",
+      ...overrides.deviceInfo,
     },
     ...(overrides.claimedName ? { claimedName: overrides.claimedName } : {}),
   };
@@ -1732,7 +1747,846 @@ describe.sequential("clawline provider server", () => {
       );
       expect(call?.item?.origin).toEqual({ channel: "clawline", to: "agent:main:main" });
       expect(gatewayCallMock).not.toHaveBeenCalled();
+      const repeatResponse = await performPairRequest(ctx.port, deviceId, {
+        claimedName: "QA Sim",
+      });
+      expect(repeatResponse).toMatchObject({
+        type: "pair_result",
+        success: false,
+        reason: "pair_pending",
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(enqueueAnnounceMock).toHaveBeenCalledTimes(1);
     } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("sends inline approval cards for pending devices to admin global streams", async () => {
+    const adminEntry = createAllowlistEntry({ deviceId: randomUUID(), isAdmin: true });
+    const pendingDeviceId = randomUUID();
+    const ctx = await setupTestServer([adminEntry]);
+    try {
+      const response = await performPairRequest(ctx.port, pendingDeviceId, {
+        claimedName: "QA Sim",
+      });
+      expect(response).toMatchObject({
+        type: "pair_result",
+        success: false,
+        reason: "pair_pending",
+      });
+
+      const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
+      let row: { id: string; sessionKey: string; payloadJson: string } | undefined;
+      await vi.waitFor(() => {
+        const db = new BetterSqlite3(dbPath, { readonly: true });
+        try {
+          row = db
+            .prepare(
+              `SELECT id, sessionKey, payloadJson
+                 FROM events
+                WHERE userId = ?
+                  AND payloadJson LIKE ?
+                ORDER BY sequence DESC
+                LIMIT 1`,
+            )
+            .get("flynn", `%${INTERACTIVE_HTML_MIME}%`) as
+            | { id: string; sessionKey: string; payloadJson: string }
+            | undefined;
+        } finally {
+          db.close();
+        }
+        expect(row).toBeTruthy();
+      });
+      expect(row?.sessionKey).toBe("agent:main:main");
+      const payload = JSON.parse(row!.payloadJson) as {
+        content?: string;
+        attachments?: Array<{ mimeType?: string; data?: string }>;
+      };
+      expect(payload.content).toBe(
+        `Device approval requested: qa sim (iOS/iPhone) [deviceId: ${pendingDeviceId}]`,
+      );
+      const attachment = payload.attachments?.[0];
+      expect(attachment?.mimeType).toBe(INTERACTIVE_HTML_MIME);
+      const descriptor = JSON.parse(Buffer.from(attachment!.data!, "base64").toString("utf8")) as {
+        version?: number;
+        html?: string;
+      };
+      expect(descriptor.version).toBe(1);
+      expect(descriptor.html).toContain('<meta name="viewport"');
+      expect(descriptor.html).toContain("Approve");
+      expect(descriptor.html).toContain("Deny");
+      expect(descriptor.html).toContain(pendingDeviceId);
+      expect(descriptor.html).toContain(DEVICE_APPROVAL_APPROVE_ACTION);
+      expect(descriptor.html).toContain(DEVICE_APPROVAL_DENY_ACTION);
+      expect(descriptor.html).toContain("messageHandlers.clawline");
+      expect(descriptor.html).toContain('action: "_close"');
+      expect(descriptor.html).not.toContain("clawlineInteractive");
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("coalesces concurrent duplicate pending approval alerts for one device", async () => {
+    const adminEntry = createAllowlistEntry({ deviceId: randomUUID(), isAdmin: true });
+    const pendingDeviceId = randomUUID();
+    const ctx = await setupTestServer([adminEntry]);
+    try {
+      const responses = await Promise.all(
+        Array.from({ length: 5 }, () =>
+          performPairRequest(ctx.port, pendingDeviceId, {
+            claimedName: "Flynn",
+            deviceInfo: {
+              platform: "Web",
+              model: "MacIntel",
+              osVersion: "macOS",
+              appVersion: "web",
+            },
+          }),
+        ),
+      );
+      for (const response of responses) {
+        expect(response).toMatchObject({
+          type: "pair_result",
+          success: false,
+          reason: "pair_pending",
+        });
+      }
+      await vi.waitFor(() => {
+        expect(enqueueAnnounceMock).toHaveBeenCalledTimes(1);
+      });
+      const call = enqueueAnnounceMock.mock.calls[0]?.[0] as
+        | { item?: { prompt?: string } }
+        | undefined;
+      expect(call?.item?.prompt).toBe(
+        `New device pending approval: flynn (Web/MacIntel) [deviceId: ${pendingDeviceId}]`,
+      );
+
+      const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
+      await vi.waitFor(() => {
+        const db = new BetterSqlite3(dbPath, { readonly: true });
+        try {
+          const count = db
+            .prepare(
+              `SELECT COUNT(*) AS count
+                 FROM events
+                WHERE userId = ?
+                  AND payloadJson LIKE ?`,
+            )
+            .get("flynn", `%${pendingDeviceId}%`) as { count: number };
+          expect(count.count).toBe(1);
+        } finally {
+          db.close();
+        }
+      });
+      const pending = JSON.parse(await fs.readFile(ctx.pendingPath, "utf8")) as {
+        entries: Array<{ deviceId: string; notifiedAt?: number; requestCount?: number }>;
+      };
+      const entries = pending.entries.filter((entry) => entry.deviceId === pendingDeviceId);
+      expect(entries).toHaveLength(1);
+      expect(entries[0]?.requestCount).toBeGreaterThan(1);
+      expect(entries[0]?.notifiedAt).toEqual(expect.any(Number));
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("coalesces duplicate alerts for pending devices loaded from disk", async () => {
+    const adminEntry = createAllowlistEntry({ deviceId: randomUUID(), isAdmin: true });
+    const pendingDeviceId = randomUUID();
+    const initialPending: PendingEntry = {
+      deviceId: pendingDeviceId,
+      claimedName: "flynn",
+      deviceInfo: {
+        platform: "Web",
+        model: "MacIntel",
+        osVersion: "macOS",
+        appVersion: "web",
+      },
+      requestedAt: Date.now() - 1_000,
+      lastSeenAt: Date.now() - 500,
+      requestCount: 1,
+    };
+    const ctx = await setupTestServer([adminEntry], { initialPending: [initialPending] });
+    try {
+      const response = await performPairRequest(ctx.port, pendingDeviceId, {
+        claimedName: "Flynn",
+        deviceInfo: {
+          platform: "Web",
+          model: "MacIntel",
+          osVersion: "macOS",
+          appVersion: "web",
+        },
+      });
+      expect(response).toMatchObject({
+        type: "pair_result",
+        success: false,
+        reason: "pair_pending",
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(enqueueAnnounceMock).not.toHaveBeenCalled();
+      const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
+      const db = new BetterSqlite3(dbPath, { readonly: true });
+      try {
+        const count = db
+          .prepare(
+            `SELECT COUNT(*) AS count
+               FROM events
+              WHERE payloadJson LIKE ?`,
+          )
+          .get(`%${pendingDeviceId}%`) as { count: number };
+        expect(count.count).toBe(0);
+      } finally {
+        db.close();
+      }
+      const pendingFile = JSON.parse(await fs.readFile(ctx.pendingPath, "utf8")) as {
+        entries: Array<{ deviceId: string; notifiedAt?: number; requestCount?: number }>;
+      };
+      const pendingEntry = pendingFile.entries.find((entry) => entry.deviceId === pendingDeviceId);
+      expect(pendingEntry?.requestCount).toBe(2);
+      expect(pendingEntry?.notifiedAt).toBeUndefined();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("retries pending approval notification after a failed wake", async () => {
+    const adminEntry = createAllowlistEntry({ deviceId: randomUUID(), isAdmin: true });
+    const pendingDeviceId = randomUUID();
+    enqueueAnnounceMock.mockImplementationOnce(() => {
+      throw new Error("wake unavailable");
+    });
+    const ctx = await setupTestServer([adminEntry]);
+    try {
+      const firstResponse = await performPairRequest(ctx.port, pendingDeviceId, {
+        claimedName: "QA Sim",
+        deviceInfo: {
+          platform: "Web",
+          model: "MacIntel",
+          osVersion: "macOS",
+          appVersion: "web",
+        },
+      });
+      expect(firstResponse).toMatchObject({ success: false, reason: "pair_pending" });
+      await vi.waitFor(() => {
+        expect(enqueueAnnounceMock).toHaveBeenCalledTimes(1);
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await vi.waitFor(async () => {
+        const pendingFile = JSON.parse(await fs.readFile(ctx.pendingPath, "utf8")) as {
+          entries: Array<{ deviceId: string; notifiedAt?: number }>;
+        };
+        const pendingEntry = pendingFile.entries.find(
+          (entry) => entry.deviceId === pendingDeviceId,
+        );
+        expect(pendingEntry?.notifiedAt).toBeUndefined();
+      });
+
+      const secondResponse = await performPairRequest(ctx.port, pendingDeviceId, {
+        claimedName: "QA Sim",
+        deviceInfo: {
+          platform: "Web",
+          model: "MacIntel",
+          osVersion: "macOS",
+          appVersion: "web",
+        },
+      });
+      expect(secondResponse).toMatchObject({ success: false, reason: "pair_pending" });
+      await vi.waitFor(() => {
+        expect(enqueueAnnounceMock).toHaveBeenCalledTimes(2);
+      });
+      await vi.waitFor(async () => {
+        const pendingFile = JSON.parse(await fs.readFile(ctx.pendingPath, "utf8")) as {
+          entries: Array<{ deviceId: string; notifiedAt?: number; requestCount?: number }>;
+        };
+        const pendingEntry = pendingFile.entries.find(
+          (entry) => entry.deviceId === pendingDeviceId,
+        );
+        expect(pendingEntry?.requestCount).toBe(2);
+        expect(pendingEntry?.notifiedAt).toEqual(expect.any(Number));
+      });
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("coalesces pending approval retries when device details change", async () => {
+    const adminEntry = createAllowlistEntry({ deviceId: randomUUID(), isAdmin: true });
+    const pendingDeviceId = randomUUID();
+    const ctx = await setupTestServer([adminEntry]);
+    try {
+      const firstResponse = await performPairRequest(ctx.port, pendingDeviceId, {
+        claimedName: "QA Sim",
+        deviceInfo: {
+          platform: "Web",
+          model: "MacIntel",
+          osVersion: "macOS",
+          appVersion: "web",
+        },
+      });
+      expect(firstResponse).toMatchObject({ success: false, reason: "pair_pending" });
+      const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
+      await vi.waitFor(() => {
+        const db = new BetterSqlite3(dbPath, { readonly: true });
+        try {
+          const count = db
+            .prepare(
+              `SELECT COUNT(*) AS count
+                 FROM events
+                WHERE userId = ?
+                  AND payloadJson LIKE ?`,
+            )
+            .get("flynn", `%${INTERACTIVE_HTML_MIME}%`) as { count: number };
+          expect(count.count).toBe(1);
+        } finally {
+          db.close();
+        }
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const secondResponse = await performPairRequest(ctx.port, pendingDeviceId, {
+        claimedName: "Flynn",
+        deviceInfo: {
+          platform: "Web",
+          model: "Linux x86_64",
+          osVersion: "Linux",
+          appVersion: "web",
+        },
+      });
+      expect(secondResponse).toMatchObject({ success: false, reason: "pair_pending" });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const db = new BetterSqlite3(dbPath, { readonly: true });
+      try {
+        const count = db
+          .prepare(
+            `SELECT COUNT(*) AS count
+               FROM events
+              WHERE userId = ?
+                AND payloadJson LIKE ?`,
+          )
+          .get("flynn", `%${INTERACTIVE_HTML_MIME}%`) as { count: number };
+        expect(count.count).toBe(1);
+      } finally {
+        db.close();
+      }
+      expect(enqueueAnnounceMock).toHaveBeenCalledTimes(1);
+      const pendingFile = JSON.parse(await fs.readFile(ctx.pendingPath, "utf8")) as {
+        entries: Array<{
+          deviceId: string;
+          claimedName?: string;
+          deviceInfo?: { platform?: string; model?: string };
+          requestedAt?: number;
+          lastSeenAt?: number;
+          requestCount?: number;
+        }>;
+      };
+      const pendingEntry = pendingFile.entries.find((entry) => entry.deviceId === pendingDeviceId);
+      expect(pendingEntry).toMatchObject({
+        claimedName: "qa sim",
+        deviceInfo: { platform: "Web", model: "MacIntel" },
+        requestCount: 2,
+      });
+      expect(pendingEntry?.lastSeenAt).toBeGreaterThan(pendingEntry?.requestedAt ?? 0);
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("coalesces native-shaped stalled pending approval retries for one device", async () => {
+    const adminEntry = createAllowlistEntry({ deviceId: randomUUID(), isAdmin: true });
+    const pendingDeviceId = randomUUID();
+    const ctx = await setupTestServer([adminEntry]);
+    try {
+      const firstResponse = await performPairRequest(ctx.port, pendingDeviceId, {
+        claimedName: "QA iPad",
+        deviceInfo: {
+          platform: "iOS",
+          model: "iPad",
+          osVersion: "26.0",
+          appVersion: "native-test",
+        },
+      });
+      expect(firstResponse).toMatchObject({ success: false, reason: "pair_pending" });
+
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const retryResponse = await performPairRequest(ctx.port, pendingDeviceId, {
+        claimedName: "QA iPad",
+        deviceInfo: {
+          platform: "iOS",
+          model: "iPad",
+          osVersion: "26.0",
+          appVersion: "native-test",
+        },
+      });
+      expect(retryResponse).toMatchObject({ success: false, reason: "pair_pending" });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(enqueueAnnounceMock).toHaveBeenCalledTimes(1);
+      const pendingFile = JSON.parse(await fs.readFile(ctx.pendingPath, "utf8")) as {
+        entries: Array<{
+          deviceId: string;
+          deviceInfo?: { platform?: string; model?: string };
+          requestedAt?: number;
+          lastSeenAt?: number;
+          requestCount?: number;
+        }>;
+      };
+      const pendingEntry = pendingFile.entries.find((entry) => entry.deviceId === pendingDeviceId);
+      expect(pendingEntry).toMatchObject({
+        deviceInfo: { platform: "iOS", model: "iPad" },
+        requestCount: 2,
+      });
+      expect(pendingEntry?.lastSeenAt).toBeGreaterThan(pendingEntry?.requestedAt ?? 0);
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("lets another admin act on the single canonical global approval card", async () => {
+    const flynnEntry = createAllowlistEntry({ deviceId: randomUUID(), isAdmin: true });
+    const otherAdminEntry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      claimedName: "ada",
+      userId: "ada",
+      isAdmin: true,
+    });
+    const pendingDeviceId = randomUUID();
+    const ctx = await setupTestServer([flynnEntry, otherAdminEntry]);
+    const otherAdminToken = await createAuthToken(ctx, otherAdminEntry);
+    const { ws, queue } = await authenticateDeviceWithQueue(
+      ctx.port,
+      otherAdminEntry.deviceId,
+      otherAdminToken,
+    );
+    try {
+      const response = await performPairRequest(ctx.port, pendingDeviceId, {
+        claimedName: "QA Sim",
+      });
+      expect(response).toMatchObject({ success: false, reason: "pair_pending" });
+      const pendingFile = JSON.parse(await fs.readFile(ctx.pendingPath, "utf8")) as {
+        entries: Array<{
+          deviceId: string;
+          claimedName?: string;
+          requestedAt: number;
+          deviceInfo: { platform?: string; model?: string };
+        }>;
+      };
+      const pendingEntry = pendingFile.entries.find((entry) => entry.deviceId === pendingDeviceId);
+      expect(pendingEntry).toBeTruthy();
+      const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
+      let messageId = "";
+      await vi.waitFor(() => {
+        const db = new BetterSqlite3(dbPath, { readonly: true });
+        try {
+          const rows = db
+            .prepare(
+              `SELECT id, userId
+                 FROM events
+                WHERE payloadJson LIKE ?
+                ORDER BY sequence ASC`,
+            )
+            .all(`%${INTERACTIVE_HTML_MIME}%`) as Array<{ id: string; userId: string }>;
+          expect(rows.map((row) => row.userId).toSorted()).toEqual(["ada", "flynn"]);
+          messageId = rows.find((row) => row.userId === "flynn")?.id ?? "";
+          expect(messageId).not.toBe("");
+        } finally {
+          db.close();
+        }
+      });
+      ws.send(
+        JSON.stringify({
+          type: "interactive-callback",
+          messageId,
+          payload: {
+            action: DEVICE_APPROVAL_APPROVE_ACTION,
+            data: {
+              deviceId: pendingDeviceId,
+              requestedAt: pendingEntry!.requestedAt,
+              claimedName: pendingEntry!.claimedName ?? "",
+              platform: pendingEntry!.deviceInfo.platform ?? "",
+              model: pendingEntry!.deviceInfo.model ?? "",
+            },
+          },
+        }),
+      );
+      await waitForQueuedMessage(queue, (value) => {
+        const message =
+          typeof value === "object" && value !== null
+            ? (value as { type?: string; role?: string; content?: string; sessionKey?: string })
+            : null;
+        return (
+          message?.type === "message" &&
+          message.role === "assistant" &&
+          message.sessionKey === "agent:main:main" &&
+          typeof message.content === "string" &&
+          message.content.includes("Approved")
+        );
+      });
+      const allowlist = JSON.parse(await fs.readFile(ctx.allowlistPath, "utf8")) as {
+        entries: AllowlistEntry[];
+      };
+      expect(allowlist.entries.find((entry) => entry.deviceId === pendingDeviceId)).toMatchObject({
+        deviceId: pendingDeviceId,
+        userId: "qa_sim",
+        isAdmin: false,
+      });
+    } finally {
+      queue.dispose();
+      ws.terminate();
+      await ctx.cleanup();
+    }
+  });
+
+  it("approves the exact pending device request from an inline callback", async () => {
+    const adminEntry = createAllowlistEntry({ deviceId: randomUUID(), isAdmin: true });
+    const pendingDeviceId = randomUUID();
+    const ctx = await setupTestServer([adminEntry]);
+    const token = await createAuthToken(ctx, adminEntry);
+    const { ws, queue } = await authenticateDeviceWithQueue(ctx.port, adminEntry.deviceId, token);
+    const pendingWs = new WebSocket(`ws://127.0.0.1:${ctx.port}/ws`);
+    await waitForOpen(pendingWs);
+    const pendingQueue = createMessageQueue(pendingWs);
+    try {
+      pendingWs.send(
+        JSON.stringify(createPairRequestPayload(pendingDeviceId, { claimedName: "Flynn" })),
+      );
+      const response = await waitForQueuedMessage(pendingQueue, (value) => {
+        const message =
+          typeof value === "object" && value !== null
+            ? (value as { type?: string; reason?: string })
+            : null;
+        return message?.type === "pair_result" && message.reason === "pair_pending";
+      });
+      expect(response).toMatchObject({ success: false, reason: "pair_pending" });
+      const pendingFile = JSON.parse(await fs.readFile(ctx.pendingPath, "utf8")) as {
+        entries: Array<{
+          deviceId: string;
+          claimedName?: string;
+          requestedAt: number;
+          deviceInfo: { platform?: string; model?: string };
+        }>;
+      };
+      const pendingEntry = pendingFile.entries.find((entry) => entry.deviceId === pendingDeviceId);
+      expect(pendingEntry).toBeTruthy();
+      const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
+      let messageId = "";
+      await vi.waitFor(() => {
+        const db = new BetterSqlite3(dbPath, { readonly: true });
+        try {
+          const row = db
+            .prepare(
+              `SELECT id
+                 FROM events
+                WHERE userId = ?
+                  AND payloadJson LIKE ?
+                ORDER BY sequence DESC
+                LIMIT 1`,
+            )
+            .get("flynn", `%${pendingDeviceId}%`) as { id: string } | undefined;
+          expect(row).toBeTruthy();
+          messageId = row!.id;
+        } finally {
+          db.close();
+        }
+      });
+
+      ws.send(
+        JSON.stringify({
+          type: "interactive-callback",
+          messageId,
+          payload: {
+            action: DEVICE_APPROVAL_APPROVE_ACTION,
+            data: {
+              deviceId: pendingDeviceId,
+              requestedAt: pendingEntry!.requestedAt,
+              claimedName: pendingEntry!.claimedName ?? "",
+              platform: pendingEntry!.deviceInfo.platform ?? "",
+              model: pendingEntry!.deviceInfo.model ?? "",
+            },
+          },
+        }),
+      );
+      const confirmation = await waitForQueuedMessage(queue, (value) => {
+        const message =
+          typeof value === "object" && value !== null
+            ? (value as { type?: string; role?: string; content?: string })
+            : null;
+        return (
+          message?.type === "message" &&
+          message.role === "assistant" &&
+          typeof message.content === "string" &&
+          message.content.includes("Approved")
+        );
+      });
+      expect((confirmation as { content?: string }).content).toContain("state verified");
+      const delivered = await waitForQueuedMessage(pendingQueue, (value) => {
+        const message =
+          typeof value === "object" && value !== null
+            ? (value as { type?: string; success?: boolean })
+            : null;
+        return message?.type === "pair_result" && message.success === true;
+      });
+      expect(delivered).toMatchObject({
+        type: "pair_result",
+        success: true,
+        userId: "flynn",
+      });
+      expect((delivered as { token?: string }).token).toEqual(expect.any(String));
+      await vi.waitFor(async () => {
+        const allowlist = JSON.parse(await fs.readFile(ctx.allowlistPath, "utf8")) as {
+          entries: AllowlistEntry[];
+        };
+        const approvedEntries = allowlist.entries.filter(
+          (entry) => entry.deviceId === pendingDeviceId,
+        );
+        expect(approvedEntries).toHaveLength(1);
+        const approved = approvedEntries[0];
+        expect(approved).toMatchObject({
+          deviceId: pendingDeviceId,
+          claimedName: "flynn",
+          userId: "flynn",
+          isAdmin: true,
+          tokenDelivered: true,
+        });
+        const pending = JSON.parse(await fs.readFile(ctx.pendingPath, "utf8")) as {
+          entries: Array<{ deviceId: string }>;
+        };
+        expect(pending.entries.some((entry) => entry.deviceId === pendingDeviceId)).toBe(false);
+      });
+    } finally {
+      pendingQueue.dispose();
+      pendingWs.terminate();
+      queue.dispose();
+      ws.terminate();
+      await ctx.cleanup();
+    }
+  });
+
+  it("updates an existing allowlist entry when approving an account switch", async () => {
+    const adminEntry = createAllowlistEntry({ deviceId: randomUUID(), isAdmin: true });
+    const switchingDeviceId = randomUUID();
+    const switchingEntry = createAllowlistEntry({
+      deviceId: switchingDeviceId,
+      claimedName: "old user",
+      userId: "old_user",
+      isAdmin: false,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([adminEntry, switchingEntry]);
+    const token = await createAuthToken(ctx, adminEntry);
+    const { ws, queue } = await authenticateDeviceWithQueue(ctx.port, adminEntry.deviceId, token);
+    const switchingToken = await createAuthToken(ctx, switchingEntry);
+    const { ws: oldWs, queue: oldQueue } = await authenticateDeviceWithQueue(
+      ctx.port,
+      switchingEntry.deviceId,
+      switchingToken,
+    );
+    try {
+      const response = await performPairRequest(ctx.port, switchingDeviceId, {
+        claimedName: "Flynn",
+      });
+      expect(response).toMatchObject({ success: false, reason: "pair_pending" });
+      const pendingFile = JSON.parse(await fs.readFile(ctx.pendingPath, "utf8")) as {
+        entries: Array<{
+          deviceId: string;
+          claimedName?: string;
+          requestedAt: number;
+          deviceInfo: { platform?: string; model?: string };
+        }>;
+      };
+      const pendingEntry = pendingFile.entries.find(
+        (entry) => entry.deviceId === switchingDeviceId,
+      );
+      expect(pendingEntry).toBeTruthy();
+      ws.send(
+        JSON.stringify({
+          type: "interactive-callback",
+          messageId: `s_${randomUUID()}`,
+          payload: {
+            action: DEVICE_APPROVAL_APPROVE_ACTION,
+            data: {
+              deviceId: switchingDeviceId,
+              requestedAt: pendingEntry!.requestedAt,
+              claimedName: pendingEntry!.claimedName ?? "",
+              platform: pendingEntry!.deviceInfo.platform ?? "",
+              model: pendingEntry!.deviceInfo.model ?? "",
+            },
+          },
+        }),
+      );
+      await waitForQueuedMessage(queue, (value) => {
+        const message =
+          typeof value === "object" && value !== null
+            ? (value as { type?: string; role?: string; content?: string })
+            : null;
+        return (
+          message?.type === "message" &&
+          message.role === "assistant" &&
+          typeof message.content === "string" &&
+          message.content.includes("Approved")
+        );
+      });
+      const oldSessionError = await waitForQueuedMessage(oldQueue, (value) => {
+        const message =
+          typeof value === "object" && value !== null
+            ? (value as { type?: string; code?: string })
+            : null;
+        return message?.type === "error" && message.code === "token_revoked";
+      });
+      expect(oldSessionError).toMatchObject({
+        type: "error",
+        code: "token_revoked",
+      });
+      const allowlist = JSON.parse(await fs.readFile(ctx.allowlistPath, "utf8")) as {
+        entries: AllowlistEntry[];
+      };
+      const switched = allowlist.entries.find((entry) => entry.deviceId === switchingDeviceId);
+      expect(switched).toMatchObject({
+        deviceId: switchingDeviceId,
+        claimedName: "flynn",
+        userId: "flynn",
+        isAdmin: true,
+        tokenDelivered: false,
+      });
+      const pending = JSON.parse(await fs.readFile(ctx.pendingPath, "utf8")) as {
+        entries: Array<{ deviceId: string }>;
+      };
+      expect(pending.entries.some((entry) => entry.deviceId === switchingDeviceId)).toBe(false);
+    } finally {
+      queue.dispose();
+      ws.terminate();
+      oldQueue.dispose();
+      oldWs.terminate();
+      await ctx.cleanup();
+    }
+  });
+
+  it("does not approve stale device approval callbacks", async () => {
+    const adminEntry = createAllowlistEntry({ deviceId: randomUUID(), isAdmin: true });
+    const pendingDeviceId = randomUUID();
+    const ctx = await setupTestServer([adminEntry]);
+    const token = await createAuthToken(ctx, adminEntry);
+    const { ws, queue } = await authenticateDeviceWithQueue(ctx.port, adminEntry.deviceId, token);
+    try {
+      const response = await performPairRequest(ctx.port, pendingDeviceId, {
+        claimedName: "QA Sim",
+      });
+      expect(response).toMatchObject({ success: false, reason: "pair_pending" });
+      const pendingFile = JSON.parse(await fs.readFile(ctx.pendingPath, "utf8")) as {
+        entries: Array<{
+          deviceId: string;
+          claimedName?: string;
+          requestedAt: number;
+          deviceInfo: { platform?: string; model?: string };
+        }>;
+      };
+      const pendingEntry = pendingFile.entries.find((entry) => entry.deviceId === pendingDeviceId);
+      expect(pendingEntry).toBeTruthy();
+      ws.send(
+        JSON.stringify({
+          type: "interactive-callback",
+          messageId: `s_${randomUUID()}`,
+          payload: {
+            action: DEVICE_APPROVAL_APPROVE_ACTION,
+            data: {
+              deviceId: pendingDeviceId,
+              requestedAt: pendingEntry!.requestedAt + 1,
+              claimedName: pendingEntry!.claimedName ?? "",
+              platform: pendingEntry!.deviceInfo.platform ?? "",
+              model: pendingEntry!.deviceInfo.model ?? "",
+            },
+          },
+        }),
+      );
+      const confirmation = await waitForQueuedMessage(queue, (value) => {
+        const message =
+          typeof value === "object" && value !== null
+            ? (value as { type?: string; role?: string; content?: string })
+            : null;
+        return (
+          message?.type === "message" &&
+          message.role === "assistant" &&
+          typeof message.content === "string" &&
+          message.content.includes("changed")
+        );
+      });
+      expect((confirmation as { content?: string }).content).toContain("No changes made");
+      const allowlist = JSON.parse(await fs.readFile(ctx.allowlistPath, "utf8")) as {
+        entries: AllowlistEntry[];
+      };
+      expect(allowlist.entries.some((entry) => entry.deviceId === pendingDeviceId)).toBe(false);
+      const pending = JSON.parse(await fs.readFile(ctx.pendingPath, "utf8")) as {
+        entries: Array<{ deviceId: string }>;
+      };
+      expect(pending.entries.some((entry) => entry.deviceId === pendingDeviceId)).toBe(true);
+    } finally {
+      queue.dispose();
+      ws.terminate();
+      await ctx.cleanup();
+    }
+  });
+
+  it("denies exact pending device requests without denylisting", async () => {
+    const adminEntry = createAllowlistEntry({ deviceId: randomUUID(), isAdmin: true });
+    const pendingDeviceId = randomUUID();
+    const ctx = await setupTestServer([adminEntry]);
+    const token = await createAuthToken(ctx, adminEntry);
+    const { ws, queue } = await authenticateDeviceWithQueue(ctx.port, adminEntry.deviceId, token);
+    try {
+      const response = await performPairRequest(ctx.port, pendingDeviceId, {
+        claimedName: "QA Sim",
+      });
+      expect(response).toMatchObject({ success: false, reason: "pair_pending" });
+      const pendingFile = JSON.parse(await fs.readFile(ctx.pendingPath, "utf8")) as {
+        entries: Array<{
+          deviceId: string;
+          claimedName?: string;
+          requestedAt: number;
+          deviceInfo: { platform?: string; model?: string };
+        }>;
+      };
+      const pendingEntry = pendingFile.entries.find((entry) => entry.deviceId === pendingDeviceId);
+      expect(pendingEntry).toBeTruthy();
+      ws.send(
+        JSON.stringify({
+          type: "interactive-callback",
+          messageId: `s_${randomUUID()}`,
+          payload: {
+            action: DEVICE_APPROVAL_DENY_ACTION,
+            data: {
+              deviceId: pendingDeviceId,
+              requestedAt: pendingEntry!.requestedAt,
+              claimedName: pendingEntry!.claimedName ?? "",
+              platform: pendingEntry!.deviceInfo.platform ?? "",
+              model: pendingEntry!.deviceInfo.model ?? "",
+            },
+          },
+        }),
+      );
+      const confirmation = await waitForQueuedMessage(queue, (value) => {
+        const message =
+          typeof value === "object" && value !== null
+            ? (value as { type?: string; role?: string; content?: string })
+            : null;
+        return (
+          message?.type === "message" &&
+          message.role === "assistant" &&
+          typeof message.content === "string" &&
+          message.content.includes("Denied")
+        );
+      });
+      expect((confirmation as { content?: string }).content).toContain("No denylist entry");
+      const pending = JSON.parse(await fs.readFile(ctx.pendingPath, "utf8")) as {
+        entries: Array<{ deviceId: string }>;
+      };
+      expect(pending.entries.some((entry) => entry.deviceId === pendingDeviceId)).toBe(false);
+      const denylist = JSON.parse(
+        await fs.readFile(path.join(path.dirname(ctx.allowlistPath), "denylist.json"), "utf8"),
+      ) as Array<{ deviceId: string }>;
+      expect(denylist.some((entry) => entry.deviceId === pendingDeviceId)).toBe(false);
+    } finally {
+      queue.dispose();
+      ws.terminate();
       await ctx.cleanup();
     }
   });
