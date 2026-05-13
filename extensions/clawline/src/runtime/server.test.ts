@@ -16,6 +16,7 @@ import type {
   AllowlistEntry,
   ClawlineOutboundSendResult,
   Logger,
+  PendingEntry,
   ProviderConfig,
   ProviderServer,
 } from "./domain.js";
@@ -394,6 +395,7 @@ async function setupTestServer(
     webRootFollowSymlinks?: boolean;
     webRootPathRelative?: string;
     seedLegacyDatabase?: (dbPath: string) => Promise<void>;
+    initialPending?: PendingEntry[];
     replyResolver?: typeof getReplyFromConfig;
     logger?: Logger;
     openClawConfig?: OpenClawConfig;
@@ -428,7 +430,10 @@ async function setupTestServer(
     JSON.stringify({ version: 1, entries: initialAllowlist }, null, 2),
   );
   const pendingPath = path.join(statePath, "pending.json");
-  await fs.writeFile(pendingPath, JSON.stringify({ version: 1, entries: [] }, null, 2));
+  await fs.writeFile(
+    pendingPath,
+    JSON.stringify({ version: 1, entries: options.initialPending ?? [] }, null, 2),
+  );
   await fs.writeFile(path.join(statePath, "denylist.json"), "[]");
   const dbPath = path.join(statePath, "clawline.sqlite");
   if (typeof options.seedLegacyDatabase === "function") {
@@ -514,6 +519,12 @@ async function setupTestServer(
 
 type PairRequestOverrides = {
   claimedName?: string;
+  deviceInfo?: Partial<{
+    platform: string;
+    model: string;
+    osVersion: string;
+    appVersion: string;
+  }>;
 };
 
 function createPairRequestPayload(deviceId: string, overrides: PairRequestOverrides = {}) {
@@ -526,6 +537,7 @@ function createPairRequestPayload(deviceId: string, overrides: PairRequestOverri
       model: "iPhone",
       osVersion: "17.0",
       appVersion: "1.0",
+      ...overrides.deviceInfo,
     },
     ...(overrides.claimedName ? { claimedName: overrides.claimedName } : {}),
   };
@@ -1804,6 +1816,118 @@ describe.sequential("clawline provider server", () => {
       expect(descriptor.html).toContain("messageHandlers.clawline");
       expect(descriptor.html).toContain('action: "_close"');
       expect(descriptor.html).not.toContain("clawlineInteractive");
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("coalesces concurrent duplicate pending approval alerts for one device", async () => {
+    const adminEntry = createAllowlistEntry({ deviceId: randomUUID(), isAdmin: true });
+    const pendingDeviceId = randomUUID();
+    const ctx = await setupTestServer([adminEntry]);
+    try {
+      const responses = await Promise.all(
+        Array.from({ length: 5 }, () =>
+          performPairRequest(ctx.port, pendingDeviceId, {
+            claimedName: "Flynn",
+            deviceInfo: {
+              platform: "Web",
+              model: "MacIntel",
+              osVersion: "macOS",
+              appVersion: "web",
+            },
+          }),
+        ),
+      );
+      for (const response of responses) {
+        expect(response).toMatchObject({
+          type: "pair_result",
+          success: false,
+          reason: "pair_pending",
+        });
+      }
+      await vi.waitFor(() => {
+        expect(enqueueAnnounceMock).toHaveBeenCalledTimes(1);
+      });
+      const call = enqueueAnnounceMock.mock.calls[0]?.[0] as
+        | { item?: { prompt?: string } }
+        | undefined;
+      expect(call?.item?.prompt).toBe(
+        `New device pending approval: flynn (Web/MacIntel) [deviceId: ${pendingDeviceId}]`,
+      );
+
+      const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
+      await vi.waitFor(() => {
+        const db = new BetterSqlite3(dbPath, { readonly: true });
+        try {
+          const count = db
+            .prepare(
+              `SELECT COUNT(*) AS count
+                 FROM events
+                WHERE userId = ?
+                  AND payloadJson LIKE ?`,
+            )
+            .get("flynn", `%${pendingDeviceId}%`) as { count: number };
+          expect(count.count).toBe(1);
+        } finally {
+          db.close();
+        }
+      });
+      const pending = JSON.parse(await fs.readFile(ctx.pendingPath, "utf8")) as {
+        entries: Array<{ deviceId: string }>;
+      };
+      expect(pending.entries.filter((entry) => entry.deviceId === pendingDeviceId)).toHaveLength(1);
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("coalesces duplicate alerts for pending devices loaded from disk", async () => {
+    const adminEntry = createAllowlistEntry({ deviceId: randomUUID(), isAdmin: true });
+    const pendingDeviceId = randomUUID();
+    const initialPending: PendingEntry = {
+      deviceId: pendingDeviceId,
+      claimedName: "flynn",
+      deviceInfo: {
+        platform: "Web",
+        model: "MacIntel",
+        osVersion: "macOS",
+        appVersion: "web",
+      },
+      requestedAt: Date.now() - 1_000,
+    };
+    const ctx = await setupTestServer([adminEntry], { initialPending: [initialPending] });
+    try {
+      const response = await performPairRequest(ctx.port, pendingDeviceId, {
+        claimedName: "Flynn",
+        deviceInfo: {
+          platform: "Web",
+          model: "MacIntel",
+          osVersion: "macOS",
+          appVersion: "web",
+        },
+      });
+      expect(response).toMatchObject({
+        type: "pair_result",
+        success: false,
+        reason: "pair_pending",
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(enqueueAnnounceMock).not.toHaveBeenCalled();
+      const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
+      const db = new BetterSqlite3(dbPath, { readonly: true });
+      try {
+        const count = db
+          .prepare(
+            `SELECT COUNT(*) AS count
+               FROM events
+              WHERE payloadJson LIKE ?`,
+          )
+          .get(`%${pendingDeviceId}%`) as { count: number };
+        expect(count.count).toBe(0);
+      } finally {
+        db.close();
+      }
     } finally {
       await ctx.cleanup();
     }

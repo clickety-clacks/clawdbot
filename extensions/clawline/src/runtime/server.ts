@@ -4476,6 +4476,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const terminalSessions = new Map<string, TerminalSessionRecord>();
   const TERMINAL_DB_LOOKUP_LIMIT = 300;
   const pendingSockets = new Map<string, PendingConnection>();
+  const pendingDeviceNotificationKeys = new Map<string, string>();
   const faceSpeakPending = new Map<string, string>();
   const faceSpeakDedupe = new Map<string, number>();
   const sessionsByDevice = new Map<string, Session>();
@@ -4679,6 +4680,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   async function refreshPendingFile() {
     try {
       pendingFile = await loadPending(pendingPath);
+      prunePendingDeviceNotificationKeysFromPendingFile();
       reconcilePendingSocketsWithFile();
     } catch (err) {
       logger.warn?.(`pending_reload_failed: ${formatError(err)}`);
@@ -4950,6 +4952,7 @@ button.deny { background: #9b1c31; color: white; }
   }
 
   async function removePendingEntry(deviceId: string) {
+    pendingDeviceNotificationKeys.delete(deviceId);
     const next = pendingFile.entries.filter((entry) => entry.deviceId !== deviceId);
     if (next.length === pendingFile.entries.length) {
       return;
@@ -4995,13 +4998,40 @@ button.deny { background: #9b1c31; color: white; }
     );
   }
 
-  function pendingApprovalDetailsEqual(left: PendingEntry, right: PendingEntry): boolean {
-    return (
-      left.deviceId === right.deviceId &&
-      (left.claimedName ?? "") === (right.claimedName ?? "") &&
-      (left.deviceInfo.platform ?? "") === (right.deviceInfo.platform ?? "") &&
-      (left.deviceInfo.model ?? "") === (right.deviceInfo.model ?? "")
-    );
+  type PendingDeviceNotificationDecision = "notify" | "refresh-card" | "coalesce";
+
+  function pendingDeviceNotificationKey(entry: PendingEntry): string {
+    return JSON.stringify({
+      claimedName: entry.claimedName ?? "",
+      platform: entry.deviceInfo.platform ?? "",
+      model: entry.deviceInfo.model ?? "",
+    });
+  }
+
+  function markPendingDeviceNotification(entry: PendingEntry): PendingDeviceNotificationDecision {
+    const nextKey = pendingDeviceNotificationKey(entry);
+    const previousKey = pendingDeviceNotificationKeys.get(entry.deviceId);
+    if (previousKey === nextKey) {
+      return "coalesce";
+    }
+    pendingDeviceNotificationKeys.set(entry.deviceId, nextKey);
+    return previousKey ? "refresh-card" : "notify";
+  }
+
+  function prunePendingDeviceNotificationKeysFromPendingFile() {
+    const pendingDeviceIds = new Set<string>();
+    for (const entry of pendingFile.entries) {
+      pendingDeviceIds.add(entry.deviceId);
+    }
+    for (const deviceId of pendingDeviceNotificationKeys.keys()) {
+      if (!pendingDeviceIds.has(deviceId)) {
+        pendingDeviceNotificationKeys.delete(deviceId);
+      }
+    }
+  }
+
+  for (const entry of pendingFile.entries) {
+    pendingDeviceNotificationKeys.set(entry.deviceId, pendingDeviceNotificationKey(entry));
   }
 
   function closeActiveSessionForAllowlistReplacement(deviceId: string) {
@@ -9640,10 +9670,15 @@ button.deny { background: #9b1c31; color: white; }
           requestedAt: existingPendingEntry ? existingPendingEntry.requestedAt : nowMs(),
         };
         await upsertPendingEntry(pendingEntry);
-        if (!existingPendingEntry) {
+        const notificationDecision = markPendingDeviceNotification(pendingEntry);
+        if (notificationDecision === "notify") {
           await notifyGatewayOfPending(pendingEntry).catch(() => {});
-        } else if (!pendingApprovalDetailsEqual(existingPendingEntry, pendingEntry)) {
+        } else if (notificationDecision === "refresh-card") {
           await notifyAdminsOfPendingDevice(pendingEntry).catch(() => {});
+        } else {
+          logger.info?.(
+            `[clawline:http] pair_request_pending_coalesced ${describePairingEntry(pendingEntry)} pendingEntries=${pendingFile.entries.length}`,
+          );
         }
         await sendJson(ws, { type: "pair_result", success: false, reason: "pair_pending" });
         ws.close();
@@ -9690,7 +9725,8 @@ button.deny { background: #9b1c31; color: white; }
     logger.info?.(
       `[clawline:http] pair_request_pending_persisted ${describePairingEntry(pendingEntry)} pendingEntries=${pendingFile.entries.length}`,
     );
-    if (!existingPendingEntry) {
+    const notificationDecision = markPendingDeviceNotification(pendingEntry);
+    if (notificationDecision === "notify") {
       notifyGatewayOfPending(pendingEntry)
         .then(() =>
           logger.info?.(
@@ -9703,7 +9739,7 @@ button.deny { background: #9b1c31; color: white; }
             error: err.message,
           }),
         );
-    } else if (!pendingApprovalDetailsEqual(existingPendingEntry, pendingEntry)) {
+    } else if (notificationDecision === "refresh-card") {
       notifyAdminsOfPendingDevice(pendingEntry)
         .then(() =>
           logger.info?.(
