@@ -1966,6 +1966,7 @@ describe.sequential("clawline provider server", () => {
         }
       });
 
+      await new Promise((resolve) => setTimeout(resolve, 5));
       const secondResponse = await performPairRequest(ctx.port, pendingDeviceId, {
         claimedName: "Flynn",
         deviceInfo: {
@@ -2008,7 +2009,57 @@ describe.sequential("clawline provider server", () => {
         deviceInfo: { platform: "Web", model: "MacIntel" },
         requestCount: 2,
       });
-      expect(pendingEntry?.lastSeenAt).toBeGreaterThanOrEqual(pendingEntry?.requestedAt ?? 0);
+      expect(pendingEntry?.lastSeenAt).toBeGreaterThan(pendingEntry?.requestedAt ?? 0);
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("coalesces native-shaped stalled pending approval retries for one device", async () => {
+    const adminEntry = createAllowlistEntry({ deviceId: randomUUID(), isAdmin: true });
+    const pendingDeviceId = randomUUID();
+    const ctx = await setupTestServer([adminEntry]);
+    try {
+      const firstResponse = await performPairRequest(ctx.port, pendingDeviceId, {
+        claimedName: "QA iPad",
+        deviceInfo: {
+          platform: "iOS",
+          model: "iPad",
+          osVersion: "26.0",
+          appVersion: "native-test",
+        },
+      });
+      expect(firstResponse).toMatchObject({ success: false, reason: "pair_pending" });
+
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const retryResponse = await performPairRequest(ctx.port, pendingDeviceId, {
+        claimedName: "QA iPad",
+        deviceInfo: {
+          platform: "iOS",
+          model: "iPad",
+          osVersion: "26.0",
+          appVersion: "native-test",
+        },
+      });
+      expect(retryResponse).toMatchObject({ success: false, reason: "pair_pending" });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(enqueueAnnounceMock).toHaveBeenCalledTimes(1);
+      const pendingFile = JSON.parse(await fs.readFile(ctx.pendingPath, "utf8")) as {
+        entries: Array<{
+          deviceId: string;
+          deviceInfo?: { platform?: string; model?: string };
+          requestedAt?: number;
+          lastSeenAt?: number;
+          requestCount?: number;
+        }>;
+      };
+      const pendingEntry = pendingFile.entries.find((entry) => entry.deviceId === pendingDeviceId);
+      expect(pendingEntry).toMatchObject({
+        deviceInfo: { platform: "iOS", model: "iPad" },
+        requestCount: 2,
+      });
+      expect(pendingEntry?.lastSeenAt).toBeGreaterThan(pendingEntry?.requestedAt ?? 0);
     } finally {
       await ctx.cleanup();
     }
@@ -2115,9 +2166,19 @@ describe.sequential("clawline provider server", () => {
     const ctx = await setupTestServer([adminEntry]);
     const token = await createAuthToken(ctx, adminEntry);
     const { ws, queue } = await authenticateDeviceWithQueue(ctx.port, adminEntry.deviceId, token);
+    const pendingWs = new WebSocket(`ws://127.0.0.1:${ctx.port}/ws`);
+    await waitForOpen(pendingWs);
+    const pendingQueue = createMessageQueue(pendingWs);
     try {
-      const response = await performPairRequest(ctx.port, pendingDeviceId, {
-        claimedName: "Flynn",
+      pendingWs.send(
+        JSON.stringify(createPairRequestPayload(pendingDeviceId, { claimedName: "Flynn" })),
+      );
+      const response = await waitForQueuedMessage(pendingQueue, (value) => {
+        const message =
+          typeof value === "object" && value !== null
+            ? (value as { type?: string; reason?: string })
+            : null;
+        return message?.type === "pair_result" && message.reason === "pair_pending";
       });
       expect(response).toMatchObject({ success: false, reason: "pair_pending" });
       const pendingFile = JSON.parse(await fs.readFile(ctx.pendingPath, "utf8")) as {
@@ -2181,16 +2242,34 @@ describe.sequential("clawline provider server", () => {
         );
       });
       expect((confirmation as { content?: string }).content).toContain("state verified");
+      const delivered = await waitForQueuedMessage(pendingQueue, (value) => {
+        const message =
+          typeof value === "object" && value !== null
+            ? (value as { type?: string; success?: boolean })
+            : null;
+        return message?.type === "pair_result" && message.success === true;
+      });
+      expect(delivered).toMatchObject({
+        type: "pair_result",
+        success: true,
+        userId: "flynn",
+      });
+      expect((delivered as { token?: string }).token).toEqual(expect.any(String));
       await vi.waitFor(async () => {
         const allowlist = JSON.parse(await fs.readFile(ctx.allowlistPath, "utf8")) as {
           entries: AllowlistEntry[];
         };
-        const approved = allowlist.entries.find((entry) => entry.deviceId === pendingDeviceId);
+        const approvedEntries = allowlist.entries.filter(
+          (entry) => entry.deviceId === pendingDeviceId,
+        );
+        expect(approvedEntries).toHaveLength(1);
+        const approved = approvedEntries[0];
         expect(approved).toMatchObject({
           deviceId: pendingDeviceId,
           claimedName: "flynn",
           userId: "flynn",
           isAdmin: true,
+          tokenDelivered: true,
         });
         const pending = JSON.parse(await fs.readFile(ctx.pendingPath, "utf8")) as {
           entries: Array<{ deviceId: string }>;
@@ -2198,6 +2277,8 @@ describe.sequential("clawline provider server", () => {
         expect(pending.entries.some((entry) => entry.deviceId === pendingDeviceId)).toBe(false);
       });
     } finally {
+      pendingQueue.dispose();
+      pendingWs.terminate();
       queue.dispose();
       ws.terminate();
       await ctx.cleanup();
