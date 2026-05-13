@@ -87,6 +87,7 @@ export type PendingEntry = {
   requestedAt: number;
   lastSeenAt?: number;
   requestCount?: number;
+  notifiedAt?: number;
 };
 
 export type PendingFile = { version: 1; entries: PendingEntry[] };

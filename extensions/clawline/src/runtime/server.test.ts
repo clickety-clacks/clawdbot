@@ -1880,9 +1880,12 @@ describe.sequential("clawline provider server", () => {
         }
       });
       const pending = JSON.parse(await fs.readFile(ctx.pendingPath, "utf8")) as {
-        entries: Array<{ deviceId: string }>;
+        entries: Array<{ deviceId: string; notifiedAt?: number; requestCount?: number }>;
       };
-      expect(pending.entries.filter((entry) => entry.deviceId === pendingDeviceId)).toHaveLength(1);
+      const entries = pending.entries.filter((entry) => entry.deviceId === pendingDeviceId);
+      expect(entries).toHaveLength(1);
+      expect(entries[0]?.requestCount).toBeGreaterThan(1);
+      expect(entries[0]?.notifiedAt).toEqual(expect.any(Number));
     } finally {
       await ctx.cleanup();
     }
@@ -1901,6 +1904,8 @@ describe.sequential("clawline provider server", () => {
         appVersion: "web",
       },
       requestedAt: Date.now() - 1_000,
+      lastSeenAt: Date.now() - 500,
+      requestCount: 1,
     };
     const ctx = await setupTestServer([adminEntry], { initialPending: [initialPending] });
     try {
@@ -1934,6 +1939,72 @@ describe.sequential("clawline provider server", () => {
       } finally {
         db.close();
       }
+      const pendingFile = JSON.parse(await fs.readFile(ctx.pendingPath, "utf8")) as {
+        entries: Array<{ deviceId: string; notifiedAt?: number; requestCount?: number }>;
+      };
+      const pendingEntry = pendingFile.entries.find((entry) => entry.deviceId === pendingDeviceId);
+      expect(pendingEntry?.requestCount).toBe(2);
+      expect(pendingEntry?.notifiedAt).toBeUndefined();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("retries pending approval notification after a failed wake", async () => {
+    const adminEntry = createAllowlistEntry({ deviceId: randomUUID(), isAdmin: true });
+    const pendingDeviceId = randomUUID();
+    enqueueAnnounceMock.mockImplementationOnce(() => {
+      throw new Error("wake unavailable");
+    });
+    const ctx = await setupTestServer([adminEntry]);
+    try {
+      const firstResponse = await performPairRequest(ctx.port, pendingDeviceId, {
+        claimedName: "QA Sim",
+        deviceInfo: {
+          platform: "Web",
+          model: "MacIntel",
+          osVersion: "macOS",
+          appVersion: "web",
+        },
+      });
+      expect(firstResponse).toMatchObject({ success: false, reason: "pair_pending" });
+      await vi.waitFor(() => {
+        expect(enqueueAnnounceMock).toHaveBeenCalledTimes(1);
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await vi.waitFor(async () => {
+        const pendingFile = JSON.parse(await fs.readFile(ctx.pendingPath, "utf8")) as {
+          entries: Array<{ deviceId: string; notifiedAt?: number }>;
+        };
+        const pendingEntry = pendingFile.entries.find(
+          (entry) => entry.deviceId === pendingDeviceId,
+        );
+        expect(pendingEntry?.notifiedAt).toBeUndefined();
+      });
+
+      const secondResponse = await performPairRequest(ctx.port, pendingDeviceId, {
+        claimedName: "QA Sim",
+        deviceInfo: {
+          platform: "Web",
+          model: "MacIntel",
+          osVersion: "macOS",
+          appVersion: "web",
+        },
+      });
+      expect(secondResponse).toMatchObject({ success: false, reason: "pair_pending" });
+      await vi.waitFor(() => {
+        expect(enqueueAnnounceMock).toHaveBeenCalledTimes(2);
+      });
+      await vi.waitFor(async () => {
+        const pendingFile = JSON.parse(await fs.readFile(ctx.pendingPath, "utf8")) as {
+          entries: Array<{ deviceId: string; notifiedAt?: number; requestCount?: number }>;
+        };
+        const pendingEntry = pendingFile.entries.find(
+          (entry) => entry.deviceId === pendingDeviceId,
+        );
+        expect(pendingEntry?.requestCount).toBe(2);
+        expect(pendingEntry?.notifiedAt).toEqual(expect.any(Number));
+      });
     } finally {
       await ctx.cleanup();
     }

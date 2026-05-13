@@ -1887,12 +1887,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   };
   async function notifyGatewayOfPending(entry: PendingEntry) {
     const text = `New device pending approval: ${describePairingEntry(entry)}`;
-    await notifyAdminsOfPendingDevice(entry).catch((err) =>
-      logger.warn?.("[clawline:http] pending_device_card_notify_failed", {
-        deviceId: entry.deviceId,
-        error: err instanceof Error ? err.message : String(err),
-      }),
-    );
+    const cardsDelivered = await notifyAdminsOfPendingDevice(entry);
+    if (!cardsDelivered) {
+      throw new Error("pending_device_card_notify_failed");
+    }
     await wakeGatewayForAlert(text, mainSessionKey);
   }
   const alertInstructionsPath =
@@ -4888,6 +4886,24 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     };
   }
 
+  async function upsertPendingEntryForPairRequest(params: {
+    deviceId: string;
+    claimedName: string | undefined;
+    deviceInfo: DeviceInfo;
+    now: number;
+  }): Promise<{ entry: PendingEntry; existingPendingEntry: PendingEntry | undefined }> {
+    const existingPendingEntry = findPendingEntry(params.deviceId);
+    const entry = buildPendingEntryForPairRequest({
+      existingPendingEntry,
+      deviceId: params.deviceId,
+      claimedName: params.claimedName,
+      deviceInfo: params.deviceInfo,
+      now: params.now,
+    });
+    await upsertPendingEntry(entry);
+    return { entry, existingPendingEntry };
+  }
+
   function userIdForPendingEntry(entry: PendingEntry): string {
     const normalized = normalizeUserIdFromClaimedName(entry.claimedName);
     if (normalized) {
@@ -5005,7 +5021,7 @@ button.deny { background: #9b1c31; color: white; }
     entry: PendingEntry;
     attachment: ClawlineOutboundAttachmentInput;
     broadcast: boolean;
-  }) {
+  }): Promise<boolean> {
     let outboundAttachments = {
       attachments: [] as NormalizedAttachment[],
       assetIds: [] as string[],
@@ -5022,7 +5038,7 @@ button.deny { background: #9b1c31; color: white; }
         userId: params.userId,
         error: err instanceof Error ? err.message : String(err),
       });
-      return;
+      return false;
     }
     outboundAttachments.attachments = await filterOutboundAttachmentsForTerminalPolicy({
       attachments: outboundAttachments.attachments,
@@ -5053,9 +5069,10 @@ button.deny { background: #9b1c31; color: white; }
       broadcastToSessionKey(mainSessionKey, event);
     }
     await broadcastStreamTailStateForUser(params.userId, event);
+    return true;
   }
 
-  async function notifyAdminsOfPendingDevice(entry: PendingEntry) {
+  async function notifyAdminsOfPendingDevice(entry: PendingEntry): Promise<boolean> {
     const adminUserIds: string[] = [];
     const seen = new Set<string>();
     for (const allowlistEntry of allowlist.entries) {
@@ -5071,12 +5088,12 @@ button.deny { background: #9b1c31; color: white; }
       adminUserIds.push(userId);
     }
     if (adminUserIds.length === 0) {
-      return;
+      return true;
     }
     const attachment = buildDeviceApprovalAttachment(entry);
     const broadcastUserId =
       adminUserIds.find((userId) => userId.toLowerCase() === "flynn") ?? adminUserIds[0];
-    await Promise.all(
+    const results = await Promise.all(
       adminUserIds.map((userId) =>
         persistDeviceApprovalCardForAdmin({
           userId,
@@ -5086,6 +5103,7 @@ button.deny { background: #9b1c31; color: white; }
         }),
       ),
     );
+    return results.every(Boolean);
   }
 
   async function upsertPendingEntry(entry: PendingEntry) {
@@ -5147,7 +5165,7 @@ button.deny { background: #9b1c31; color: white; }
 
   type PendingDeviceNotificationDecision = "notify" | "coalesce";
 
-  function markPendingDeviceNotification(entry: PendingEntry): PendingDeviceNotificationDecision {
+  function beginPendingDeviceNotification(entry: PendingEntry): PendingDeviceNotificationDecision {
     if (pendingDeviceNotificationDeviceIds.has(entry.deviceId)) {
       return "coalesce";
     }
@@ -5155,10 +5173,46 @@ button.deny { background: #9b1c31; color: white; }
     return "notify";
   }
 
+  async function markPendingDeviceNotificationDelivered(deviceId: string) {
+    const pendingEntry = findPendingEntry(deviceId);
+    if (!pendingEntry) {
+      return;
+    }
+    await upsertPendingEntry({ ...pendingEntry, notifiedAt: nowMs() });
+  }
+
+  function markPendingDeviceNotificationFailed(deviceId: string) {
+    pendingDeviceNotificationDeviceIds.delete(deviceId);
+  }
+
+  async function notifyPendingDeviceOnce(entry: PendingEntry) {
+    const notificationDecision = beginPendingDeviceNotification(entry);
+    if (notificationDecision === "coalesce") {
+      logger.info?.(
+        `[clawline:http] pair_request_pending_coalesced ${describePairingEntry(entry)} pendingEntries=${pendingFile.entries.length}`,
+      );
+      return;
+    }
+    try {
+      await notifyGatewayOfPending(entry);
+      await markPendingDeviceNotificationDelivered(entry.deviceId);
+      logger.info?.(`[clawline:http] pair_request_pending_notified ${describePairingEntry(entry)}`);
+    } catch (err) {
+      markPendingDeviceNotificationFailed(entry.deviceId);
+      logger.warn?.("[clawline:http] pair_request_pending_notify_failed", {
+        deviceId: entry.deviceId,
+        error: formatError(err),
+      });
+    }
+  }
+
   function prunePendingDeviceNotificationKeysFromPendingFile() {
     const pendingDeviceIds = new Set<string>();
     for (const entry of pendingFile.entries) {
       pendingDeviceIds.add(entry.deviceId);
+      if (typeof entry.notifiedAt === "number") {
+        pendingDeviceNotificationDeviceIds.add(entry.deviceId);
+      }
     }
     for (const deviceId of pendingDeviceNotificationDeviceIds) {
       if (!pendingDeviceIds.has(deviceId)) {
@@ -9811,22 +9865,13 @@ button.deny { background: #9b1c31; color: white; }
           return;
         }
         const now = nowMs();
-        const pendingEntry = buildPendingEntryForPairRequest({
-          existingPendingEntry,
+        const { entry: pendingEntry } = await upsertPendingEntryForPairRequest({
           deviceId,
           claimedName: sanitizedClaimedName,
           deviceInfo: sanitizedInfo,
           now,
         });
-        await upsertPendingEntry(pendingEntry);
-        const notificationDecision = markPendingDeviceNotification(pendingEntry);
-        if (notificationDecision === "notify") {
-          await notifyGatewayOfPending(pendingEntry).catch(() => {});
-        } else {
-          logger.info?.(
-            `[clawline:http] pair_request_pending_coalesced ${describePairingEntry(pendingEntry)} pendingEntries=${pendingFile.entries.length}`,
-          );
-        }
+        void notifyPendingDeviceOnce(pendingEntry);
         await sendJson(ws, { type: "pair_result", success: false, reason: "pair_pending" });
         ws.close();
         return;
@@ -9859,39 +9904,19 @@ button.deny { background: #9b1c31; color: white; }
       return;
     }
     const now = nowMs();
-    const pendingEntry = buildPendingEntryForPairRequest({
-      existingPendingEntry,
+    const { entry: pendingEntry } = await upsertPendingEntryForPairRequest({
       deviceId,
       claimedName: sanitizedClaimedName,
       deviceInfo: sanitizedInfo,
       now,
     });
     logger.info?.(
-      `[clawline:http] pair_request_upsert_pending ${describePairingEntry(pendingEntry)} pendingCount=${pendingFile.entries.length + (existingPendingEntry ? 0 : 1)}`,
+      `[clawline:http] pair_request_upsert_pending ${describePairingEntry(pendingEntry)} pendingCount=${pendingCount}`,
     );
-    await upsertPendingEntry(pendingEntry);
     logger.info?.(
       `[clawline:http] pair_request_pending_persisted ${describePairingEntry(pendingEntry)} pendingEntries=${pendingFile.entries.length}`,
     );
-    const notificationDecision = markPendingDeviceNotification(pendingEntry);
-    if (notificationDecision === "notify") {
-      notifyGatewayOfPending(pendingEntry)
-        .then(() =>
-          logger.info?.(
-            `[clawline:http] pair_request_pending_notified ${describePairingEntry(pendingEntry)}`,
-          ),
-        )
-        .catch((err) =>
-          logger.warn?.("[clawline:http] pair_request_pending_notify_failed", {
-            deviceId,
-            error: err.message,
-          }),
-        );
-    } else {
-      logger.info?.(
-        `[clawline:http] pair_request_pending_coalesced ${describePairingEntry(pendingEntry)} pendingEntries=${pendingFile.entries.length}`,
-      );
-    }
+    void notifyPendingDeviceOnce(pendingEntry);
     const existingSocket = pendingSockets.get(deviceId);
     if (existingSocket) {
       existingSocket.socket.close(1000);
