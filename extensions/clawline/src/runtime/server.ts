@@ -173,14 +173,25 @@ function buildSshBaseArgs(cfg: ProviderConfig["terminal"]["tmux"]["ssh"]): strin
   return args;
 }
 
+function isLocalTarsTerminalDestination(address: string): boolean {
+  const trimmed = address.trim().toLowerCase();
+  return trimmed === "mike@tars";
+}
+
 function createTerminalTmuxBackend(
   config: ProviderConfig,
   logger: Logger,
   destinationAddress?: string | null,
 ): TerminalTmuxBackend {
   const sshCfg = config.terminal?.tmux?.ssh;
-  const explicitTarget = typeof destinationAddress === "string" ? destinationAddress.trim() : "";
-  const tmuxMode = explicitTarget ? "ssh" : (config.terminal?.tmux?.mode ?? "local");
+  const requestedTarget = typeof destinationAddress === "string" ? destinationAddress.trim() : "";
+  const useLocalDestination = isLocalTarsTerminalDestination(requestedTarget);
+  const explicitTarget = useLocalDestination ? "" : requestedTarget;
+  const tmuxMode = useLocalDestination
+    ? "local"
+    : explicitTarget
+      ? "ssh"
+      : (config.terminal?.tmux?.mode ?? "local");
   const sshTarget =
     explicitTarget || (typeof sshCfg?.target === "string" ? sshCfg.target.trim() : "");
   const sshBaseArgs = sshCfg ? buildSshBaseArgs(sshCfg) : [];
