@@ -2716,6 +2716,87 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("delivers outbound interactive HTML attachments addressed by canonical session key", async () => {
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      userId: "flynn",
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry]);
+    try {
+      const sessionKey = "agent:main:clawline:flynn:main";
+      const descriptor = {
+        version: 1,
+        html: '<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"></head><body><button>Hello</button></body></html>',
+        metadata: { title: "Session Key Card", height: 96 },
+      };
+      const base64 = Buffer.from(JSON.stringify(descriptor), "utf8").toString("base64");
+
+      const result = await ctx.server.sendMessage({
+        target: sessionKey,
+        text: "",
+        attachments: [
+          {
+            data: base64,
+            mimeType: INTERACTIVE_HTML_MIME,
+          },
+        ],
+      });
+
+      expect(result.attachments).toEqual([
+        {
+          type: "document",
+          mimeType: INTERACTIVE_HTML_MIME,
+          data: base64,
+        },
+      ]);
+      expect(result.assetIds).toEqual([]);
+
+      const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
+      const db = new BetterSqlite3(dbPath);
+      try {
+        const row = db
+          .prepare(`SELECT userId, sessionKey FROM events WHERE id = ?`)
+          .get(result.messageId) as { userId: string; sessionKey: string } | undefined;
+        expect(row).toEqual({ userId: entry.userId, sessionKey });
+      } finally {
+        db.close();
+      }
+
+      const pair = await performPairRequest(ctx.port, entry.deviceId);
+      const { ws, queue } = await authenticateDeviceWithQueue(
+        ctx.port,
+        entry.deviceId,
+        pair.token as string,
+      );
+      try {
+        const replay = await waitForQueuedMessage(queue, (value) => {
+          const frame = value as { type?: string; id?: string };
+          return frame.type === "message" && frame.id === result.messageId;
+        });
+        expect(replay).toMatchObject({
+          type: "message",
+          id: result.messageId,
+          sessionKey,
+          attachments: [
+            {
+              type: "document",
+              mimeType: INTERACTIVE_HTML_MIME,
+              data: base64,
+            },
+          ],
+        });
+      } finally {
+        queue.dispose();
+        ws.terminate();
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("rejects outbound interactive HTML attachments with malformed descriptor JSON", async () => {
     const entry = createAllowlistEntry({
       deviceId: randomUUID(),
