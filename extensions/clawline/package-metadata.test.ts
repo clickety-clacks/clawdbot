@@ -12,10 +12,10 @@ function readJsonFile(filePath: string): unknown {
   return JSON.parse(fs.readFileSync(filePath, "utf8"));
 }
 
-function readWorkspaceOnlyBuiltDependencies(): string[] {
+function readWorkspaceBuildAllowlist(): string[] {
   const workspace = fs.readFileSync(path.join(repoRoot, "pnpm-workspace.yaml"), "utf8");
   const lines = workspace.split(/\r?\n/u);
-  const start = lines.findIndex((line) => line.trim() === "onlyBuiltDependencies:");
+  const start = lines.findIndex((line) => line.trim() === "allowBuilds:");
   if (start < 0) {
     return [];
   }
@@ -24,7 +24,7 @@ function readWorkspaceOnlyBuiltDependencies(): string[] {
     if (/^\S/u.test(line)) {
       break;
     }
-    const match = /^\s*-\s+"?([^"\n]+)"?\s*$/u.exec(line);
+    const match = /^\s*"?([^":\n]+)"?\s*:\s*true\s*$/u.exec(line);
     if (match?.[1]) {
       values.push(match[1]);
     }
@@ -54,7 +54,7 @@ describe("Clawline package metadata", () => {
   });
 
   it("keeps better-sqlite3 in pnpm's effective workspace build allowlist", () => {
-    expect(readWorkspaceOnlyBuiltDependencies()).toContain("better-sqlite3");
+    expect(readWorkspaceBuildAllowlist()).toContain("better-sqlite3");
   });
 
   it("keeps the native sqlite runtime external to the ESM gateway bundle", () => {

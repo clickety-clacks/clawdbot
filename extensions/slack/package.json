@@ -1,17 +1,30 @@
 {
   "name": "@openclaw/slack",
-  "version": "2026.5.4",
-  "private": true,
+  "version": "2026.5.12",
   "description": "OpenClaw Slack channel plugin",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/openclaw/openclaw"
+  },
   "type": "module",
   "dependencies": {
-    "@slack/bolt": "^4.7.2",
-    "@slack/types": "^2.21.0",
-    "@slack/web-api": "^7.15.2",
-    "https-proxy-agent": "^9.0.0"
+    "@slack/bolt": "4.7.2",
+    "@slack/types": "2.21.1",
+    "@slack/web-api": "7.15.2",
+    "https-proxy-agent": "9.0.0",
+    "typebox": "1.1.38"
   },
   "devDependencies": {
-    "@openclaw/plugin-sdk": "workspace:*"
+    "@openclaw/plugin-sdk": "workspace:*",
+    "openclaw": "workspace:*"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.5.12"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
   },
   "openclaw": {
     "extensions": [
@@ -43,6 +56,21 @@
         "specifier": "./configured-state",
         "exportName": "hasSlackConfiguredState"
       }
+    },
+    "install": {
+      "npmSpec": "@openclaw/slack",
+      "defaultChoice": "npm",
+      "minHostVersion": ">=2026.5.12-beta.6"
+    },
+    "compat": {
+      "pluginApi": ">=2026.5.12"
+    },
+    "build": {
+      "openclawVersion": "2026.5.12"
+    },
+    "release": {
+      "publishToClawHub": true,
+      "publishToNpm": true
     }
   }
 }

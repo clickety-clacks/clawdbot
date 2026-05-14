@@ -1,4 +1,6 @@
 import crypto from "node:crypto";
+import { completionRequiresMessageToolDelivery } from "../../auto-reply/reply/completion-delivery-policy.js";
+import { SILENT_REPLY_TOKEN } from "../../auto-reply/tokens.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { clearAgentRunContext, registerAgentRunContext } from "../../infra/agent-events.js";
 import { formatErrorMessage } from "../../infra/errors.js";
@@ -222,8 +224,18 @@ function failMediaGenerationTaskRun(params: {
 function buildMediaGenerationReplyInstruction(params: {
   status: "ok" | "error";
   completionLabel: string;
+  requiresMessageToolDelivery: boolean;
 }) {
   if (params.status === "ok") {
+    if (params.requiresMessageToolDelivery) {
+      return [
+        `The ${params.completionLabel} is ready for the original channel/group chat.`,
+        "This route requires message-tool delivery: the user will NOT see your normal assistant final reply.",
+        'Call the message tool with action="send" to the original/current chat, put a short caption in the message, and attach the generated media paths from the result.',
+        `After the message tool succeeds, reply only ${SILENT_REPLY_TOKEN}.`,
+        "Do not put MEDIA: lines only in your final answer; that final answer is private in this chat.",
+      ].join(" ");
+    }
     return `Tell the user the ${params.completionLabel} is ready. If visible source delivery requires the message tool, send it there with the generated media attached.`;
   }
   return [
@@ -266,6 +278,11 @@ async function wakeMediaGenerationTaskCompletion(params: {
       replyInstruction: buildMediaGenerationReplyInstruction({
         status: params.status,
         completionLabel: params.completionLabel,
+        requiresMessageToolDelivery: completionRequiresMessageToolDelivery({
+          cfg: params.config ?? {},
+          requesterSessionKey: params.handle.requesterSessionKey,
+          directOrigin: params.handle.requesterOrigin,
+        }),
       }),
     },
   ];

@@ -237,6 +237,7 @@ async function confirmGatewayReachable(params: {
   port: number;
   includeHealthDetails?: boolean;
   auth?: GatewayRestartProbeAuth;
+  env?: NodeJS.ProcessEnv;
 }): Promise<GatewayReachability> {
   const token = normalizeOptionalString(params.auth?.token ?? process.env.OPENCLAW_GATEWAY_TOKEN);
   const password = normalizeOptionalString(
@@ -247,6 +248,7 @@ async function confirmGatewayReachable(params: {
     auth: token || password ? { token, password } : undefined,
     timeoutMs: 3_000,
     includeDetails: params.includeHealthDetails === true,
+    env: params.env,
   });
   const reachedGateway =
     probe.ok ||
@@ -272,6 +274,7 @@ async function resolveGatewayRestartProbeAuth(
   const cfg = await createConfigIO({
     env: mergedEnv,
     pluginValidation: "skip",
+    suppressFutureVersionWarning: true,
   })
     .readBestEffortConfig()
     .catch((): OpenClawConfig => ({}));
@@ -307,6 +310,7 @@ async function inspectGatewayPortHealth(params: {
         await confirmGatewayReachable({
           port: params.port,
           auth: params.auth,
+          env: process.env,
         })
       ).reachable;
     } catch {
@@ -336,6 +340,7 @@ export async function inspectGatewayRestart(params: {
         port: params.port,
         includeHealthDetails: Boolean(expectedVersion),
         auth: params.probeAuth,
+        env,
       });
       activatedPluginErrors = reachability.activatedPluginErrors;
       channelProbeErrors = reachability.channelProbeErrors;

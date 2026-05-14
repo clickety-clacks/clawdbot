@@ -137,8 +137,9 @@ jobs:
             node -e "
               const fs = require(\"node:fs\");
               const path = require(\"node:path\");
-              const pkg = require(\"/app/package.json\");
-              for (const [dep, rel] of Object.entries(pkg.pnpm?.patchedDependencies ?? {})) {
+              const YAML = require(\"yaml\");
+              const workspace = YAML.parse(fs.readFileSync(\"/app/pnpm-workspace.yaml\", \"utf8\")) ?? {};
+              for (const [dep, rel] of Object.entries(workspace.patchedDependencies ?? {})) {
                 const absolute = path.join(\"/app\", rel);
                 if (!fs.existsSync(absolute)) {
                   throw new Error(`missing patch for ${dep}: ${rel}`);
@@ -315,13 +316,40 @@ jobs:
       - name: Pull root Dockerfile smoke image
         env:
           IMAGE_REF: ${{ needs.root_dockerfile_image.outputs.image_ref }}
-        run: timeout 600s docker pull "$IMAGE_REF"
+        run: |
+          set -euo pipefail
+          for attempt in 1 2; do
+            if timeout 1200s docker pull "$IMAGE_REF"; then
+              exit 0
+            fi
+            status=$?
+            if [ "$attempt" = "2" ]; then
+              exit "$status"
+            fi
+            docker image rm "$IMAGE_REF" >/dev/null 2>&1 || true
+            sleep 30
+          done
 
       - name: Run root Dockerfile CLI smoke
         env:
           IMAGE_REF: ${{ needs.root_dockerfile_image.outputs.image_ref }}
         run: |
-          docker run --rm --entrypoint sh "$IMAGE_REF" -lc 'which openclaw && openclaw --version'
+          docker run --rm --entrypoint sh "$IMAGE_REF" -lc '
+            which openclaw &&
+            openclaw --version &&
+            node -e "
+              const fs = require(\"node:fs\");
+              const path = require(\"node:path\");
+              const YAML = require(\"yaml\");
+              const workspace = YAML.parse(fs.readFileSync(\"/app/pnpm-workspace.yaml\", \"utf8\")) ?? {};
+              for (const [dep, rel] of Object.entries(workspace.patchedDependencies ?? {})) {
+                const absolute = path.join(\"/app\", rel);
+                if (!fs.existsSync(absolute)) {
+                  throw new Error(`missing patch for ${dep}: ${rel}`);
+                }
+              }
+            "
+          '
 
       - name: Run agents delete shared workspace Docker CLI smoke
         env:
@@ -405,7 +433,19 @@ jobs:
       - name: Pull root Dockerfile smoke image
         env:
           IMAGE_REF: ${{ needs.root_dockerfile_image.outputs.image_ref }}
-        run: timeout 600s docker pull "$IMAGE_REF"
+        run: |
+          set -euo pipefail
+          for attempt in 1 2; do
+            if timeout 1200s docker pull "$IMAGE_REF"; then
+              exit 0
+            fi
+            status=$?
+            if [ "$attempt" = "2" ]; then
+              exit "$status"
+            fi
+            docker image rm "$IMAGE_REF" >/dev/null 2>&1 || true
+            sleep 30
+          done
 
       - name: Set up Blacksmith Docker Builder
         uses: useblacksmith/setup-docker-builder@722e97d12b1d06a961800dd6c05d79d951ad3c80 # v1
@@ -472,7 +512,19 @@ jobs:
       - name: Pull root Dockerfile smoke image
         env:
           IMAGE_REF: ${{ needs.root_dockerfile_image.outputs.image_ref }}
-        run: timeout 600s docker pull "$IMAGE_REF"
+        run: |
+          set -euo pipefail
+          for attempt in 1 2; do
+            if timeout 1200s docker pull "$IMAGE_REF"; then
+              exit 0
+            fi
+            status=$?
+            if [ "$attempt" = "2" ]; then
+              exit "$status"
+            fi
+            docker image rm "$IMAGE_REF" >/dev/null 2>&1 || true
+            sleep 30
+          done
 
       - name: Setup Node environment for Bun smoke
         uses: ./.github/actions/setup-node-env
