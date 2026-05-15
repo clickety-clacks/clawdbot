@@ -2048,6 +2048,7 @@ export async function runEmbeddedAttempt(
         modelApi: params.model.api,
         workspaceDir: params.workspaceDir,
       });
+      const cacheTraceToolStartedAt = new Map<string, number>();
       const anthropicPayloadLogger = createAnthropicPayloadLogger({
         env: process.env,
         runId: params.runId,
@@ -2687,7 +2688,28 @@ export async function runEmbeddedAttempt(
           onPartialReply: params.onPartialReply,
           onAssistantMessageStart: params.onAssistantMessageStart,
           onExecutionPhase: params.onExecutionPhase,
-          onAgentEvent: params.onAgentEvent,
+          onAgentEvent: (evt) => {
+            if (evt.stream === "tool") {
+              const data = evt.data;
+              const phase = typeof data.phase === "string" ? data.phase : "";
+              const toolCallId = typeof data.toolCallId === "string" ? data.toolCallId : "";
+              const toolName = typeof data.name === "string" ? data.name : undefined;
+              if (phase === "start" && toolCallId) {
+                cacheTraceToolStartedAt.set(toolCallId, Date.now());
+                cacheTrace?.recordToolExecution({ phase: "start", toolName });
+              } else if (phase === "result" && toolCallId) {
+                const startedAt = cacheTraceToolStartedAt.get(toolCallId);
+                cacheTraceToolStartedAt.delete(toolCallId);
+                cacheTrace?.recordToolExecution({
+                  phase: "end",
+                  toolName,
+                  durationMs: startedAt === undefined ? undefined : Date.now() - startedAt,
+                  isError: typeof data.isError === "boolean" ? data.isError : undefined,
+                });
+              }
+            }
+            return params.onAgentEvent?.(evt);
+          },
           onBeforeLifecycleTerminal: () => {
             // Clear embedded-run activity before emitting terminal lifecycle events so
             // post-completion cleanup does not observe a logically finished run as active.
@@ -3528,40 +3550,54 @@ export async function runEmbeddedAttempt(
           }
 
           if (!skipPromptSubmission) {
-            const normalizedReplayMessages = normalizeAssistantReplayContent(
-              activeSession.messages,
-            );
-            if (normalizedReplayMessages !== activeSession.messages) {
-              activeSession.agent.state.messages = normalizedReplayMessages;
-            }
-            finalPromptText = promptForModel;
-            trajectoryRecorder?.recordEvent("prompt.submitted", {
-              prompt: promptForModel,
-              systemPrompt: systemPromptForHook,
-              messages: activeSession.messages,
-              imagesCount: imageResult.images.length,
-            });
-            const btwSnapshotMessages = normalizedReplayMessages.slice(-MAX_BTW_SNAPSHOT_MESSAGES);
-            updateActiveEmbeddedRunSnapshot(params.sessionId, {
-              transcriptLeafId,
-              messages: btwSnapshotMessages,
-              inFlightPrompt: promptForModel,
-            });
-            if (promptSubmission.runtimeOnly) {
-              await promptActiveSession(promptForModel);
-            } else {
-              await queueRuntimeContextForNextTurn({
-                session: activeSession,
-                runtimeContext: runtimeContextForHook,
-              });
-
-              // Only pass images option if there are actually images to pass
-              // This avoids potential issues with models that don't expect the images parameter
-              if (imageResult.images.length > 0) {
-                await promptActiveSession(promptForModel, { images: imageResult.images });
-              } else {
-                await promptActiveSession(promptForModel);
+            cacheTrace?.recordStage("prompt:submit:before");
+            const promptSubmitStartedAt = Date.now();
+            let promptSubmitSucceeded = false;
+            try {
+              const normalizedReplayMessages = normalizeAssistantReplayContent(
+                activeSession.messages,
+              );
+              if (normalizedReplayMessages !== activeSession.messages) {
+                activeSession.agent.state.messages = normalizedReplayMessages;
               }
+              finalPromptText = promptForModel;
+              trajectoryRecorder?.recordEvent("prompt.submitted", {
+                prompt: promptForModel,
+                systemPrompt: systemPromptForHook,
+                messages: activeSession.messages,
+                imagesCount: imageResult.images.length,
+              });
+              const btwSnapshotMessages =
+                normalizedReplayMessages.slice(-MAX_BTW_SNAPSHOT_MESSAGES);
+              updateActiveEmbeddedRunSnapshot(params.sessionId, {
+                transcriptLeafId,
+                messages: btwSnapshotMessages,
+                inFlightPrompt: promptForModel,
+              });
+              if (promptSubmission.runtimeOnly) {
+                await promptActiveSession(promptForModel);
+              } else {
+                await queueRuntimeContextForNextTurn({
+                  session: activeSession,
+                  runtimeContext: runtimeContextForHook,
+                });
+
+                // Only pass images option if there are actually images to pass
+                // This avoids potential issues with models that don't expect the images parameter
+                if (imageResult.images.length > 0) {
+                  await promptActiveSession(promptForModel, { images: imageResult.images });
+                } else {
+                  await promptActiveSession(promptForModel);
+                }
+              }
+              promptSubmitSucceeded = true;
+            } finally {
+              cacheTrace?.recordStage("prompt:submit:after", {
+                options: {
+                  durationMs: Math.max(0, Date.now() - promptSubmitStartedAt),
+                  isError: !promptSubmitSucceeded,
+                },
+              });
             }
           }
         } catch (err) {

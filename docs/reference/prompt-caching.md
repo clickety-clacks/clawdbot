@@ -332,6 +332,8 @@ Defaults:
 ### What to inspect
 
 - Cache trace events are JSONL and include staged snapshots like `session:loaded`, `prompt:before`, `stream:context`, and `session:after`.
+- Post-dispatch timing events split prompt execution into `prompt:submit:*`, `model:call:*`, and `tool:execution:*` stages so reports can separate provider wait/streaming from tool execution and finalization gaps.
+- Tool timing records include only the normalized tool name, duration, and error boolean. They do not include tool arguments, tool results, prompts, message bodies, or credentials.
 - Timing-only runner events (`runner:startup-stages`, `runner:prep-stages`, and `runner:core-plugin-tool-stages`) split broad runtime/context/cache gaps into source stages without prompt text, message bodies, workspace paths, or session keys.
 - Per-turn cache token impact is visible in normal usage surfaces via `cacheRead` and `cacheWrite` (for example `/usage full` and session usage summaries).
 - For Anthropic, expect both `cacheRead` and `cacheWrite` when caching is active.

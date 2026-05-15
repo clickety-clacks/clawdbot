@@ -189,10 +189,170 @@ describe("createCacheTrace", () => {
       {},
     );
 
-    const event = JSON.parse(lines[0]?.trim() ?? "{}") as Record<string, unknown>;
-    expect(event.stage).toBe("stream:context");
-    expect(event.system).toBe("system prompt text");
-    expect(event.systemDigest).toBeTypeOf("string");
+    const event = lines
+      .map((line) => JSON.parse(line.trim()) as Record<string, unknown>)
+      .find((entry) => entry.stage === "stream:context");
+    expect(event?.stage).toBe("stream:context");
+    expect(event?.system).toBe("system prompt text");
+    expect(event?.systemDigest).toBeTypeOf("string");
+  });
+
+  it("records model call timing stages without prompt or body content", async () => {
+    const lines: string[] = [];
+    const trace = createCacheTrace({
+      cfg: {
+        diagnostics: {
+          cacheTrace: {
+            enabled: true,
+            includeMessages: false,
+            includeSystem: false,
+            includePrompt: false,
+          },
+        },
+      },
+      env: {},
+      writer: {
+        filePath: "memory",
+        write: (line) => lines.push(line),
+        flush: async () => undefined,
+      },
+    });
+    const wrapped = trace?.wrapStreamFn(async function* () {
+      yield { type: "text", text: "do not persist" };
+    } as never);
+
+    const result = wrapped?.(
+      {
+        id: "gpt-5.5",
+        provider: "openai",
+        api: "openai-responses",
+      } as never,
+      {
+        systemPrompt: "do not persist",
+        messages: [{ role: "user", content: "do not persist" }],
+      } as never,
+      { apiKey: "sk-do-not-persist" },
+    ) as AsyncIterable<unknown> | undefined;
+
+    for await (const _chunk of result ?? []) {
+      // Exhaust the observed stream so terminal timing is recorded.
+    }
+
+    const events = lines.map((line) => JSON.parse(line.trim()) as Record<string, unknown>);
+    expect(events.map((event) => event.stage)).toEqual([
+      "model:call:start",
+      "stream:context",
+      "model:call:first-byte",
+      "model:call:end",
+    ]);
+    const firstByte = events[2] as { options?: Record<string, unknown> };
+    const end = events[3] as { options?: Record<string, unknown> };
+    expect(firstByte.options?.timeToFirstByteMs).toBeTypeOf("number");
+    expect(end.options?.durationMs).toBeTypeOf("number");
+    for (const event of events) {
+      expect(event).not.toHaveProperty("prompt");
+      expect(JSON.stringify(event)).not.toContain("do not persist");
+      expect(JSON.stringify(event)).not.toContain("sk-do-not-persist");
+    }
+  });
+
+  it("forwards early stream cancellation to the wrapped iterator", async () => {
+    const { trace } = createMemoryTraceForTest();
+    let returned = false;
+    const stream = {
+      [Symbol.asyncIterator]() {
+        return {
+          next: async () => ({ done: false, value: { type: "text_delta" } }),
+          return: async () => {
+            returned = true;
+            return { done: true, value: undefined };
+          },
+        };
+      },
+    };
+    const wrapped = trace?.wrapStreamFn(() => stream as never);
+    const result = wrapped?.(
+      { id: "gpt-5.5", provider: "openai", api: "openai-responses" } as never,
+      {
+        messages: [],
+      } as never,
+    ) as AsyncIterable<unknown> | undefined;
+    const iterator = result?.[Symbol.asyncIterator]();
+
+    await iterator?.next();
+    await iterator?.return?.();
+
+    expect(returned).toBe(true);
+  });
+
+  it("records model call errors without raw error names or messages", () => {
+    const lines: string[] = [];
+    const trace = createCacheTrace({
+      cfg: {
+        diagnostics: {
+          cacheTrace: {
+            enabled: true,
+            includeMessages: false,
+            includeSystem: false,
+            includePrompt: false,
+          },
+        },
+      },
+      env: {},
+      writer: {
+        filePath: "memory",
+        write: (line) => lines.push(line),
+        flush: async () => undefined,
+      },
+    });
+    const err = new Error("secret prompt body");
+    err.name = "sk-secret-error-name";
+    const wrapped = trace?.wrapStreamFn(() => {
+      throw err;
+    });
+
+    expect(() =>
+      wrapped?.(
+        { id: "gpt-5.5", provider: "openai", api: "openai-responses" } as never,
+        {
+          messages: [],
+        } as never,
+      ),
+    ).toThrow(err);
+
+    const events = lines.map((line) => JSON.parse(line.trim()) as Record<string, unknown>);
+    const errorEvent = events.find((event) => event.stage === "model:call:error") as
+      | { options?: Record<string, unknown> }
+      | undefined;
+    expect(errorEvent?.options?.errorCategory).toBe("Error");
+    expect(JSON.stringify(events)).not.toContain("secret prompt body");
+    expect(JSON.stringify(events)).not.toContain("sk-secret-error-name");
+  });
+
+  it("records tool execution labels and durations without args or results", () => {
+    const { lines, trace } = createMemoryTraceForTest();
+
+    trace?.recordToolExecution({ phase: "start", toolName: "surf_ace_push" });
+    trace?.recordToolExecution({
+      phase: "end",
+      toolName: "surf_ace_push",
+      durationMs: 123.4,
+      isError: false,
+    });
+
+    const events = lines.map((line) => JSON.parse(line.trim()) as Record<string, unknown>);
+    expect(events.map((event) => event.stage)).toEqual([
+      "tool:execution:start",
+      "tool:execution:end",
+    ]);
+    expect(events[0]?.options).toEqual({ toolName: "surf_ace_push" });
+    expect(events[1]?.options).toEqual({
+      toolName: "surf_ace_push",
+      durationMs: 123,
+      isError: false,
+    });
+    expect(JSON.stringify(events)).not.toContain("args");
+    expect(JSON.stringify(events)).not.toContain("result");
   });
 
   it("respects env overrides for enablement", () => {
