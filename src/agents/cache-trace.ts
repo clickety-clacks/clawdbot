@@ -193,10 +193,10 @@ export function createCacheTrace(params: CacheTraceInit): CacheTrace | null {
       }
     }
 
-    if (payload.note) {
+    if (!runnerTimingStage && payload.note) {
       event.note = payload.note;
     }
-    if (payload.error) {
+    if (!runnerTimingStage && payload.error) {
       event.error = payload.error;
     }
 

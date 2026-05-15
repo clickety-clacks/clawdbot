@@ -791,21 +791,15 @@ export async function runEmbeddedAttempt(
   log.debug(
     `embedded run start: runId=${params.runId} sessionId=${params.sessionId} provider=${params.provider} model=${params.modelId} thinking=${params.thinkLevel} messageChannel=${params.messageChannel ?? params.messageProvider ?? "unknown"}`,
   );
-  const cacheTrace = createCacheTrace({
+  const runnerTimingTrace = createCacheTrace({
     cfg: params.config,
     env: process.env,
     runId: params.runId,
-    sessionId: params.sessionId,
-    sessionKey: params.sessionKey,
-    provider: params.provider,
-    modelId: params.modelId,
-    modelApi: params.model.api,
-    workspaceDir: params.workspaceDir,
   });
   const prepStages = createEmbeddedRunStageTracker();
   const emitPrepStageSummary = (phase: string) => {
     const summary = prepStages.snapshot();
-    cacheTrace?.recordStage("runner:prep-stages", {
+    runnerTimingTrace?.recordStage("runner:prep-stages", {
       timing: {
         phase,
         totalMs: summary.totalMs,
@@ -833,7 +827,7 @@ export async function runEmbeddedAttempt(
     if (summary.stages.length === 0) {
       return;
     }
-    cacheTrace?.recordStage("runner:core-plugin-tool-stages", {
+    runnerTimingTrace?.recordStage("runner:core-plugin-tool-stages", {
       timing: {
         phase,
         totalMs: summary.totalMs,
@@ -2043,6 +2037,17 @@ export async function runEmbeddedAttempt(
         removeHistoryImagePruneContextTransform();
         removeLoopContextGuard?.();
       };
+      const cacheTrace = createCacheTrace({
+        cfg: params.config,
+        env: process.env,
+        runId: params.runId,
+        sessionId: activeSession.sessionId,
+        sessionKey: params.sessionKey,
+        provider: params.provider,
+        modelId: params.modelId,
+        modelApi: params.model.api,
+        workspaceDir: params.workspaceDir,
+      });
       const anthropicPayloadLogger = createAnthropicPayloadLogger({
         env: process.env,
         runId: params.runId,

@@ -426,7 +426,7 @@ export async function runEmbeddedPiAgent(
     return enqueueGlobal(async () => {
       throwIfAborted();
       const started = Date.now();
-      let cacheTrace: ReturnType<typeof createCacheTrace> = null;
+      let runnerTimingTrace: ReturnType<typeof createCacheTrace> = null;
       const startupStages = createEmbeddedRunStageTracker();
       let startupStagesEmitted = false;
       const notifyExecutionPhase = (
@@ -440,7 +440,7 @@ export async function runEmbeddedPiAgent(
       };
       const emitStartupStageSummary = (phase: string) => {
         const summary = startupStages.snapshot();
-        cacheTrace?.recordStage("runner:startup-stages", {
+        runnerTimingTrace?.recordStage("runner:startup-stages", {
           timing: {
             phase,
             totalMs: summary.totalMs,
@@ -494,15 +494,10 @@ export async function runEmbeddedPiAgent(
 
       let provider = (params.provider ?? DEFAULT_PROVIDER).trim() || DEFAULT_PROVIDER;
       let modelId = (params.model ?? DEFAULT_MODEL).trim() || DEFAULT_MODEL;
-      cacheTrace = createCacheTrace({
+      runnerTimingTrace = createCacheTrace({
         cfg: params.config,
         env: process.env,
         runId: params.runId,
-        sessionId: params.sessionId,
-        sessionKey: params.sessionKey,
-        provider,
-        modelId,
-        workspaceDir: resolvedWorkspace,
       });
       const agentDir =
         params.agentDir ?? resolveAgentDir(params.config ?? {}, workspaceResolution.agentId);

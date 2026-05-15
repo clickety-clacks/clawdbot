@@ -113,6 +113,8 @@ describe("createCacheTrace", () => {
       messages: [{ role: "user", content: "do not persist" }] as unknown as [],
       model: { provider: "do-not-persist" },
       options: { prompt: "do-not-persist" },
+      note: "do not persist",
+      error: "do not persist",
       timing: {
         phase: "stream-ready",
         totalMs: 42,
@@ -145,6 +147,8 @@ describe("createCacheTrace", () => {
     expect(event).not.toHaveProperty("options");
     expect(event).not.toHaveProperty("messages");
     expect(event).not.toHaveProperty("messageCount");
+    expect(event).not.toHaveProperty("note");
+    expect(event).not.toHaveProperty("error");
   });
 
   it("records stream context from systemPrompt when wrapping stream functions", () => {
