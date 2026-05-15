@@ -48,20 +48,15 @@ export OPENCLAW_NO_PROMPT=1
 package_tgz="${OPENCLAW_CURRENT_PACKAGE_TGZ:?missing OPENCLAW_CURRENT_PACKAGE_TGZ}"
 git_root="/tmp/openclaw-git"
 mkdir -p "$git_root"
+echo "==> prepare package-derived git fixture"
 # Build the fake git install from the packed package contents, not the checkout.
 tar -xzf "$package_tgz" -C "$git_root" --strip-components=1
 # The package-derived fixture can carry patchedDependencies whose targets are
 # absent from the trimmed tarball install; that should not block update preflight.
 node scripts/e2e/lib/update-channel-switch/assertions.mjs prepare-git-fixture "$git_root"
-(
-  cd "$git_root"
-  if ! npm install --omit=optional --no-fund --no-audit >/tmp/openclaw-git-install.log 2>&1; then
-    cat /tmp/openclaw-git-install.log >&2 || true
-    exit 1
-  fi
-)
 node scripts/e2e/lib/update-channel-switch/assertions.mjs write-control-ui "$git_root"
 
+echo "==> commit package-derived git fixture"
 git config --global user.email "docker-e2e@openclaw.local"
 git config --global user.name "OpenClaw Docker E2E"
 git config --global gc.auto 0
@@ -74,6 +69,7 @@ fixture_sha="$(git -C "$git_root" rev-parse HEAD)"
 
 pkg_tgz_path="$package_tgz"
 
+echo "==> install package fixture"
 npm install -g --prefix /tmp/npm-prefix --omit=optional "$pkg_tgz_path"
 package_version="$(node -p "JSON.parse(require(\"node:fs\").readFileSync(\"/tmp/npm-prefix/lib/node_modules/openclaw/package.json\", \"utf8\")).version")"
 OPENCLAW_PACKAGE_ACCEPTANCE_LEGACY_COMPAT="$(

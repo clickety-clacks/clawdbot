@@ -11,7 +11,7 @@ describeLive("openai tts live", () => {
     const speechProvider = buildOpenAISpeechProvider();
 
     const voices = await speechProvider.listVoices?.({});
-    expect(voices).toEqual(expect.arrayContaining([expect.objectContaining({ id: "alloy" })]));
+    expect(voices?.some((voice) => voice.id === "alloy")).toBe(true);
 
     const providerConfig = {
       apiKey: OPENAI_API_KEY,
@@ -25,7 +25,7 @@ describeLive("openai tts live", () => {
       cfg: { plugins: { enabled: true } } as never,
       providerConfig,
       target: "audio-file",
-      timeoutMs: 45_000,
+      timeoutMs: 90_000,
     });
     expect(audioFile.outputFormat).toBe("mp3");
     expect(audioFile.fileExtension).toBe(".mp3");
@@ -35,10 +35,10 @@ describeLive("openai tts live", () => {
       text: "OpenClaw OpenAI telephony integration test OK.",
       cfg: { plugins: { enabled: true } } as never,
       providerConfig,
-      timeoutMs: 45_000,
+      timeoutMs: 90_000,
     });
     expect(telephony?.outputFormat).toBe("pcm");
     expect(telephony?.sampleRate).toBe(24_000);
     expect(telephony?.audioBuffer.byteLength).toBeGreaterThan(512);
-  }, 60_000);
+  }, 120_000);
 });

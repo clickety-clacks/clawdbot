@@ -148,10 +148,16 @@ validate_credential_preflight
 
 docker_e2e_build_or_reuse "$IMAGE_NAME" npm-telegram-live "$ROOT_DIR/scripts/e2e/Dockerfile" "$ROOT_DIR" "$DOCKER_TARGET"
 
-mkdir -p "$ROOT_DIR/.artifacts/qa-e2e"
-run_log="$(mktemp "${TMPDIR:-/tmp}/openclaw-npm-telegram-live.XXXXXX")"
+host_output_dir="$OUTPUT_DIR"
+case "$host_output_dir" in
+  /*) ;;
+  *) host_output_dir="$ROOT_DIR/$host_output_dir" ;;
+esac
+mkdir -p "$host_output_dir"
+run_log="$host_output_dir/npm-telegram-live.log"
+: >"$run_log"
 npm_prefix_host="$(mktemp -d "$ROOT_DIR/.artifacts/qa-e2e/npm-telegram-live-prefix.XXXXXX")"
-trap 'rm -f "$run_log"; rm -rf "$npm_prefix_host"' EXIT
+trap 'rm -rf "$npm_prefix_host"' EXIT
 
 docker_env=(
   -e COREPACK_ENABLE_DOWNLOAD_PROMPT=0
@@ -159,6 +165,7 @@ docker_env=(
   -e OPENCLAW_NPM_TELEGRAM_PACKAGE_LABEL="$PACKAGE_LABEL"
   -e OPENCLAW_NPM_TELEGRAM_OUTPUT_DIR="$OUTPUT_DIR"
   -e OPENCLAW_NPM_TELEGRAM_FAST="${OPENCLAW_NPM_TELEGRAM_FAST:-1}"
+  -e OPENCLAW_QA_SUITE_PROGRESS="${OPENCLAW_QA_SUITE_PROGRESS:-1}"
 )
 
 forward_env_if_set() {
@@ -212,12 +219,13 @@ for key in \
 done
 
 run_logged() {
-  if ! "$@" >"$run_log" 2>&1; then
-    cat "$run_log"
-    exit 1
+  set +e
+  "$@" 2>&1 | tee -a "$run_log"
+  local status="${PIPESTATUS[0]}"
+  set -e
+  if [ "$status" -ne 0 ]; then
+    exit "$status"
   fi
-  cat "$run_log"
-  >"$run_log"
 }
 
 echo "Running package Telegram live Docker E2E ($PACKAGE_LABEL)..."
@@ -243,11 +251,12 @@ command -v openclaw
 openclaw --version
 EOF
 
-# Mount only test harness/plugin QA sources; the SUT itself is the installed package candidate.
+# Mount only QA harness source; the SUT itself, including bundled plugin runtime,
+# is the installed package candidate.
 run_logged docker_e2e_run_with_harness \
   "${docker_env[@]}" \
   -v "$ROOT_DIR/.artifacts:/app/.artifacts" \
-  -v "$ROOT_DIR/extensions:/app/extensions:ro" \
+  -v "$ROOT_DIR/extensions/qa-lab:/app/extensions/qa-lab:ro" \
   -v "$npm_prefix_host:/npm-global" \
   -i "$IMAGE_NAME" bash -s <<'EOF'
 set -euo pipefail
@@ -278,17 +287,12 @@ openclaw --version
 mkdir -p /app/node_modules
 openclaw_package_dir="/npm-global/lib/node_modules/openclaw"
 # The mounted QA harness imports openclaw/plugin-sdk and package dependencies;
-# point those imports at the installed package without copying source into the test image.
+# point those imports at the installed package without copying source plugins into the test image.
 rm -rf /app/node_modules/openclaw
 ln -sfnT "$openclaw_package_dir" /app/node_modules/openclaw
 rm -rf /app/dist
 ln -sfnT "$openclaw_package_dir/dist" /app/dist
 cp "$openclaw_package_dir/package.json" /app/package.json
-rm -rf "$openclaw_package_dir/extensions"
-ln -sfnT /app/extensions "$openclaw_package_dir/extensions"
-mkdir -p /app/node_modules/@openclaw
-rm -rf /app/node_modules/@openclaw/qa-channel
-ln -sfnT /app/extensions/qa-channel /app/node_modules/@openclaw/qa-channel
 node scripts/e2e/lib/npm-telegram-live/prepare-package.mjs \
   /app/package.json \
   /app/node_modules/openclaw/package.json
