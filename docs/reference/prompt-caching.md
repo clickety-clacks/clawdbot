@@ -332,6 +332,7 @@ Defaults:
 ### What to inspect
 
 - Cache trace events are JSONL and include staged snapshots like `session:loaded`, `prompt:before`, `stream:context`, and `session:after`.
+- Timing-only runner events (`runner:startup-stages`, `runner:prep-stages`, and `runner:core-plugin-tool-stages`) split broad runtime/context/cache gaps into source stages without prompt text, message bodies, workspace paths, or session keys.
 - Per-turn cache token impact is visible in normal usage surfaces via `cacheRead` and `cacheWrite` (for example `/usage full` and session usage summaries).
 - For Anthropic, expect both `cacheRead` and `cacheWrite` when caching is active.
 - For OpenAI, expect `cacheRead` on cache hits and `cacheWrite` to remain `0`; OpenAI does not publish a separate cache-write token field.

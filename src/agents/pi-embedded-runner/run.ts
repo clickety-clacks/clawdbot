@@ -33,6 +33,7 @@ import {
   markAuthProfileGood,
   markAuthProfileUsed,
 } from "../auth-profiles.js";
+import { createCacheTrace } from "../cache-trace.js";
 import {
   resolveSessionKeyForRequest,
   resolveStoredSessionKeyForSessionId,
@@ -381,10 +382,18 @@ export async function runEmbeddedPiAgent(
     return enqueueGlobal(async () => {
       throwIfAborted();
       const started = Date.now();
+      let cacheTrace: ReturnType<typeof createCacheTrace> = null;
       const startupStages = createEmbeddedRunStageTracker();
       let startupStagesEmitted = false;
       const emitStartupStageSummary = (phase: string) => {
         const summary = startupStages.snapshot();
+        cacheTrace?.recordStage("runner:startup-stages", {
+          timing: {
+            phase,
+            totalMs: summary.totalMs,
+            stages: summary.stages,
+          },
+        });
         const shouldWarn = shouldWarnEmbeddedRunStageSummary(summary);
         if (!shouldWarn && !log.isEnabled("trace")) {
           return;
@@ -429,6 +438,16 @@ export async function runEmbeddedPiAgent(
 
       let provider = (params.provider ?? DEFAULT_PROVIDER).trim() || DEFAULT_PROVIDER;
       let modelId = (params.model ?? DEFAULT_MODEL).trim() || DEFAULT_MODEL;
+      cacheTrace = createCacheTrace({
+        cfg: params.config,
+        env: process.env,
+        runId: params.runId,
+        sessionId: params.sessionId,
+        sessionKey: params.sessionKey,
+        provider,
+        modelId,
+        workspaceDir: resolvedWorkspace,
+      });
       const agentDir = params.agentDir ?? resolveOpenClawAgentDir();
       const normalizedSessionKey = params.sessionKey?.trim();
       const fallbackConfigured = hasConfiguredModelFallbacks({

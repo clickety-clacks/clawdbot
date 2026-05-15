@@ -104,6 +104,49 @@ describe("createCacheTrace", () => {
     expect(event.system).toBe("");
   });
 
+  it("records runner timing stages without prompt or message content", () => {
+    const { lines, trace } = createMemoryTraceForTest();
+
+    trace?.recordStage("runner:prep-stages", {
+      prompt: "do not persist",
+      system: "do not persist",
+      messages: [{ role: "user", content: "do not persist" }] as unknown as [],
+      model: { provider: "do-not-persist" },
+      options: { prompt: "do-not-persist" },
+      timing: {
+        phase: "stream-ready",
+        totalMs: 42,
+        stages: [
+          { name: "workspace-sandbox", durationMs: 10, elapsedMs: 10 },
+          { name: "stream-setup", durationMs: 32, elapsedMs: 42 },
+        ],
+      },
+    });
+
+    const event = JSON.parse(lines[0]?.trim() ?? "{}") as Record<string, unknown>;
+    expect(event.stage).toBe("runner:prep-stages");
+    expect(event.runId).toBeUndefined();
+    expect(event.sessionId).toBeUndefined();
+    expect(event.sessionKey).toBeUndefined();
+    expect(event.provider).toBeUndefined();
+    expect(event.modelId).toBeUndefined();
+    expect(event.workspaceDir).toBeUndefined();
+    expect(event.timing).toEqual({
+      phase: "stream-ready",
+      totalMs: 42,
+      stages: [
+        { name: "workspace-sandbox", durationMs: 10, elapsedMs: 10 },
+        { name: "stream-setup", durationMs: 32, elapsedMs: 42 },
+      ],
+    });
+    expect(event).not.toHaveProperty("prompt");
+    expect(event).not.toHaveProperty("system");
+    expect(event).not.toHaveProperty("model");
+    expect(event).not.toHaveProperty("options");
+    expect(event).not.toHaveProperty("messages");
+    expect(event).not.toHaveProperty("messageCount");
+  });
+
   it("records stream context from systemPrompt when wrapping stream functions", () => {
     const lines: string[] = [];
     const trace = createCacheTrace({

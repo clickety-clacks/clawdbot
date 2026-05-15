@@ -13,6 +13,9 @@ import { buildAgentTraceBase } from "./trace-base.js";
 type CacheTraceStage =
   | "cache:result"
   | "cache:state"
+  | "runner:core-plugin-tool-stages"
+  | "runner:prep-stages"
+  | "runner:startup-stages"
   | "session:loaded"
   | "session:raw-model-run"
   | "session:sanitized"
@@ -43,6 +46,15 @@ type CacheTraceEvent = {
   messageFingerprints?: string[];
   messagesDigest?: string;
   systemDigest?: string;
+  timing?: {
+    phase?: string;
+    totalMs: number;
+    stages: Array<{
+      name: string;
+      durationMs: number;
+      elapsedMs: number;
+    }>;
+  };
   note?: string;
   error?: string;
 };
@@ -178,6 +190,10 @@ function summarizeMessages(messages: AgentMessage[]): {
   };
 }
 
+function isRunnerTimingStage(stage: CacheTraceStage): boolean {
+  return stage.startsWith("runner:");
+}
+
 export function createCacheTrace(params: CacheTraceInit): CacheTrace | null {
   const cfg = resolveCacheTraceConfig(params);
   if (!cfg.enabled) {
@@ -190,29 +206,33 @@ export function createCacheTrace(params: CacheTraceInit): CacheTrace | null {
   const base: Omit<CacheTraceEvent, "ts" | "seq" | "stage"> = buildAgentTraceBase(params);
 
   const recordStage: CacheTrace["recordStage"] = (stage, payload = {}) => {
+    const runnerTimingStage = isRunnerTimingStage(stage);
     const event: CacheTraceEvent = {
-      ...base,
+      ...(runnerTimingStage ? { runId: base.runId } : base),
       ts: new Date().toISOString(),
       seq: (seq += 1),
       stage,
     };
 
-    if (payload.prompt !== undefined && cfg.includePrompt) {
+    if (!runnerTimingStage && payload.prompt !== undefined && cfg.includePrompt) {
       event.prompt = payload.prompt;
     }
-    if (payload.system !== undefined && cfg.includeSystem) {
+    if (!runnerTimingStage && payload.system !== undefined && cfg.includeSystem) {
       event.system = sanitizeDiagnosticPayload(payload.system);
       event.systemDigest = digest(payload.system);
     }
-    if (payload.options) {
+    if (!runnerTimingStage && payload.options) {
       event.options = sanitizeDiagnosticPayload(payload.options) as Record<string, unknown>;
     }
-    if (payload.model) {
+    if (!runnerTimingStage && payload.model) {
       event.model = sanitizeDiagnosticPayload(payload.model) as Record<string, unknown>;
+    }
+    if (payload.timing) {
+      event.timing = sanitizeDiagnosticPayload(payload.timing) as CacheTraceEvent["timing"];
     }
 
     const messages = payload.messages;
-    if (Array.isArray(messages)) {
+    if (!runnerTimingStage && Array.isArray(messages)) {
       const summary = summarizeMessages(messages);
       event.messageCount = summary.messageCount;
       event.messageRoles = summary.messageRoles;
