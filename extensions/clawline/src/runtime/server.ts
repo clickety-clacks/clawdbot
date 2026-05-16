@@ -5841,6 +5841,7 @@ button.deny { background: #9b1c31; color: white; }
       null;
     const fastMode = resolveStatusFastMode(entry, activeRun ?? snapshot);
     const runtimeContext = resolveSessionControlRuntimeContext(sessionKey, modelStatus);
+    const displayFastMode = isCodexSessionControlRuntime(runtimeContext.runtime) ? null : fastMode;
     const modelCatalog = await loadSessionControlModelCatalog(sessionKey, runtimeContext);
     const capabilities = sessionControlCapabilitiesForSession(userId, sessionKey, runtimeContext);
     if (!modelCatalog.available) {
@@ -5858,8 +5859,8 @@ button.deny { background: #9b1c31; color: white; }
         harness: runtimeContext.runtime,
         reasoningLevel: normalizeStatusString(entry?.reasoningLevel),
         thinkingLevel,
-        fastMode,
-        mode: fastMode == null ? null : fastMode ? "fast" : "normal",
+        fastMode: displayFastMode,
+        mode: displayFastMode == null ? null : displayFastMode ? "fast" : "normal",
         verbosity: normalizeStatusString(entry?.verboseLevel),
       },
       run: activeRun

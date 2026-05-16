@@ -1290,8 +1290,8 @@ describe.sequential("clawline provider server", () => {
           model: "gpt-5.5",
           provider: "openai",
           thinkingLevel: "low",
-          fastMode: true,
-          mode: "fast",
+          fastMode: null,
+          mode: null,
         },
       });
 
@@ -1358,6 +1358,8 @@ describe.sequential("clawline provider server", () => {
           provider: "openai",
           model: "gpt-5.5",
           harness: "codex",
+          fastMode: null,
+          mode: null,
         },
         capabilities: {
           setThinking: {
