@@ -78,7 +78,6 @@ import {
   shouldAttemptTtsPayload,
 } from "../../tts/tts-config.js";
 import { INTERNAL_MESSAGE_CHANNEL, normalizeMessageChannel } from "../../utils/message-channel.js";
-import { resolveTextCommand } from "../commands-registry-normalize.js";
 import type { BlockReplyContext } from "../get-reply-options.types.js";
 import { getReplyPayloadMetadata, type ReplyPayload } from "../reply-payload.js";
 import type { FinalizedMsgContext } from "../templating.js";
@@ -194,26 +193,6 @@ const isInboundAudioContext = (ctx: FinalizedMsgContext): boolean => {
   }
   return AUDIO_HEADER_RE.test(trimmed);
 };
-
-const resolveInboundCommandText = (ctx: FinalizedMsgContext): string => {
-  if (typeof ctx.BodyForCommands === "string") {
-    return ctx.BodyForCommands;
-  }
-  if (typeof ctx.CommandBody === "string") {
-    return ctx.CommandBody;
-  }
-  if (typeof ctx.RawBody === "string") {
-    return ctx.RawBody;
-  }
-  return typeof ctx.Body === "string" ? ctx.Body : "";
-};
-
-const shouldRouteRegisteredSourceCommandBeforePluginBinding = (
-  ctx: FinalizedMsgContext,
-  cfg: OpenClawConfig,
-): boolean =>
-  isExplicitSourceReplyCommand(ctx) &&
-  resolveTextCommand(resolveInboundCommandText(ctx), cfg) !== null;
 
 const resolveRoutedPolicyConversationType = (
   ctx: FinalizedMsgContext,
@@ -863,12 +842,7 @@ export async function dispatchReplyFromConfig(
     | "plugin-bound-fallback-no-handler"
     | undefined;
 
-  if (pluginOwnedBinding && shouldRouteRegisteredSourceCommandBeforePluginBinding(ctx, cfg)) {
-    touchConversationBindingRecord(pluginOwnedBinding.bindingId);
-    logVerbose(
-      `plugin-bound inbound deferred to registered source command handling (plugin=${pluginOwnedBinding.pluginId} session=${sessionKey ?? "unknown"})`,
-    );
-  } else if (pluginOwnedBinding) {
+  if (pluginOwnedBinding) {
     touchConversationBindingRecord(pluginOwnedBinding.bindingId);
     if (suppressDelivery) {
       // Plugin-bound inbound handlers typically emit outbound replies we
