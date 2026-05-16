@@ -1301,6 +1301,406 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("filters session-control status and controls by Codex versus Pi runtime", async () => {
+    const codexEntry = createAllowlistEntry();
+    const sessionKey = "agent:main:clawline:flynn:main";
+    const codexCtx = await setupTestServer([codexEntry], {
+      openClawConfig: {
+        agents: {
+          default: "main",
+          defaults: {
+            model: { primary: "openai/gpt-5.5" },
+            models: {
+              "openai/gpt-5.5": {},
+              "anthropic/claude-sonnet-4-6": {},
+            },
+          },
+          list: [{ id: "main" }],
+        },
+        bindings: [],
+      } as OpenClawConfig,
+    });
+    try {
+      await fs.writeFile(
+        codexCtx.sessionStorePath,
+        JSON.stringify(
+          {
+            [sessionKey]: {
+              sessionId: "codex-session-control-test",
+              updatedAt: Date.now(),
+              modelProvider: "openai",
+              model: "gpt-5.5",
+              thinkingLevel: "medium",
+              fastMode: false,
+            },
+          },
+          null,
+          2,
+        ),
+      );
+      const pairResult = await performPairRequest(codexCtx.port, codexEntry.deviceId, {
+        claimedName: codexEntry.claimedName,
+      });
+      const authToken = pairResult.token as string;
+      const { ws } = await authenticateDevice(codexCtx.port, codexEntry.deviceId, authToken);
+      const authHeader = `Bearer ${authToken}`;
+
+      const codexStatusResponse = await fetch(
+        `http://127.0.0.1:${codexCtx.port}/api/session-status?sessionKey=${encodeURIComponent(
+          sessionKey,
+        )}`,
+        { headers: { Authorization: authHeader } },
+      );
+      expect(codexStatusResponse.status).toBe(200);
+      const codexStatusJson = await codexStatusResponse.json();
+      expect(codexStatusJson).toMatchObject({
+        display: {
+          provider: "openai",
+          model: "gpt-5.5",
+          harness: "codex",
+        },
+        capabilities: {
+          setThinking: {
+            supported: true,
+            options: [
+              { title: "off", value: "off" },
+              { title: "minimal", value: "minimal" },
+              { title: "low", value: "low" },
+              { title: "medium", value: "medium" },
+              { title: "high", value: "high" },
+              { title: "xhigh", value: "xhigh" },
+            ],
+          },
+          setReasoning: {
+            supported: false,
+            reason: "codex_reasoning_uses_thinking_level",
+          },
+          setFastMode: {
+            supported: false,
+            reason: "codex_fast_mode_not_supported_by_session_control",
+          },
+          setMode: {
+            supported: false,
+            reason: "codex_fast_mode_not_supported_by_session_control",
+          },
+        },
+        modelCatalog: {
+          available: true,
+          runtime: "codex",
+          models: expect.arrayContaining([expect.objectContaining({ ref: "openai/gpt-5.5" })]),
+        },
+      });
+      const codexCatalogRefs = (
+        codexStatusJson as { modelCatalog?: { models?: Array<{ ref?: string }> } }
+      ).modelCatalog?.models?.map((model) => model.ref);
+      expect(codexCatalogRefs).not.toContain("anthropic/claude-sonnet-4-6");
+      expect(
+        (
+          codexStatusJson as {
+            capabilities?: { setThinking?: { options?: Array<{ value?: string }> } };
+          }
+        ).capabilities?.setThinking?.options?.map((option) => option.value),
+      ).not.toContain("adaptive");
+
+      const codexFastResponse = await fetch(
+        `http://127.0.0.1:${codexCtx.port}/api/session-control`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: authHeader,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ sessionKey, action: "set_fast_mode", fastMode: true }),
+        },
+      );
+      expect(codexFastResponse.status).toBe(200);
+      expect(await codexFastResponse.json()).toMatchObject({
+        ok: false,
+        sessionKey,
+        action: "set_fast_mode",
+        code: "codex_fast_mode_not_supported_by_session_control",
+      });
+
+      const codexThinkingResponse = await fetch(
+        `http://127.0.0.1:${codexCtx.port}/api/session-control`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: authHeader,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            sessionKey,
+            action: "set_thinking",
+            thinkingLevel: "adaptive",
+          }),
+        },
+      );
+      expect(codexThinkingResponse.status).toBe(200);
+      expect(await codexThinkingResponse.json()).toMatchObject({
+        ok: false,
+        sessionKey,
+        action: "set_thinking",
+        code: "unsupported_control_option",
+      });
+
+      const codexNullThinkingResponse = await fetch(
+        `http://127.0.0.1:${codexCtx.port}/api/session-control`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: authHeader,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            sessionKey,
+            action: "set_thinking",
+            thinkingLevel: null,
+          }),
+        },
+      );
+      expect(codexNullThinkingResponse.status).toBe(200);
+      expect(await codexNullThinkingResponse.json()).toMatchObject({
+        ok: false,
+        sessionKey,
+        action: "set_thinking",
+        code: "unsupported_control_option",
+      });
+
+      const codexPiModelResponse = await fetch(
+        `http://127.0.0.1:${codexCtx.port}/api/session-control`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: authHeader,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            sessionKey,
+            action: "set_model",
+            model: "anthropic/claude-sonnet-4-6",
+          }),
+        },
+      );
+      expect(codexPiModelResponse.status).toBe(200);
+      expect(await codexPiModelResponse.json()).toMatchObject({
+        ok: false,
+        sessionKey,
+        action: "set_model",
+        code: "unsupported_runtime_model",
+      });
+
+      ws.terminate();
+    } finally {
+      await codexCtx.cleanup();
+    }
+
+    const piEntry = createAllowlistEntry();
+    const piCtx = await setupTestServer([piEntry], {
+      openClawConfig: {
+        agents: {
+          default: "main",
+          defaults: {
+            model: { primary: "openai/gpt-5.5" },
+            models: {
+              "openai/gpt-5.5": { agentRuntime: { id: "pi" } },
+              "anthropic/claude-sonnet-4-6": {},
+            },
+          },
+          list: [{ id: "main" }],
+        },
+        bindings: [],
+      } as OpenClawConfig,
+    });
+    try {
+      await fs.writeFile(
+        piCtx.sessionStorePath,
+        JSON.stringify(
+          {
+            [sessionKey]: {
+              sessionId: "pi-session-control-test",
+              updatedAt: Date.now(),
+              modelProvider: "openai",
+              model: "gpt-5.5",
+              thinkingLevel: "medium",
+              fastMode: false,
+            },
+          },
+          null,
+          2,
+        ),
+      );
+      const pairResult = await performPairRequest(piCtx.port, piEntry.deviceId, {
+        claimedName: piEntry.claimedName,
+      });
+      const authToken = pairResult.token as string;
+      const { ws } = await authenticateDevice(piCtx.port, piEntry.deviceId, authToken);
+      const authHeader = `Bearer ${authToken}`;
+
+      const piStatusResponse = await fetch(
+        `http://127.0.0.1:${piCtx.port}/api/session-status?sessionKey=${encodeURIComponent(
+          sessionKey,
+        )}`,
+        { headers: { Authorization: authHeader } },
+      );
+      expect(piStatusResponse.status).toBe(200);
+      const piStatusJson = await piStatusResponse.json();
+      expect(piStatusJson).toMatchObject({
+        display: {
+          provider: "openai",
+          model: "gpt-5.5",
+          harness: "pi",
+        },
+        capabilities: {
+          setThinking: {
+            supported: true,
+            options: expect.arrayContaining([{ title: "adaptive", value: "adaptive" }]),
+          },
+          setFastMode: {
+            supported: true,
+            options: [
+              { title: "On", enabled: true },
+              { title: "Off", enabled: false },
+            ],
+          },
+        },
+        modelCatalog: {
+          available: true,
+          runtime: "pi",
+          models: expect.arrayContaining([
+            expect.objectContaining({ ref: "openai/gpt-5.5" }),
+            expect.objectContaining({ ref: "anthropic/claude-sonnet-4-6" }),
+          ]),
+        },
+      });
+
+      const piFastResponse = await fetch(`http://127.0.0.1:${piCtx.port}/api/session-control`, {
+        method: "POST",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ sessionKey, action: "set_fast_mode", fastMode: true }),
+      });
+      expect(piFastResponse.status).toBe(200);
+      expect(await piFastResponse.json()).toMatchObject({
+        ok: true,
+        sessionKey,
+        action: "set_fast_mode",
+        status: {
+          display: {
+            fastMode: true,
+            mode: "fast",
+          },
+        },
+      });
+
+      ws.terminate();
+    } finally {
+      await piCtx.cleanup();
+    }
+  });
+
+  it("validates session controls against the active runtime status model", async () => {
+    const entry = createAllowlistEntry();
+    const sessionKey = "agent:main:clawline:flynn:main";
+    let releaseReply: (() => void) | undefined;
+    let markModelSelected: (() => void) | undefined;
+    const modelSelected = new Promise<void>((resolve) => {
+      markModelSelected = resolve;
+    });
+    const replyResolver: typeof testReplyResolver = async (_ctx, opts) => {
+      opts?.onModelSelected?.({
+        provider: "openai",
+        model: "gpt-5.5",
+        thinkLevel: "medium",
+        fastMode: false,
+      });
+      markModelSelected?.();
+      await new Promise<void>((release) => {
+        releaseReply = release;
+      });
+      return { text: "active runtime ok" };
+    };
+    const ctx = await setupTestServer([entry], {
+      replyResolver,
+      openClawConfig: {
+        agents: {
+          default: "main",
+          defaults: {
+            model: { primary: "anthropic/claude-sonnet-4-6" },
+            models: {
+              "anthropic/claude-sonnet-4-6": {},
+              "openai/gpt-5.5": {},
+            },
+          },
+          list: [{ id: "main" }],
+        },
+        bindings: [],
+      } as OpenClawConfig,
+    });
+    try {
+      const pairResult = await performPairRequest(ctx.port, entry.deviceId, {
+        claimedName: entry.claimedName,
+      });
+      const authToken = pairResult.token as string;
+      const { ws, queue } = await authenticateDeviceWithQueue(ctx.port, entry.deviceId, authToken);
+      const messageId = `c_${randomUUID()}`;
+      try {
+        ws.send(
+          JSON.stringify({
+            type: "message",
+            id: messageId,
+            content: "hold active runtime",
+          }),
+        );
+        await waitForQueuedMessage(queue, (value) => {
+          const typed = value as { type?: string; id?: string };
+          return typed.type === "ack" && typed.id === messageId;
+        });
+        await modelSelected;
+
+        const authHeader = `Bearer ${authToken}`;
+        const statusResponse = await fetch(
+          `http://127.0.0.1:${ctx.port}/api/session-status?sessionKey=${encodeURIComponent(
+            sessionKey,
+          )}`,
+          { headers: { Authorization: authHeader } },
+        );
+        expect(statusResponse.status).toBe(200);
+        expect(await statusResponse.json()).toMatchObject({
+          display: {
+            provider: "openai",
+            model: "gpt-5.5",
+            harness: "codex",
+          },
+        });
+
+        const fastResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/session-control`, {
+          method: "POST",
+          headers: {
+            Authorization: authHeader,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ sessionKey, action: "set_fast_mode", fastMode: true }),
+        });
+        expect(fastResponse.status).toBe(200);
+        expect(await fastResponse.json()).toMatchObject({
+          ok: false,
+          sessionKey,
+          action: "set_fast_mode",
+          code: "codex_fast_mode_not_supported_by_session_control",
+        });
+      } finally {
+        releaseReply?.();
+        queue.dispose();
+        ws.terminate();
+      }
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("surfaces fastMode from the model-selected callback in runtime session status", async () => {
     const entry = createAllowlistEntry();
     const sessionKey = "agent:main:clawline:flynn:main";

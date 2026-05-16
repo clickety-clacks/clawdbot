@@ -31,6 +31,7 @@ import {
   isPrivateOrLoopbackHost,
   loadWebMedia,
   loadSessionStore,
+  listThinkingLevelOptions,
   maxBytesForKind,
   mediaKindFromMime,
   optimizeImageToJpeg,
@@ -44,6 +45,7 @@ import {
   resolveActiveAgentHarnessRunSessionId,
   resolveAllAgentSessionStoreTargetsSync,
   resolveDefaultModelForAgent,
+  resolveAgentHarnessPolicy,
   resolveEffectiveMessagesConfig,
   resolveHumanDelayConfig,
   resolveSessionStoreEntry,
@@ -52,6 +54,7 @@ import {
   applySessionsPatchToStore,
   buildAllowedModelSet,
   loadModelCatalog,
+  type ModelCatalogEntry,
   type PinnedHostname,
   type ReplyPayload,
 } from "../runtime-api.js";
@@ -5519,6 +5522,7 @@ button.deny { background: #9b1c31; color: white; }
   type SessionControlModelCatalogStatus =
     | {
         available: true;
+        runtime: string;
         models: Array<{
           id: string;
           provider: string;
@@ -5530,46 +5534,168 @@ button.deny { background: #9b1c31; color: white; }
     | {
         available: false;
         reason: string;
+        runtime?: string;
         models: [];
       };
+
+  type SessionControlOption = {
+    title: string;
+    value?: string;
+    enabled?: boolean;
+  };
 
   type SessionControlCapability = {
     supported: boolean;
     reason?: string;
+    options?: SessionControlOption[];
   };
 
-  function sessionControlCapabilities() {
-    const supported = {
-      supported: true,
-    };
+  type SessionControlRuntimeContext = {
+    agentId: string | undefined;
+    provider: string;
+    model: string;
+    runtime: string;
+  };
+
+  const PI_THINKING_OPTIONS = [
+    "off",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "adaptive",
+    "max",
+  ];
+  const REASONING_OPTIONS = ["off", "on", "stream"];
+
+  function optionValues(values: readonly string[]): SessionControlOption[] {
+    return values.map((value) => ({ title: value, value }));
+  }
+
+  function booleanOptions(): SessionControlOption[] {
+    return [
+      { title: "On", enabled: true },
+      { title: "Off", enabled: false },
+    ];
+  }
+
+  function modeOptions(): SessionControlOption[] {
+    return [
+      { title: "On", value: "fast" },
+      { title: "Off", value: "normal" },
+    ];
+  }
+
+  function supportedCapability(options?: SessionControlOption[]): SessionControlCapability {
+    return options ? { supported: true, options } : { supported: true };
+  }
+
+  function unsupportedCapability(reason: string): SessionControlCapability {
+    return { supported: false, reason };
+  }
+
+  function isCodexSessionControlRuntime(runtime: string | undefined): boolean {
+    const normalized = runtime?.trim().toLowerCase();
+    return normalized === "codex" || normalized === "codex-cli" || normalized === "openai-codex";
+  }
+
+  function resolveSessionControlRuntimeContext(
+    sessionKey: string,
+    modelStatus?: { provider: string; model: string },
+  ): SessionControlRuntimeContext {
+    const agentId = resolveAgentIdFromSessionKey(sessionKey);
+    const normalizedSessionKey = normalizeSessionKey(sessionKey);
+    const activeRun = activeSessionRuns.get(normalizedSessionKey) ?? null;
+    const snapshot = sessionRuntimeStatusSnapshots.get(normalizedSessionKey) ?? null;
+    const selectedModel =
+      modelStatus ??
+      resolveStatusModel(
+        loadSessionStoreEntryForKey(sessionKey).entry,
+        activeRun ?? snapshot,
+        sessionKey,
+      );
+    const policy = resolveAgentHarnessPolicy({
+      provider: selectedModel.provider,
+      modelId: selectedModel.model,
+      config: openClawCfg,
+      agentId,
+      sessionKey,
+    });
     return {
-      cancelCurrentRun: supported,
-      setModel: {
-        supported: true,
-      } as SessionControlCapability,
-      setThinking: supported,
-      setReasoning: supported,
-      setFastMode: supported,
-      setMode: supported,
-      setVerbosity: supported,
+      agentId,
+      provider: selectedModel.provider,
+      model: selectedModel.model,
+      runtime: policy.runtime,
+    };
+  }
+
+  function modelRuntimeForCatalogEntry(
+    entry: ModelCatalogEntry,
+    context: SessionControlRuntimeContext,
+  ): string {
+    return resolveAgentHarnessPolicy({
+      provider: entry.provider,
+      modelId: entry.id,
+      config: openClawCfg,
+      agentId: context.agentId,
+      sessionKey: undefined,
+    }).runtime;
+  }
+
+  function filterSessionControlCatalogEntries(
+    entries: ModelCatalogEntry[],
+    context: SessionControlRuntimeContext,
+  ): ModelCatalogEntry[] {
+    if (!isCodexSessionControlRuntime(context.runtime)) {
+      return entries;
+    }
+    return entries.filter((entry) =>
+      isCodexSessionControlRuntime(modelRuntimeForCatalogEntry(entry, context)),
+    );
+  }
+
+  function thinkingOptionsForSessionControl(
+    context: SessionControlRuntimeContext,
+  ): SessionControlOption[] {
+    if (!isCodexSessionControlRuntime(context.runtime)) {
+      return optionValues(PI_THINKING_OPTIONS);
+    }
+    return listThinkingLevelOptions(context.provider, context.model).map((option) => ({
+      title: option.label,
+      value: option.id,
+    }));
+  }
+
+  function sessionControlCapabilities(context: SessionControlRuntimeContext) {
+    const codexRuntime = isCodexSessionControlRuntime(context.runtime);
+    return {
+      cancelCurrentRun: supportedCapability(),
+      setModel: supportedCapability(),
+      setThinking: supportedCapability(thinkingOptionsForSessionControl(context)),
+      setReasoning: codexRuntime
+        ? unsupportedCapability("codex_reasoning_uses_thinking_level")
+        : supportedCapability(optionValues(REASONING_OPTIONS)),
+      setFastMode: codexRuntime
+        ? unsupportedCapability("codex_fast_mode_not_supported_by_session_control")
+        : supportedCapability(booleanOptions()),
+      setMode: codexRuntime
+        ? unsupportedCapability("codex_fast_mode_not_supported_by_session_control")
+        : supportedCapability(modeOptions()),
+      setVerbosity: supportedCapability(),
       readOnlyStatus: false,
     };
   }
 
-  function mutableSessionControlCapabilities() {
-    return sessionControlCapabilities();
+  function mutableSessionControlCapabilities(context: SessionControlRuntimeContext) {
+    return sessionControlCapabilities(context);
   }
 
   function adoptedSessionControlCapabilities() {
-    const unsupported = {
-      supported: false,
-      reason: "adopted_session_read_only",
-    };
+    const unsupported = unsupportedCapability("adopted_session_read_only");
     return {
       cancelCurrentRun: unsupported,
-      setModel: {
-        supported: true,
-      } as SessionControlCapability,
+      setModel: supportedCapability(),
       setThinking: unsupported,
       setReasoning: unsupported,
       setFastMode: unsupported,
@@ -5579,41 +5705,50 @@ button.deny { background: #9b1c31; color: white; }
     };
   }
 
-  function sessionControlCapabilitiesForSession(userId: string, sessionKey: string) {
+  function sessionControlCapabilitiesForSession(
+    userId: string,
+    sessionKey: string,
+    context: SessionControlRuntimeContext,
+  ) {
     const row = loadStreamRowForUser(userId, normalizeSessionKey(sessionKey));
     if (row?.adopted === 1) {
       return adoptedSessionControlCapabilities();
     }
-    return mutableSessionControlCapabilities();
+    return mutableSessionControlCapabilities(context);
   }
 
   async function loadSessionControlModelCatalog(
     sessionKey: string,
+    context: SessionControlRuntimeContext,
   ): Promise<SessionControlModelCatalogStatus> {
     try {
       const catalog = await loadModelCatalog({ config: openClawCfg });
-      const agentId = resolveAgentIdFromSessionKey(sessionKey);
-      const defaultModel = resolveDefaultModelForAgent({ cfg: openClawCfg, agentId });
+      const defaultModel = resolveDefaultModelForAgent({
+        cfg: openClawCfg,
+        agentId: context.agentId,
+      });
       const allowed = buildAllowedModelSet({
         cfg: openClawCfg,
         catalog,
         defaultProvider: defaultModel.provider,
         defaultModel: defaultModel.model,
-        agentId,
+        agentId: context.agentId,
       });
-      const models = allowed.allowedCatalog.map((entry) => {
-        const model: SessionControlModelCatalogStatus["models"][number] = {
-          id: entry.id,
-          provider: entry.provider,
-          ref: `${entry.provider}/${entry.id}`,
-          name: entry.name,
-        };
-        if (entry.alias) {
-          model.alias = entry.alias;
-        }
-        return model;
-      });
-      return { available: true, models };
+      const models = filterSessionControlCatalogEntries(allowed.allowedCatalog, context).map(
+        (entry) => {
+          const model: SessionControlModelCatalogStatus["models"][number] = {
+            id: entry.id,
+            provider: entry.provider,
+            ref: `${entry.provider}/${entry.id}`,
+            name: entry.name,
+          };
+          if (entry.alias) {
+            model.alias = entry.alias;
+          }
+          return model;
+        },
+      );
+      return { available: true, runtime: context.runtime, models };
     } catch (err) {
       logger.warn?.(
         `[clawline:session-control] failed to load model catalog for ${sessionKey}: ${String(err)}`,
@@ -5621,6 +5756,7 @@ button.deny { background: #9b1c31; color: white; }
       return {
         available: false,
         reason: "model_catalog_unavailable",
+        runtime: context.runtime,
         models: [],
       };
     }
@@ -5704,8 +5840,9 @@ button.deny { background: #9b1c31; color: white; }
       snapshot?.thinkingLevel ??
       null;
     const fastMode = resolveStatusFastMode(entry, activeRun ?? snapshot);
-    const modelCatalog = await loadSessionControlModelCatalog(sessionKey);
-    const capabilities = sessionControlCapabilitiesForSession(userId, sessionKey);
+    const runtimeContext = resolveSessionControlRuntimeContext(sessionKey, modelStatus);
+    const modelCatalog = await loadSessionControlModelCatalog(sessionKey, runtimeContext);
+    const capabilities = sessionControlCapabilitiesForSession(userId, sessionKey, runtimeContext);
     if (!modelCatalog.available) {
       capabilities.setModel = {
         supported: false,
@@ -5718,7 +5855,7 @@ button.deny { background: #9b1c31; color: white; }
         model: modelStatus.model,
         fallbackModels: null,
         provider: modelStatus.provider,
-        harness: null,
+        harness: runtimeContext.runtime,
         reasoningLevel: normalizeStatusString(entry?.reasoningLevel),
         thinkingLevel,
         fastMode,
@@ -5774,6 +5911,114 @@ button.deny { background: #9b1c31; color: white; }
       message,
       capabilities,
     });
+  }
+
+  function capabilityForAction(
+    capabilities: ReturnType<typeof sessionControlCapabilitiesForSession>,
+    action: string,
+  ): SessionControlCapability | null {
+    switch (action) {
+      case "cancel_current_run":
+        return capabilities.cancelCurrentRun;
+      case "set_model":
+        return capabilities.setModel;
+      case "set_thinking":
+        return capabilities.setThinking;
+      case "set_reasoning":
+        return capabilities.setReasoning;
+      case "set_fast_mode":
+        return capabilities.setFastMode;
+      case "set_mode":
+        return capabilities.setMode;
+      case "set_verbosity":
+        return capabilities.setVerbosity;
+      default:
+        return null;
+    }
+  }
+
+  function optionIncludesString(
+    options: SessionControlOption[] | undefined,
+    value: string | null | undefined,
+  ) {
+    if (!options || value == null) {
+      return !options;
+    }
+    return options.some((option) => option.value === value);
+  }
+
+  function optionIncludesBoolean(
+    options: SessionControlOption[] | undefined,
+    value: boolean | null | undefined,
+  ) {
+    if (!options || value == null) {
+      return !options;
+    }
+    return options.some((option) => option.enabled === value);
+  }
+
+  async function validateSessionControlPatch(
+    sessionKey: string,
+    action: string,
+    patch: Record<string, unknown>,
+    context: SessionControlRuntimeContext,
+    capability: SessionControlCapability,
+  ): Promise<{ ok: true } | { ok: false; code: string; message: string }> {
+    if (action === "set_model" && isCodexSessionControlRuntime(context.runtime)) {
+      const catalog = await loadSessionControlModelCatalog(sessionKey, context);
+      const model = typeof patch.model === "string" ? patch.model : undefined;
+      if (!catalog.available || !model || !catalog.models.some((entry) => entry.ref === model)) {
+        return {
+          ok: false,
+          code: "unsupported_runtime_model",
+          message: "The selected model is not available for this session runtime.",
+        };
+      }
+    }
+    if (
+      action === "set_thinking" &&
+      !optionIncludesString(capability.options, patch.thinkingLevel as string | null | undefined)
+    ) {
+      return {
+        ok: false,
+        code: "unsupported_control_option",
+        message: "The selected thinking level is not available for this session runtime.",
+      };
+    }
+    if (
+      action === "set_reasoning" &&
+      !optionIncludesString(capability.options, patch.reasoningLevel as string | null | undefined)
+    ) {
+      return {
+        ok: false,
+        code: "unsupported_control_option",
+        message: "The selected reasoning level is not available for this session runtime.",
+      };
+    }
+    if (
+      action === "set_fast_mode" &&
+      !optionIncludesBoolean(capability.options, patch.fastMode as boolean | null | undefined)
+    ) {
+      return {
+        ok: false,
+        code: "unsupported_control_option",
+        message: "The selected fast mode is not available for this session runtime.",
+      };
+    }
+    if (
+      action === "set_mode" &&
+      !optionIncludesString(
+        capability.options,
+        patch.fastMode === true ? "fast" : patch.fastMode === false ? "normal" : undefined,
+      )
+    ) {
+      return {
+        ok: false,
+        code: "unsupported_control_option",
+        message: "The selected mode is not available for this session runtime.",
+      };
+    }
+    return { ok: true };
   }
 
   function resolveActiveRunAgentSessionId(sessionKey: string, activeRun: SessionStatusActiveRun) {
@@ -5960,7 +6205,24 @@ button.deny { background: #9b1c31; color: white; }
     if (!supportedActions.has(action)) {
       throw new HttpError(400, "invalid_action", "Unsupported session control action");
     }
-    const capabilities = sessionControlCapabilitiesForSession(auth.userId, sessionKey);
+    const runtimeContext = resolveSessionControlRuntimeContext(sessionKey);
+    const capabilities = sessionControlCapabilitiesForSession(
+      auth.userId,
+      sessionKey,
+      runtimeContext,
+    );
+    const actionCapability = capabilityForAction(capabilities, action);
+    if (actionCapability && !actionCapability.supported) {
+      rejectUnsupportedSessionControl(
+        res,
+        sessionKey,
+        action,
+        actionCapability.reason ?? "unsupported",
+        "This session control action is not supported for the current session runtime.",
+        capabilities,
+      );
+      return;
+    }
     if (capabilities.readOnlyStatus && action !== "set_model") {
       rejectUnsupportedSessionControl(
         res,
@@ -5979,6 +6241,26 @@ button.deny { background: #9b1c31; color: white; }
     const patch = resolveSessionControlPatch(body, action);
     if (!patch || Object.values(patch).some((value) => value === undefined)) {
       throw new HttpError(400, "invalid_control_payload", "Invalid session control payload");
+    }
+    if (actionCapability) {
+      const validation = await validateSessionControlPatch(
+        sessionKey,
+        action,
+        patch,
+        runtimeContext,
+        actionCapability,
+      );
+      if (!validation.ok) {
+        rejectUnsupportedSessionControl(
+          res,
+          sessionKey,
+          action,
+          validation.code,
+          validation.message,
+          capabilities,
+        );
+        return;
+      }
     }
     const result = await applySessionControlPatch(sessionKey, patch);
     if (!result.ok) {
