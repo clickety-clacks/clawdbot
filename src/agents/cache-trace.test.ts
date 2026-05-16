@@ -104,6 +104,40 @@ describe("createCacheTrace", () => {
     expect(event.system).toBe("");
   });
 
+  it("shares event sequence across trace instances for the same run", () => {
+    const lines: string[] = [];
+    const writer = {
+      filePath: "memory",
+      write: (line: string) => lines.push(line),
+      flush: async () => undefined,
+    };
+    const cfg = {
+      diagnostics: {
+        cacheTrace: {
+          enabled: true,
+        },
+      },
+    };
+    const first = createCacheTrace({
+      cfg,
+      env: {},
+      runId: "run-sequence",
+      writer,
+    });
+    const second = createCacheTrace({
+      cfg,
+      env: {},
+      runId: "run-sequence",
+      writer,
+    });
+
+    first?.recordStage("runner:startup-stages");
+    second?.recordStage("runner:prep-stages");
+
+    const events = lines.map((line) => JSON.parse(line.trim()) as Record<string, unknown>);
+    expect(events.map((event) => event.seq)).toEqual([1, 2]);
+  });
+
   it("records runner timing stages without prompt or message content", () => {
     const { lines, trace } = createMemoryTraceForTest();
 

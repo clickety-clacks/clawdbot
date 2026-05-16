@@ -106,6 +106,7 @@ type CacheTraceConfig = {
 type CacheTraceWriter = QueuedFileWriter;
 
 const writers = new Map<string, CacheTraceWriter>();
+const sequenceByTraceKey = new Map<string, number>();
 const CACHE_TRACE_STREAM_RETURN_TIMEOUT_MS = 1000;
 
 async function safeReturnIterator(iterator: AsyncIterator<unknown>): Promise<void> {
@@ -287,7 +288,16 @@ export function createCacheTrace(params: CacheTraceInit): CacheTrace | null {
   }
 
   const writer = params.writer ?? getWriter(cfg.filePath);
+  const sequenceKey = params.runId ? `${cfg.filePath}\0${params.runId}` : undefined;
   let seq = 0;
+  const nextSequence = () => {
+    if (!sequenceKey) {
+      return (seq += 1);
+    }
+    const next = (sequenceByTraceKey.get(sequenceKey) ?? 0) + 1;
+    sequenceByTraceKey.set(sequenceKey, next);
+    return next;
+  };
 
   const base: Omit<CacheTraceEvent, "ts" | "seq" | "stage"> = buildAgentTraceBase(params);
 
@@ -296,7 +306,7 @@ export function createCacheTrace(params: CacheTraceInit): CacheTrace | null {
     const event: CacheTraceEvent = {
       ...(runnerTimingStage ? { runId: base.runId } : base),
       ts: new Date().toISOString(),
-      seq: (seq += 1),
+      seq: nextSequence(),
       stage,
     };
 
