@@ -37,7 +37,6 @@ import {
   resolveAuthProfileEligibility,
 } from "../auth-profiles.js";
 import { listActiveProcessSessionReferences } from "../bash-process-references.js";
-import { createCacheTrace } from "../cache-trace.js";
 import {
   resolveSessionKeyForRequest,
   resolveStoredSessionKeyForSessionId,
@@ -426,7 +425,6 @@ export async function runEmbeddedPiAgent(
     return enqueueGlobal(async () => {
       throwIfAborted();
       const started = Date.now();
-      let runnerTimingTrace: ReturnType<typeof createCacheTrace> = null;
       const startupStages = createEmbeddedRunStageTracker();
       let startupStagesEmitted = false;
       const notifyExecutionPhase = (
@@ -440,13 +438,6 @@ export async function runEmbeddedPiAgent(
       };
       const emitStartupStageSummary = (phase: string) => {
         const summary = startupStages.snapshot();
-        runnerTimingTrace?.recordStage("runner:startup-stages", {
-          timing: {
-            phase,
-            totalMs: summary.totalMs,
-            stages: summary.stages,
-          },
-        });
         const shouldWarn = shouldWarnEmbeddedRunStageSummary(summary);
         if (!shouldWarn && !log.isEnabled("trace")) {
           return;
@@ -494,11 +485,6 @@ export async function runEmbeddedPiAgent(
 
       let provider = (params.provider ?? DEFAULT_PROVIDER).trim() || DEFAULT_PROVIDER;
       let modelId = (params.model ?? DEFAULT_MODEL).trim() || DEFAULT_MODEL;
-      runnerTimingTrace = createCacheTrace({
-        cfg: params.config,
-        env: process.env,
-        runId: params.runId,
-      });
       const agentDir =
         params.agentDir ?? resolveAgentDir(params.config ?? {}, workspaceResolution.agentId);
       const normalizedSessionKey = params.sessionKey?.trim();

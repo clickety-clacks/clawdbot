@@ -1071,7 +1071,6 @@ Notes:
 - `cacheTrace.enabled`: log cache trace snapshots for embedded runs (default: `false`).
 - `cacheTrace.filePath`: output path for cache trace JSONL (default: `$OPENCLAW_STATE_DIR/logs/cache-trace.jsonl`).
 - `cacheTrace.includeMessages` / `includePrompt` / `includeSystem`: control what is included in cache trace output (all default: `true`).
-- Cache trace also records timing-only runner stages (`runner:startup-stages`, `runner:prep-stages`, `runner:core-plugin-tool-stages`) plus post-dispatch `prompt:submit:*`, `model:call:*`, and `tool:execution:*` stages so broad latency gaps can be narrowed to source stages without logging credentials, raw prompts, message bodies, or tool payloads.
 
 ---
 
