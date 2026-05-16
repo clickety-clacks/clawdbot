@@ -5341,14 +5341,9 @@ button.deny { background: #9b1c31; color: white; }
         ? await approvePendingDeviceFromCallback(data)
         : await denyPendingDeviceFromCallback(data);
     const callbackSessionKey = mainSessionKey;
-    const event = await persistAssistantMessage(
-      session,
-      session.userId,
-      content,
-      callbackSessionKey,
-      [],
-      { replyToMessageId: sourceMessageId },
-    );
+    const event = await persistAssistantMessage(session.userId, content, callbackSessionKey, [], {
+      replyToMessageId: sourceMessageId,
+    });
     broadcastToSessionKey(callbackSessionKey, event);
     await broadcastStreamTailStateForUser(session.userId, event);
     return true;
@@ -7848,7 +7843,6 @@ button.deny { background: #9b1c31; color: white; }
   }
 
   async function persistAssistantMessage(
-    session: Session,
     targetUserId: string,
     content: string,
     sessionKey: string,
@@ -8525,7 +8519,6 @@ button.deny { background: #9b1c31; color: white; }
                 return;
               }
               const assistantEvent = await persistAssistantMessage(
-                session,
                 targetUserId,
                 assistantText,
                 route.sessionKey,
@@ -9065,7 +9058,6 @@ button.deny { background: #9b1c31; color: white; }
                 return;
               }
               const assistantEvent = await persistAssistantMessage(
-                session,
                 targetUserId,
                 assistantText,
                 route.sessionKey,

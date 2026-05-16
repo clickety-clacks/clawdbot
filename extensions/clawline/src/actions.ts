@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
-import type { AgentToolResult } from "@mariozechner/pi-agent-core";
+import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Type } from "@sinclair/typebox";
 import BetterSqlite3 from "better-sqlite3";
 import { jsonResult } from "openclaw/plugin-sdk/agent-runtime";
