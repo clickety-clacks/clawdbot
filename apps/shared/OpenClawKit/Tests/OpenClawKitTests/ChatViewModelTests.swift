@@ -246,6 +246,7 @@ private actor TestChatTransportState {
     var modelsCallCount: Int = 0
     var resetSessionKeys: [String] = []
     var compactSessionKeys: [String] = []
+    var sentMessages: [String] = []
     var sentRunIds: [String] = []
     var sentThinkingLevels: [String] = []
     var abortedRunIds: [String] = []
@@ -313,11 +314,12 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
 
     func sendMessage(
         sessionKey _: String,
-        message _: String,
+        message: String,
         thinking: String,
         idempotencyKey: String,
         attachments _: [OpenClawChatAttachmentPayload]) async throws -> OpenClawChatSendResponse
     {
+        await self.state.sentMessagesAppend(message)
         await self.state.sentRunIdsAppend(idempotencyKey)
         await self.state.sentThinkingLevelsAppend(thinking)
         return OpenClawChatSendResponse(runId: idempotencyKey, status: "ok")
@@ -394,6 +396,10 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
         return ids.last
     }
 
+    func sentMessages() async -> [String] {
+        await self.state.sentMessages
+    }
+
     func abortedRunIds() async -> [String] {
         await self.state.abortedRunIds
     }
@@ -438,6 +444,10 @@ extension TestChatTransportState {
 
     fileprivate func sentRunIdsAppend(_ v: String) {
         self.sentRunIds.append(v)
+    }
+
+    fileprivate func sentMessagesAppend(_ v: String) {
+        self.sentMessages.append(v)
     }
 
     fileprivate func abortedRunIdsAppend(_ v: String) {
@@ -998,34 +1008,40 @@ extension TestChatTransportState {
         #expect(keys == ["agent:main:main"])
     }
 
-    @Test func resetTriggerResetsSessionAndReloadsHistory() async throws {
-        let before = historyPayload(
-            messages: [
-                chatTextMessage(role: "assistant", text: "before reset", timestamp: 1),
-            ])
-        let after = historyPayload(
-            messages: [
-                chatTextMessage(role: "assistant", text: "after reset", timestamp: 2),
-            ])
+    @Test func openClawResetTriggersSendThroughChatTransport() async throws {
+        for command in ["/new", "/reset"] {
+            let history = historyPayload()
+            let (transport, vm) = await makeViewModel(historyResponses: [history])
+            try await loadAndWaitBootstrap(vm: vm)
 
-        let (transport, vm) = await makeViewModel(historyResponses: [before, after])
-        try await loadAndWaitBootstrap(vm: vm)
-        try await waitUntil("initial history loaded") {
-            await MainActor.run { vm.messages.first?.content.first?.text == "before reset" }
+            await MainActor.run {
+                vm.input = command
+                vm.send()
+            }
+
+            try await waitUntil("\(command) sent through chat transport") {
+                await transport.sentMessages() == [command]
+            }
+            #expect(await transport.resetSessionKeys().isEmpty)
+            #expect(await transport.lastSentRunId() != nil)
+            #expect(await MainActor.run { vm.input.isEmpty })
         }
+    }
+
+    @Test func clearSlashTextDoesNotUseClawlineResetAlias() async throws {
+        let history = historyPayload()
+        let (transport, vm) = await makeViewModel(historyResponses: [history])
+        try await loadAndWaitBootstrap(vm: vm)
 
         await MainActor.run {
-            vm.input = "/new"
+            vm.input = "/clear"
             vm.send()
         }
 
-        try await waitUntil("reset called") {
-            await transport.resetSessionKeys() == ["main"]
+        try await waitUntil("/clear sent through chat transport") {
+            await transport.sentMessages() == ["/clear"]
         }
-        try await waitUntil("history reloaded") {
-            await MainActor.run { vm.messages.first?.content.first?.text == "after reset" }
-        }
-        #expect(await transport.lastSentRunId() == nil)
+        #expect(await transport.resetSessionKeys().isEmpty)
     }
 
     @Test func compactTriggerCompactsSessionAndReloadsHistory() async throws {
