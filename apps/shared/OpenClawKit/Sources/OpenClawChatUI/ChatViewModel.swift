@@ -484,6 +484,7 @@ public final class OpenClawChatViewModel {
 
     private static let resetTriggers: Set<String> = ["/new", "/reset", "/clear"]
     private static let compactTriggers: Set<String> = ["/compact"]
+    private static let modelsTriggers: Set<String> = ["/models"]
 
     private func performSend() async {
         guard !self.isSending else { return }
@@ -498,6 +499,11 @@ public final class OpenClawChatViewModel {
         if Self.compactTriggers.contains(trimmed.lowercased()) {
             self.input = ""
             await self.performCompact()
+            return
+        }
+        if Self.modelsTriggers.contains(trimmed.lowercased()) {
+            self.input = ""
+            await self.performModelsCommand()
             return
         }
 
@@ -584,6 +590,58 @@ public final class OpenClawChatViewModel {
         }
 
         self.isSending = false
+    }
+
+    private func performModelsCommand() async {
+        self.errorText = nil
+        do {
+            let models = try await self.transport.listModels()
+            self.modelChoices = models
+            self.syncSelectedModel()
+            self.appendLocalAssistantMessage(text: Self.formatModelsCommandReply(models))
+        } catch {
+            let message = "Unable to load models: \(error.localizedDescription)"
+            self.errorText = message
+            self.appendLocalAssistantMessage(text: message)
+            chatUILogger.error("/models failed \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func appendLocalAssistantMessage(text: String) {
+        self.messages.append(
+            OpenClawChatMessage(
+                id: UUID(),
+                role: "assistant",
+                content: [
+                    OpenClawChatMessageContent(
+                        type: "text",
+                        text: text,
+                        thinking: nil,
+                        thinkingSignature: nil,
+                        mimeType: nil,
+                        fileName: nil,
+                        content: nil,
+                        id: nil,
+                        name: nil,
+                        arguments: nil),
+                ],
+                timestamp: Date().timeIntervalSince1970 * 1000))
+    }
+
+    private static func formatModelsCommandReply(_ models: [OpenClawChatModelChoice]) -> String {
+        guard !models.isEmpty else {
+            return "No models are available."
+        }
+        let rows = models.prefix(40).map { model -> String in
+            let provider = model.provider.trimmingCharacters(in: .whitespacesAndNewlines)
+            let id = model.selectionID.trimmingCharacters(in: .whitespacesAndNewlines)
+            let name = model.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            let title = name.isEmpty || name == id ? id : "\(name) - \(id)"
+            return provider.isEmpty ? "- \(title)" : "- \(title) (\(provider))"
+        }
+        let remaining = models.count - rows.count
+        let suffix = remaining > 0 ? "\n...and \(remaining) more." : ""
+        return "Available models:\n\(rows.joined(separator: "\n"))\(suffix)"
     }
 
     private func performAbort() async {
