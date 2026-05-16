@@ -32,8 +32,8 @@ struct MacGatewayChatTransport: OpenClawChatTransport {
             return result.models.map(Self.mapModelChoice)
         } catch {
             webChatSwiftLogger.warning(
-                "models.list failed; hiding model picker: \(error.localizedDescription, privacy: .public)")
-            return []
+                "models.list failed: \(error.localizedDescription, privacy: .public)")
+            throw error
         }
     }
 
