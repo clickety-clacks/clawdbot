@@ -2544,12 +2544,12 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
-  it("lets another admin act on the single canonical global approval card", async () => {
+  it("stores one canonical global approval card when multiple admin users share the session", async () => {
     const flynnEntry = createAllowlistEntry({ deviceId: randomUUID(), isAdmin: true });
     const otherAdminEntry = createAllowlistEntry({
       deviceId: randomUUID(),
-      claimedName: "ada",
-      userId: "ada",
+      claimedName: "clawline web test",
+      userId: "clawline_web_test",
       isAdmin: true,
     });
     const pendingDeviceId = randomUUID();
@@ -2582,14 +2582,21 @@ describe.sequential("clawline provider server", () => {
         try {
           const rows = db
             .prepare(
-              `SELECT id, userId
+              `SELECT id, userId, sessionKey, payloadJson
                  FROM events
                 WHERE payloadJson LIKE ?
                 ORDER BY sequence ASC`,
             )
-            .all(`%${INTERACTIVE_HTML_MIME}%`) as Array<{ id: string; userId: string }>;
-          expect(rows.map((row) => row.userId).toSorted()).toEqual(["ada", "flynn"]);
-          messageId = rows.find((row) => row.userId === "flynn")?.id ?? "";
+            .all(`%${INTERACTIVE_HTML_MIME}%`) as Array<{
+            id: string;
+            userId: string;
+            sessionKey: string;
+            payloadJson: string;
+          }>;
+          expect(rows).toHaveLength(1);
+          expect(rows[0]).toMatchObject({ userId: "flynn", sessionKey: "agent:main:main" });
+          expect(rows[0]?.payloadJson).toContain(pendingDeviceId);
+          messageId = rows[0]?.id ?? "";
           expect(messageId).not.toBe("");
         } finally {
           db.close();

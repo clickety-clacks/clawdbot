@@ -5093,11 +5093,20 @@ button.deny { background: #9b1c31; color: white; }
     if (adminUserIds.length === 0) {
       return true;
     }
+    const targetUserIdsBySessionKey = new Map<string, string>();
+    for (const userId of adminUserIds) {
+      const sessionKey = normalizeStoredSessionKey(mainSessionKey, userId) || mainSessionKey;
+      const currentUserId = targetUserIdsBySessionKey.get(sessionKey);
+      if (!currentUserId || userId.toLowerCase() === "flynn") {
+        targetUserIdsBySessionKey.set(sessionKey, userId);
+      }
+    }
+    const targetUserIds = [...targetUserIdsBySessionKey.values()];
     const attachment = buildDeviceApprovalAttachment(entry);
     const broadcastUserId =
-      adminUserIds.find((userId) => userId.toLowerCase() === "flynn") ?? adminUserIds[0];
+      targetUserIds.find((userId) => userId.toLowerCase() === "flynn") ?? targetUserIds[0];
     const results = await Promise.all(
-      adminUserIds.map((userId) =>
+      targetUserIds.map((userId) =>
         persistDeviceApprovalCardForAdmin({
           userId,
           entry,
