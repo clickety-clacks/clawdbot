@@ -4755,6 +4755,121 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("emits feature-gated live agent progress from real reply callbacks", async () => {
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      userId: "progress_user",
+      isAdmin: false,
+      tokenDelivered: false,
+      lastSeenAt: null,
+    });
+    const ctx = await setupTestServer([entry], {
+      replyResolver: async (_ctx, opts) => {
+        await opts?.onToolStart?.({
+          name: "read",
+          phase: "start",
+          args: { path: "/private/raw-arg.txt" },
+        });
+        await opts?.onItemEvent?.({
+          kind: "tool",
+          phase: "end",
+          status: "completed",
+          name: "read",
+          progressText: "Read complete",
+        });
+        await opts?.onCommandOutput?.({
+          phase: "end",
+          name: "exec",
+          output: "raw command output must not leave provider",
+          status: "completed",
+          cwd: "/tmp",
+        });
+        return { text: "ok" };
+      },
+    });
+    try {
+      const pair = await performPairRequest(ctx.port, entry.deviceId);
+      const { ws, queue, auth } = await authenticateDeviceWithQueue(
+        ctx.port,
+        entry.deviceId,
+        pair.token as string,
+        {
+          authPayload: {
+            clientFeatures: ["live_agent_progress_v1"],
+          },
+        },
+      );
+      expect(auth.features).toEqual(
+        expect.arrayContaining(["session_info", "live_agent_progress_v1"]),
+      );
+
+      const clientMessageId = `c_${randomUUID()}`;
+      ws.send(JSON.stringify({ type: "message", id: clientMessageId, content: "show progress" }));
+
+      await waitForQueuedMessageWithTimeout(queue, (value) => {
+        return (
+          typeof value === "object" &&
+          value !== null &&
+          (value as ParsedWsFrame).type === "ack" &&
+          (value as ParsedWsFrame).id === clientMessageId
+        );
+      });
+
+      const toolProgress = await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const event = (value as { event?: { kind?: unknown; name?: unknown } }).event;
+        return (
+          typeof value === "object" &&
+          value !== null &&
+          (value as ParsedWsFrame).type === "agent_progress" &&
+          event?.kind === "tool" &&
+          event?.name === "read"
+        );
+      });
+      expect(toolProgress).toMatchObject({
+        type: "agent_progress",
+        version: 1,
+        messageId: clientMessageId,
+        state: "running",
+        event: {
+          kind: "tool",
+          name: "read",
+        },
+      });
+      expect(typeof toolProgress.runId).toBe("string");
+      expect(typeof toolProgress.sessionKey).toBe("string");
+      expect(typeof toolProgress.seq).toBe("number");
+      expect(JSON.stringify(toolProgress)).not.toContain("/private/raw-arg.txt");
+
+      const commandProgress = await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const event = (value as { event?: { kind?: unknown; name?: unknown } }).event;
+        return (
+          typeof value === "object" &&
+          value !== null &&
+          (value as ParsedWsFrame).type === "agent_progress" &&
+          event?.kind === "command-output" &&
+          event?.name === "exec"
+        );
+      });
+      expect(JSON.stringify(commandProgress)).not.toContain("raw command output");
+      expect(JSON.stringify(commandProgress)).not.toContain("/tmp");
+
+      const doneProgress = await waitForQueuedMessageWithTimeout(queue, (value) => {
+        return (
+          typeof value === "object" &&
+          value !== null &&
+          (value as ParsedWsFrame).type === "agent_progress" &&
+          (value as ParsedWsFrame).state === "final"
+        );
+      });
+      expect(doneProgress.messageId).toBe(clientMessageId);
+
+      queue.dispose();
+      ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("includes stream read and tail state snapshots in auth_result", async () => {
     const primaryDeviceId = randomUUID();
     const secondaryDeviceId = randomUUID();

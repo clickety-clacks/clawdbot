@@ -279,6 +279,7 @@ const INTERACTIVE_CALLBACK_MIME = "application/vnd.clawline.interactive-callback
 const DEVICE_APPROVAL_APPROVE_ACTION = "clawline.deviceApproval.approve";
 const DEVICE_APPROVAL_DENY_ACTION = "clawline.deviceApproval.deny";
 const CLIENT_FEATURE_TERMINAL_BUBBLES_V1 = "terminal_bubbles_v1";
+const CLIENT_FEATURE_LIVE_AGENT_PROGRESS_V1 = "live_agent_progress_v1";
 const SERVER_FEATURE_SESSION_INFO = "session_info";
 const SERVER_FEATURE_STREAM_READ_STATE = "stream_read_state";
 const SERVER_FEATURE_STREAM_TAIL_STATE = "stream_tail_state";
@@ -286,7 +287,10 @@ const TERMINAL_BUBBLES_UNSUPPORTED_NOTICE =
   "Terminal session hidden: this client does not support terminal bubbles yet. Update Clawline to view it.";
 const MEDIA_ATTACHMENT_FAILED_TEXT = "[Media attachment failed]";
 const INLINE_DOCUMENT_MIME_TYPES = new Set([TERMINAL_SESSION_MIME, INTERACTIVE_HTML_MIME]);
-const SUPPORTED_CLIENT_FEATURES = new Set([CLIENT_FEATURE_TERMINAL_BUBBLES_V1]);
+const SUPPORTED_CLIENT_FEATURES = new Set([
+  CLIENT_FEATURE_TERMINAL_BUBBLES_V1,
+  CLIENT_FEATURE_LIVE_AGENT_PROGRESS_V1,
+]);
 const MAX_INTERACTIVE_ACTION_CHARS = 128;
 const MAX_INTERACTIVE_DATA_BYTES = 64 * 1024;
 const MAX_ALERT_BODY_BYTES = 4 * 1024;
@@ -472,6 +476,9 @@ function buildAuthResultFeatures(session: Session): string[] {
   if (session.clientFeatures.has(CLIENT_FEATURE_TERMINAL_BUBBLES_V1)) {
     features.push(CLIENT_FEATURE_TERMINAL_BUBBLES_V1);
   }
+  if (session.clientFeatures.has(CLIENT_FEATURE_LIVE_AGENT_PROGRESS_V1)) {
+    features.push(CLIENT_FEATURE_LIVE_AGENT_PROGRESS_V1);
+  }
   return features;
 }
 
@@ -524,6 +531,29 @@ function sanitizeLabel(label?: string): string | undefined {
     return undefined;
   }
   return truncateUtf8(stripped, 64);
+}
+
+function compactAgentProgressItem(input: AgentProgressItem): AgentProgressItem {
+  const event: AgentProgressItem = {};
+  const assign = (key: keyof AgentProgressItem, value: string | undefined) => {
+    const sanitized = sanitizeLabel(value);
+    if (sanitized) {
+      event[key] = sanitized;
+    }
+  };
+  assign("kind", input.kind);
+  assign("phase", input.phase);
+  assign("status", input.status);
+  assign("title", input.title);
+  assign("name", input.name);
+  assign("summary", input.summary);
+  assign("progressText", input.progressText);
+  return event;
+}
+
+function projectAgentProgressEvent(input: AgentProgressItem): AgentProgressItem | null {
+  const event = compactAgentProgressItem(input);
+  return Object.keys(event).length > 0 ? event : null;
 }
 
 function sanitizeStreamDisplayName(value: unknown, maxBytes: number): string | null {
@@ -1187,6 +1217,28 @@ type ServerMessage = {
   clientMessageId?: string;
   replyToMessageId?: string;
   replyToClientMessageId?: string;
+};
+
+type AgentProgressItem = {
+  kind?: string;
+  phase?: string;
+  status?: string;
+  title?: string;
+  name?: string;
+  summary?: string;
+  progressText?: string;
+};
+
+type AgentProgressPayload = {
+  type: "agent_progress";
+  version: 1;
+  sessionKey: string;
+  runId: string;
+  messageId: string;
+  seq: number;
+  timestamp: number;
+  state: "running" | "final" | "error";
+  event: AgentProgressItem;
 };
 
 type StreamServerMessage =
@@ -7791,6 +7843,184 @@ button.deny { background: #9b1c31; color: white; }
     });
   }
 
+  function broadcastAgentProgressToSessionKey(sessionKey: string, payload: AgentProgressPayload) {
+    const normalizedKey = sessionKey.toLowerCase();
+    let matchedTargets = 0;
+    for (const target of sessionsByDevice.values()) {
+      if (target.revoked || isDenylisted(target.deviceId)) {
+        continue;
+      }
+      if (!target.clientFeatures.has(CLIENT_FEATURE_LIVE_AGENT_PROGRESS_V1)) {
+        continue;
+      }
+      const keys = resolveSubscribedSessionKeys(target);
+      if (!keys.some((key) => key.toLowerCase() === normalizedKey)) {
+        continue;
+      }
+      matchedTargets += 1;
+      void sendJson(target.socket, payload);
+    }
+    logger.info?.("[clawline] agent_progress_broadcast_result", {
+      sessionKey,
+      runId: payload.runId,
+      messageId: payload.messageId,
+      seq: payload.seq,
+      state: payload.state,
+      kind: payload.event.kind,
+      matchedTargets,
+    });
+  }
+
+  function createAgentProgressEmitter(params: {
+    sessionKey: string;
+    messageId: string;
+    getActiveRun: () => SessionStatusActiveRun | null;
+  }) {
+    let seq = 0;
+    const emit = (
+      state: AgentProgressPayload["state"],
+      input: AgentProgressItem,
+    ): AgentProgressPayload | null => {
+      const activeRun = params.getActiveRun();
+      if (!activeRun) {
+        return null;
+      }
+      const event = projectAgentProgressEvent(input);
+      if (!event) {
+        return null;
+      }
+      const payload: AgentProgressPayload = {
+        type: "agent_progress",
+        version: 1,
+        sessionKey: params.sessionKey,
+        runId: activeRun.runId,
+        messageId: params.messageId,
+        seq: ++seq,
+        timestamp: Date.now(),
+        state,
+        event,
+      };
+      broadcastAgentProgressToSessionKey(params.sessionKey, payload);
+      return payload;
+    };
+
+    return {
+      emitRunning: (input: AgentProgressItem) => emit("running", input),
+      emitDone: () =>
+        emit("final", {
+          kind: "run",
+          phase: "final",
+          status: "final",
+          title: "Agent run ended",
+        }),
+      emitError: () =>
+        emit("error", {
+          kind: "run",
+          phase: "error",
+          status: "error",
+          title: "Agent run failed",
+        }),
+      replyOptions: {
+        onToolStart: async (payload: {
+          name?: string;
+          phase?: string;
+          detailMode?: "explain" | "raw";
+        }) => {
+          emit("running", {
+            kind: "tool",
+            phase: payload.phase,
+            name: payload.name,
+            title: payload.name ? `Using ${payload.name}` : "Using tool",
+          });
+        },
+        onItemEvent: async (payload: {
+          kind?: string;
+          title?: string;
+          name?: string;
+          phase?: string;
+          status?: string;
+          summary?: string;
+          progressText?: string;
+        }) => {
+          emit("running", {
+            kind: payload.kind ?? "item",
+            phase: payload.phase,
+            status: payload.status,
+            title: payload.title,
+            name: payload.name,
+            summary: payload.summary,
+            progressText: payload.progressText,
+          });
+        },
+        onPlanUpdate: async (payload: { phase?: string; title?: string; explanation?: string }) => {
+          emit("running", {
+            kind: "plan",
+            phase: payload.phase,
+            title: payload.title ?? "Plan updated",
+            summary: payload.explanation,
+          });
+        },
+        onApprovalEvent: async (payload: {
+          phase?: string;
+          kind?: string;
+          status?: string;
+          title?: string;
+        }) => {
+          emit("running", {
+            kind: "approval",
+            phase: payload.phase,
+            status: payload.status,
+            title: payload.title ?? "Approval requested",
+            name: payload.kind,
+          });
+        },
+        onCommandOutput: async (payload: {
+          phase?: string;
+          title?: string;
+          name?: string;
+          status?: string;
+        }) => {
+          emit("running", {
+            kind: "command-output",
+            phase: payload.phase,
+            status: payload.status,
+            title: payload.title ?? "Command output",
+            name: payload.name,
+          });
+        },
+        onPatchSummary: async (payload: {
+          phase?: string;
+          title?: string;
+          name?: string;
+          summary?: string;
+        }) => {
+          emit("running", {
+            kind: "patch",
+            phase: payload.phase,
+            title: payload.title ?? "Patch updated",
+            name: payload.name,
+            summary: payload.summary,
+          });
+        },
+        onCompactionStart: async () => {
+          emit("running", {
+            kind: "compaction",
+            phase: "start",
+            title: "Compacting context",
+          });
+        },
+        onCompactionEnd: async () => {
+          emit("running", {
+            kind: "compaction",
+            phase: "end",
+            status: "done",
+            title: "Context compaction complete",
+          });
+        },
+      },
+    };
+  }
+
   async function appendEvent(
     event: ServerMessage,
     userId: string,
@@ -8447,6 +8677,7 @@ button.deny { background: #9b1c31; color: white; }
 
           // Track activity state for typing indicator
           let activitySignaled = false;
+          let activeRunForProgress: SessionStatusActiveRun | null = null;
           const sendActivitySignal = async (isActive: boolean) => {
             logger.info?.("[clawline] activity_signal", {
               isActive,
@@ -8463,6 +8694,11 @@ button.deny { background: #9b1c31; color: white; }
               },
             }).catch(() => {});
           };
+          const agentProgress = createAgentProgressEmitter({
+            sessionKey: resolvedSessionKey,
+            messageId,
+            getActiveRun: () => activeRunForProgress,
+          });
 
           markProcessStage("create_reply_dispatcher");
           const { dispatcher, replyOptions, markDispatchIdle } = createReplyDispatcherWithTyping({
@@ -8579,6 +8815,7 @@ button.deny { background: #9b1c31; color: white; }
               fastMode: null,
               cancelRequested: false,
             };
+            activeRunForProgress = activeRun;
             activeSessionRuns.set(normalizeSessionKey(resolvedSessionKey), activeRun);
 
             let queuedFinal = false;
@@ -8603,6 +8840,7 @@ button.deny { background: #9b1c31; color: white; }
                     dispatcher,
                     replyOptions: {
                       ...replyOptions,
+                      ...agentProgress.replyOptions,
                       images: inboundImages.length > 0 ? inboundImages : undefined,
                       onModelSelected: (ctx) => {
                         prefixContext.provider = ctx.provider;
@@ -8665,6 +8903,7 @@ button.deny { background: #9b1c31; color: white; }
             }
             if (markMessageFailedIfDeviceRevoked(session.deviceId, messageId)) {
               activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
+              activeRunForProgress = null;
               return;
             }
 
@@ -8697,7 +8936,9 @@ button.deny { background: #9b1c31; color: white; }
                   session.deviceId,
                   messageId,
                 );
+                agentProgress.emitDone();
                 activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
+                activeRunForProgress = null;
                 return;
               }
               logger.warn?.("[clawline] agent_run_no_delivery", {
@@ -8727,7 +8968,9 @@ button.deny { background: #9b1c31; color: white; }
                 deviceId: session.deviceId,
                 errorSent,
               });
+              agentProgress.emitError();
               activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
+              activeRunForProgress = null;
               return;
             }
 
@@ -8737,7 +8980,9 @@ button.deny { background: #9b1c31; color: white; }
               session.deviceId,
               messageId,
             );
+            agentProgress.emitDone();
             activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
+            activeRunForProgress = null;
           };
           markProcessStage("dispatch_agent_run");
           await runAgentDispatch();
@@ -8985,6 +9230,7 @@ button.deny { background: #9b1c31; color: white; }
 
           // Track activity state for typing indicator
           let activitySignaled = false;
+          let activeRunForProgress: SessionStatusActiveRun | null = null;
           const sendActivitySignal = async (isActive: boolean) => {
             logger.info?.("[clawline] activity_signal", {
               isActive,
@@ -9001,6 +9247,11 @@ button.deny { background: #9b1c31; color: white; }
               },
             }).catch(() => {});
           };
+          const agentProgress = createAgentProgressEmitter({
+            sessionKey: resolvedSessionKey,
+            messageId: clientId,
+            getActiveRun: () => activeRunForProgress,
+          });
 
           const { dispatcher, replyOptions, markDispatchIdle } = createReplyDispatcherWithTyping({
             responsePrefix: resolveEffectiveMessagesConfig(openClawCfg, route.agentId)
@@ -9119,6 +9370,7 @@ button.deny { background: #9b1c31; color: white; }
               fastMode: null,
               cancelRequested: false,
             };
+            activeRunForProgress = activeRun;
             activeSessionRuns.set(normalizeSessionKey(resolvedSessionKey), activeRun);
 
             let queuedFinal = false;
@@ -9145,6 +9397,7 @@ button.deny { background: #9b1c31; color: white; }
                     dispatcher,
                     replyOptions: {
                       ...replyOptions,
+                      ...agentProgress.replyOptions,
                       images: inboundImages.length > 0 ? inboundImages : undefined,
                       onModelSelected: (ctx) => {
                         prefixContext.provider = ctx.provider;
@@ -9213,6 +9466,7 @@ button.deny { background: #9b1c31; color: white; }
             }
             if (markMessageFailedIfDeviceRevoked(session.deviceId, clientId)) {
               activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
+              activeRunForProgress = null;
               return;
             }
 
@@ -9243,7 +9497,9 @@ button.deny { background: #9b1c31; color: white; }
                   session.deviceId,
                   clientId,
                 );
+                agentProgress.emitDone();
                 activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
+                activeRunForProgress = null;
                 return;
               }
               updateMessageStreamingStmt.run(
@@ -9257,7 +9513,9 @@ button.deny { background: #9b1c31; color: white; }
                 message: "Unable to deliver reply",
                 messageId: clientId,
               }).catch(() => {});
+              agentProgress.emitError();
               activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
+              activeRunForProgress = null;
               return;
             }
 
@@ -9266,7 +9524,9 @@ button.deny { background: #9b1c31; color: white; }
               session.deviceId,
               clientId,
             );
+            agentProgress.emitDone();
             activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
+            activeRunForProgress = null;
           };
           await runAgentDispatch();
           runAgentDispatch = null;
