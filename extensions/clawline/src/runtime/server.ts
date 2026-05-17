@@ -9,6 +9,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import type { ImageContent } from "@earendil-works/pi-ai";
 import type { Database as SqliteDatabase, Statement as SqliteStatement } from "better-sqlite3";
 import BetterSqlite3 from "better-sqlite3";
 import jwt from "jsonwebtoken";
@@ -630,9 +631,13 @@ function normalizeAttachmentsInput(
       if (!INLINE_IMAGE_MIME_TYPES.has(mime)) {
         throw new ClientMessageError("invalid_message", "Unsupported image type");
       }
+      const compactData = typed.data.replace(/\s+/g, "");
+      if (!isStrictBase64(compactData)) {
+        throw new ClientMessageError("invalid_message", "Invalid base64 data");
+      }
       let decoded: Buffer;
       try {
-        decoded = Buffer.from(typed.data, "base64");
+        decoded = Buffer.from(compactData, "base64");
       } catch {
         throw new ClientMessageError("invalid_message", "Invalid base64 data");
       }
@@ -640,7 +645,7 @@ function normalizeAttachmentsInput(
         throw new ClientMessageError("invalid_message", "Empty attachment data");
       }
       inlineBytes += decoded.length;
-      attachments.push({ type: "image", mimeType: mime, data: typed.data });
+      attachments.push({ type: "image", mimeType: mime, data: compactData });
     } else if (typed.type === "asset") {
       if (typeof typed.assetId !== "string" || !ASSET_ID_REGEX.test(typed.assetId)) {
         throw new ClientMessageError("invalid_message", "Invalid assetId");
@@ -1077,11 +1082,11 @@ function buildAssistantTextFromMediaOutcome(params: {
   if (trimmedText && trimmedText.length > 0) {
     return params.mediaFailed ? withMediaFailureIndicator(trimmedText) : trimmedText;
   }
-  if (params.attachments.length > 0) {
-    return "";
-  }
   if (params.mediaFailed) {
     return MEDIA_ATTACHMENT_FAILED_TEXT;
+  }
+  if (params.attachments.length > 0) {
+    return "";
   }
   return buildAssistantTextFromPayload(params.payload, params.fallback);
 }
@@ -3269,6 +3274,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         throw new Error("Clawline outbound attachment must be an object");
       }
       const { data, mimeType } = normalizeOutboundAttachmentData(attachment);
+      if (!isStrictBase64(data)) {
+        throw new Error("Clawline outbound attachment data is not valid base64");
+      }
       const buffer = Buffer.from(data, "base64");
       if (buffer.length === 0) {
         throw new Error("Clawline outbound attachment is empty");
@@ -3405,53 +3413,69 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     agentId: string;
     ownerUserId: string;
     uploaderDeviceId: string;
-  }): Promise<{ attachments: NormalizedAttachment[]; assetIds: string[] }> {
+  }): Promise<{
+    attachments: NormalizedAttachment[];
+    assetIds: string[];
+    failedMediaCount: number;
+  }> {
     if (params.mediaUrls.length === 0) {
-      return { attachments: [], assetIds: [] };
+      return { attachments: [], assetIds: [], failedMediaCount: 0 };
     }
     const resolved: NormalizedAttachment[] = [];
     const assetIds: string[] = [];
+    let failedMediaCount = 0;
+    let firstFailure: unknown = null;
     const trimmedUrls = params.mediaUrls
       .map((url) => (typeof url === "string" ? url.trim() : ""))
       .filter((url) => url.length > 0);
     const workspaceDir = resolveOutboundMediaWorkspaceDir(params.agentId);
     for (const url of trimmedUrls) {
-      const resolvedUrl = resolveOutboundMediaReference(url, workspaceDir);
-      const media = /^https?:\/\//i.test(resolvedUrl)
-        ? await (async () => {
-            const fetched = await fetchPinnedMedia(resolvedUrl, config.media.maxUploadBytes);
-            if (fetched.buffer.length === 0) {
-              return null;
-            }
-            return await clampAndOptimizeMedia({
-              buffer: fetched.buffer,
-              contentType: fetched.contentType,
-              fileName: fetched.fileName,
+      try {
+        const resolvedUrl = resolveOutboundMediaReference(url, workspaceDir);
+        const media = /^https?:\/\//i.test(resolvedUrl)
+          ? await (async () => {
+              const fetched = await fetchPinnedMedia(resolvedUrl, config.media.maxUploadBytes);
+              if (fetched.buffer.length === 0) {
+                throw new Error("Clawline outbound mediaUrl produced an empty attachment");
+              }
+              return await clampAndOptimizeMedia({
+                buffer: fetched.buffer,
+                contentType: fetched.contentType,
+                fileName: fetched.fileName,
+                maxBytes: config.media.maxUploadBytes,
+              });
+            })()
+          : await loadWebMedia(resolvedUrl, {
               maxBytes: config.media.maxUploadBytes,
+              workspaceDir,
+              localRoots: outboundMediaLocalRoots(workspaceDir),
             });
-          })()
-        : await loadWebMedia(resolvedUrl, {
-            maxBytes: config.media.maxUploadBytes,
-            workspaceDir,
-            localRoots: outboundMediaLocalRoots(workspaceDir),
-          });
-      if (!media) {
-        continue;
-      }
-      const stored = await storeOutboundMediaBuffer({
-        buffer: media.buffer,
-        contentType: media.contentType,
-        ownerUserId: params.ownerUserId,
-        uploaderDeviceId: params.uploaderDeviceId,
-      });
-      if (stored.attachment) {
+        if (!media) {
+          throw new Error("Clawline outbound mediaUrl materialization produced no attachment");
+        }
+        const stored = await storeOutboundMediaBuffer({
+          buffer: media.buffer,
+          contentType: media.contentType,
+          ownerUserId: params.ownerUserId,
+          uploaderDeviceId: params.uploaderDeviceId,
+        });
+        if (!stored.attachment) {
+          throw new Error("Clawline outbound mediaUrl produced an empty attachment");
+        }
         resolved.push(stored.attachment);
-      }
-      if (stored.assetId) {
-        assetIds.push(stored.assetId);
+        if (stored.assetId) {
+          assetIds.push(stored.assetId);
+        }
+      } catch (err) {
+        firstFailure ??= err;
+        failedMediaCount += 1;
+        logger.warn?.(`[clawline] outbound_media_url_materialize_failed: ${formatError(err)}`);
       }
     }
-    return { attachments: resolved, assetIds };
+    if (resolved.length === 0 && failedMediaCount > 0) {
+      throw firstFailure ?? new Error("Clawline outbound mediaUrl materialization failed");
+    }
+    return { attachments: resolved, assetIds, failedMediaCount };
   }
 
   async function materializeInlineAttachments(params: {
@@ -3537,7 +3561,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     const asset = selectAssetStmt.get(assetId) as { mimeType: string } | undefined;
     if (!asset) {
       logger.warn?.("[clawline] inbound_asset_row_missing", { assetId });
-      return null;
+      throw new Error(`Clawline inbound asset row missing: ${assetId}`);
     }
     const mimeType = typeof asset?.mimeType === "string" ? asset.mimeType.trim().toLowerCase() : "";
     if (!mimeType.startsWith("image/")) {
@@ -3547,7 +3571,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     try {
       const buffer = await fs.readFile(assetPath);
       if (buffer.length === 0) {
-        return null;
+        throw new Error(`Clawline inbound asset image is empty: ${assetId}`);
       }
       return {
         mimeType,
@@ -3555,8 +3579,37 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       };
     } catch (err) {
       logger.warn?.(`[clawline] asset_image_read_failed: ${formatError(err)}`, { assetId });
-      return null;
+      throw err;
     }
+  }
+
+  async function materializeInboundAttachmentImages(
+    attachments: NormalizedAttachment[],
+    logContext: Record<string, unknown>,
+  ): Promise<{ images: ImageContent[]; failureMarkers: string[] }> {
+    const images: ImageContent[] = [];
+    const failureMarkers: string[] = [];
+    for (const attachment of attachments) {
+      try {
+        const materialized = await clawlineAttachmentsToImages([attachment], {
+          loadAssetImage: loadInboundAssetImage,
+        });
+        images.push(...materialized);
+      } catch (err) {
+        logger.warn?.(`[clawline] inbound_attachment_image_load_failed: ${formatError(err)}`, {
+          ...logContext,
+          attachmentType: attachment.type,
+        });
+        if (attachment.type === "asset") {
+          failureMarkers.push(
+            `Attachment image load failed: uploaded asset ${attachment.assetId} could not be loaded.`,
+          );
+        } else {
+          failureMarkers.push("Attachment image load failed: attachment could not be loaded.");
+        }
+      }
+    }
+    return { images, failureMarkers };
   }
 
   type EventRow = { id: string; payloadJson: string; sequence?: number; timestamp?: number };
@@ -7957,24 +8010,21 @@ button.deny { background: #9b1c31; color: white; }
       throw new Error("stream_not_found");
     }
 
-    let outboundAttachments = {
-      attachments: [] as NormalizedAttachment[],
-      assetIds: [] as string[],
+    let outboundAttachments: {
+      attachments: NormalizedAttachment[];
+      assetIds: string[];
+      failedMediaCount?: number;
+    } = {
+      attachments: [],
+      assetIds: [],
     };
     let outboundMediaFailed = false;
     if (rawAttachments.length > 0) {
-      try {
-        outboundAttachments = await materializeOutboundAttachments({
-          attachments: rawAttachments,
-          ownerUserId: target.userId,
-          uploaderDeviceId: target.kind === "device" ? target.deviceId : "server",
-        });
-      } catch (err) {
-        logger.warn?.(`[clawline] outbound_attachment_materialize_failed: ${formatError(err)}`);
-        if (err instanceof InteractiveHTMLAttachmentError) {
-          throw err;
-        }
-      }
+      outboundAttachments = await materializeOutboundAttachments({
+        attachments: rawAttachments,
+        ownerUserId: target.userId,
+        uploaderDeviceId: target.kind === "device" ? target.deviceId : "server",
+      });
     } else if (mediaUrl) {
       try {
         outboundAttachments = await materializeOutboundMediaUrls({
@@ -7983,7 +8033,8 @@ button.deny { background: #9b1c31; color: white; }
           ownerUserId: target.userId,
           uploaderDeviceId: target.kind === "device" ? target.deviceId : "server",
         });
-        outboundMediaFailed = outboundAttachments.attachments.length === 0;
+        const failedMediaCount = outboundAttachments.failedMediaCount ?? 0;
+        outboundMediaFailed = outboundAttachments.attachments.length === 0 || failedMediaCount > 0;
       } catch (err) {
         outboundMediaFailed = true;
         logger.warn?.(`[clawline] outbound_media_attachment_failed: ${formatError(err)}`);
@@ -8390,13 +8441,19 @@ button.deny { background: #9b1c31; color: white; }
           await broadcastStreamTailStateForUser(targetUserId, event);
 
           const attachmentSummary = describeClawlineAttachments(ownership.attachments);
-          const inboundBody = attachmentSummary
+          let inboundBody = attachmentSummary
             ? `${rawContent}\n\n${attachmentSummary}`
             : rawContent;
           markProcessStage("load_inbound_images");
-          const inboundImages = await clawlineAttachmentsToImages(ownership.attachments, {
-            loadAssetImage: loadInboundAssetImage,
-          });
+          const { images: inboundImages, failureMarkers: inboundImageFailureMarkers } =
+            await materializeInboundAttachmentImages(ownership.attachments, {
+              messageId,
+              sessionKey: resolvedSessionKey,
+              deviceId: session.deviceId,
+            });
+          if (inboundImageFailureMarkers.length > 0) {
+            inboundBody = [inboundBody, ...inboundImageFailureMarkers].filter(Boolean).join("\n\n");
+          }
 
           markProcessStage("build_delivery_context");
           const routeSessionKey = resolvedSessionKey;
@@ -8500,7 +8557,7 @@ button.deny { background: #9b1c31; color: white; }
                     uploaderDeviceId: session.deviceId,
                   });
                   attachments = materialized.attachments;
-                  mediaFailed = attachments.length === 0;
+                  mediaFailed = attachments.length === 0 || materialized.failedMediaCount > 0;
                 } catch (err) {
                   mediaFailed = true;
                   logger.warn?.(`[clawline] reply_media_attachment_failed: ${formatError(err)}`);
@@ -8918,12 +8975,18 @@ button.deny { background: #9b1c31; color: white; }
           broadcastToSessionKey(resolvedSessionKey, event);
 
           const attachmentSummary = describeClawlineAttachments(attachments);
-          const inboundBody = attachmentSummary
+          let inboundBody = attachmentSummary
             ? `${rawContent}\n\n${attachmentSummary}`
             : rawContent;
-          const inboundImages = await clawlineAttachmentsToImages(attachments, {
-            loadAssetImage: loadInboundAssetImage,
-          });
+          const { images: inboundImages, failureMarkers: inboundImageFailureMarkers } =
+            await materializeInboundAttachmentImages(attachments, {
+              messageId: clientId,
+              sessionKey: resolvedSessionKey,
+              deviceId: session.deviceId,
+            });
+          if (inboundImageFailureMarkers.length > 0) {
+            inboundBody = [inboundBody, ...inboundImageFailureMarkers].filter(Boolean).join("\n\n");
+          }
 
           const channelLabel = "clawline";
           const routeSessionKey = resolvedSessionKey;
@@ -9039,7 +9102,7 @@ button.deny { background: #9b1c31; color: white; }
                     uploaderDeviceId: session.deviceId,
                   });
                   replyAttachments = materialized.attachments;
-                  mediaFailed = replyAttachments.length === 0;
+                  mediaFailed = replyAttachments.length === 0 || materialized.failedMediaCount > 0;
                 } catch (err) {
                   mediaFailed = true;
                   logger.warn?.(`[clawline] reply_media_attachment_failed: ${formatError(err)}`);

@@ -4221,6 +4221,146 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("rejects outbound sends when attachment data is malformed base64", async () => {
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry]);
+    try {
+      await expect(
+        ctx.server.sendMessage({
+          target: entry.userId,
+          text: "fallback text",
+          attachments: [{ data: "not valid base64", mimeType: "image/png" }],
+        }),
+      ).rejects.toThrow("not valid base64");
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("rejects inbound messages when inline attachment data is malformed base64", async () => {
+    const deviceId = randomUUID();
+    const entry = createAllowlistEntry({
+      deviceId,
+      isAdmin: true,
+      tokenDelivered: false,
+      lastSeenAt: null,
+    });
+    const ctx = await setupTestServer([entry]);
+    let ws: WebSocket | null = null;
+    try {
+      const pair = await performPairRequest(ctx.port, deviceId, { claimedName: "Flynn" });
+      const authed = await authenticateDevice(ctx.port, deviceId, pair.token as string);
+      ws = authed.ws;
+
+      const clientMessageId = `c_${randomUUID()}`;
+      const responsePromise = waitForMessage(ws);
+      ws.send(
+        JSON.stringify({
+          type: "message",
+          id: clientMessageId,
+          content: "bad attachment",
+          attachments: [{ type: "image", mimeType: "image/png", data: "not valid base64" }],
+        }),
+      );
+
+      await expect(responsePromise).resolves.toMatchObject({
+        type: "error",
+        code: "invalid_message",
+        message: "Invalid base64 data",
+      });
+    } finally {
+      ws?.terminate();
+      await ctx.cleanup();
+    }
+  });
+
+  it("marks asset image load failures without dropping other valid images", async () => {
+    const deviceId = randomUUID();
+    const entry = createAllowlistEntry({
+      deviceId,
+      isAdmin: true,
+      tokenDelivered: false,
+      lastSeenAt: null,
+    });
+    let capturedBody = "";
+    const infoCalls: Array<[string, Record<string, unknown> | undefined]> = [];
+    const warnCalls: Array<[string, Record<string, unknown> | undefined]> = [];
+    const ctx = await setupTestServer([entry], {
+      replyResolver: async (replyCtx) => {
+        capturedBody = replyCtx.Body ?? "";
+        return { text: "ok" };
+      },
+      logger: {
+        info: (message, meta) => infoCalls.push([message, meta]),
+        warn: (message, meta) => warnCalls.push([message, meta]),
+        error: () => {},
+      },
+    });
+    let ws: WebSocket | null = null;
+    let queue: ReturnType<typeof createMessageQueue> | null = null;
+    try {
+      const pair = await performPairRequest(ctx.port, deviceId, { claimedName: "Flynn" });
+      const token = pair.token as string;
+      const validUpload = await uploadAsset(ctx.port, token, tinyPngBytes(), "image/png");
+      const missingUpload = await uploadAsset(ctx.port, token, tinyPngBytes(), "image/png");
+      await fs.unlink(path.join(ctx.mediaPath, "assets", missingUpload.assetId));
+
+      const authed = await authenticateDeviceWithQueue(ctx.port, deviceId, token);
+      ws = authed.ws;
+      queue = authed.queue;
+
+      const clientMessageId = `c_${randomUUID()}`;
+      ws.send(
+        JSON.stringify({
+          type: "message",
+          id: clientMessageId,
+          content: "missing asset file",
+          attachments: [
+            { type: "asset", assetId: validUpload.assetId },
+            { type: "asset", assetId: missingUpload.assetId },
+          ],
+        }),
+      );
+
+      await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const typed = value as { type?: string; id?: string };
+        return typed.type === "ack" && typed.id === clientMessageId;
+      });
+      await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const typed = value as { type?: string; role?: string; content?: string };
+        return typed.type === "message" && typed.role === "assistant" && typed.content === "ok";
+      });
+
+      expect(capturedBody).toContain(`Attachment 1: uploaded asset ${validUpload.assetId}`);
+      expect(capturedBody).toContain(`Attachment 2: uploaded asset ${missingUpload.assetId}`);
+      expect(capturedBody).toContain(
+        `Attachment image load failed: uploaded asset ${missingUpload.assetId} could not be loaded.`,
+      );
+      expect(capturedBody).not.toContain(ctx.mediaPath);
+      expect(capturedBody).not.toContain("ENOENT");
+      expect(capturedBody).not.toContain("Error:");
+      expect(
+        infoCalls.some(
+          ([message, meta]) =>
+            message === "[clawline] agent_run_phase" &&
+            meta?.phase === "dispatch_start" &&
+            meta.imageCount === 1,
+        ),
+      ).toBe(true);
+      expect(
+        warnCalls.some(([message]) => message.includes("[clawline] asset_image_read_failed")),
+      ).toBe(true);
+    } finally {
+      queue?.dispose();
+      ws?.terminate();
+      await ctx.cleanup();
+    }
+  });
+
   it("does not deliver admin channel messages to non-admin sessions", async () => {
     const adminDeviceId = randomUUID();
     const userDeviceId = randomUUID();
