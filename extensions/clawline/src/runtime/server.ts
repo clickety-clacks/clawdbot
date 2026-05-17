@@ -48,6 +48,7 @@ import {
   resolveAgentHarnessPolicy,
   resolveEffectiveMessagesConfig,
   resolveHumanDelayConfig,
+  resolveModelAuthMode,
   resolveSessionStoreEntry,
   resolvePinnedHostname,
   readCodexAppServerFastMode,
@@ -5926,6 +5927,17 @@ button.deny { background: #9b1c31; color: white; }
     return snapshot?.fastMode ?? null;
   }
 
+  function resolveClientAuthMode(provider: string): "oauth" | "api_key" | "unknown" {
+    const mode = resolveModelAuthMode(provider, openClawCfg);
+    if (mode === "oauth") {
+      return "oauth";
+    }
+    if (mode === "api-key") {
+      return "api_key";
+    }
+    return "unknown";
+  }
+
   function rememberSessionRuntimeStatus(
     sessionKey: string,
     snapshot: SessionStatusRuntimeSnapshot,
@@ -5976,6 +5988,7 @@ button.deny { background: #9b1c31; color: white; }
         fallbackModels: null,
         provider: modelStatus.provider,
         harness: runtimeContext.runtime,
+        authMode: resolveClientAuthMode(modelStatus.provider),
         reasoningLevel: normalizeStatusString(entry?.reasoningLevel),
         thinkingLevel,
         fastMode: displayFastMode,

@@ -12,6 +12,7 @@ export {
   resolveAgentWorkspaceDir,
   resolveAgentIdentity,
   resolveEffectiveMessagesConfig,
+  resolveModelAuthMode,
   resolveHumanDelayConfig,
 } from "openclaw/plugin-sdk/agent-runtime";
 export type { ModelCatalogEntry } from "openclaw/plugin-sdk/agent-runtime";
