@@ -97,6 +97,7 @@
   "gateway-runtime",
   "cli-runtime",
   "cli-backend",
+  "codex-app-server-control",
   "codex-mcp-projection",
   "codex-native-task-runtime",
   "agent-harness",

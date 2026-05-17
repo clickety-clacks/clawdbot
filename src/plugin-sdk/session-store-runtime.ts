@@ -3,10 +3,12 @@
 export { loadSessionStore } from "../config/sessions/store-load.js";
 export { resolveSessionStoreEntry } from "../config/sessions/store-entry.js";
 export { resolveSessionTranscriptPathInDir, resolveStorePath } from "../config/sessions/paths.js";
+export { resolveAllAgentSessionStoreTargetsSync } from "../config/sessions/targets.js";
 export { resolveAndPersistSessionFile } from "../config/sessions/session-file.js";
 export { resolveSessionKey } from "../config/sessions/session-key.js";
 export { resolveGroupSessionKey } from "../config/sessions/group.js";
 export { canonicalizeMainSessionAlias } from "../config/sessions/main-session.js";
+export { applySessionsPatchToStore } from "../gateway/sessions-patch.js";
 export {
   clearSessionStoreCacheForTest,
   readSessionUpdatedAt,

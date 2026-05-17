@@ -1321,12 +1321,34 @@ describe.sequential("clawline provider server", () => {
       } as OpenClawConfig,
     });
     try {
+      const codexSessionFile = path.join(
+        path.dirname(codexCtx.sessionStorePath),
+        "codex-session-control-test.jsonl",
+      );
+      await fs.writeFile(
+        `${codexSessionFile}.codex-app-server.json`,
+        JSON.stringify(
+          {
+            schemaVersion: 1,
+            threadId: "thread-1",
+            sessionFile: codexSessionFile,
+            cwd: path.dirname(codexSessionFile),
+            model: "gpt-5.5",
+            modelProvider: "openai",
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          },
+          null,
+          2,
+        ),
+      );
       await fs.writeFile(
         codexCtx.sessionStorePath,
         JSON.stringify(
           {
             [sessionKey]: {
               sessionId: "codex-session-control-test",
+              sessionFile: codexSessionFile,
               updatedAt: Date.now(),
               modelProvider: "openai",
               model: "gpt-5.5",
@@ -1358,8 +1380,8 @@ describe.sequential("clawline provider server", () => {
           provider: "openai",
           model: "gpt-5.5",
           harness: "codex",
-          fastMode: null,
-          mode: null,
+          fastMode: false,
+          mode: "normal",
         },
         capabilities: {
           setThinking: {
@@ -1378,12 +1400,18 @@ describe.sequential("clawline provider server", () => {
             reason: "codex_reasoning_uses_thinking_level",
           },
           setFastMode: {
-            supported: false,
-            reason: "codex_fast_mode_not_supported_by_session_control",
+            supported: true,
+            options: [
+              { title: "On", enabled: true },
+              { title: "Off", enabled: false },
+            ],
           },
           setMode: {
-            supported: false,
-            reason: "codex_fast_mode_not_supported_by_session_control",
+            supported: true,
+            options: [
+              { title: "On", value: "fast" },
+              { title: "Off", value: "normal" },
+            ],
           },
         },
         modelCatalog: {
@@ -1416,11 +1444,38 @@ describe.sequential("clawline provider server", () => {
         },
       );
       expect(codexFastResponse.status).toBe(200);
-      expect(await codexFastResponse.json()).toMatchObject({
-        ok: false,
+      const codexFastJson = await codexFastResponse.json();
+      expect(codexFastJson).toMatchObject({
+        ok: true,
         sessionKey,
         action: "set_fast_mode",
-        code: "codex_fast_mode_not_supported_by_session_control",
+        status: {
+          display: {
+            fastMode: true,
+            mode: "fast",
+          },
+        },
+      });
+      await fs.rm(`${codexSessionFile}.codex-app-server.json`);
+      const codexDetachedStatusResponse = await fetch(
+        `http://127.0.0.1:${codexCtx.port}/api/session-status?sessionKey=${encodeURIComponent(
+          sessionKey,
+        )}`,
+        { headers: { Authorization: authHeader } },
+      );
+      expect(codexDetachedStatusResponse.status).toBe(200);
+      expect(await codexDetachedStatusResponse.json()).toMatchObject({
+        display: {
+          harness: "codex",
+          fastMode: null,
+          mode: null,
+        },
+        capabilities: {
+          setFastMode: {
+            supported: false,
+            reason: "codex_thread_not_attached",
+          },
+        },
       });
 
       const codexThinkingResponse = await fetch(
@@ -1691,7 +1746,7 @@ describe.sequential("clawline provider server", () => {
           ok: false,
           sessionKey,
           action: "set_fast_mode",
-          code: "codex_fast_mode_not_supported_by_session_control",
+          code: "codex_thread_not_attached",
         });
       } finally {
         releaseReply?.();

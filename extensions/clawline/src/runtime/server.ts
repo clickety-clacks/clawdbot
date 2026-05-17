@@ -50,6 +50,8 @@ import {
   resolveHumanDelayConfig,
   resolveSessionStoreEntry,
   resolvePinnedHostname,
+  readCodexAppServerFastMode,
+  setCodexAppServerFastMode,
   updateSessionStore,
   applySessionsPatchToStore,
   buildAllowedModelSet,
@@ -114,6 +116,12 @@ const execFile = promisify(execFileCb);
 type SessionEntry = ClawlineSessionEntry;
 
 type ClientPayload = Record<string, unknown>;
+type CodexFastControlState = {
+  supported: boolean;
+  enabled: boolean | null;
+  sessionFile?: string;
+  reason?: string;
+};
 
 type PtyProcess = {
   write(data: string): void;
@@ -5723,8 +5731,42 @@ button.deny { background: #9b1c31; color: white; }
     }));
   }
 
-  function sessionControlCapabilities(context: SessionControlRuntimeContext) {
+  function resolveSessionControlSessionFile(sessionKey: string): string | null {
+    const { entry } = loadSessionStoreEntryForKey(sessionKey);
+    const sessionFile = normalizeStatusString(entry?.sessionFile);
+    if (sessionFile) {
+      return sessionFile;
+    }
+    const sessionId = normalizeStatusString(entry?.sessionId);
+    return sessionId ? resolveClawlineSessionTranscriptPath(sessionId, mainSessionAgentId) : null;
+  }
+
+  async function resolveCodexFastControlState(
+    sessionKey: string,
+    context: SessionControlRuntimeContext,
+  ): Promise<CodexFastControlState | null> {
+    if (!isCodexSessionControlRuntime(context.runtime)) {
+      return null;
+    }
+    const sessionFile = resolveSessionControlSessionFile(sessionKey);
+    if (!sessionFile) {
+      return { supported: false, enabled: null, reason: "codex_thread_not_attached" };
+    }
+    const fastMode = await readCodexAppServerFastMode({ sessionFile });
+    if (!fastMode.available) {
+      return { supported: false, enabled: null, reason: fastMode.reason };
+    }
+    return { supported: true, enabled: fastMode.enabled, sessionFile };
+  }
+
+  function sessionControlCapabilities(
+    context: SessionControlRuntimeContext,
+    codexFastControl: CodexFastControlState | null = null,
+  ) {
     const codexRuntime = isCodexSessionControlRuntime(context.runtime);
+    const codexFastSupported = codexRuntime && codexFastControl?.supported === true;
+    const codexFastUnsupportedReason =
+      codexFastControl?.reason ?? "codex_fast_mode_not_supported_by_session_control";
     return {
       cancelCurrentRun: supportedCapability(),
       setModel: supportedCapability(),
@@ -5733,18 +5775,25 @@ button.deny { background: #9b1c31; color: white; }
         ? unsupportedCapability("codex_reasoning_uses_thinking_level")
         : supportedCapability(optionValues(REASONING_OPTIONS)),
       setFastMode: codexRuntime
-        ? unsupportedCapability("codex_fast_mode_not_supported_by_session_control")
+        ? codexFastSupported
+          ? supportedCapability(booleanOptions())
+          : unsupportedCapability(codexFastUnsupportedReason)
         : supportedCapability(booleanOptions()),
       setMode: codexRuntime
-        ? unsupportedCapability("codex_fast_mode_not_supported_by_session_control")
+        ? codexFastSupported
+          ? supportedCapability(modeOptions())
+          : unsupportedCapability(codexFastUnsupportedReason)
         : supportedCapability(modeOptions()),
       setVerbosity: supportedCapability(),
       readOnlyStatus: false,
     };
   }
 
-  function mutableSessionControlCapabilities(context: SessionControlRuntimeContext) {
-    return sessionControlCapabilities(context);
+  function mutableSessionControlCapabilities(
+    context: SessionControlRuntimeContext,
+    codexFastControl: CodexFastControlState | null = null,
+  ) {
+    return sessionControlCapabilities(context, codexFastControl);
   }
 
   function adoptedSessionControlCapabilities() {
@@ -5765,12 +5814,13 @@ button.deny { background: #9b1c31; color: white; }
     userId: string,
     sessionKey: string,
     context: SessionControlRuntimeContext,
+    codexFastControl: CodexFastControlState | null = null,
   ) {
     const row = loadStreamRowForUser(userId, normalizeSessionKey(sessionKey));
     if (row?.adopted === 1) {
       return adoptedSessionControlCapabilities();
     }
-    return mutableSessionControlCapabilities(context);
+    return mutableSessionControlCapabilities(context, codexFastControl);
   }
 
   async function loadSessionControlModelCatalog(
@@ -5883,7 +5933,11 @@ button.deny { background: #9b1c31; color: white; }
     sessionRuntimeStatusSnapshots.set(normalizeSessionKey(sessionKey), snapshot);
   }
 
-  async function buildSessionStatusPayload(userId: string, sessionKey: string) {
+  async function buildSessionStatusPayload(
+    userId: string,
+    sessionKey: string,
+    resolvedCodexFastControl: CodexFastControlState | null = null,
+  ) {
     const normalizedSessionKey = normalizeSessionKey(sessionKey);
     const activeRun = activeSessionRuns.get(normalizedSessionKey) ?? null;
     const snapshot = sessionRuntimeStatusSnapshots.get(normalizedSessionKey) ?? null;
@@ -5897,9 +5951,18 @@ button.deny { background: #9b1c31; color: white; }
       null;
     const fastMode = resolveStatusFastMode(entry, activeRun ?? snapshot);
     const runtimeContext = resolveSessionControlRuntimeContext(sessionKey, modelStatus);
-    const displayFastMode = isCodexSessionControlRuntime(runtimeContext.runtime) ? null : fastMode;
+    const codexFastControl =
+      resolvedCodexFastControl ?? (await resolveCodexFastControlState(sessionKey, runtimeContext));
+    const displayFastMode = isCodexSessionControlRuntime(runtimeContext.runtime)
+      ? (codexFastControl?.enabled ?? null)
+      : fastMode;
     const modelCatalog = await loadSessionControlModelCatalog(sessionKey, runtimeContext);
-    const capabilities = sessionControlCapabilitiesForSession(userId, sessionKey, runtimeContext);
+    const capabilities = sessionControlCapabilitiesForSession(
+      userId,
+      sessionKey,
+      runtimeContext,
+      codexFastControl,
+    );
     if (!modelCatalog.available) {
       capabilities.setModel = {
         supported: false,
@@ -6241,6 +6304,53 @@ button.deny { background: #9b1c31; color: white; }
     return result;
   }
 
+  async function applyCodexFastControlPatch(
+    sessionKey: string,
+    patch: Record<string, unknown>,
+    codexFastControl: CodexFastControlState | null,
+  ): Promise<
+    | { ok: true; codexFastControl: CodexFastControlState }
+    | { ok: false; error: { code: string; message: string } }
+  > {
+    const fastMode =
+      typeof patch.fastMode === "boolean"
+        ? patch.fastMode
+        : patch.mode === "fast"
+          ? true
+          : patch.mode === "normal"
+            ? false
+            : undefined;
+    if (typeof fastMode !== "boolean") {
+      return {
+        ok: false,
+        error: { code: "invalid_control_payload", message: "Invalid session control payload" },
+      };
+    }
+    const sessionFile =
+      codexFastControl?.sessionFile ?? resolveSessionControlSessionFile(sessionKey);
+    if (!sessionFile) {
+      return {
+        ok: false,
+        error: {
+          code: "codex_thread_not_attached",
+          message: "No Codex thread is attached to this OpenClaw session yet.",
+        },
+      };
+    }
+    try {
+      await setCodexAppServerFastMode({ sessionFile, enabled: fastMode });
+      return { ok: true, codexFastControl: { supported: true, enabled: fastMode, sessionFile } };
+    } catch (err) {
+      return {
+        ok: false,
+        error: {
+          code: "codex_thread_not_attached",
+          message: err instanceof Error ? err.message : "Codex fast mode control failed.",
+        },
+      };
+    }
+  }
+
   async function handleSessionControlRequest(req: http.IncomingMessage, res: http.ServerResponse) {
     const auth = authenticateHttpRequest(req);
     const body = await parseStreamsRequestBody(req);
@@ -6263,10 +6373,12 @@ button.deny { background: #9b1c31; color: white; }
       throw new HttpError(400, "invalid_action", "Unsupported session control action");
     }
     const runtimeContext = resolveSessionControlRuntimeContext(sessionKey);
+    const codexFastControl = await resolveCodexFastControlState(sessionKey, runtimeContext);
     const capabilities = sessionControlCapabilitiesForSession(
       auth.userId,
       sessionKey,
       runtimeContext,
+      codexFastControl,
     );
     const actionCapability = capabilityForAction(capabilities, action);
     if (actionCapability && !actionCapability.supported) {
@@ -6319,7 +6431,11 @@ button.deny { background: #9b1c31; color: white; }
         return;
       }
     }
-    const result = await applySessionControlPatch(sessionKey, patch);
+    const result =
+      isCodexSessionControlRuntime(runtimeContext.runtime) &&
+      (action === "set_fast_mode" || action === "set_mode")
+        ? await applyCodexFastControlPatch(sessionKey, patch, codexFastControl)
+        : await applySessionControlPatch(sessionKey, patch);
     if (!result.ok) {
       sendSessionControlJson(res, 200, {
         ok: false,
@@ -6335,7 +6451,11 @@ button.deny { background: #9b1c31; color: white; }
       ok: true,
       sessionKey,
       action,
-      status: await buildSessionStatusPayload(auth.userId, sessionKey),
+      status: await buildSessionStatusPayload(
+        auth.userId,
+        sessionKey,
+        "codexFastControl" in result ? result.codexFastControl : null,
+      ),
       capabilities,
     });
   }

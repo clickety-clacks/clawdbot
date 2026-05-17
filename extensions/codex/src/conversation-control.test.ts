@@ -9,6 +9,7 @@ import {
   writeCodexAppServerBinding,
 } from "./app-server/session-binding.js";
 import {
+  readCodexConversationFastMode,
   setCodexConversationFastMode,
   setCodexConversationModel,
   setCodexConversationPermissions,
@@ -58,6 +59,68 @@ describe("codex conversation controls", () => {
     expect(binding?.serviceTier).toBe("priority");
     expect(binding?.approvalPolicy).toBe("on-request");
     expect(binding?.sandbox).toBe("workspace-write");
+    await expect(readCodexConversationFastMode({ sessionFile })).resolves.toEqual({
+      available: true,
+      enabled: true,
+      serviceTier: "priority",
+    });
+  });
+
+  it("reads missing Codex fast mode as off for attached threads", async () => {
+    const sessionFile = path.join(tempDir, "session.jsonl");
+    await writeCodexAppServerBinding(sessionFile, {
+      threadId: "thread-1",
+      cwd: tempDir,
+      model: "gpt-5.4",
+      modelProvider: "openai",
+    });
+
+    await expect(readCodexConversationFastMode({ sessionFile })).resolves.toEqual({
+      available: true,
+      enabled: false,
+      serviceTier: undefined,
+    });
+  });
+
+  it("reports Codex fast mode unavailable without an attached thread", async () => {
+    const sessionFile = path.join(tempDir, "session.jsonl");
+
+    await expect(readCodexConversationFastMode({ sessionFile })).resolves.toEqual({
+      available: false,
+      reason: "codex_thread_not_attached",
+    });
+  });
+
+  it("reports Codex fast mode unavailable for unreadable bindings", async () => {
+    const sessionFile = path.join(tempDir, "session.jsonl");
+    await fs.writeFile(`${sessionFile}.codex-app-server.json`, "{not json");
+
+    await expect(readCodexConversationFastMode({ sessionFile })).resolves.toEqual({
+      available: false,
+      reason: "codex_app_server_binding_unreadable",
+    });
+    await expect(setCodexConversationFastMode({ sessionFile, enabled: true })).rejects.toThrow(
+      "Codex app-server binding is not readable.",
+    );
+  });
+
+  it("does not treat other Codex service tiers as Fast off", async () => {
+    const sessionFile = path.join(tempDir, "session.jsonl");
+    await writeCodexAppServerBinding(sessionFile, {
+      threadId: "thread-1",
+      cwd: tempDir,
+      model: "gpt-5.4",
+      modelProvider: "openai",
+      serviceTier: "batch-preview",
+    });
+
+    await expect(readCodexConversationFastMode({ sessionFile })).resolves.toEqual({
+      available: false,
+      reason: "codex_service_tier_not_supported_by_fast_control",
+    });
+    await expect(setCodexConversationFastMode({ sessionFile, enabled: false })).rejects.toThrow(
+      "Codex service tier is not supported by Fast control.",
+    );
   });
 
   it("does not persist public OpenAI provider after model changes on native auth bindings", async () => {

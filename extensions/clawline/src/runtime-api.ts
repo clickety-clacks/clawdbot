@@ -22,11 +22,13 @@ export {
 export type { OpenClawConfig } from "openclaw/plugin-sdk/core";
 export { resolveUserPath } from "openclaw/plugin-sdk/account-resolution";
 export {
+  applySessionsPatchToStore,
   loadSessionStore,
+  resolveAllAgentSessionStoreTargetsSync,
   resolveSessionStoreEntry,
   resolveStorePath,
-  applySessionsPatchToStore,
-} from "openclaw/plugin-sdk/config-runtime";
+  updateSessionStore,
+} from "openclaw/plugin-sdk/session-store-runtime";
 export { recordInboundSession } from "openclaw/plugin-sdk/conversation-runtime";
 export {
   createReplyDispatcherWithTyping,
@@ -39,12 +41,14 @@ export { isLoopbackHost, rawDataToString } from "openclaw/plugin-sdk/gateway-run
 export {
   closeDispatcher,
   createPinnedDispatcher,
+  resolvePinnedHostname,
+  type PinnedHostname,
+} from "openclaw/plugin-sdk/ssrf-runtime";
+export {
   enqueueSystemEvent,
   peekSystemEvents,
   resetSystemEventsForTest,
-  resolvePinnedHostname,
-  type PinnedHostname,
-} from "openclaw/plugin-sdk/infra-runtime";
+} from "openclaw/plugin-sdk/system-event-runtime";
 export {
   detectMime,
   hasAlphaChannel,
@@ -59,14 +63,14 @@ export {
 } from "openclaw/plugin-sdk/web-media";
 export { isPrivateOrLoopbackHost } from "openclaw/plugin-sdk/ssrf-runtime";
 export {
+  readCodexAppServerFastMode,
+  setCodexAppServerFastMode,
+} from "openclaw/plugin-sdk/codex-app-server-control";
+export {
   DEFAULT_ACCOUNT_ID,
   parseAgentSessionKey,
   resolveAgentIdFromSessionKey,
 } from "openclaw/plugin-sdk/routing";
-export {
-  resolveAllAgentSessionStoreTargetsSync,
-  updateSessionStore,
-} from "openclaw/plugin-sdk/config-runtime";
 
 // Remaining gaps after T187:
 // - Clawline runtime production code no longer reaches into repo `src/**`.

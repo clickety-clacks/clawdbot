@@ -488,6 +488,10 @@
       "types": "./dist/plugin-sdk/cli-backend.d.ts",
       "default": "./dist/plugin-sdk/cli-backend.js"
     },
+    "./plugin-sdk/codex-app-server-control": {
+      "types": "./dist/plugin-sdk/codex-app-server-control.d.ts",
+      "default": "./dist/plugin-sdk/codex-app-server-control.js"
+    },
     "./plugin-sdk/codex-mcp-projection": {
       "types": "./dist/plugin-sdk/codex-mcp-projection.d.ts",
       "default": "./dist/plugin-sdk/codex-mcp-projection.js"
