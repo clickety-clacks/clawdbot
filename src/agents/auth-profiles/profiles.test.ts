@@ -779,6 +779,104 @@ describe("promoteAuthProfileInOrder", () => {
     }
   });
 
+  it("tries fallback oauth key material when the preferred read key cannot decrypt", () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-auth-profile-read-fallback-"));
+    const agentDir = path.join(stateDir, "agents", "main", "agent");
+    const homeDir = path.join(path.dirname(stateDir), "home");
+    const configDir = path.join(path.dirname(stateDir), "external-config");
+    const previousStateDir = process.env.OPENCLAW_STATE_DIR;
+    const previousSecretKey = process.env.OPENCLAW_AUTH_PROFILE_SECRET_KEY;
+    const previousNodeEnv = process.env.NODE_ENV;
+    const previousVitest = process.env.VITEST;
+    const previousHome = process.env.HOME;
+    const previousXdgConfigHome = process.env.XDG_CONFIG_HOME;
+    const previousAppData = process.env.APPDATA;
+    const previousUserProfile = process.env.USERPROFILE;
+    process.env.OPENCLAW_STATE_DIR = stateDir;
+    process.env.NODE_ENV = "production";
+    process.env.VITEST = "true";
+    process.env.HOME = homeDir;
+    process.env.XDG_CONFIG_HOME = configDir;
+    process.env.APPDATA = configDir;
+    process.env.USERPROFILE = homeDir;
+    delete process.env.OPENCLAW_AUTH_PROFILE_SECRET_KEY;
+    try {
+      fs.mkdirSync(agentDir, { recursive: true });
+      const profileId = "openai-codex:default";
+      saveAuthProfileStore(
+        {
+          version: AUTH_STORE_VERSION,
+          profiles: {
+            [profileId]: {
+              type: "oauth",
+              provider: "openai-codex",
+              access: "fallback-read-access-token",
+              refresh: "fallback-read-refresh-token",
+              expires: Date.now() + 60 * 60 * 1000,
+            },
+          },
+        },
+        agentDir,
+        { filterExternalAuthProfiles: false },
+      );
+
+      process.env.OPENCLAW_AUTH_PROFILE_SECRET_KEY = "wrong-preferred-read-key";
+      clearRuntimeAuthProfileStoreSnapshots();
+      expectOAuthCredentialFields(
+        loadAuthProfileStoreWithoutExternalProfiles(agentDir).profiles[profileId],
+        {
+          provider: "openai-codex",
+          access: "fallback-read-access-token",
+          refresh: "fallback-read-refresh-token",
+        },
+      );
+    } finally {
+      if (previousStateDir === undefined) {
+        delete process.env.OPENCLAW_STATE_DIR;
+      } else {
+        process.env.OPENCLAW_STATE_DIR = previousStateDir;
+      }
+      if (previousSecretKey === undefined) {
+        delete process.env.OPENCLAW_AUTH_PROFILE_SECRET_KEY;
+      } else {
+        process.env.OPENCLAW_AUTH_PROFILE_SECRET_KEY = previousSecretKey;
+      }
+      if (previousNodeEnv === undefined) {
+        delete process.env.NODE_ENV;
+      } else {
+        process.env.NODE_ENV = previousNodeEnv;
+      }
+      if (previousVitest === undefined) {
+        delete process.env.VITEST;
+      } else {
+        process.env.VITEST = previousVitest;
+      }
+      if (previousHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = previousHome;
+      }
+      if (previousXdgConfigHome === undefined) {
+        delete process.env.XDG_CONFIG_HOME;
+      } else {
+        process.env.XDG_CONFIG_HOME = previousXdgConfigHome;
+      }
+      if (previousAppData === undefined) {
+        delete process.env.APPDATA;
+      } else {
+        process.env.APPDATA = previousAppData;
+      }
+      if (previousUserProfile === undefined) {
+        delete process.env.USERPROFILE;
+      } else {
+        process.env.USERPROFILE = previousUserProfile;
+      }
+      fs.rmSync(stateDir, { recursive: true, force: true });
+      fs.rmSync(homeDir, { recursive: true, force: true });
+      fs.rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
   it("preserves access-only openai-codex oauth credentials when persisting refs", () => {
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-auth-profile-access-only-"));
     const agentDir = path.join(stateDir, "agents", "main", "agent");
