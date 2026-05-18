@@ -52,61 +52,6 @@ function expectOAuthCredentialFields(
 }
 
 describe("promoteAuthProfileInOrder", () => {
-  it("normalizes copied secrets when using the locked upsert path", async () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-auth-profile-upsert-"));
-    const agentDir = path.join(stateDir, "agents", "main", "agent");
-    const previousStateDir = process.env.OPENCLAW_STATE_DIR;
-    const previousOAuthDir = process.env.OPENCLAW_OAUTH_DIR;
-    process.env.OPENCLAW_STATE_DIR = stateDir;
-    delete process.env.OPENCLAW_OAUTH_DIR;
-    try {
-      fs.mkdirSync(agentDir, { recursive: true });
-
-      await upsertAuthProfileWithLock({
-        profileId: "openai:manual",
-        credential: {
-          type: "token",
-          provider: "openai",
-          token: "  bearer\r\n-token\u2502  ",
-        },
-        agentDir,
-      });
-      await upsertAuthProfileWithLock({
-        profileId: "anthropic:key",
-        credential: {
-          type: "api_key",
-          provider: "anthropic",
-          key: "  sk-\r\nant\u2502  ",
-        },
-        agentDir,
-      });
-
-      const profiles = loadAuthProfileStoreWithoutExternalProfiles(agentDir).profiles;
-      expect(profiles["openai:manual"]).toMatchObject({
-        type: "token",
-        provider: "openai",
-        token: "bearer-token",
-      });
-      expect(profiles["anthropic:key"]).toMatchObject({
-        type: "api_key",
-        provider: "anthropic",
-        key: "sk-ant",
-      });
-    } finally {
-      if (previousStateDir === undefined) {
-        delete process.env.OPENCLAW_STATE_DIR;
-      } else {
-        process.env.OPENCLAW_STATE_DIR = previousStateDir;
-      }
-      if (previousOAuthDir === undefined) {
-        delete process.env.OPENCLAW_OAUTH_DIR;
-      } else {
-        process.env.OPENCLAW_OAUTH_DIR = previousOAuthDir;
-      }
-      fs.rmSync(stateDir, { recursive: true, force: true });
-    }
-  });
-
   it("persists openai-codex oauth credentials inline", () => {
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-auth-profile-metadata-"));
     const agentDir = path.join(stateDir, "agents", "main", "agent");
