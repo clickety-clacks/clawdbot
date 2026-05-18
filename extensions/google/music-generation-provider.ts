@@ -5,8 +5,8 @@ import type {
   MusicGenerationRequest,
 } from "openclaw/plugin-sdk/music-generation";
 import { resolveApiKeyForProvider } from "openclaw/plugin-sdk/provider-auth-runtime";
-import { normalizeOptionalString } from "openclaw/plugin-sdk/text-runtime";
-import { normalizeGoogleApiBaseUrl } from "./api.js";
+import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
+import { resolveGoogleGenerativeAiApiOrigin } from "./api.js";
 import {
   createGoogleMusicGenerationProviderMetadata,
   DEFAULT_GOOGLE_MUSIC_MODEL,
@@ -37,7 +37,7 @@ type GoogleGenerateMusicResponse = {
 
 function resolveConfiguredGoogleMusicBaseUrl(req: MusicGenerationRequest): string | undefined {
   const configured = normalizeOptionalString(req.cfg?.models?.providers?.google?.baseUrl);
-  return configured ? normalizeGoogleApiBaseUrl(configured) : undefined;
+  return configured ? resolveGoogleGenerativeAiApiOrigin(configured) : undefined;
 }
 
 function buildMusicPrompt(req: MusicGenerationRequest): string {

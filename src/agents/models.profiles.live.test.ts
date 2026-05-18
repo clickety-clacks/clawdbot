@@ -1,10 +1,19 @@
-import { type Api, completeSimple, type Model } from "@mariozechner/pi-ai";
+import { writeSync } from "node:fs";
+import {
+  type Api,
+  completeSimple,
+  getModels,
+  getProviders,
+  type KnownProvider,
+  type Model,
+} from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import { loadConfig } from "../config/config.js";
+import { getRuntimeConfig } from "../config/config.js";
 import { parseLiveCsvFilter } from "../media-generation/live-test-helpers.js";
 import { runTasksWithConcurrency } from "../utils/run-with-concurrency.js";
-import { resolveOpenClawAgentDir } from "./agent-paths.js";
+import { resolveDefaultAgentDir } from "./agent-scope.js";
+import { externalCliDiscoveryForProviders } from "./auth-profiles/external-cli-discovery.js";
 import {
   collectAnthropicApiKeys,
   isAnthropicBillingError,
@@ -13,6 +22,8 @@ import {
 import { isModelNotFoundErrorMessage } from "./live-model-errors.js";
 import {
   isHighSignalLiveModelRef,
+  isPrioritizedHighSignalLiveModelRef,
+  listPrioritizedHighSignalLiveModelRefs,
   resolveHighSignalLiveModelLimit,
   selectHighSignalLiveItems,
   shouldExcludeProviderFromDefaultHighSignalLiveSweep,
@@ -42,7 +53,11 @@ import {
   isCloudflareOrHtmlErrorPage,
   isRateLimitErrorMessage,
 } from "./pi-embedded-helpers/errors.js";
-import { discoverAuthStorage, discoverModels } from "./pi-model-discovery.js";
+import {
+  discoverAuthStorage,
+  discoverModels,
+  normalizeDiscoveredPiModel,
+} from "./pi-model-discovery.js";
 
 const LIVE = isLiveTestEnabled();
 const DIRECT_ENABLED = Boolean(process.env.OPENCLAW_LIVE_MODELS?.trim());
@@ -58,8 +73,12 @@ const LIVE_TEST_TIMEOUT_MS = Math.max(
   toInt(process.env.OPENCLAW_LIVE_TEST_TIMEOUT_MS, 60 * 60 * 1000),
 );
 const DEFAULT_LIVE_MODEL_CONCURRENCY = 20;
-const LIVE_MODEL_CONCURRENCY = resolveLiveModelConcurrency();
-const LIVE_MODELS_JSON_TIMEOUT_MS = resolveLiveModelsJsonTimeoutMs();
+const LIVE_MODEL_CONCURRENCY = resolveLiveModelConcurrency(
+  process.env.OPENCLAW_LIVE_MODEL_CONCURRENCY,
+);
+const LIVE_MODELS_JSON_TIMEOUT_MS = resolveLiveModelsJsonTimeoutMs(
+  process.env.OPENCLAW_LIVE_MODELS_JSON_TIMEOUT_MS,
+);
 const LIVE_FILE_PROBE_ENABLED = isLiveModelProbeEnabled(process.env, LIVE_MODEL_FILE_PROBE_ENV);
 const LIVE_IMAGE_PROBE_ENABLED = isLiveModelProbeEnabled(process.env, LIVE_MODEL_IMAGE_PROBE_ENV);
 
@@ -78,7 +97,46 @@ function parseModelFilter(raw?: string): Set<string> | null {
 }
 
 function logProgress(message: string): void {
-  process.stderr.write(`[live] ${message}\n`);
+  writeSync(2, `[live] ${message}\n`);
+}
+
+function resolveKnownProvider(provider: string): KnownProvider | undefined {
+  const normalized = provider.trim();
+  return getProviders().find((knownProvider) => knownProvider === normalized);
+}
+
+function loadPrioritizedHighSignalModels(): Model<Api>[] {
+  const idsByProvider = new Map<string, Set<string>>();
+  for (const ref of listPrioritizedHighSignalLiveModelRefs()) {
+    const bucket = idsByProvider.get(ref.provider);
+    if (bucket) {
+      bucket.add(ref.id);
+    } else {
+      idsByProvider.set(ref.provider, new Set([ref.id]));
+    }
+  }
+
+  const models: Model<Api>[] = [];
+  const seen = new Set<string>();
+  for (const [provider, ids] of idsByProvider) {
+    const knownProvider = resolveKnownProvider(provider);
+    if (!knownProvider) {
+      continue;
+    }
+    for (const model of getModels(knownProvider)) {
+      const id = model.id.toLowerCase();
+      if (!ids.has(id)) {
+        continue;
+      }
+      const key = `${provider}/${id}`;
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      models.push(model);
+    }
+  }
+  return models;
 }
 
 function formatElapsedSeconds(ms: number): string {
@@ -215,6 +273,14 @@ describe("isProviderUnavailableErrorMessage", () => {
       isProviderUnavailableErrorMessage("provider returned error: 502 Internal Server Error"),
     ).toBe(true);
   });
+
+  it("matches xAI temporary capacity errors", () => {
+    expect(
+      isProviderUnavailableErrorMessage(
+        "Service temporarily unavailable. The model is at capacity and currently cannot serve this request. Please try again later.",
+      ),
+    ).toBe(true);
+  });
 });
 
 function isChatGPTUsageLimitErrorMessage(raw: string): boolean {
@@ -256,6 +322,7 @@ function isProviderUnavailableErrorMessage(raw: string): boolean {
     msg.includes("upstream provider unavailable") ||
     msg.includes("upstream error from google") ||
     msg.includes("temporarily rate-limited upstream") ||
+    (msg.includes("service temporarily unavailable") && msg.includes("capacity")) ||
     msg.includes("unable to access non-serverless model") ||
     msg.includes("create and start a new dedicated endpoint") ||
     msg.includes("no available capacity was found for the model") ||
@@ -287,6 +354,7 @@ function isAudioOnlyModelErrorMessage(raw: string): boolean {
 function isUnsupportedReasoningEffortErrorMessage(raw: string): boolean {
   return (
     /does not support parameter reasoningeffort/i.test(raw) ||
+    /invalid reasoning effort/i.test(raw) ||
     /unsupported value:\s*'low'.*reasoning\.effort.*supported values are:\s*'medium'/i.test(raw)
   );
 }
@@ -299,6 +367,24 @@ function isUnsupportedPlanErrorMessage(raw: string): boolean {
   return /current token plan (?:does )?not support (?:this )?model/i.test(raw);
 }
 
+function isOpenRouterOpaqueBadRequestErrorMessage(raw: string): boolean {
+  const msg = raw.toLowerCase();
+  return (
+    msg.includes("provider returned error") &&
+    msg.includes('"code":400') &&
+    msg.includes('"msg":"bad request"')
+  );
+}
+
+describe("isUnsupportedReasoningEffortErrorMessage", () => {
+  it("matches provider-native reasoning effort rejections", () => {
+    expect(isUnsupportedReasoningEffortErrorMessage('Error: 400 "Invalid reasoning effort."')).toBe(
+      true,
+    );
+    expect(isUnsupportedReasoningEffortErrorMessage("Error: 400 model not found")).toBe(false);
+  });
+});
+
 describe("isUnsupportedPlanErrorMessage", () => {
   it("matches provider plan-gated models", () => {
     expect(isUnsupportedPlanErrorMessage("current token plan does not support this model")).toBe(
@@ -306,6 +392,17 @@ describe("isUnsupportedPlanErrorMessage", () => {
     );
     expect(isUnsupportedPlanErrorMessage("your current token plan not support model")).toBe(true);
     expect(isUnsupportedPlanErrorMessage("model not found")).toBe(false);
+  });
+});
+
+describe("isOpenRouterOpaqueBadRequestErrorMessage", () => {
+  it("matches opaque OpenRouter upstream bad requests", () => {
+    expect(
+      isOpenRouterOpaqueBadRequestErrorMessage(
+        'Error: 400 Provider returned error {"code":400,"msg":"bad request","request_id":"abc"}',
+      ),
+    ).toBe(true);
+    expect(isOpenRouterOpaqueBadRequestErrorMessage("Error: 400 bad request")).toBe(false);
   });
 });
 
@@ -318,13 +415,13 @@ function toInt(value: string | undefined, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-function resolveLiveModelConcurrency(raw = process.env.OPENCLAW_LIVE_MODEL_CONCURRENCY): number {
+function resolveLiveModelConcurrency(raw?: string): number {
   return Math.max(1, toInt(raw, DEFAULT_LIVE_MODEL_CONCURRENCY));
 }
 
 describe("resolveLiveModelConcurrency", () => {
   it("defaults direct-model probes to 20-way concurrency", () => {
-    expect(resolveLiveModelConcurrency(undefined)).toBe(20);
+    expect(resolveLiveModelConcurrency()).toBe(20);
   });
 
   it("accepts explicit concurrency overrides", () => {
@@ -334,7 +431,7 @@ describe("resolveLiveModelConcurrency", () => {
 });
 
 function resolveLiveModelsJsonTimeoutMs(
-  modelsJsonTimeoutRaw = process.env.OPENCLAW_LIVE_MODELS_JSON_TIMEOUT_MS,
+  modelsJsonTimeoutRaw?: string,
   setupTimeoutMs = LIVE_SETUP_TIMEOUT_MS,
 ): number {
   return Math.max(setupTimeoutMs, toInt(modelsJsonTimeoutRaw, 120_000));
@@ -358,9 +455,6 @@ function resolveTestReasoning(
   }
   const id = model.id.toLowerCase();
   if (id.includes("deep-research")) {
-    return "medium";
-  }
-  if (id === "gpt-5.4-pro") {
     return "medium";
   }
   if (model.provider === "openrouter" && id.startsWith("qwq")) {
@@ -451,6 +545,34 @@ async function completeSimpleWithTimeout<TApi extends Api>(
   }
 }
 
+function requireToolChoicePayload(payload: unknown): unknown {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return undefined;
+  }
+  const candidate = payload as { tools?: unknown; tool_choice?: unknown };
+  if (!Array.isArray(candidate.tools) || candidate.tools.length === 0) {
+    return undefined;
+  }
+  return {
+    ...candidate,
+    tool_choice: { type: "function", name: "noop" },
+  };
+}
+
+describe("requireToolChoicePayload", () => {
+  it("requires tool use when a Responses payload has tools", () => {
+    expect(requireToolChoicePayload({ model: "gpt", tools: [{ name: "noop" }] })).toEqual({
+      model: "gpt",
+      tools: [{ name: "noop" }],
+      tool_choice: { type: "function", name: "noop" },
+    });
+  });
+
+  it("leaves payloads without tools unchanged", () => {
+    expect(requireToolChoicePayload({ model: "gpt", tools: [] })).toBeUndefined();
+  });
+});
+
 async function completeOkWithRetry(params: {
   model: Model<Api>;
   apiKey: string;
@@ -492,6 +614,102 @@ async function completeOkWithRetry(params: {
   // Some providers (for example Moonshot Kimi and MiniMax M2.5) may emit
   // reasoning blocks first and only return text once token budget is higher.
   return await runOnce(256);
+}
+
+function isDeepSeekV4Model(model: Pick<Model<Api>, "id" | "provider">): boolean {
+  return (
+    model.provider === "deepseek" &&
+    (model.id === "deepseek-v4-flash" || model.id === "deepseek-v4-pro")
+  );
+}
+
+async function runDeepSeekV4ReplayRegression(params: {
+  model: Model<Api>;
+  apiKey: string;
+  timeoutMs: number;
+  progressLabel: string;
+}) {
+  const noopTool = {
+    name: "noop",
+    description: "Return ok.",
+    parameters: Type.Object({}, { additionalProperties: false }),
+  };
+  let firstUser = {
+    role: "user" as const,
+    content: "Call the tool `noop` with {}. Do not write any other text.",
+    timestamp: Date.now(),
+  };
+  let first = await completeSimpleWithTimeout(
+    params.model,
+    { messages: [firstUser], tools: [noopTool] },
+    {
+      apiKey: params.apiKey,
+      reasoning: resolveTestReasoning(params.model),
+      maxTokens: 256,
+    },
+    params.timeoutMs,
+    `${params.progressLabel}: DeepSeek V4 replay first call`,
+  );
+  let toolCall = first.content.find((block) => block.type === "toolCall");
+
+  for (let i = 0; i < 2 && !toolCall; i += 1) {
+    firstUser = {
+      role: "user" as const,
+      content: "Call the tool `noop` with {}. IMPORTANT: respond with the tool call.",
+      timestamp: Date.now(),
+    };
+    first = await completeSimpleWithTimeout(
+      params.model,
+      { messages: [firstUser], tools: [noopTool] },
+      {
+        apiKey: params.apiKey,
+        reasoning: resolveTestReasoning(params.model),
+        maxTokens: 256,
+      },
+      params.timeoutMs,
+      `${params.progressLabel}: DeepSeek V4 replay retry ${i + 1}`,
+    );
+    toolCall = first.content.find((block) => block.type === "toolCall");
+  }
+
+  if (!toolCall || toolCall.type !== "toolCall") {
+    throw new Error("expected DeepSeek V4 tool call");
+  }
+  expect(toolCall.name).toBe("noop");
+
+  const second = await completeSimpleWithTimeout(
+    params.model,
+    {
+      messages: [
+        firstUser,
+        first,
+        {
+          role: "toolResult",
+          toolCallId: toolCall.id,
+          toolName: "noop",
+          content: [{ type: "text", text: "ok" }],
+          isError: false,
+          timestamp: Date.now(),
+        },
+        {
+          role: "user",
+          content: "Reply with the word ok.",
+          timestamp: Date.now(),
+        },
+      ],
+    },
+    {
+      apiKey: params.apiKey,
+      reasoning: resolveTestReasoning(params.model),
+      maxTokens: 256,
+    },
+    params.timeoutMs,
+    `${params.progressLabel}: DeepSeek V4 replay followup`,
+  );
+  if (second.stopReason === "error") {
+    throw new Error(second.errorMessage || "DeepSeek V4 replay followup returned error");
+  }
+  expect(extractAssistantText(second).length).toBeGreaterThan(0);
 }
 
 async function runExtraTurnProbes(params: {
@@ -592,7 +810,7 @@ describeLive("live models (profile keys)", () => {
     async () => {
       logProgress("[live-models] loading config");
       const cfg = await withLiveStageTimeout(
-        Promise.resolve().then(() => loadConfig()),
+        Promise.resolve().then(() => getRuntimeConfig()),
         "[live-models] load config",
       );
       logProgress("[live-models] preparing models.json");
@@ -613,20 +831,46 @@ describeLive("live models (profile keys)", () => {
         logProgress(`[live-models] anthropic keys loaded: ${anthropicKeys.length}`);
       }
 
-      const agentDir = resolveOpenClawAgentDir();
-      const authStorage = discoverAuthStorage(agentDir);
-      logProgress("[live-models] loading model registry");
-      const models = await withLiveStageTimeout(
-        Promise.resolve().then(() => discoverModels(authStorage, agentDir).getAll()),
-        "[live-models] load model registry",
-      );
-
+      const providers = parseProviderFilter(process.env.OPENCLAW_LIVE_PROVIDERS);
+      const providerList = providers ? [...providers] : null;
+      logProgress("[live-models] resolving agent dir");
+      const agentDir = resolveDefaultAgentDir(cfg);
       const rawModels = process.env.OPENCLAW_LIVE_MODELS?.trim();
       const useModern = rawModels === "modern" || rawModels === "all";
       const useExplicit = Boolean(rawModels) && !useModern;
       const filter = useExplicit ? parseModelFilter(rawModels) : null;
+      const useDefaultPriorityOnly = !filter && useModern && !providers;
       const allowNotFoundSkip = useModern;
-      const providers = parseProviderFilter(process.env.OPENCLAW_LIVE_PROVIDERS);
+      const models = await (async () => {
+        if (useDefaultPriorityOnly) {
+          logProgress("[live-models] loading prioritized model refs");
+          return loadPrioritizedHighSignalModels();
+        }
+        logProgress("[live-models] loading auth storage");
+        const authStorage = await withLiveStageTimeout(
+          Promise.resolve().then(() =>
+            discoverAuthStorage(agentDir, {
+              config: cfg,
+              env: process.env,
+              externalCli: externalCliDiscoveryForProviders({ cfg, providers: providerList ?? [] }),
+              ...(providerList
+                ? {
+                    skipExternalAuthProfiles: true,
+                    syntheticAuthProviderRefs: [],
+                  }
+                : {}),
+            }),
+          ),
+          "[live-models] load auth storage",
+        );
+        logProgress("[live-models] loading model registry");
+        return withLiveStageTimeout(
+          Promise.resolve().then(() =>
+            discoverModels(authStorage, agentDir, { normalizeModels: false }).getAll(),
+          ),
+          "[live-models] load model registry",
+        );
+      })();
       const perModelTimeoutMs = toInt(process.env.OPENCLAW_LIVE_MODEL_TIMEOUT_MS, 30_000);
       const maxModels = resolveHighSignalLiveModelLimit({
         rawMaxModels: process.env.OPENCLAW_LIVE_MAX_MODELS,
@@ -659,6 +903,12 @@ describeLive("live models (profile keys)", () => {
         }
         if (!filter && useModern) {
           if (
+            useDefaultPriorityOnly &&
+            !isPrioritizedHighSignalLiveModelRef({ provider: model.provider, id: model.id })
+          ) {
+            continue;
+          }
+          if (
             shouldExcludeProviderFromDefaultHighSignalLiveSweep({
               provider: model.provider,
               useExplicitModels: useExplicit,
@@ -686,7 +936,10 @@ describeLive("live models (profile keys)", () => {
             });
             continue;
           }
-          candidates.push({ model, apiKeyInfo });
+          candidates.push({
+            model: normalizeDiscoveredPiModel(model, agentDir),
+            apiKeyInfo,
+          });
         } catch (err) {
           skipped.push({ model: id, reason: String(err) });
         }
@@ -734,7 +987,7 @@ describeLive("live models (profile keys)", () => {
             if (
               model.provider === "openai" &&
               model.api === "openai-responses" &&
-              (model.id === "gpt-5.5" || model.id === "gpt-5.4")
+              model.id === "gpt-5.2"
             ) {
               logProgress(`${progressLabel}: tool-only regression`);
               const noopTool = {
@@ -757,6 +1010,7 @@ describeLive("live models (profile keys)", () => {
                   apiKey,
                   reasoning: resolveTestReasoning(model),
                   maxTokens: 128,
+                  onPayload: requireToolChoicePayload,
                 },
                 perModelTimeoutMs,
                 `${progressLabel}: tool-only regression first call`,
@@ -787,6 +1041,7 @@ describeLive("live models (profile keys)", () => {
                     apiKey,
                     reasoning: resolveTestReasoning(model),
                     maxTokens: 128,
+                    onPayload: requireToolChoicePayload,
                   },
                   perModelTimeoutMs,
                   `${progressLabel}: tool-only regression retry ${i + 1}`,
@@ -800,11 +1055,16 @@ describeLive("live models (profile keys)", () => {
                   .trim();
               }
 
-              expect(toolCall).toBeTruthy();
+              if (first.stopReason === "error") {
+                throw new Error(
+                  first.errorMessage || "tool-only regression returned error with no message",
+                );
+              }
               expect(firstText.length).toBe(0);
               if (!toolCall || toolCall.type !== "toolCall") {
                 throw new Error("expected tool call");
               }
+              expect(toolCall.name).toBe("noop");
 
               const second = await completeSimpleWithTimeout(
                 model,
@@ -842,6 +1102,24 @@ describeLive("live models (profile keys)", () => {
                 .map((b) => b.text.trim())
                 .join(" ");
               expect(secondText.length).toBeGreaterThan(0);
+              await runExtraTurnProbes({
+                model,
+                apiKey,
+                timeoutMs: perModelTimeoutMs,
+                progressLabel,
+              });
+              logProgress(`${progressLabel}: done`);
+              break;
+            }
+
+            if (isDeepSeekV4Model(model)) {
+              logProgress(`${progressLabel}: DeepSeek V4 replay regression`);
+              await runDeepSeekV4ReplayRegression({
+                model,
+                apiKey,
+                timeoutMs: perModelTimeoutMs,
+                progressLabel,
+              });
               await runExtraTurnProbes({
                 model,
                 apiKey,
@@ -1034,6 +1312,15 @@ describeLive("live models (profile keys)", () => {
             if (allowNotFoundSkip && isProviderUnavailableErrorMessage(message)) {
               skipped.push({ model: id, reason: message });
               logProgress(`${progressLabel}: skip (provider unavailable)`);
+              break;
+            }
+            if (
+              allowNotFoundSkip &&
+              model.provider === "openrouter" &&
+              isOpenRouterOpaqueBadRequestErrorMessage(message)
+            ) {
+              skipped.push({ model: id, reason: message });
+              logProgress(`${progressLabel}: skip (openrouter upstream bad request)`);
               break;
             }
             if (allowNotFoundSkip && isModelNotFoundErrorMessage(message)) {

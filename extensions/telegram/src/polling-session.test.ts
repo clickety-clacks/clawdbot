@@ -1,3 +1,6 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import type { ChannelAccountSnapshot } from "openclaw/plugin-sdk/channel-contract";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -30,6 +33,7 @@ vi.mock("openclaw/plugin-sdk/runtime-env", () => ({
 }));
 
 let TelegramPollingSession: typeof import("./polling-session.js").TelegramPollingSession;
+let writeTelegramSpooledUpdate: typeof import("./telegram-ingress-spool.js").writeTelegramSpooledUpdate;
 
 type TelegramApiMiddleware = (
   prev: (...args: unknown[]) => Promise<unknown>,
@@ -37,6 +41,54 @@ type TelegramApiMiddleware = (
   payload: unknown,
 ) => Promise<unknown>;
 type AsyncVoidFn = () => Promise<void>;
+type MockCallSource = { mock: { calls: Array<Array<unknown>> } };
+
+function mockObjectArg(
+  source: MockCallSource,
+  label: string,
+  callIndex = 0,
+  argIndex = 0,
+): Record<string, unknown> {
+  const call = source.mock.calls[callIndex];
+  if (!call) {
+    throw new Error(`Expected ${label} call ${callIndex} to exist`);
+  }
+  const value = call[argIndex];
+  if (!value || typeof value !== "object") {
+    throw new Error(`Expected ${label} call ${callIndex} argument ${argIndex} to be an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function logContains(source: MockCallSource, text: string): boolean {
+  return source.mock.calls.some((call) => String(call[0]).includes(text));
+}
+
+function expectLogIncludes(source: MockCallSource, text: string): void {
+  expect(logContains(source, text), `Expected log to include ${text}`).toBe(true);
+}
+
+function expectLogExcludes(source: MockCallSource, text: string): void {
+  expect(logContains(source, text), `Expected log not to include ${text}`).toBe(false);
+}
+
+function statusPatches(source: MockCallSource): Record<string, unknown>[] {
+  return source.mock.calls.map((call, index) => {
+    const patch = call[0];
+    if (!patch || typeof patch !== "object") {
+      throw new Error(`Expected status patch call ${index} to be an object`);
+    }
+    return patch as Record<string, unknown>;
+  });
+}
+
+function expectPollingConnectedPatch(patch: Record<string, unknown> | undefined): void {
+  if (!patch) {
+    throw new Error("Expected polling connected patch");
+  }
+  expect(patch.connected).toBe(true);
+  expect(patch.mode).toBe("polling");
+}
 
 function makeBot() {
   return {
@@ -143,6 +195,7 @@ function createPollingSession(params: {
   createTelegramTransport?: () => ReturnType<typeof makeTelegramTransport>;
   stallThresholdMs?: number;
   setStatus?: (patch: Omit<ChannelAccountSnapshot, "accountId">) => void;
+  isolatedIngress?: ConstructorParameters<typeof TelegramPollingSession>[0]["isolatedIngress"];
 }) {
   return new TelegramPollingSession({
     token: "tok",
@@ -158,6 +211,7 @@ function createPollingSession(params: {
     telegramTransport: params.telegramTransport,
     stallThresholdMs: params.stallThresholdMs,
     setStatus: params.setStatus,
+    isolatedIngress: params.isolatedIngress,
     ...(params.createTelegramTransport
       ? { createTelegramTransport: params.createTelegramTransport }
       : {}),
@@ -213,6 +267,7 @@ async function waitForApiMiddleware(
 describe("TelegramPollingSession", () => {
   beforeAll(async () => {
     ({ TelegramPollingSession } = await import("./polling-session.js"));
+    ({ writeTelegramSpooledUpdate } = await import("./telegram-ingress-spool.js"));
   });
 
   beforeEach(() => {
@@ -276,14 +331,15 @@ describe("TelegramPollingSession", () => {
     await session.runUntilAbort();
 
     expect(runMock).toHaveBeenCalledTimes(2);
+    expect(
+      mockObjectArg(createTelegramBotMock, "createTelegramBot").minimumClientTimeoutSeconds,
+    ).toBe(45);
     expect(computeBackoffMock).toHaveBeenCalledTimes(1);
     expect(sleepWithAbortMock).toHaveBeenCalledTimes(1);
   });
 
-  it("bounds the persisted offset confirmation getUpdates call", async () => {
+  it("does not call getUpdates for offset confirmation (avoiding 409 conflicts)", async () => {
     const abort = new AbortController();
-    const timeoutSignal = new AbortController().signal;
-    const timeoutSpy = vi.spyOn(AbortSignal, "timeout").mockReturnValue(timeoutSignal);
     const bot = makeBot();
     createTelegramBotMock.mockReturnValueOnce(bot);
     runMock.mockReturnValueOnce({
@@ -308,16 +364,74 @@ describe("TelegramPollingSession", () => {
       telegramTransport: undefined,
     });
 
-    try {
-      await session.runUntilAbort();
+    await session.runUntilAbort();
 
-      expect(timeoutSpy).toHaveBeenCalledWith(10_000);
-      expect(bot.api.getUpdates).toHaveBeenCalledWith(
-        { offset: 42, limit: 1, timeout: 0 },
-        timeoutSignal,
+    // Offset confirmation was removed because it could self-conflict with the runner.
+    // OpenClaw middleware still skips duplicates using the persisted update offset.
+    expect(bot.api.getUpdates).not.toHaveBeenCalled();
+  });
+
+  it("drains isolated ingress spool through the main-thread bot without offset watermark skipping", async () => {
+    const abort = new AbortController();
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-telegram-spool-"));
+    const handleUpdate = vi.fn(async () => undefined);
+    const bot = {
+      api: {
+        deleteWebhook: vi.fn(async () => true),
+        config: { use: vi.fn() },
+      },
+      handleUpdate,
+      stop: vi.fn(async () => undefined),
+    };
+    createTelegramBotMock.mockReturnValueOnce(bot);
+    await writeTelegramSpooledUpdate({
+      spoolDir: tempDir,
+      update: { update_id: 42, message: { text: "hello" } },
+    });
+    let stopWorker: (() => void) | undefined;
+    const workerDone = new Promise<void>((resolve) => {
+      stopWorker = resolve;
+    });
+    const createWorker = vi.fn(() => ({
+      onMessage: vi.fn(() => () => undefined),
+      stop: vi.fn(async () => {
+        stopWorker?.();
+      }),
+      task: vi.fn(async () => {
+        await workerDone;
+      }),
+    }));
+
+    try {
+      const session = createPollingSession({
+        abortSignal: abort.signal,
+        isolatedIngress: {
+          enabled: true,
+          spoolDir: tempDir,
+          createWorker,
+          drainIntervalMs: 10,
+        },
+      });
+
+      const runPromise = session.runUntilAbort();
+      await vi.waitFor(() => expect(handleUpdate).toHaveBeenCalledTimes(1));
+      abort.abort();
+      await runPromise;
+
+      expect(createWorker).toHaveBeenCalledWith(
+        expect.objectContaining({
+          initialUpdateId: null,
+          spoolDir: tempDir,
+          token: "tok",
+        }),
       );
+      expect(
+        mockObjectArg(createTelegramBotMock, "createTelegramBot").updateOffset,
+      ).toBeUndefined();
+      expect(handleUpdate).toHaveBeenCalledWith({ update_id: 42, message: { text: "hello" } });
+      await expect(fs.readdir(tempDir)).resolves.toEqual([]);
     } finally {
-      timeoutSpy.mockRestore();
+      await fs.rm(tempDir, { recursive: true, force: true });
     }
   });
 
@@ -388,8 +502,62 @@ describe("TelegramPollingSession", () => {
       expect(runMock).toHaveBeenCalledTimes(2);
       expect(firstRunnerStop).toHaveBeenCalledTimes(1);
       expect(botStop).toHaveBeenCalled();
-      expect(log).toHaveBeenCalledWith(expect.stringContaining("Polling stall detected"));
-      expect(log).toHaveBeenCalledWith(expect.stringContaining("polling stall detected"));
+      expectLogIncludes(log, "Polling stall detected");
+      expectLogIncludes(log, "polling stall detected");
+    } finally {
+      watchdogHarness.restore();
+    }
+  });
+
+  it("forces a restart when the runner task is pending but reports not running", async () => {
+    const abort = new AbortController();
+    const firstRunnerStop = vi.fn(async () => undefined);
+    const secondRunnerStop = vi.fn(async () => undefined);
+    createTelegramBotMock.mockReturnValue(makeBot());
+
+    let firstTaskResolve: (() => void) | undefined;
+    const firstTask = new Promise<void>((resolve) => {
+      firstTaskResolve = resolve;
+    });
+    let cycle = 0;
+    runMock.mockImplementation(() => {
+      cycle += 1;
+      if (cycle === 1) {
+        return {
+          task: () => firstTask,
+          stop: async () => {
+            await firstRunnerStop();
+            firstTaskResolve?.();
+          },
+          isRunning: () => false,
+        };
+      }
+      return {
+        task: async () => {
+          abort.abort();
+        },
+        stop: secondRunnerStop,
+        isRunning: () => false,
+      };
+    });
+
+    const watchdogHarness = installPollingStallWatchdogHarness();
+
+    const log = vi.fn();
+    const session = createPollingSession({
+      abortSignal: abort.signal,
+      log,
+    });
+
+    try {
+      const runPromise = session.runUntilAbort();
+      const watchdog = await watchdogHarness.waitForWatchdog();
+      watchdog?.();
+      await runPromise;
+
+      expect(runMock).toHaveBeenCalledTimes(2);
+      expect(firstRunnerStop).toHaveBeenCalledTimes(1);
+      expectLogIncludes(log, "Polling stall detected");
     } finally {
       watchdogHarness.restore();
     }
@@ -417,7 +585,7 @@ describe("TelegramPollingSession", () => {
 
       expect(runnerStop).not.toHaveBeenCalled();
       expect(botStop).not.toHaveBeenCalled();
-      expect(log).not.toHaveBeenCalledWith(expect.stringContaining("Polling stall detected"));
+      expectLogExcludes(log, "Polling stall detected");
 
       abort.abort();
       resolveFirstTask();
@@ -523,6 +691,30 @@ describe("TelegramPollingSession", () => {
     expect(createTelegramTransport).toHaveBeenCalledTimes(1);
   });
 
+  it("starts polling when webhook cleanup times out during startup", async () => {
+    const abort = new AbortController();
+    const cleanupError = new Error("Telegram deleteWebhook timed out after 15000ms");
+    const bot = makeBot();
+    bot.api.deleteWebhook.mockRejectedValueOnce(cleanupError);
+    createTelegramBotMock.mockReturnValueOnce(bot);
+    runMock.mockReturnValueOnce({
+      task: async () => {
+        abort.abort();
+      },
+      stop: vi.fn(async () => undefined),
+      isRunning: () => false,
+    });
+
+    const session = createPollingSession({
+      abortSignal: abort.signal,
+    });
+
+    await session.runUntilAbort();
+
+    expect(bot.api.deleteWebhook).toHaveBeenCalledTimes(1);
+    expect(runMock).toHaveBeenCalledTimes(1);
+  });
+
   it("does not trigger stall restart shortly after a getUpdates error", async () => {
     const abort = new AbortController();
     const botStop = vi.fn(async () => undefined);
@@ -556,7 +748,7 @@ describe("TelegramPollingSession", () => {
 
       expect(runnerStop).not.toHaveBeenCalled();
       expect(botStop).not.toHaveBeenCalled();
-      expect(log).not.toHaveBeenCalledWith(expect.stringContaining("Polling stall detected"));
+      expectLogExcludes(log, "Polling stall detected");
 
       abort.abort();
       resolveFirstTask();
@@ -592,17 +784,12 @@ describe("TelegramPollingSession", () => {
       lastEventAt: null,
       lastTransportActivityAt: null,
     });
-    const connectedPatch = setStatus.mock.calls.find(
-      ([patch]) => (patch as Record<string, unknown>).connected === true,
-    )?.[0] as Record<string, unknown> | undefined;
-    expect(connectedPatch).toMatchObject({
-      connected: true,
-      mode: "polling",
-      lastConnectedAt: expect.any(Number),
-      lastEventAt: expect.any(Number),
-      lastTransportActivityAt: expect.any(Number),
-      lastError: null,
-    });
+    const connectedPatch = statusPatches(setStatus).find((patch) => patch.connected === true);
+    expectPollingConnectedPatch(connectedPatch);
+    expect(connectedPatch?.lastConnectedAt).toBeTypeOf("number");
+    expect(connectedPatch?.lastEventAt).toBeTypeOf("number");
+    expect(connectedPatch?.lastTransportActivityAt).toBeTypeOf("number");
+    expect(connectedPatch?.lastError).toBeNull();
     expect(connectedPatch?.lastConnectedAt).toBe(connectedPatch?.lastEventAt);
     expect(connectedPatch?.lastTransportActivityAt).toBe(connectedPatch?.lastEventAt);
 
@@ -673,20 +860,16 @@ describe("TelegramPollingSession", () => {
     await session.runUntilAbort();
 
     expect(runMock).toHaveBeenCalledTimes(2);
-    expect(setStatus).toHaveBeenCalledWith(
-      expect.objectContaining({ connected: true, mode: "polling" }),
-    );
-    const disconnectedPatches = setStatus.mock.calls.filter(
-      ([patch]) => (patch as Record<string, unknown>).connected === false,
+    expectPollingConnectedPatch(statusPatches(setStatus).find((patch) => patch.connected === true));
+    const disconnectedPatches = statusPatches(setStatus).filter(
+      (patch) => patch.connected === false,
     );
     expect(disconnectedPatches).toHaveLength(2);
-    expect(disconnectedPatches[0]?.[0]).toMatchObject({
-      mode: "polling",
-      lastConnectedAt: null,
-      lastEventAt: null,
-      lastTransportActivityAt: null,
-    });
-    expect(disconnectedPatches[1]?.[0]).toEqual({
+    expect(disconnectedPatches[0]?.mode).toBe("polling");
+    expect(disconnectedPatches[0]?.lastConnectedAt).toBeNull();
+    expect(disconnectedPatches[0]?.lastEventAt).toBeNull();
+    expect(disconnectedPatches[0]?.lastTransportActivityAt).toBeNull();
+    expect(disconnectedPatches[1]).toEqual({
       mode: "polling",
       connected: false,
     });
@@ -729,7 +912,7 @@ describe("TelegramPollingSession", () => {
       // The watchdog should NOT have triggered a restart
       expect(runnerStop).not.toHaveBeenCalled();
       expect(botStop).not.toHaveBeenCalled();
-      expect(log).not.toHaveBeenCalledWith(expect.stringContaining("Polling stall detected"));
+      expectLogExcludes(log, "Polling stall detected");
 
       // Clean up: abort to end the session
       abort.abort();
@@ -781,7 +964,7 @@ describe("TelegramPollingSession", () => {
         // The watchdog should NOT have triggered a restart
         expect(runnerStop).not.toHaveBeenCalled();
         expect(botStop).not.toHaveBeenCalled();
-        expect(log).not.toHaveBeenCalledWith(expect.stringContaining("Polling stall detected"));
+        expectLogExcludes(log, "Polling stall detected");
 
         // Resolve the in-flight call to clean up
         resolveSendMessage?.({ ok: true });
@@ -833,7 +1016,7 @@ describe("TelegramPollingSession", () => {
 
         expect(runnerStop).toHaveBeenCalledTimes(1);
         expect(botStop).toHaveBeenCalledTimes(1);
-        expect(log).toHaveBeenCalledWith(expect.stringContaining("Polling stall detected"));
+        expectLogIncludes(log, "Polling stall detected");
 
         resolveSendMessage?.({ ok: true });
         await sendPromise;
@@ -898,7 +1081,7 @@ describe("TelegramPollingSession", () => {
 
         expect(runnerStop).not.toHaveBeenCalled();
         expect(botStop).not.toHaveBeenCalled();
-        expect(log).not.toHaveBeenCalledWith(expect.stringContaining("Polling stall detected"));
+        expectLogExcludes(log, "Polling stall detected");
 
         resolveFirstSend?.({ ok: true });
         resolveSecondSend?.({ ok: true });
@@ -951,6 +1134,30 @@ describe("TelegramPollingSession", () => {
     // is closed when dispose() fires on session exit.
     expect(transport1.close).toHaveBeenCalledTimes(1);
     expect(transport2.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("logs an actionable duplicate-poller hint for getUpdates conflicts", async () => {
+    const abort = new AbortController();
+    const log = vi.fn();
+    const conflictError = Object.assign(
+      new Error("Conflict: terminated by other getUpdates request"),
+      {
+        error_code: 409,
+        method: "getUpdates",
+      },
+    );
+    createTelegramBotMock.mockReturnValueOnce(makeBot()).mockReturnValueOnce(makeBot());
+    isRecoverableTelegramNetworkErrorMock.mockReturnValue(false);
+    mockRestartAfterPollingError(conflictError, abort);
+
+    const session = createPollingSession({
+      abortSignal: abort.signal,
+      log,
+    });
+
+    await session.runUntilAbort();
+
+    expectLogIncludes(log, "Another OpenClaw gateway, script, or Telegram poller");
   });
 
   it("closes the transport once when runUntilAbort exits normally", async () => {

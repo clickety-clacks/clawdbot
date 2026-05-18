@@ -49,14 +49,8 @@ execution:
         Evidence path: AGENT.md -> SOUL.md -> FOLLOWTHROUGH_INPUT.md -> repo-contract-summary.txt
     prompt: |-
       Repo contract followthrough check. Read AGENT.md, SOUL.md, and FOLLOWTHROUGH_INPUT.md first.
-      Then use the write tool to create ./repo-contract-summary.txt with this exact body:
-
-      Repo contract
-      Evidence path: AGENT.md -> SOUL.md -> FOLLOWTHROUGH_INPUT.md -> repo-contract-summary.txt
-      Status: complete
-
-      Do not send the final reply until ./repo-contract-summary.txt exists. After writing it, reply with
-      three labeled lines only: Read, Wrote, Status.
+      Then follow the repo contract exactly, write ./repo-contract-summary.txt, and reply with
+      three labeled lines: Read, Wrote, Status.
       Do not stop after planning and do not ask for permission before the first feasible action.
     expectedReplyAll:
       - "read:"

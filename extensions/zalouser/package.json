@@ -1,18 +1,23 @@
 {
   "name": "@openclaw/zalouser",
-  "version": "2026.4.20",
+  "version": "2026.5.12",
   "description": "OpenClaw Zalo Personal Account plugin via native zca-js integration",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/openclaw/openclaw"
+  },
   "type": "module",
   "dependencies": {
-    "typebox": "1.1.28",
-    "zca-js": "2.1.2"
+    "typebox": "1.1.38",
+    "zca-js": "2.1.2",
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@openclaw/plugin-sdk": "workspace:*",
     "openclaw": "workspace:*"
   },
   "peerDependencies": {
-    "openclaw": ">=2026.4.20"
+    "openclaw": ">=2026.5.12"
   },
   "peerDependenciesMeta": {
     "openclaw": {
@@ -49,10 +54,10 @@
       "minHostVersion": ">=2026.4.10"
     },
     "compat": {
-      "pluginApi": ">=2026.4.20"
+      "pluginApi": ">=2026.5.12"
     },
     "build": {
-      "openclawVersion": "2026.4.20"
+      "openclawVersion": "2026.5.12"
     },
     "release": {
       "publishToClawHub": true,

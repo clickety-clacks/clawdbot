@@ -1,4 +1,7 @@
-import { resolveSendableOutboundReplyParts } from "openclaw/plugin-sdk/reply-payload";
+import {
+  hasOutboundReplyContent,
+  resolveSendableOutboundReplyParts,
+} from "openclaw/plugin-sdk/reply-payload";
 import { logVerbose } from "../../globals.js";
 import { getReplyPayloadMetadata } from "../reply-payload.js";
 import type { ReplyPayload } from "../types.js";
@@ -13,6 +16,7 @@ export type BlockReplyPipeline = {
   didStream: () => boolean;
   isAborted: () => boolean;
   hasSentPayload: (payload: ReplyPayload) => boolean;
+  getSentMediaUrls: () => readonly string[];
 };
 
 export type BlockReplyBuffer = {
@@ -41,6 +45,9 @@ export function createBlockReplyPayloadKey(payload: ReplyPayload): string {
   return JSON.stringify({
     text: reply.trimmedText,
     mediaList: reply.mediaUrls,
+    presentation: payload.presentation ?? null,
+    interactive: payload.interactive ?? null,
+    channelData: payload.channelData ?? null,
     replyToId: payload.replyToId ?? null,
   });
 }
@@ -50,7 +57,13 @@ export function createBlockReplyContentKey(payload: ReplyPayload): string {
   // Content-only key used for final-payload suppression after block streaming.
   // This intentionally ignores replyToId so a streamed threaded payload and the
   // later final payload still collapse when they carry the same content.
-  return JSON.stringify({ text: reply.trimmedText, mediaList: reply.mediaUrls });
+  return JSON.stringify({
+    text: reply.trimmedText,
+    mediaList: reply.mediaUrls,
+    presentation: payload.presentation ?? null,
+    interactive: payload.interactive ?? null,
+    channelData: payload.channelData ?? null,
+  });
 }
 
 const withTimeout = async <T>(
@@ -86,11 +99,13 @@ export function createBlockReplyPipeline(params: {
   const { onBlockReply, timeoutMs, coalescing, buffer } = params;
   const sentKeys = new Set<string>();
   const sentContentKeys = new Set<string>();
+  const sentMediaUrls = new Set<string>();
   const pendingKeys = new Set<string>();
   const seenKeys = new Set<string>();
   const bufferedKeys = new Set<string>();
   const bufferedPayloadKeys = new Set<string>();
   const bufferedPayloads: ReplyPayload[] = [];
+  const streamedTextFragments: string[] = [];
   let bufferedAssistantMessageIndex: number | undefined;
   let sendChain: Promise<void> = Promise.resolve();
   let aborted = false;
@@ -147,6 +162,13 @@ export function createBlockReplyPipeline(params: {
         }
         sentKeys.add(payloadKey);
         sentContentKeys.add(contentKey);
+        const reply = resolveSendableOutboundReplyParts(payload);
+        for (const mediaUrl of reply.mediaUrls) {
+          sentMediaUrls.add(mediaUrl);
+        }
+        if (!reply.hasMedia && reply.trimmedText) {
+          streamedTextFragments.push(reply.trimmedText);
+        }
         didStream = true;
       })
       .catch((err) => {
@@ -214,8 +236,12 @@ export function createBlockReplyPipeline(params: {
     if (bufferPayload(payload)) {
       return;
     }
-    const hasMedia = resolveSendableOutboundReplyParts(payload).hasMedia;
-    if (hasMedia) {
+    const reply = resolveSendableOutboundReplyParts(payload);
+    const hasNonTextContent = hasOutboundReplyContent(
+      { ...payload, text: undefined },
+      { trimText: true },
+    );
+    if (reply.hasMedia || hasNonTextContent) {
       void coalescer?.flush({ force: true });
       sendPayload(payload, /* bypassSeenCheck */ false);
       return;
@@ -266,7 +292,19 @@ export function createBlockReplyPipeline(params: {
     isAborted: () => aborted,
     hasSentPayload: (payload) => {
       const payloadKey = createBlockReplyContentKey(payload);
-      return sentContentKeys.has(payloadKey);
+      if (sentContentKeys.has(payloadKey)) {
+        return true;
+      }
+      if (!didStream || streamedTextFragments.length === 0) {
+        return false;
+      }
+      const reply = resolveSendableOutboundReplyParts(payload);
+      if (reply.hasMedia || !reply.trimmedText) {
+        return false;
+      }
+      const normalize = (text: string) => text.replace(/\s+/g, "");
+      return normalize(streamedTextFragments.join("")) === normalize(reply.trimmedText);
     },
+    getSentMediaUrls: () => Array.from(sentMediaUrls),
   };
 }

@@ -1,15 +1,21 @@
+import Foundation
 import OpenClawChatUI
 import OpenClawKit
 import OpenClawProtocol
-import Foundation
 import OSLog
 
-struct IOSGatewayChatTransport: OpenClawChatTransport, Sendable {
+struct IOSGatewayChatTransport: OpenClawChatTransport {
     private static let logger = Logger(subsystem: "ai.openclaw", category: "ios.chat.transport")
     private let gateway: GatewayNodeSession
 
     init(gateway: GatewayNodeSession) {
         self.gateway = gateway
+    }
+
+    func listModels() async throws -> [OpenClawChatModelChoice] {
+        let res = try await self.gateway.request(method: "models.list", paramsJSON: "{}", timeoutSeconds: 15)
+        let decoded = try JSONDecoder().decode(ModelsListResult.self, from: res)
+        return decoded.models.map(Self.mapModelChoice)
     }
 
     func abortRun(sessionKey: String, runId: String) async throws {
@@ -70,10 +76,9 @@ struct IOSGatewayChatTransport: OpenClawChatTransport, Sendable {
     {
         let startLogMessage =
             "chat.send start sessionKey=\(sessionKey) "
-            + "len=\(message.count) attachments=\(attachments.count)"
+                + "len=\(message.count) attachments=\(attachments.count)"
         Self.logger.info(
-            "\(startLogMessage, privacy: .public)"
-        )
+            "\(startLogMessage, privacy: .public)")
         struct Params: Codable {
             var sessionKey: String
             var message: String
@@ -152,5 +157,13 @@ struct IOSGatewayChatTransport: OpenClawChatTransport, Sendable {
                 task.cancel()
             }
         }
+    }
+
+    private static func mapModelChoice(_ model: OpenClawProtocol.ModelChoice) -> OpenClawChatModelChoice {
+        OpenClawChatModelChoice(
+            modelID: model.id,
+            name: model.name,
+            provider: model.provider,
+            contextWindow: model.contextwindow)
     }
 }

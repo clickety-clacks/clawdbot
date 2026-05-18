@@ -1,4 +1,4 @@
-import type { AgentMessage } from "@mariozechner/pi-agent-core";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import "../../test-helpers/pi-coding-agent-token-mock.js";
 import { estimateToolResultReductionPotential } from "../tool-result-truncation.js";
@@ -91,6 +91,21 @@ describe("preemptive-compaction", () => {
     expect(result.shouldCompact).toBe(false);
     expect(result.route).toBe("fits");
     expect(result.estimatedPromptTokens).toBeLessThan(result.promptBudgetBeforeReserve);
+  });
+
+  it("uses the larger unwindowed message estimate when explicitly provided", () => {
+    const result = shouldPreemptivelyCompactBeforePrompt({
+      messages: [makeAssistantHistory("small assembled window")],
+      unwindowedMessages: [makeAssistantHistory(verboseHistory.repeat(4))],
+      systemPrompt: "sys",
+      prompt: "hello",
+      contextTokenBudget: 500,
+      reserveTokens: 50,
+    });
+
+    expect(result.shouldCompact).toBe(true);
+    expect(result.route).toBe("compact_only");
+    expect(result.estimatedPromptTokens).toBeGreaterThan(result.promptBudgetBeforeReserve);
   });
 
   it("caps reserve tokens so small context models keep usable prompt budget", () => {

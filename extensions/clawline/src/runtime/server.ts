@@ -17,6 +17,7 @@ import { type Dispatcher } from "undici";
 import WebSocket, { WebSocketServer } from "ws";
 import {
   DEFAULT_ACCOUNT_ID,
+  abortAgentHarnessRun,
   closeDispatcher,
   createPinnedDispatcher,
   createReplyDispatcherWithTyping,
@@ -24,10 +25,13 @@ import {
   dispatchInboundMessage,
   enqueueAnnounce,
   finalizeInboundContext,
+  getDefaultLocalRoots,
   hasAlphaChannel,
   isLoopbackHost,
   isPrivateOrLoopbackHost,
+  loadWebMedia,
   loadSessionStore,
+  listThinkingLevelOptions,
   maxBytesForKind,
   mediaKindFromMime,
   optimizeImageToJpeg,
@@ -37,11 +41,22 @@ import {
   recordInboundSession,
   resolveAgentIdentity,
   resolveAgentIdFromSessionKey,
+  resolveAgentWorkspaceDir,
+  resolveActiveAgentHarnessRunSessionId,
   resolveAllAgentSessionStoreTargetsSync,
+  resolveDefaultModelForAgent,
+  resolveAgentHarnessPolicy,
   resolveEffectiveMessagesConfig,
   resolveHumanDelayConfig,
   resolveSessionStoreEntry,
   resolvePinnedHostname,
+  readCodexAppServerFastMode,
+  setCodexAppServerFastMode,
+  updateSessionStore,
+  applySessionsPatchToStore,
+  buildAllowedModelSet,
+  loadModelCatalog,
+  type ModelCatalogEntry,
   type PinnedHostname,
   type ReplyPayload,
 } from "../runtime-api.js";
@@ -58,8 +73,6 @@ import type {
   ProviderOptions,
   ProviderServer,
   Logger,
-  TerminalDestinationSnapshot,
-  TerminalSshConfig,
   ClawlineOutboundAttachmentInput,
   ClawlineOutboundSendParams,
   ClawlineOutboundSendResult,
@@ -103,6 +116,12 @@ const execFile = promisify(execFileCb);
 type SessionEntry = ClawlineSessionEntry;
 
 type ClientPayload = Record<string, unknown>;
+type CodexFastControlState = {
+  supported: boolean;
+  enabled: boolean | null;
+  sessionFile?: string;
+  reason?: string;
+};
 
 type PtyProcess = {
   write(data: string): void;
@@ -131,25 +150,22 @@ type TerminalTmuxBackend = {
   }>;
 };
 
+type TerminalDestination = {
+  address: string;
+};
+
 type DecodedTerminalSessionDescriptor = {
   version?: number;
   terminalSessionId: string;
   title?: string;
-  destination?: {
-    address: string;
-  };
+  destination?: TerminalDestination;
   terminalSession?: {
     name: string;
     provisioning: "attach_or_create";
   };
 };
 
-type TerminalSessionStoreFile = {
-  version: 1;
-  sessions: TerminalSessionRecord[];
-};
-
-function buildSshBaseArgs(cfg: TerminalSshConfig): string[] {
+function buildSshBaseArgs(cfg: ProviderConfig["terminal"]["tmux"]["ssh"]): string[] {
   const args: string[] = [];
   if (cfg.port && Number.isFinite(cfg.port)) {
     args.push("-p", String(cfg.port));
@@ -182,30 +198,33 @@ function buildSshBaseArgs(cfg: TerminalSshConfig): string[] {
   return args;
 }
 
+function isLocalTarsTerminalDestination(address: string): boolean {
+  const trimmed = address.trim().toLowerCase();
+  return trimmed === "mike@tars";
+}
+
 function createTerminalTmuxBackend(
-  params: {
-    destination?: TerminalDestinationSnapshot | null;
-    config: ProviderConfig;
-    allowLegacyGlobalFallback?: boolean;
-  },
+  config: ProviderConfig,
   logger: Logger,
+  destinationAddress?: string | null,
 ): TerminalTmuxBackend {
-  if (!params.destination && !params.allowLegacyGlobalFallback) {
-    throw new Error("Terminal session destination is unavailable");
-  }
-  const sshCfg = params.destination
-    ? {
-        ...cloneTerminalSshConfig(params.config.terminal.tmux.ssh),
-        target: params.destination.address,
-      }
-    : cloneTerminalSshConfig(params.config.terminal.tmux.ssh);
-  const sshTarget = typeof sshCfg?.target === "string" ? sshCfg.target.trim() : "";
+  const sshCfg = config.terminal?.tmux?.ssh;
+  const requestedTarget = typeof destinationAddress === "string" ? destinationAddress.trim() : "";
+  const useLocalDestination = isLocalTarsTerminalDestination(requestedTarget);
+  const explicitTarget = useLocalDestination ? "" : requestedTarget;
+  const tmuxMode = useLocalDestination
+    ? "local"
+    : explicitTarget
+      ? "ssh"
+      : (config.terminal?.tmux?.mode ?? "local");
+  const sshTarget =
+    explicitTarget || (typeof sshCfg?.target === "string" ? sshCfg.target.trim() : "");
   const sshBaseArgs = sshCfg ? buildSshBaseArgs(sshCfg) : [];
 
-  const isRemote = params.destination ? true : params.config.terminal.tmux.mode === "ssh";
+  const isRemote = tmuxMode === "ssh";
   if (isRemote && !sshTarget) {
     logger.warn?.(
-      "[clawline:terminal] terminal ssh destination missing address; falling back to local",
+      "[clawline:terminal] tmux remote mode enabled but ssh target is empty; falling back to local",
     );
   }
 
@@ -304,14 +323,21 @@ const INLINE_IMAGE_MIME_TYPES = new Set([
 const TERMINAL_SESSION_MIME = "application/vnd.clawline.terminal-session+json";
 const INTERACTIVE_HTML_MIME = "application/vnd.clawline.interactive-html+json";
 const INTERACTIVE_CALLBACK_MIME = "application/vnd.clawline.interactive-callback+json";
+const DEVICE_APPROVAL_APPROVE_ACTION = "clawline.deviceApproval.approve";
+const DEVICE_APPROVAL_DENY_ACTION = "clawline.deviceApproval.deny";
 const CLIENT_FEATURE_TERMINAL_BUBBLES_V1 = "terminal_bubbles_v1";
+const CLIENT_FEATURE_LIVE_AGENT_PROGRESS_V1 = "live_agent_progress_v1";
 const SERVER_FEATURE_SESSION_INFO = "session_info";
 const SERVER_FEATURE_STREAM_READ_STATE = "stream_read_state";
 const SERVER_FEATURE_STREAM_TAIL_STATE = "stream_tail_state";
 const TERMINAL_BUBBLES_UNSUPPORTED_NOTICE =
   "Terminal session hidden: this client does not support terminal bubbles yet. Update Clawline to view it.";
+const MEDIA_ATTACHMENT_FAILED_TEXT = "[Media attachment failed]";
 const INLINE_DOCUMENT_MIME_TYPES = new Set([TERMINAL_SESSION_MIME, INTERACTIVE_HTML_MIME]);
-const SUPPORTED_CLIENT_FEATURES = new Set([CLIENT_FEATURE_TERMINAL_BUBBLES_V1]);
+const SUPPORTED_CLIENT_FEATURES = new Set([
+  CLIENT_FEATURE_TERMINAL_BUBBLES_V1,
+  CLIENT_FEATURE_LIVE_AGENT_PROGRESS_V1,
+]);
 const MAX_INTERACTIVE_ACTION_CHARS = 128;
 const MAX_INTERACTIVE_DATA_BYTES = 64 * 1024;
 const MAX_ALERT_BODY_BYTES = 4 * 1024;
@@ -497,6 +523,9 @@ function buildAuthResultFeatures(session: Session): string[] {
   if (session.clientFeatures.has(CLIENT_FEATURE_TERMINAL_BUBBLES_V1)) {
     features.push(CLIENT_FEATURE_TERMINAL_BUBBLES_V1);
   }
+  if (session.clientFeatures.has(CLIENT_FEATURE_LIVE_AGENT_PROGRESS_V1)) {
+    features.push(CLIENT_FEATURE_LIVE_AGENT_PROGRESS_V1);
+  }
   return features;
 }
 
@@ -549,6 +578,29 @@ function sanitizeLabel(label?: string): string | undefined {
     return undefined;
   }
   return truncateUtf8(stripped, 64);
+}
+
+function compactAgentProgressItem(input: AgentProgressItem): AgentProgressItem {
+  const event: AgentProgressItem = {};
+  const assign = (key: keyof AgentProgressItem, value: string | undefined) => {
+    const sanitized = sanitizeLabel(value);
+    if (sanitized) {
+      event[key] = sanitized;
+    }
+  };
+  assign("kind", input.kind);
+  assign("phase", input.phase);
+  assign("status", input.status);
+  assign("title", input.title);
+  assign("name", input.name);
+  assign("summary", input.summary);
+  assign("progressText", input.progressText);
+  return event;
+}
+
+function projectAgentProgressEvent(input: AgentProgressItem): AgentProgressItem | null {
+  const event = compactAgentProgressItem(input);
+  return Object.keys(event).length > 0 ? event : null;
 }
 
 function sanitizeStreamDisplayName(value: unknown, maxBytes: number): string | null {
@@ -715,6 +767,82 @@ function maybeEncodeJsonDocumentPayload(data: string, mimeType: string): string 
     return data;
   }
   return Buffer.from(trimmed, "utf8").toString("base64");
+}
+
+function decodeBase64Utf8Payload(data: string, label: string): string {
+  const compact = data.replace(/\s+/g, "");
+  if (!isStrictBase64(compact)) {
+    throw new Error(`${label} is not valid base64 JSON`);
+  }
+  try {
+    return Buffer.from(compact, "base64").toString("utf8");
+  } catch {
+    throw new Error(`${label} is not valid base64 JSON`);
+  }
+}
+
+class InteractiveHTMLAttachmentError extends Error {}
+
+function metaTags(html: string): string[] {
+  return html.match(/<meta\b[^>]*>/gi) ?? [];
+}
+
+function hasMetaAttribute(tag: string, attribute: string, value: string): boolean {
+  const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(
+    `\\b${attribute}\\s*=\\s*(?:"${escaped}"|'${escaped}'|${escaped})(?:\\s|/?>)`,
+    "i",
+  ).test(tag);
+}
+
+function hasViewportMeta(html: string): boolean {
+  return metaTags(html).some((tag) => hasMetaAttribute(tag, "name", "viewport"));
+}
+
+function hasCustomCSPMeta(html: string): boolean {
+  return metaTags(html).some((tag) =>
+    hasMetaAttribute(tag, "http-equiv", "Content-Security-Policy"),
+  );
+}
+
+function validateInteractiveHTMLDescriptorPayload(data: string): void {
+  let descriptor: unknown;
+  try {
+    descriptor = JSON.parse(
+      decodeBase64Utf8Payload(data, "Clawline interactive HTML descriptor"),
+    ) as unknown;
+  } catch {
+    throw new InteractiveHTMLAttachmentError(
+      "Clawline interactive HTML descriptor is not valid base64 JSON",
+    );
+  }
+  if (!descriptor || typeof descriptor !== "object" || Array.isArray(descriptor)) {
+    throw new InteractiveHTMLAttachmentError(
+      "Clawline interactive HTML descriptor must be a JSON object",
+    );
+  }
+  const typed = descriptor as { version?: unknown; html?: unknown };
+  if (typed.version !== 1) {
+    throw new InteractiveHTMLAttachmentError(
+      "Clawline interactive HTML descriptor requires version 1",
+    );
+  }
+  const html = typeof typed.html === "string" ? typed.html.trim() : "";
+  if (!html) {
+    throw new InteractiveHTMLAttachmentError(
+      "Clawline interactive HTML descriptor requires non-empty html",
+    );
+  }
+  if (!hasViewportMeta(html)) {
+    throw new InteractiveHTMLAttachmentError(
+      "Clawline interactive HTML descriptor requires viewport meta tag",
+    );
+  }
+  if (hasCustomCSPMeta(html)) {
+    throw new InteractiveHTMLAttachmentError(
+      "Clawline interactive HTML descriptor must not include custom CSP",
+    );
+  }
 }
 
 function normalizeOutboundAttachmentData(input: ClawlineOutboundAttachmentInput): {
@@ -886,53 +1014,58 @@ function isClawlinePersonalUserStreamSessionKey(sessionKey: string, userId?: str
   return suffix === "main" || suffix === "dm" || isCustomStreamSuffix(suffix ?? "");
 }
 
+function normalizeTerminalDestination(value: unknown): TerminalDestination | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  const address =
+    typeof (value as { address?: unknown }).address === "string"
+      ? (value as { address: string }).address.trim()
+      : "";
+  if (!address) {
+    return undefined;
+  }
+  return { address };
+}
+
 function decodeTerminalSessionDescriptorFromBase64(
   data: string,
 ): DecodedTerminalSessionDescriptor | null {
   try {
-    const decoded = Buffer.from(data, "base64").toString("utf8");
+    const decoded = decodeBase64Utf8Payload(data, "Clawline terminal session descriptor");
     const obj = JSON.parse(decoded) as {
-      version?: unknown;
       terminalSessionId?: unknown;
       title?: unknown;
-      destination?: {
-        address?: unknown;
-      } | null;
-      terminalSession?: {
-        name?: unknown;
-        provisioning?: unknown;
-      } | null;
+      version?: unknown;
+      destination?: unknown;
+      terminalSession?: unknown;
     };
     const id = typeof obj.terminalSessionId === "string" ? obj.terminalSessionId.trim() : "";
     if (!id) {
       return null;
     }
+    const title =
+      typeof obj.title === "string" && obj.title.trim().length > 0 ? obj.title.trim() : undefined;
     const version =
       typeof obj.version === "number" && Number.isFinite(obj.version)
         ? Math.floor(obj.version)
         : undefined;
-    const title =
-      typeof obj.title === "string" && obj.title.trim().length > 0 ? obj.title.trim() : undefined;
-    if (obj.destination == null) {
-      if (version === 2) {
-        return null;
-      }
-      return { version, terminalSessionId: id, title };
-    }
-    const address =
-      typeof obj.destination.address === "string" ? obj.destination.address.trim() : "";
-    if (!address) {
+    const destination = normalizeTerminalDestination(obj.destination);
+    if (version === 2 && !destination) {
       return null;
     }
     const terminalSessionName =
-      typeof obj.terminalSession?.name === "string" ? obj.terminalSession.name.trim() : "";
+      obj.terminalSession &&
+      typeof obj.terminalSession === "object" &&
+      !Array.isArray(obj.terminalSession) &&
+      typeof (obj.terminalSession as { name?: unknown }).name === "string"
+        ? (obj.terminalSession as { name: string }).name.trim()
+        : "";
     return {
       version,
       terminalSessionId: id,
       title,
-      destination: {
-        address,
-      },
+      ...(destination ? { destination } : {}),
       ...(terminalSessionName
         ? {
             terminalSession: {
@@ -1022,6 +1155,30 @@ function buildAssistantTextFromPayload(payload: ReplyPayload, fallback: string):
   }
   const fallbackText = fallback.trim();
   return fallbackText || null;
+}
+
+function withMediaFailureIndicator(text: string): string {
+  const trimmed = text.trim();
+  return trimmed ? `${trimmed}\n\n${MEDIA_ATTACHMENT_FAILED_TEXT}` : MEDIA_ATTACHMENT_FAILED_TEXT;
+}
+
+function buildAssistantTextFromMediaOutcome(params: {
+  payload: ReplyPayload;
+  fallback: string;
+  attachments: NormalizedAttachment[];
+  mediaFailed: boolean;
+}): string | null {
+  const trimmedText = params.payload.text?.trim();
+  if (trimmedText && trimmedText.length > 0) {
+    return params.mediaFailed ? withMediaFailureIndicator(trimmedText) : trimmedText;
+  }
+  if (params.attachments.length > 0) {
+    return "";
+  }
+  if (params.mediaFailed) {
+    return MEDIA_ATTACHMENT_FAILED_TEXT;
+  }
+  return buildAssistantTextFromPayload(params.payload, params.fallback);
 }
 
 function timingSafeStringEqual(a: string, b: string): boolean {
@@ -1127,6 +1284,28 @@ type ServerMessage = {
   replyToClientMessageId?: string;
 };
 
+type AgentProgressItem = {
+  kind?: string;
+  phase?: string;
+  status?: string;
+  title?: string;
+  name?: string;
+  summary?: string;
+  progressText?: string;
+};
+
+type AgentProgressPayload = {
+  type: "agent_progress";
+  version: 1;
+  sessionKey: string;
+  runId: string;
+  messageId: string;
+  seq: number;
+  timestamp: number;
+  state: "running" | "final" | "error";
+  event: AgentProgressItem;
+};
+
 type StreamServerMessage =
   | StreamSnapshotServerMessage
   | StreamCreatedServerMessage
@@ -1153,10 +1332,20 @@ type SessionStatusActiveRun = {
   runId: string;
   messageId: string;
   sessionKey: string;
+  agentSessionId: string | null;
   startedAt: number;
   provider: string | null;
   model: string | null;
   thinkingLevel: string | null;
+  fastMode: boolean | null;
+  cancelRequested: boolean;
+};
+
+type SessionStatusRuntimeSnapshot = {
+  provider: string | null;
+  model: string | null;
+  thinkingLevel: string | null;
+  fastMode: boolean | null;
 };
 
 type AdoptedSessionRow = {
@@ -1206,7 +1395,7 @@ type TerminalSessionRecord = {
   lastSeenAt: number;
   terminalSessionName?: string;
   tmuxSessionName?: string;
-  destination?: TerminalDestinationSnapshot;
+  destination?: TerminalDestination;
   legacyGlobalTmuxFallback?: boolean;
 };
 
@@ -1288,7 +1477,6 @@ const PENDING_FILENAME = "pending.json";
 const DENYLIST_FILENAME = "denylist.json";
 const JWT_KEY_FILENAME = "jwt.key";
 const DB_FILENAME = "clawline.sqlite";
-const TERMINAL_SESSIONS_FILENAME = "terminal-sessions.json";
 const SESSION_REPLACED_CODE = 1000;
 const FACE_SPEAK_MAX_CHARS = 500;
 const FACE_SPEAK_DEDUPE_TTL_MS = 5 * 60 * 1000;
@@ -1405,32 +1593,6 @@ function mergeConfig(partial?: Partial<ProviderConfig>): ProviderConfig {
   return deepMerge(merged, partial);
 }
 
-function cloneTerminalSshConfig(cfg?: TerminalSshConfig | null): TerminalSshConfig | undefined {
-  if (!cfg) {
-    return undefined;
-  }
-  const target = typeof cfg.target === "string" ? cfg.target.trim() : "";
-  return {
-    target,
-    identityFile:
-      typeof cfg.identityFile === "string" ? cfg.identityFile.trim() : (cfg.identityFile ?? null),
-    port: typeof cfg.port === "number" && Number.isFinite(cfg.port) ? cfg.port : null,
-    knownHostsFile:
-      typeof cfg.knownHostsFile === "string"
-        ? cfg.knownHostsFile.trim()
-        : (cfg.knownHostsFile ?? null),
-    strictHostKeyChecking:
-      cfg.strictHostKeyChecking === "yes" ||
-      cfg.strictHostKeyChecking === "no" ||
-      cfg.strictHostKeyChecking === "accept-new"
-        ? cfg.strictHostKeyChecking
-        : null,
-    extraArgs: Array.isArray(cfg.extraArgs)
-      ? cfg.extraArgs.filter((item): item is string => typeof item === "string")
-      : [],
-  };
-}
-
 function isLocalhost(address: string): boolean {
   return ["127.0.0.1", "::1", "localhost"].includes(address);
 }
@@ -1445,6 +1607,19 @@ function describePairingEntry(entry: {
   const model = entry.deviceInfo?.model?.trim();
   const surface = model && model !== platform ? `${platform}/${model}` : platform;
   return `${name} (${surface}) [deviceId: ${entry.deviceId}]`;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function jsonForHtmlScript(value: unknown): string {
+  return JSON.stringify(value).replace(/</g, "\\u003c");
 }
 
 const CLAWLINE_ALLOWED_ORIGINS_SETTING = "channels.clawline.network.allowedOrigins";
@@ -1738,6 +1913,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const resolveAssistantSenderName = (sessionKey: string) =>
     resolveIdentityName(resolveAgentIdFromSessionKey(sessionKey));
   const activeSessionRuns = new Map<string, SessionStatusActiveRun>();
+  const sessionRuntimeStatusSnapshots = new Map<string, SessionStatusRuntimeSnapshot>();
 
   type SessionInfo = {
     dmScope: string;
@@ -1832,6 +2008,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   };
   async function notifyGatewayOfPending(entry: PendingEntry) {
     const text = `New device pending approval: ${describePairingEntry(entry)}`;
+    const cardsDelivered = await notifyAdminsOfPendingDevice(entry);
+    if (!cardsDelivered) {
+      throw new Error("pending_device_card_notify_failed");
+    }
     await wakeGatewayForAlert(text, mainSessionKey);
   }
   const alertInstructionsPath =
@@ -1888,14 +2068,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const denylistPath = path.join(config.statePath, DENYLIST_FILENAME);
   const jwtKeyPath = path.join(config.statePath, JWT_KEY_FILENAME);
   const dbPath = path.join(config.statePath, DB_FILENAME);
-  const terminalSessionsPath = path.join(config.statePath, TERMINAL_SESSIONS_FILENAME);
 
   let allowlist = await loadAllowlist(allowlistPath);
   allowlist.entries.forEach(normalizeAllowlistEntry);
   let pendingFile = await loadPending(pendingPath);
   let denylist = await loadDenylist(denylistPath);
   const jwtKey = await ensureJwtKey(jwtKeyPath, config.auth.jwtSigningKey);
-  const persistedTerminalSessions = await loadTerminalSessionsFromDisk();
 
   type AssetHandlers = ReturnType<typeof createAssetHandlers>;
 
@@ -2286,7 +2464,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     userId: string;
     isAdmin: boolean;
   }): StreamSession[] => {
-    if (!selectStreamSessionsByUserStmt || !insertStreamSessionStmt || !selectStreamMaxOrderStmt) {
+    if (
+      !selectStreamSessionsByUserStmt ||
+      !insertStreamSessionStmt ||
+      !selectStreamMaxOrderStmt ||
+      !deleteStreamSessionStmt
+    ) {
       const fallback: StreamSession[] = [
         {
           sessionKey: buildClawlinePersonalSessionKey(mainSessionAgentId, params.userId),
@@ -2364,7 +2547,23 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     const streamByKey = new Map(
       streams.map((stream) => [normalizeSessionKey(stream.sessionKey), stream] as const),
     );
+    const builtInKeySet = new Set(builtIns.map((stream) => normalizeSessionKey(stream.sessionKey)));
     let changed = false;
+    const dmBuiltInKey = normalizeSessionKey(
+      buildClawlineUserStreamSessionKey(mainSessionAgentId, params.userId, "dm"),
+    );
+    for (const stream of streams) {
+      const normalizedStreamKey = normalizeSessionKey(stream.sessionKey);
+      if (
+        stream.isBuiltIn &&
+        normalizedStreamKey === dmBuiltInKey &&
+        !builtInKeySet.has(normalizedStreamKey)
+      ) {
+        deleteStreamSessionStmt.run(params.userId, stream.sessionKey);
+        streamByKey.delete(normalizedStreamKey);
+        changed = true;
+      }
+    }
     for (const builtIn of builtIns) {
       const existing = streamByKey.get(normalizeSessionKey(builtIn.sessionKey));
       if (!existing) {
@@ -3208,9 +3407,14 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             throw new Error("Clawline terminal session descriptor exceeds maxInlineBytes");
           }
           if (mimeType === INTERACTIVE_HTML_MIME) {
-            throw new Error("Clawline interactive HTML descriptor exceeds maxInlineBytes");
+            throw new InteractiveHTMLAttachmentError(
+              "Clawline interactive HTML descriptor exceeds maxInlineBytes",
+            );
           }
           throw new Error("Clawline inline document descriptor exceeds maxInlineBytes");
+        }
+        if (mimeType === INTERACTIVE_HTML_MIME) {
+          validateInteractiveHTMLDescriptorPayload(data);
         }
         resolved.push({ type: "document", mimeType, data });
         continue;
@@ -3234,8 +3438,89 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     return { attachments: resolved, assetIds };
   }
 
+  async function storeOutboundMediaBuffer(params: {
+    buffer: Buffer;
+    contentType?: string;
+    ownerUserId: string;
+    uploaderDeviceId: string;
+  }): Promise<{ attachment: NormalizedAttachment | null; assetId?: string }> {
+    if (params.buffer.length === 0) {
+      return { attachment: null };
+    }
+    const mimeType = (params.contentType ?? "application/octet-stream").toLowerCase();
+    const isInlineImage = INLINE_IMAGE_MIME_TYPES.has(mimeType);
+    if (isInlineImage && params.buffer.length <= config.media.maxInlineBytes) {
+      return {
+        attachment: { type: "image", mimeType, data: params.buffer.toString("base64") },
+      };
+    }
+    const assetId = `a_${randomUUID()}`;
+    const assetPath = path.join(assetsDir, assetId);
+    await fs.writeFile(assetPath, params.buffer);
+    await enqueueWriteTask(() =>
+      insertAssetStmt.run(
+        assetId,
+        params.ownerUserId,
+        mimeType,
+        params.buffer.length,
+        nowMs(),
+        params.uploaderDeviceId,
+      ),
+    );
+    return { attachment: { type: "asset", assetId }, assetId };
+  }
+
+  function resolveOutboundMediaWorkspaceDir(agentId: string): string {
+    return path.resolve(resolveAgentWorkspaceDir(openClawCfg, agentId));
+  }
+
+  function stripAgentMediaDirective(rawUrl: string): string {
+    const trimmed = rawUrl.trim();
+    if (/^\s*media:\/\//i.test(trimmed)) {
+      return trimmed;
+    }
+    return trimmed.replace(/^\s*MEDIA\s*:\s*/i, "").trim();
+  }
+
+  function resolveOutboundMediaReference(rawUrl: string, workspaceDir: string): string {
+    const stripped = stripAgentMediaDirective(rawUrl);
+    if (stripped === "/workspace") {
+      return workspaceDir;
+    }
+    if (stripped.startsWith("/workspace/")) {
+      return path.join(workspaceDir, stripped.slice("/workspace/".length));
+    }
+    if (stripped.startsWith("file://")) {
+      try {
+        const parsed = new URL(stripped);
+        const isLocalFileUrl =
+          parsed.protocol === "file:" && (!parsed.hostname || parsed.hostname === "localhost");
+        if (isLocalFileUrl && parsed.pathname === "/workspace") {
+          return workspaceDir;
+        }
+        if (isLocalFileUrl && parsed.pathname.startsWith("/workspace/")) {
+          return path.join(
+            workspaceDir,
+            decodeURIComponent(parsed.pathname.slice("/workspace/".length)),
+          );
+        }
+      } catch {}
+    }
+    return stripped;
+  }
+
+  function outboundMediaLocalRoots(workspaceDir: string): string[] {
+    return Array.from(
+      new Set([
+        ...getDefaultLocalRoots().map((root) => path.resolve(root)),
+        path.resolve(workspaceDir),
+      ]),
+    );
+  }
+
   async function materializeOutboundMediaUrls(params: {
     mediaUrls: string[];
+    agentId: string;
     ownerUserId: string;
     uploaderDeviceId: string;
   }): Promise<{ attachments: NormalizedAttachment[]; assetIds: string[] }> {
@@ -3247,39 +3532,42 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     const trimmedUrls = params.mediaUrls
       .map((url) => (typeof url === "string" ? url.trim() : ""))
       .filter((url) => url.length > 0);
+    const workspaceDir = resolveOutboundMediaWorkspaceDir(params.agentId);
     for (const url of trimmedUrls) {
-      const media = await fetchPinnedMedia(url, config.media.maxUploadBytes);
-      if (media.buffer.length === 0) {
+      const resolvedUrl = resolveOutboundMediaReference(url, workspaceDir);
+      const media = /^https?:\/\//i.test(resolvedUrl)
+        ? await (async () => {
+            const fetched = await fetchPinnedMedia(resolvedUrl, config.media.maxUploadBytes);
+            if (fetched.buffer.length === 0) {
+              return null;
+            }
+            return await clampAndOptimizeMedia({
+              buffer: fetched.buffer,
+              contentType: fetched.contentType,
+              fileName: fetched.fileName,
+              maxBytes: config.media.maxUploadBytes,
+            });
+          })()
+        : await loadWebMedia(resolvedUrl, {
+            maxBytes: config.media.maxUploadBytes,
+            workspaceDir,
+            localRoots: outboundMediaLocalRoots(workspaceDir),
+          });
+      if (!media) {
         continue;
       }
-      const processed = await clampAndOptimizeMedia({
+      const stored = await storeOutboundMediaBuffer({
         buffer: media.buffer,
         contentType: media.contentType,
-        fileName: media.fileName,
-        maxBytes: config.media.maxUploadBytes,
+        ownerUserId: params.ownerUserId,
+        uploaderDeviceId: params.uploaderDeviceId,
       });
-      const mimeType = (processed.contentType ?? "application/octet-stream").toLowerCase();
-      const buffer = processed.buffer;
-      const isInlineImage = INLINE_IMAGE_MIME_TYPES.has(mimeType);
-      if (isInlineImage && buffer.length <= config.media.maxInlineBytes) {
-        resolved.push({ type: "image", mimeType, data: buffer.toString("base64") });
-        continue;
+      if (stored.attachment) {
+        resolved.push(stored.attachment);
       }
-      const assetId = `a_${randomUUID()}`;
-      const assetPath = path.join(assetsDir, assetId);
-      await fs.writeFile(assetPath, buffer);
-      await enqueueWriteTask(() =>
-        insertAssetStmt.run(
-          assetId,
-          params.ownerUserId,
-          mimeType,
-          buffer.length,
-          nowMs(),
-          params.uploaderDeviceId,
-        ),
-      );
-      resolved.push({ type: "asset", assetId });
-      assetIds.push(assetId);
+      if (stored.assetId) {
+        assetIds.push(stored.assetId);
+      }
     }
     return { attachments: resolved, assetIds };
   }
@@ -4422,18 +4710,17 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         userId: string;
         terminalSessionId: string;
         tmuxSessionName?: string;
-        destination?: TerminalDestinationSnapshot;
+        destination?: TerminalDestination;
         legacyGlobalTmuxFallback?: boolean;
         paneId?: string;
         tmuxBackend?: TerminalTmuxBackend;
         pty: PtyProcess;
       };
   const terminalConnectionState = new WeakMap<WebSocket, TerminalConnectionState>();
-  const terminalSessions = new Map(
-    persistedTerminalSessions.map((record) => [record.terminalSessionId, record] as const),
-  );
+  const terminalSessions = new Map<string, TerminalSessionRecord>();
   const TERMINAL_DB_LOOKUP_LIMIT = 300;
   const pendingSockets = new Map<string, PendingConnection>();
+  const pendingDeviceNotificationDeviceIds = new Set<string>();
   const faceSpeakPending = new Map<string, string>();
   const faceSpeakDedupe = new Map<string, number>();
   const sessionsByDevice = new Map<string, Session>();
@@ -4482,107 +4769,21 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   });
   denylistWatcher.on("error", (err) => logger.warn?.(`denylist_watch_failed: ${formatError(err)}`));
 
-  function normalizeTerminalDestinationSnapshot(
-    input: unknown,
-  ): TerminalDestinationSnapshot | null {
-    if (!input || typeof input !== "object") {
-      return null;
-    }
-    const raw = input as {
-      address?: unknown;
-    };
-    const address = typeof raw.address === "string" ? raw.address.trim() : "";
-    if (!address) {
-      return null;
-    }
-    return { address };
-  }
-
-  function normalizeTerminalSessionRecord(input: unknown): TerminalSessionRecord | null {
-    if (!input || typeof input !== "object") {
-      return null;
-    }
-    const raw = input as Record<string, unknown>;
-    const terminalSessionId =
-      typeof raw.terminalSessionId === "string" ? raw.terminalSessionId.trim() : "";
-    const ownerUserId = typeof raw.ownerUserId === "string" ? raw.ownerUserId : "";
-    const sessionKey = typeof raw.sessionKey === "string" ? raw.sessionKey : "";
-    const tmuxSessionName =
-      typeof raw.tmuxSessionName === "string" ? raw.tmuxSessionName.trim() : "";
-    const terminalSessionName =
-      typeof raw.terminalSessionName === "string" ? raw.terminalSessionName.trim() : "";
-    const destination = normalizeTerminalDestinationSnapshot(raw.destination);
-    const legacyGlobalTmuxFallback =
-      raw.legacyGlobalTmuxFallback === true || raw.legacyGlobalTmuxFallback === "true";
-    if (!terminalSessionId || !ownerUserId || !sessionKey) {
-      return null;
-    }
-    if (!destination && !legacyGlobalTmuxFallback) {
-      return null;
-    }
-    const title = typeof raw.title === "string" ? raw.title.trim() : undefined;
-    const createdAt =
-      typeof raw.createdAt === "number" && Number.isFinite(raw.createdAt) ? raw.createdAt : nowMs();
-    const lastSeenAt =
-      typeof raw.lastSeenAt === "number" && Number.isFinite(raw.lastSeenAt)
-        ? raw.lastSeenAt
-        : createdAt;
-    return {
-      terminalSessionId,
-      ownerUserId,
-      sessionKey,
-      title,
-      createdAt,
-      lastSeenAt,
-      ...(terminalSessionName ? { terminalSessionName } : {}),
-      ...(tmuxSessionName ? { tmuxSessionName } : {}),
-      ...(destination ? { destination } : {}),
-      ...(legacyGlobalTmuxFallback ? { legacyGlobalTmuxFallback: true } : {}),
-    };
-  }
-
-  async function loadTerminalSessionsFromDisk(): Promise<TerminalSessionRecord[]> {
-    try {
-      const raw = await fs.readFile(terminalSessionsPath, "utf8");
-      const parsed = JSON.parse(raw) as TerminalSessionStoreFile;
-      if (parsed.version !== 1 || !Array.isArray(parsed.sessions)) {
-        return [];
-      }
-      return parsed.sessions
-        .map((record) => normalizeTerminalSessionRecord(record))
-        .filter((record): record is TerminalSessionRecord => record !== null);
-    } catch {
-      return [];
-    }
-  }
-
-  async function persistTerminalSessionsToDisk() {
-    const payload: TerminalSessionStoreFile = {
-      version: 1,
-      sessions: Array.from(terminalSessions.values()),
-    };
-    await fs.writeFile(terminalSessionsPath, JSON.stringify(payload, null, 2));
-  }
-
-  async function rememberTerminalSession(record: TerminalSessionRecord) {
+  function rememberTerminalSession(record: TerminalSessionRecord) {
     terminalSessions.set(record.terminalSessionId, record);
-    await persistTerminalSessionsToDisk();
   }
 
   function resolveTerminalDestinationForDescriptor(
     descriptor: DecodedTerminalSessionDescriptor,
-  ): TerminalDestinationSnapshot | undefined {
+  ): TerminalDestination | undefined {
     return descriptor.destination ? { address: descriptor.destination.address } : undefined;
   }
 
   function getTerminalTmuxBackend(record: TerminalSessionRecord): TerminalTmuxBackend {
     return createTerminalTmuxBackend(
-      {
-        destination: record.destination,
-        config,
-        allowLegacyGlobalFallback: record.legacyGlobalTmuxFallback === true,
-      },
+      config,
       logger,
+      record.destination?.address ?? (record.legacyGlobalTmuxFallback === true ? null : undefined),
     );
   }
 
@@ -4631,14 +4832,14 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           );
         }
         const destination = resolveTerminalDestinationForDescriptor(descriptor);
-        if (!destination) {
+        if (!destination && descriptor.version === 3) {
           logger.warn?.("[clawline] terminal_attachment_missing_destination", {
             sessionKey: params.sessionKey,
             ownerUserId: params.ownerUserId,
             terminalSessionId: descriptor.terminalSessionId,
           });
           throw new Error(
-            "Clawline terminal session descriptor is invalid (version 2 destination.address is required).",
+            "Clawline terminal session descriptor is invalid (version 3 destination.address is required).",
           );
         }
         const now = nowMs();
@@ -4646,7 +4847,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         const tmuxSessionName =
           terminalSessionName ??
           (descriptor.version === 3 ? undefined : descriptor.terminalSessionId);
-        await rememberTerminalSession({
+        rememberTerminalSession({
           terminalSessionId: descriptor.terminalSessionId,
           ownerUserId: params.ownerUserId,
           sessionKey: params.sessionKey,
@@ -4655,7 +4856,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           lastSeenAt: now,
           ...(terminalSessionName ? { terminalSessionName } : {}),
           ...(tmuxSessionName ? { tmuxSessionName } : {}),
-          destination,
+          ...(destination ? { destination } : {}),
+          ...(!destination ? { legacyGlobalTmuxFallback: true } : {}),
         });
         filtered.push(attachment);
         continue;
@@ -4783,6 +4985,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   async function refreshPendingFile() {
     try {
       pendingFile = await loadPending(pendingPath);
+      prunePendingDeviceNotificationKeysFromPendingFile();
       reconcilePendingSocketsWithFile();
     } catch (err) {
       logger.warn?.(`pending_reload_failed: ${formatError(err)}`);
@@ -4843,6 +5046,259 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     return pendingFile.entries.find((entry) => entry.deviceId === deviceId);
   }
 
+  function buildPendingEntryForPairRequest(params: {
+    existingPendingEntry: PendingEntry | undefined;
+    deviceId: string;
+    claimedName: string | undefined;
+    deviceInfo: DeviceInfo;
+    now: number;
+  }): PendingEntry {
+    if (params.existingPendingEntry) {
+      return {
+        ...params.existingPendingEntry,
+        lastSeenAt: params.now,
+        requestCount: Math.max(1, params.existingPendingEntry.requestCount ?? 1) + 1,
+      };
+    }
+    return {
+      deviceId: params.deviceId,
+      claimedName: params.claimedName,
+      deviceInfo: params.deviceInfo,
+      requestedAt: params.now,
+      lastSeenAt: params.now,
+      requestCount: 1,
+    };
+  }
+
+  async function upsertPendingEntryForPairRequest(params: {
+    deviceId: string;
+    claimedName: string | undefined;
+    deviceInfo: DeviceInfo;
+    now: number;
+  }): Promise<{ entry: PendingEntry; existingPendingEntry: PendingEntry | undefined }> {
+    const existingPendingEntry = findPendingEntry(params.deviceId);
+    const entry = buildPendingEntryForPairRequest({
+      existingPendingEntry,
+      deviceId: params.deviceId,
+      claimedName: params.claimedName,
+      deviceInfo: params.deviceInfo,
+      now: params.now,
+    });
+    await upsertPendingEntry(entry);
+    return { entry, existingPendingEntry };
+  }
+
+  function userIdForPendingEntry(entry: PendingEntry): string {
+    const normalized = normalizeUserIdFromClaimedName(entry.claimedName);
+    if (normalized) {
+      return normalized;
+    }
+    const compactDeviceId = entry.deviceId.replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+    return `device_${compactDeviceId.slice(0, Math.max(1, USER_ID_MAX_LENGTH - 7))}`;
+  }
+
+  function adminDefaultForPendingEntry(entry: PendingEntry): boolean {
+    return userIdForPendingEntry(entry) === "flynn";
+  }
+
+  function createAllowlistEntryFromPending(entry: PendingEntry): AllowlistEntry {
+    const userId = userIdForPendingEntry(entry);
+    return {
+      deviceId: entry.deviceId,
+      claimedName: entry.claimedName,
+      deviceInfo: entry.deviceInfo,
+      userId,
+      isAdmin: userId === "flynn",
+      tokenDelivered: false,
+      createdAt: nowMs(),
+      lastSeenAt: null,
+    };
+  }
+
+  function buildDeviceApprovalAttachment(entry: PendingEntry): ClawlineOutboundAttachmentInput {
+    const claimedName = entry.claimedName?.trim() || "New device";
+    const platform = entry.deviceInfo.platform?.trim() || "Unknown platform";
+    const model = entry.deviceInfo.model?.trim();
+    const surface = model && model !== platform ? `${platform}/${model}` : platform;
+    const userId = userIdForPendingEntry(entry);
+    const approvalData = {
+      deviceId: entry.deviceId,
+      requestedAt: entry.requestedAt,
+      claimedName: entry.claimedName ?? "",
+      platform: entry.deviceInfo.platform ?? "",
+      model: entry.deviceInfo.model ?? "",
+    };
+    const denyMessage = {
+      action: DEVICE_APPROVAL_DENY_ACTION,
+      data: approvalData,
+      summary: `Denied ${entry.deviceId}`,
+    };
+    const approveMessage = {
+      action: DEVICE_APPROVAL_APPROVE_ACTION,
+      data: approvalData,
+      summary: `Approved ${entry.deviceId}`,
+    };
+    const html = `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root { color-scheme: light dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+body { margin: 0; padding: 14px; background: transparent; color: CanvasText; }
+.card { border: 1px solid color-mix(in srgb, CanvasText 18%, transparent); border-radius: 8px; padding: 14px; max-width: 520px; }
+h1 { font-size: 16px; line-height: 1.25; margin: 0 0 12px; font-weight: 650; }
+.row { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 8px; font-size: 13px; line-height: 1.35; margin: 6px 0; }
+.label { color: color-mix(in srgb, CanvasText 62%, transparent); }
+.value { overflow-wrap: anywhere; }
+.actions { display: flex; gap: 8px; margin-top: 14px; }
+button { border: 0; border-radius: 7px; padding: 9px 13px; font: inherit; font-weight: 650; cursor: pointer; }
+button.approve { background: #147a42; color: white; }
+button.deny { background: #9b1c31; color: white; }
+.hint { margin-top: 10px; font-size: 12px; color: color-mix(in srgb, CanvasText 62%, transparent); }
+</style>
+</head>
+<body>
+<section class="card" aria-label="Device approval request">
+<h1>New device pending approval</h1>
+<div class="row"><div class="label">Name</div><div class="value">${escapeHtml(claimedName)}</div></div>
+<div class="row"><div class="label">Platform</div><div class="value">${escapeHtml(surface)}</div></div>
+<div class="row"><div class="label">Device ID</div><div class="value">${escapeHtml(entry.deviceId)}</div></div>
+<div class="row"><div class="label">User ID</div><div class="value">${escapeHtml(userId)}</div></div>
+<div class="row"><div class="label">Admin</div><div class="value">${adminDefaultForPendingEntry(entry) ? "yes" : "no"}</div></div>
+<div class="actions">
+<button class="approve" type="button" data-action="approve">Approve</button>
+<button class="deny" type="button" data-action="deny">Deny</button>
+</div>
+<div class="hint">Approval applies only to this exact pending request.</div>
+</section>
+<script>
+(() => {
+  const messages = {
+    approve: ${jsonForHtmlScript(approveMessage)},
+    deny: ${jsonForHtmlScript(denyMessage)}
+  };
+  function post(message) {
+    const bridge = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.clawline;
+    if (bridge && typeof bridge.postMessage === "function") {
+      bridge.postMessage({ action: message.action, data: message.data });
+      bridge.postMessage({ action: "_close", summary: message.summary });
+      return;
+    }
+  }
+  document.querySelectorAll("button[data-action]").forEach((button) => {
+    button.addEventListener("click", () => post(messages[button.dataset.action]));
+  });
+})();
+</script>
+</body>
+</html>`;
+    const descriptor = { version: 1, html };
+    return {
+      mimeType: INTERACTIVE_HTML_MIME,
+      data: Buffer.from(JSON.stringify(descriptor), "utf8").toString("base64"),
+    };
+  }
+
+  async function persistDeviceApprovalCardForAdmin(params: {
+    userId: string;
+    entry: PendingEntry;
+    attachment: ClawlineOutboundAttachmentInput;
+    broadcast: boolean;
+  }): Promise<boolean> {
+    let outboundAttachments = {
+      attachments: [] as NormalizedAttachment[],
+      assetIds: [] as string[],
+    };
+    try {
+      outboundAttachments = await materializeOutboundAttachments({
+        attachments: [params.attachment],
+        ownerUserId: params.userId,
+        uploaderDeviceId: "server",
+      });
+    } catch (err) {
+      logger.warn?.("[clawline:http] pending_device_card_materialize_failed", {
+        deviceId: params.entry.deviceId,
+        userId: params.userId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return false;
+    }
+    outboundAttachments.attachments = await filterOutboundAttachmentsForTerminalPolicy({
+      attachments: outboundAttachments.attachments,
+      ownerUserId: params.userId,
+      sessionKey: mainSessionKey,
+    });
+    const event: ServerMessage = {
+      type: "message",
+      id: generateServerMessageId(),
+      role: "assistant",
+      sender: resolveAssistantSenderName(mainSessionKey),
+      content: `Device approval requested: ${describePairingEntry(params.entry)}`,
+      timestamp: nowMs(),
+      streaming: false,
+      sessionKey: mainSessionKey,
+      attachments:
+        outboundAttachments.attachments.length > 0 ? outboundAttachments.attachments : undefined,
+    };
+    await enqueueWriteTask(() => {
+      const streams = ensureStreamSessionsForUser({
+        userId: params.userId,
+        isAdmin: true,
+      });
+      syncUserSessionSubscriptions(params.userId, streams);
+      insertEventTx(event, params.userId);
+    });
+    if (params.broadcast) {
+      broadcastToSessionKey(mainSessionKey, event);
+    }
+    await broadcastStreamTailStateForUser(params.userId, event);
+    return true;
+  }
+
+  async function notifyAdminsOfPendingDevice(entry: PendingEntry): Promise<boolean> {
+    const adminUserIds: string[] = [];
+    const seen = new Set<string>();
+    for (const allowlistEntry of allowlist.entries) {
+      if (!allowlistEntry.isAdmin) {
+        continue;
+      }
+      const userId = sanitizeUserId(allowlistEntry.userId);
+      const key = userId.toLowerCase();
+      if (!userId || seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      adminUserIds.push(userId);
+    }
+    if (adminUserIds.length === 0) {
+      return true;
+    }
+    const targetUserIdsBySessionKey = new Map<string, string>();
+    for (const userId of adminUserIds) {
+      const sessionKey = normalizeStoredSessionKey(mainSessionKey, userId) || mainSessionKey;
+      const currentUserId = targetUserIdsBySessionKey.get(sessionKey);
+      if (!currentUserId || userId.toLowerCase() === "flynn") {
+        targetUserIdsBySessionKey.set(sessionKey, userId);
+      }
+    }
+    const targetUserIds = [...targetUserIdsBySessionKey.values()];
+    const attachment = buildDeviceApprovalAttachment(entry);
+    const broadcastUserId =
+      targetUserIds.find((userId) => userId.toLowerCase() === "flynn") ?? targetUserIds[0];
+    const results = await Promise.all(
+      targetUserIds.map((userId) =>
+        persistDeviceApprovalCardForAdmin({
+          userId,
+          entry,
+          attachment,
+          broadcast: userId === broadcastUserId,
+        }),
+      ),
+    );
+    return results.every(Boolean);
+  }
+
   async function upsertPendingEntry(entry: PendingEntry) {
     const idx = pendingFile.entries.findIndex((existing) => existing.deviceId === entry.deviceId);
     if (idx >= 0) {
@@ -4854,12 +5310,224 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   }
 
   async function removePendingEntry(deviceId: string) {
+    pendingDeviceNotificationDeviceIds.delete(deviceId);
     const next = pendingFile.entries.filter((entry) => entry.deviceId !== deviceId);
     if (next.length === pendingFile.entries.length) {
       return;
     }
     pendingFile = { ...pendingFile, entries: next };
     await persistPendingFile();
+  }
+
+  type DeviceApprovalCallbackData = {
+    deviceId: string;
+    requestedAt: number;
+    claimedName: string;
+    platform: string;
+    model: string;
+  };
+
+  function parseDeviceApprovalCallbackData(dataValue: unknown): DeviceApprovalCallbackData {
+    const data =
+      dataValue && typeof dataValue === "object" && !Array.isArray(dataValue)
+        ? (dataValue as Record<string, unknown>)
+        : null;
+    const deviceId = typeof data?.deviceId === "string" ? data.deviceId.trim() : "";
+    const requestedAt = typeof data?.requestedAt === "number" ? data.requestedAt : Number.NaN;
+    const claimedName = typeof data?.claimedName === "string" ? data.claimedName : "";
+    const platform = typeof data?.platform === "string" ? data.platform : "";
+    const model = typeof data?.model === "string" ? data.model : "";
+    if (!validateDeviceId(deviceId) || !Number.isFinite(requestedAt)) {
+      throw new ClientMessageError("invalid_message", "Invalid device approval payload");
+    }
+    return { deviceId, requestedAt, claimedName, platform, model };
+  }
+
+  function pendingEntryMatchesDeviceApproval(
+    entry: PendingEntry,
+    data: DeviceApprovalCallbackData,
+  ): boolean {
+    return (
+      entry.deviceId === data.deviceId &&
+      entry.requestedAt === data.requestedAt &&
+      (entry.claimedName ?? "") === data.claimedName &&
+      (entry.deviceInfo.platform ?? "") === data.platform &&
+      (entry.deviceInfo.model ?? "") === data.model
+    );
+  }
+
+  type PendingDeviceNotificationDecision = "notify" | "coalesce";
+
+  function beginPendingDeviceNotification(entry: PendingEntry): PendingDeviceNotificationDecision {
+    if (pendingDeviceNotificationDeviceIds.has(entry.deviceId)) {
+      return "coalesce";
+    }
+    pendingDeviceNotificationDeviceIds.add(entry.deviceId);
+    return "notify";
+  }
+
+  async function markPendingDeviceNotificationDelivered(deviceId: string) {
+    const pendingEntry = findPendingEntry(deviceId);
+    if (!pendingEntry) {
+      return;
+    }
+    await upsertPendingEntry({ ...pendingEntry, notifiedAt: nowMs() });
+  }
+
+  function markPendingDeviceNotificationFailed(deviceId: string) {
+    pendingDeviceNotificationDeviceIds.delete(deviceId);
+  }
+
+  async function notifyPendingDeviceOnce(entry: PendingEntry) {
+    const notificationDecision = beginPendingDeviceNotification(entry);
+    if (notificationDecision === "coalesce") {
+      logger.info?.(
+        `[clawline:http] pair_request_pending_coalesced ${describePairingEntry(entry)} pendingEntries=${pendingFile.entries.length}`,
+      );
+      return;
+    }
+    try {
+      await notifyGatewayOfPending(entry);
+      await markPendingDeviceNotificationDelivered(entry.deviceId);
+      logger.info?.(`[clawline:http] pair_request_pending_notified ${describePairingEntry(entry)}`);
+    } catch (err) {
+      markPendingDeviceNotificationFailed(entry.deviceId);
+      logger.warn?.("[clawline:http] pair_request_pending_notify_failed", {
+        deviceId: entry.deviceId,
+        error: formatError(err),
+      });
+    }
+  }
+
+  function prunePendingDeviceNotificationKeysFromPendingFile() {
+    const pendingDeviceIds = new Set<string>();
+    for (const entry of pendingFile.entries) {
+      pendingDeviceIds.add(entry.deviceId);
+      if (typeof entry.notifiedAt === "number") {
+        pendingDeviceNotificationDeviceIds.add(entry.deviceId);
+      }
+    }
+    for (const deviceId of pendingDeviceNotificationDeviceIds) {
+      if (!pendingDeviceIds.has(deviceId)) {
+        pendingDeviceNotificationDeviceIds.delete(deviceId);
+      }
+    }
+  }
+
+  for (const entry of pendingFile.entries) {
+    pendingDeviceNotificationDeviceIds.add(entry.deviceId);
+  }
+
+  function closeActiveSessionForAllowlistReplacement(deviceId: string) {
+    const session = sessionsByDevice.get(deviceId);
+    if (!session) {
+      return;
+    }
+    session.revoked = true;
+    session.replayInProgress = false;
+    session.resolveReplayBarrier();
+    removeSession(session);
+    connectionState.delete(session.socket);
+    void sendJson(session.socket, {
+      type: "error",
+      code: "token_revoked",
+      message: "Device approval changed; reconnect required",
+    })
+      .catch(() => {})
+      .finally(() => session.socket.close(1008));
+  }
+
+  async function approvePendingDeviceFromCallback(
+    data: DeviceApprovalCallbackData,
+  ): Promise<string> {
+    await refreshPendingFile();
+    await refreshAllowlistFromDisk();
+    const pendingEntry = findPendingEntry(data.deviceId);
+    const existingAllowlistEntry = findAllowlistEntry(data.deviceId);
+    if (!pendingEntry) {
+      if (existingAllowlistEntry) {
+        await removePendingEntry(data.deviceId);
+        await refreshPendingFile();
+        return `Device already approved: ${describePairingEntry(existingAllowlistEntry)}. Pending queue verified clear.`;
+      }
+      return `Device approval request is no longer pending for deviceId ${data.deviceId}. No changes made.`;
+    }
+    if (!pendingEntryMatchesDeviceApproval(pendingEntry, data)) {
+      return `Device approval request changed for deviceId ${data.deviceId}. No changes made.`;
+    }
+
+    const approvedEntry = createAllowlistEntryFromPending(pendingEntry);
+    const existingAllowlistIndex = allowlist.entries.findIndex(
+      (entry) => entry.deviceId === data.deviceId,
+    );
+    if (existingAllowlistIndex >= 0) {
+      closeActiveSessionForAllowlistReplacement(data.deviceId);
+      allowlist.entries[existingAllowlistIndex] = approvedEntry;
+    } else {
+      allowlist.entries.push(approvedEntry);
+    }
+    await persistAllowlist();
+    await removePendingEntry(data.deviceId);
+    await refreshAllowlistFromDisk();
+    await refreshPendingFile();
+    const verifiedAllowlistEntry = findAllowlistEntry(data.deviceId);
+    const verifiedPendingEntry = findPendingEntry(data.deviceId);
+    if (!verifiedAllowlistEntry || verifiedPendingEntry) {
+      throw new Error("device approval state verification failed");
+    }
+    return `Approved ${describePairingEntry(verifiedAllowlistEntry)} for userId=${verifiedAllowlistEntry.userId} isAdmin=${verifiedAllowlistEntry.isAdmin}. Pending removed and state verified.`;
+  }
+
+  async function denyPendingDeviceFromCallback(data: DeviceApprovalCallbackData): Promise<string> {
+    await refreshPendingFile();
+    await refreshAllowlistFromDisk();
+    const pendingEntry = findPendingEntry(data.deviceId);
+    if (!pendingEntry) {
+      const existingAllowlistEntry = findAllowlistEntry(data.deviceId);
+      if (existingAllowlistEntry) {
+        return `Device already approved: ${describePairingEntry(existingAllowlistEntry)}. No deny action taken.`;
+      }
+      return `Device approval request is no longer pending for deviceId ${data.deviceId}. No changes made.`;
+    }
+    if (!pendingEntryMatchesDeviceApproval(pendingEntry, data)) {
+      return `Device approval request changed for deviceId ${data.deviceId}. No changes made.`;
+    }
+    await removePendingEntry(data.deviceId);
+    reconcilePendingSocketsWithFile();
+    await refreshPendingFile();
+    if (findPendingEntry(data.deviceId)) {
+      throw new Error("device denial state verification failed");
+    }
+    return `Denied ${describePairingEntry(pendingEntry)}. Pending removed and state verified. No denylist entry was added.`;
+  }
+
+  async function handleDeviceApprovalCallback(
+    session: Session,
+    sourceMessageId: string,
+    action: string,
+    dataValue: unknown,
+  ): Promise<boolean> {
+    if (action !== DEVICE_APPROVAL_APPROVE_ACTION && action !== DEVICE_APPROVAL_DENY_ACTION) {
+      return false;
+    }
+    if (!session.isAdmin) {
+      throw new ClientMessageError("forbidden", "Device approval requires admin access");
+    }
+    if (isDenylisted(session.deviceId)) {
+      throw new ClientMessageError("token_revoked", "Device revoked");
+    }
+    const data = parseDeviceApprovalCallbackData(dataValue);
+    const content =
+      action === DEVICE_APPROVAL_APPROVE_ACTION
+        ? await approvePendingDeviceFromCallback(data)
+        : await denyPendingDeviceFromCallback(data);
+    const callbackSessionKey = mainSessionKey;
+    const event = await persistAssistantMessage(session.userId, content, callbackSessionKey, [], {
+      replyToMessageId: sourceMessageId,
+    });
+    broadcastToSessionKey(callbackSessionKey, event);
+    await broadcastStreamTailStateForUser(session.userId, event);
+    return true;
   }
 
   function handleAllowlistChanged() {
@@ -5036,18 +5704,289 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     res.end(JSON.stringify(payload));
   }
 
-  function sessionControlCapabilities() {
-    const unsupported = {
-      supported: false,
-      reason: "provider_control_not_available",
+  type SessionControlModelCatalogStatus =
+    | {
+        available: true;
+        runtime: string;
+        models: Array<{
+          id: string;
+          provider: string;
+          ref: string;
+          name: string;
+          alias?: string;
+        }>;
+      }
+    | {
+        available: false;
+        reason: string;
+        runtime?: string;
+        models: [];
+      };
+
+  type SessionControlOption = {
+    title: string;
+    value?: string;
+    enabled?: boolean;
+  };
+
+  type SessionControlCapability = {
+    supported: boolean;
+    reason?: string;
+    options?: SessionControlOption[];
+  };
+
+  type SessionControlRuntimeContext = {
+    agentId: string | undefined;
+    provider: string;
+    model: string;
+    runtime: string;
+  };
+
+  const PI_THINKING_OPTIONS = [
+    "off",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "adaptive",
+    "max",
+  ];
+  const REASONING_OPTIONS = ["off", "on", "stream"];
+
+  function optionValues(values: readonly string[]): SessionControlOption[] {
+    return values.map((value) => ({ title: value, value }));
+  }
+
+  function booleanOptions(): SessionControlOption[] {
+    return [
+      { title: "On", enabled: true },
+      { title: "Off", enabled: false },
+    ];
+  }
+
+  function modeOptions(): SessionControlOption[] {
+    return [
+      { title: "On", value: "fast" },
+      { title: "Off", value: "normal" },
+    ];
+  }
+
+  function supportedCapability(options?: SessionControlOption[]): SessionControlCapability {
+    return options ? { supported: true, options } : { supported: true };
+  }
+
+  function unsupportedCapability(reason: string): SessionControlCapability {
+    return { supported: false, reason };
+  }
+
+  function isCodexSessionControlRuntime(runtime: string | undefined): boolean {
+    const normalized = runtime?.trim().toLowerCase();
+    return normalized === "codex" || normalized === "codex-cli" || normalized === "openai-codex";
+  }
+
+  function resolveSessionControlRuntimeContext(
+    sessionKey: string,
+    modelStatus?: { provider: string; model: string },
+  ): SessionControlRuntimeContext {
+    const agentId = resolveAgentIdFromSessionKey(sessionKey);
+    const normalizedSessionKey = normalizeSessionKey(sessionKey);
+    const activeRun = activeSessionRuns.get(normalizedSessionKey) ?? null;
+    const snapshot = sessionRuntimeStatusSnapshots.get(normalizedSessionKey) ?? null;
+    const selectedModel =
+      modelStatus ??
+      resolveStatusModel(
+        loadSessionStoreEntryForKey(sessionKey).entry,
+        activeRun ?? snapshot,
+        sessionKey,
+      );
+    const policy = resolveAgentHarnessPolicy({
+      provider: selectedModel.provider,
+      modelId: selectedModel.model,
+      config: openClawCfg,
+      agentId,
+      sessionKey,
+    });
+    return {
+      agentId,
+      provider: selectedModel.provider,
+      model: selectedModel.model,
+      runtime: policy.runtime,
     };
+  }
+
+  function modelRuntimeForCatalogEntry(
+    entry: ModelCatalogEntry,
+    context: SessionControlRuntimeContext,
+  ): string {
+    return resolveAgentHarnessPolicy({
+      provider: entry.provider,
+      modelId: entry.id,
+      config: openClawCfg,
+      agentId: context.agentId,
+      sessionKey: undefined,
+    }).runtime;
+  }
+
+  function filterSessionControlCatalogEntries(
+    entries: ModelCatalogEntry[],
+    context: SessionControlRuntimeContext,
+  ): ModelCatalogEntry[] {
+    if (!isCodexSessionControlRuntime(context.runtime)) {
+      return entries;
+    }
+    return entries.filter((entry) =>
+      isCodexSessionControlRuntime(modelRuntimeForCatalogEntry(entry, context)),
+    );
+  }
+
+  function thinkingOptionsForSessionControl(
+    context: SessionControlRuntimeContext,
+  ): SessionControlOption[] {
+    if (!isCodexSessionControlRuntime(context.runtime)) {
+      return optionValues(PI_THINKING_OPTIONS);
+    }
+    return listThinkingLevelOptions(context.provider, context.model).map((option) => ({
+      title: option.label,
+      value: option.id,
+    }));
+  }
+
+  function resolveSessionControlSessionFile(sessionKey: string): string | null {
+    const { entry } = loadSessionStoreEntryForKey(sessionKey);
+    const sessionFile = normalizeStatusString(entry?.sessionFile);
+    if (sessionFile) {
+      return sessionFile;
+    }
+    const sessionId = normalizeStatusString(entry?.sessionId);
+    return sessionId ? resolveClawlineSessionTranscriptPath(sessionId, mainSessionAgentId) : null;
+  }
+
+  async function resolveCodexFastControlState(
+    sessionKey: string,
+    context: SessionControlRuntimeContext,
+  ): Promise<CodexFastControlState | null> {
+    if (!isCodexSessionControlRuntime(context.runtime)) {
+      return null;
+    }
+    const sessionFile = resolveSessionControlSessionFile(sessionKey);
+    if (!sessionFile) {
+      return { supported: false, enabled: null, reason: "codex_thread_not_attached" };
+    }
+    const fastMode = await readCodexAppServerFastMode({ sessionFile });
+    if (!fastMode.available) {
+      return { supported: false, enabled: null, reason: fastMode.reason };
+    }
+    return { supported: true, enabled: fastMode.enabled, sessionFile };
+  }
+
+  function sessionControlCapabilities(
+    context: SessionControlRuntimeContext,
+    codexFastControl: CodexFastControlState | null = null,
+  ) {
+    const codexRuntime = isCodexSessionControlRuntime(context.runtime);
+    const codexFastSupported = codexRuntime && codexFastControl?.supported === true;
+    const codexFastUnsupportedReason =
+      codexFastControl?.reason ?? "codex_fast_mode_not_supported_by_session_control";
+    return {
+      cancelCurrentRun: supportedCapability(),
+      setModel: supportedCapability(),
+      setThinking: supportedCapability(thinkingOptionsForSessionControl(context)),
+      setReasoning: codexRuntime
+        ? unsupportedCapability("codex_reasoning_uses_thinking_level")
+        : supportedCapability(optionValues(REASONING_OPTIONS)),
+      setFastMode: codexRuntime
+        ? codexFastSupported
+          ? supportedCapability(booleanOptions())
+          : unsupportedCapability(codexFastUnsupportedReason)
+        : supportedCapability(booleanOptions()),
+      setMode: codexRuntime
+        ? codexFastSupported
+          ? supportedCapability(modeOptions())
+          : unsupportedCapability(codexFastUnsupportedReason)
+        : supportedCapability(modeOptions()),
+      setVerbosity: supportedCapability(),
+      readOnlyStatus: false,
+    };
+  }
+
+  function mutableSessionControlCapabilities(
+    context: SessionControlRuntimeContext,
+    codexFastControl: CodexFastControlState | null = null,
+  ) {
+    return sessionControlCapabilities(context, codexFastControl);
+  }
+
+  function adoptedSessionControlCapabilities() {
+    const unsupported = unsupportedCapability("adopted_session_read_only");
     return {
       cancelCurrentRun: unsupported,
-      setModel: unsupported,
+      setModel: supportedCapability(),
+      setThinking: unsupported,
       setReasoning: unsupported,
+      setFastMode: unsupported,
       setMode: unsupported,
       setVerbosity: unsupported,
+      readOnlyStatus: true,
     };
+  }
+
+  function sessionControlCapabilitiesForSession(
+    userId: string,
+    sessionKey: string,
+    context: SessionControlRuntimeContext,
+    codexFastControl: CodexFastControlState | null = null,
+  ) {
+    const row = loadStreamRowForUser(userId, normalizeSessionKey(sessionKey));
+    if (row?.adopted === 1) {
+      return adoptedSessionControlCapabilities();
+    }
+    return mutableSessionControlCapabilities(context, codexFastControl);
+  }
+
+  async function loadSessionControlModelCatalog(
+    sessionKey: string,
+    context: SessionControlRuntimeContext,
+  ): Promise<SessionControlModelCatalogStatus> {
+    try {
+      const catalog = await loadModelCatalog({ config: openClawCfg });
+      const defaultModel = resolveDefaultModelForAgent({
+        cfg: openClawCfg,
+        agentId: context.agentId,
+      });
+      const allowed = buildAllowedModelSet({
+        cfg: openClawCfg,
+        catalog,
+        defaultProvider: defaultModel.provider,
+        defaultModel: defaultModel.model,
+        agentId: context.agentId,
+      });
+      const models = filterSessionControlCatalogEntries(allowed.allowedCatalog, context).map(
+        (entry) => {
+          const model: SessionControlModelCatalogStatus["models"][number] = {
+            id: entry.id,
+            provider: entry.provider,
+            ref: `${entry.provider}/${entry.id}`,
+            name: entry.name,
+          };
+          if (entry.alias) {
+            model.alias = entry.alias;
+          }
+          return model;
+        },
+      );
+      return { available: true, runtime: context.runtime, models };
+    } catch (err) {
+      logger.warn?.(
+        `[clawline:session-control] failed to load model catalog for ${sessionKey}: ${String(err)}`,
+      );
+      return {
+        available: false,
+        reason: "model_catalog_unavailable",
+        runtime: context.runtime,
+        models: [],
+      };
+    }
   }
 
   function assertSessionControlSessionAccess(userId: string, sessionKey: string) {
@@ -5072,22 +6011,97 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     return assertSessionControlSessionAccess(userId, rawSessionKey);
   }
 
-  function buildSessionStatusPayload(sessionKey: string) {
-    const activeRun = activeSessionRuns.get(normalizeSessionKey(sessionKey)) ?? null;
+  function normalizeStatusString(value: unknown): string | null {
+    return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+  }
+
+  function resolveStatusModel(
+    entry: SessionEntry | undefined,
+    snapshot: SessionStatusRuntimeSnapshot | null,
+    sessionKey: string,
+  ) {
+    const defaultModel = resolveDefaultModelForAgent({
+      cfg: openClawCfg,
+      agentId: resolveAgentIdFromSessionKey(sessionKey),
+    });
+    const provider =
+      normalizeStatusString(entry?.providerOverride) ??
+      normalizeStatusString(entry?.modelProvider) ??
+      snapshot?.provider ??
+      defaultModel.provider;
+    const model =
+      normalizeStatusString(entry?.modelOverride) ??
+      normalizeStatusString(entry?.model) ??
+      snapshot?.model ??
+      defaultModel.model;
+    return { provider, model };
+  }
+
+  function resolveStatusFastMode(
+    entry: SessionEntry | undefined,
+    snapshot: SessionStatusRuntimeSnapshot | null,
+  ) {
+    if (typeof entry?.fastMode === "boolean") {
+      return entry.fastMode;
+    }
+    return snapshot?.fastMode ?? null;
+  }
+
+  function rememberSessionRuntimeStatus(
+    sessionKey: string,
+    snapshot: SessionStatusRuntimeSnapshot,
+  ) {
+    sessionRuntimeStatusSnapshots.set(normalizeSessionKey(sessionKey), snapshot);
+  }
+
+  async function buildSessionStatusPayload(
+    userId: string,
+    sessionKey: string,
+    resolvedCodexFastControl: CodexFastControlState | null = null,
+  ) {
+    const normalizedSessionKey = normalizeSessionKey(sessionKey);
+    const activeRun = activeSessionRuns.get(normalizedSessionKey) ?? null;
+    const snapshot = sessionRuntimeStatusSnapshots.get(normalizedSessionKey) ?? null;
+    const { entry } = loadSessionStoreEntryForKey(sessionKey);
     const queueDepth = getClawlineFollowupQueueDepth(sessionKey);
-    const provider = activeRun?.provider ?? null;
-    const model = activeRun?.model ?? null;
+    const modelStatus = resolveStatusModel(entry, activeRun ?? snapshot, sessionKey);
+    const thinkingLevel =
+      normalizeStatusString(entry?.thinkingLevel) ??
+      activeRun?.thinkingLevel ??
+      snapshot?.thinkingLevel ??
+      null;
+    const fastMode = resolveStatusFastMode(entry, activeRun ?? snapshot);
+    const runtimeContext = resolveSessionControlRuntimeContext(sessionKey, modelStatus);
+    const codexFastControl =
+      resolvedCodexFastControl ?? (await resolveCodexFastControlState(sessionKey, runtimeContext));
+    const displayFastMode = isCodexSessionControlRuntime(runtimeContext.runtime)
+      ? (codexFastControl?.enabled ?? null)
+      : fastMode;
+    const modelCatalog = await loadSessionControlModelCatalog(sessionKey, runtimeContext);
+    const capabilities = sessionControlCapabilitiesForSession(
+      userId,
+      sessionKey,
+      runtimeContext,
+      codexFastControl,
+    );
+    if (!modelCatalog.available) {
+      capabilities.setModel = {
+        supported: false,
+        reason: modelCatalog.reason,
+      };
+    }
     return {
       sessionKey,
       display: {
-        model,
+        model: modelStatus.model,
         fallbackModels: null,
-        provider,
-        harness: null,
-        reasoningLevel: null,
-        thinkingLevel: activeRun?.thinkingLevel ?? null,
-        mode: null,
-        verbosity: null,
+        provider: modelStatus.provider,
+        harness: runtimeContext.runtime,
+        reasoningLevel: normalizeStatusString(entry?.reasoningLevel),
+        thinkingLevel,
+        fastMode: displayFastMode,
+        mode: displayFastMode == null ? null : displayFastMode ? "fast" : "normal",
+        verbosity: normalizeStatusString(entry?.verboseLevel),
       },
       run: activeRun
         ? {
@@ -5111,14 +6125,351 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       approval: {
         state: null,
       },
-      capabilities: sessionControlCapabilities(),
+      capabilities,
+      modelCatalog,
     };
   }
 
   async function handleSessionStatusRequest(req: http.IncomingMessage, res: http.ServerResponse) {
     const auth = authenticateHttpRequest(req);
     const sessionKey = resolveSessionControlSessionKey(req, auth.userId);
-    sendSessionControlJson(res, 200, buildSessionStatusPayload(sessionKey));
+    sendSessionControlJson(res, 200, await buildSessionStatusPayload(auth.userId, sessionKey));
+  }
+
+  function rejectUnsupportedSessionControl(
+    res: http.ServerResponse,
+    sessionKey: string,
+    action: string,
+    code: string,
+    message: string,
+    capabilities: unknown,
+  ) {
+    sendSessionControlJson(res, 200, {
+      ok: false,
+      sessionKey,
+      action,
+      code,
+      message,
+      capabilities,
+    });
+  }
+
+  function capabilityForAction(
+    capabilities: ReturnType<typeof sessionControlCapabilitiesForSession>,
+    action: string,
+  ): SessionControlCapability | null {
+    switch (action) {
+      case "cancel_current_run":
+        return capabilities.cancelCurrentRun;
+      case "set_model":
+        return capabilities.setModel;
+      case "set_thinking":
+        return capabilities.setThinking;
+      case "set_reasoning":
+        return capabilities.setReasoning;
+      case "set_fast_mode":
+        return capabilities.setFastMode;
+      case "set_mode":
+        return capabilities.setMode;
+      case "set_verbosity":
+        return capabilities.setVerbosity;
+      default:
+        return null;
+    }
+  }
+
+  function optionIncludesString(
+    options: SessionControlOption[] | undefined,
+    value: string | null | undefined,
+  ) {
+    if (!options || value == null) {
+      return !options;
+    }
+    return options.some((option) => option.value === value);
+  }
+
+  function optionIncludesBoolean(
+    options: SessionControlOption[] | undefined,
+    value: boolean | null | undefined,
+  ) {
+    if (!options || value == null) {
+      return !options;
+    }
+    return options.some((option) => option.enabled === value);
+  }
+
+  async function validateSessionControlPatch(
+    sessionKey: string,
+    action: string,
+    patch: Record<string, unknown>,
+    context: SessionControlRuntimeContext,
+    capability: SessionControlCapability,
+  ): Promise<{ ok: true } | { ok: false; code: string; message: string }> {
+    if (action === "set_model" && isCodexSessionControlRuntime(context.runtime)) {
+      const catalog = await loadSessionControlModelCatalog(sessionKey, context);
+      const model = typeof patch.model === "string" ? patch.model : undefined;
+      if (!catalog.available || !model || !catalog.models.some((entry) => entry.ref === model)) {
+        return {
+          ok: false,
+          code: "unsupported_runtime_model",
+          message: "The selected model is not available for this session runtime.",
+        };
+      }
+    }
+    if (
+      action === "set_thinking" &&
+      !optionIncludesString(capability.options, patch.thinkingLevel as string | null | undefined)
+    ) {
+      return {
+        ok: false,
+        code: "unsupported_control_option",
+        message: "The selected thinking level is not available for this session runtime.",
+      };
+    }
+    if (
+      action === "set_reasoning" &&
+      !optionIncludesString(capability.options, patch.reasoningLevel as string | null | undefined)
+    ) {
+      return {
+        ok: false,
+        code: "unsupported_control_option",
+        message: "The selected reasoning level is not available for this session runtime.",
+      };
+    }
+    if (
+      action === "set_fast_mode" &&
+      !optionIncludesBoolean(capability.options, patch.fastMode as boolean | null | undefined)
+    ) {
+      return {
+        ok: false,
+        code: "unsupported_control_option",
+        message: "The selected fast mode is not available for this session runtime.",
+      };
+    }
+    if (
+      action === "set_mode" &&
+      !optionIncludesString(
+        capability.options,
+        patch.fastMode === true ? "fast" : patch.fastMode === false ? "normal" : undefined,
+      )
+    ) {
+      return {
+        ok: false,
+        code: "unsupported_control_option",
+        message: "The selected mode is not available for this session runtime.",
+      };
+    }
+    return { ok: true };
+  }
+
+  function resolveActiveRunAgentSessionId(sessionKey: string, activeRun: SessionStatusActiveRun) {
+    const liveSessionId = resolveActiveAgentHarnessRunSessionId(sessionKey);
+    if (liveSessionId) {
+      return liveSessionId;
+    }
+    if (activeRun.agentSessionId) {
+      return activeRun.agentSessionId;
+    }
+    const { entry } = loadSessionStoreEntryForKey(sessionKey);
+    return normalizeStatusString(entry?.sessionId);
+  }
+
+  async function cancelCurrentSessionRun(
+    res: http.ServerResponse,
+    userId: string,
+    sessionKey: string,
+    capabilities: ReturnType<typeof sessionControlCapabilitiesForSession>,
+  ) {
+    const activeRun = activeSessionRuns.get(normalizeSessionKey(sessionKey)) ?? null;
+    if (!activeRun) {
+      sendSessionControlJson(res, 200, {
+        ok: false,
+        sessionKey,
+        action: "cancel_current_run",
+        code: "no_active_run",
+        message: "No active run is currently cancellable for this session.",
+        capabilities,
+      });
+      return;
+    }
+    const agentSessionId = resolveActiveRunAgentSessionId(sessionKey, activeRun);
+    if (!agentSessionId) {
+      rejectUnsupportedSessionControl(
+        res,
+        sessionKey,
+        "cancel_current_run",
+        "unsupported",
+        "The current Clawline provider dispatch path does not expose a per-session abort seam.",
+        capabilities,
+      );
+      return;
+    }
+    const aborted = abortAgentHarnessRun(agentSessionId);
+    if (!aborted) {
+      rejectUnsupportedSessionControl(
+        res,
+        sessionKey,
+        "cancel_current_run",
+        "unsupported",
+        "The active run is not registered with the provider abort seam.",
+        capabilities,
+      );
+      return;
+    }
+    activeRun.cancelRequested = true;
+    activeSessionRuns.delete(normalizeSessionKey(sessionKey));
+    sendSessionControlJson(res, 200, {
+      ok: true,
+      sessionKey,
+      action: "cancel_current_run",
+      status: await buildSessionStatusPayload(userId, sessionKey),
+    });
+  }
+
+  function controlString(body: ClientPayload, key: string): string | null | undefined {
+    if (!(key in body)) {
+      return undefined;
+    }
+    const value = body[key];
+    if (value === null) {
+      return null;
+    }
+    return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+  }
+
+  function pickControlString(
+    body: ClientPayload,
+    keys: readonly string[],
+  ): string | null | undefined {
+    for (const key of keys) {
+      if (key in body) {
+        return controlString(body, key);
+      }
+    }
+    return undefined;
+  }
+
+  function controlBoolean(body: ClientPayload, key: string): boolean | null | undefined {
+    if (!(key in body)) {
+      return undefined;
+    }
+    const value = body[key];
+    if (value === null) {
+      return null;
+    }
+    if (typeof value === "boolean") {
+      return value;
+    }
+    return undefined;
+  }
+
+  function resolveSessionControlPatch(body: ClientPayload, action: string) {
+    switch (action) {
+      case "set_model":
+        return {
+          model: typeof body.model === "string" ? body.model.trim() || undefined : undefined,
+        };
+      case "set_thinking":
+        return { thinkingLevel: controlString(body, "thinkingLevel") };
+      case "set_reasoning":
+        return {
+          reasoningLevel: pickControlString(body, ["reasoningLevel", "level"]),
+        };
+      case "set_fast_mode": {
+        const fastMode = controlBoolean(body, "fastMode");
+        if (fastMode !== undefined) {
+          return { fastMode };
+        }
+        const enabled = controlBoolean(body, "enabled");
+        return { fastMode: enabled };
+      }
+      case "set_mode": {
+        const mode = controlString(body, "mode")?.toLowerCase();
+        if (mode === "fast") {
+          return { fastMode: true };
+        }
+        if (mode === "normal") {
+          return { fastMode: false };
+        }
+        return { fastMode: undefined };
+      }
+      case "set_verbosity":
+        return {
+          verboseLevel: pickControlString(body, ["verbosity", "verboseLevel"]),
+        };
+      default:
+        return null;
+    }
+  }
+
+  async function applySessionControlPatch(sessionKey: string, patch: Record<string, unknown>) {
+    let result:
+      | Awaited<ReturnType<typeof applySessionsPatchToStore>>
+      | { ok: false; error: { code: string; message: string } } = {
+      ok: false,
+      error: { code: "invalid_request", message: "No mutation was requested" },
+    };
+    await updateSessionStore(sessionStorePath, async (store) => {
+      const resolved = resolveSessionStoreEntry({ store, sessionKey });
+      result = await applySessionsPatchToStore({
+        cfg: openClawCfg,
+        store,
+        storeKey: resolved.normalizedKey,
+        patch: {
+          key: resolved.normalizedKey,
+          ...patch,
+        },
+        loadGatewayModelCatalog: () => loadModelCatalog({ config: openClawCfg }),
+      });
+    });
+    return result;
+  }
+
+  async function applyCodexFastControlPatch(
+    sessionKey: string,
+    patch: Record<string, unknown>,
+    codexFastControl: CodexFastControlState | null,
+  ): Promise<
+    | { ok: true; codexFastControl: CodexFastControlState }
+    | { ok: false; error: { code: string; message: string } }
+  > {
+    const fastMode =
+      typeof patch.fastMode === "boolean"
+        ? patch.fastMode
+        : patch.mode === "fast"
+          ? true
+          : patch.mode === "normal"
+            ? false
+            : undefined;
+    if (typeof fastMode !== "boolean") {
+      return {
+        ok: false,
+        error: { code: "invalid_control_payload", message: "Invalid session control payload" },
+      };
+    }
+    const sessionFile =
+      codexFastControl?.sessionFile ?? resolveSessionControlSessionFile(sessionKey);
+    if (!sessionFile) {
+      return {
+        ok: false,
+        error: {
+          code: "codex_thread_not_attached",
+          message: "No Codex thread is attached to this OpenClaw session yet.",
+        },
+      };
+    }
+    try {
+      await setCodexAppServerFastMode({ sessionFile, enabled: fastMode });
+      return { ok: true, codexFastControl: { supported: true, enabled: fastMode, sessionFile } };
+    } catch (err) {
+      return {
+        ok: false,
+        error: {
+          code: "codex_thread_not_attached",
+          message: err instanceof Error ? err.message : "Codex fast mode control failed.",
+        },
+      };
+    }
   }
 
   async function handleSessionControlRequest(req: http.IncomingMessage, res: http.ServerResponse) {
@@ -5133,20 +6484,100 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     const supportedActions = new Set([
       "cancel_current_run",
       "set_model",
+      "set_thinking",
       "set_reasoning",
+      "set_fast_mode",
       "set_mode",
       "set_verbosity",
     ]);
     if (!supportedActions.has(action)) {
       throw new HttpError(400, "invalid_action", "Unsupported session control action");
     }
+    const runtimeContext = resolveSessionControlRuntimeContext(sessionKey);
+    const codexFastControl = await resolveCodexFastControlState(sessionKey, runtimeContext);
+    const capabilities = sessionControlCapabilitiesForSession(
+      auth.userId,
+      sessionKey,
+      runtimeContext,
+      codexFastControl,
+    );
+    const actionCapability = capabilityForAction(capabilities, action);
+    if (actionCapability && !actionCapability.supported) {
+      rejectUnsupportedSessionControl(
+        res,
+        sessionKey,
+        action,
+        actionCapability.reason ?? "unsupported",
+        "This session control action is not supported for the current session runtime.",
+        capabilities,
+      );
+      return;
+    }
+    if (capabilities.readOnlyStatus && action !== "set_model") {
+      rejectUnsupportedSessionControl(
+        res,
+        sessionKey,
+        action,
+        "unsupported",
+        "This session is read-only from the provider control plane.",
+        capabilities,
+      );
+      return;
+    }
+    if (action === "cancel_current_run") {
+      await cancelCurrentSessionRun(res, auth.userId, sessionKey, capabilities);
+      return;
+    }
+    const patch = resolveSessionControlPatch(body, action);
+    if (!patch || Object.values(patch).some((value) => value === undefined)) {
+      throw new HttpError(400, "invalid_control_payload", "Invalid session control payload");
+    }
+    if (actionCapability) {
+      const validation = await validateSessionControlPatch(
+        sessionKey,
+        action,
+        patch,
+        runtimeContext,
+        actionCapability,
+      );
+      if (!validation.ok) {
+        rejectUnsupportedSessionControl(
+          res,
+          sessionKey,
+          action,
+          validation.code,
+          validation.message,
+          capabilities,
+        );
+        return;
+      }
+    }
+    const result =
+      isCodexSessionControlRuntime(runtimeContext.runtime) &&
+      (action === "set_fast_mode" || action === "set_mode")
+        ? await applyCodexFastControlPatch(sessionKey, patch, codexFastControl)
+        : await applySessionControlPatch(sessionKey, patch);
+    if (!result.ok) {
+      sendSessionControlJson(res, 200, {
+        ok: false,
+        sessionKey,
+        action,
+        code: result.error.code,
+        message: result.error.message,
+        capabilities,
+      });
+      return;
+    }
     sendSessionControlJson(res, 200, {
-      ok: false,
+      ok: true,
       sessionKey,
       action,
-      code: "unsupported",
-      message: "This provider build exposes read-only session status for this action.",
-      capabilities: sessionControlCapabilities(),
+      status: await buildSessionStatusPayload(
+        auth.userId,
+        sessionKey,
+        "codexFastControl" in result ? result.codexFastControl : null,
+      ),
+      capabilities,
     });
   }
 
@@ -6653,6 +8084,184 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     });
   }
 
+  function broadcastAgentProgressToSessionKey(sessionKey: string, payload: AgentProgressPayload) {
+    const normalizedKey = sessionKey.toLowerCase();
+    let matchedTargets = 0;
+    for (const target of sessionsByDevice.values()) {
+      if (target.revoked || isDenylisted(target.deviceId)) {
+        continue;
+      }
+      if (!target.clientFeatures.has(CLIENT_FEATURE_LIVE_AGENT_PROGRESS_V1)) {
+        continue;
+      }
+      const keys = resolveSubscribedSessionKeys(target);
+      if (!keys.some((key) => key.toLowerCase() === normalizedKey)) {
+        continue;
+      }
+      matchedTargets += 1;
+      void sendJson(target.socket, payload);
+    }
+    logger.info?.("[clawline] agent_progress_broadcast_result", {
+      sessionKey,
+      runId: payload.runId,
+      messageId: payload.messageId,
+      seq: payload.seq,
+      state: payload.state,
+      kind: payload.event.kind,
+      matchedTargets,
+    });
+  }
+
+  function createAgentProgressEmitter(params: {
+    sessionKey: string;
+    messageId: string;
+    getActiveRun: () => SessionStatusActiveRun | null;
+  }) {
+    let seq = 0;
+    const emit = (
+      state: AgentProgressPayload["state"],
+      input: AgentProgressItem,
+    ): AgentProgressPayload | null => {
+      const activeRun = params.getActiveRun();
+      if (!activeRun) {
+        return null;
+      }
+      const event = projectAgentProgressEvent(input);
+      if (!event) {
+        return null;
+      }
+      const payload: AgentProgressPayload = {
+        type: "agent_progress",
+        version: 1,
+        sessionKey: params.sessionKey,
+        runId: activeRun.runId,
+        messageId: params.messageId,
+        seq: ++seq,
+        timestamp: Date.now(),
+        state,
+        event,
+      };
+      broadcastAgentProgressToSessionKey(params.sessionKey, payload);
+      return payload;
+    };
+
+    return {
+      emitRunning: (input: AgentProgressItem) => emit("running", input),
+      emitDone: () =>
+        emit("final", {
+          kind: "run",
+          phase: "final",
+          status: "final",
+          title: "Agent run ended",
+        }),
+      emitError: () =>
+        emit("error", {
+          kind: "run",
+          phase: "error",
+          status: "error",
+          title: "Agent run failed",
+        }),
+      replyOptions: {
+        onToolStart: async (payload: {
+          name?: string;
+          phase?: string;
+          detailMode?: "explain" | "raw";
+        }) => {
+          emit("running", {
+            kind: "tool",
+            phase: payload.phase,
+            name: payload.name,
+            title: payload.name ? `Using ${payload.name}` : "Using tool",
+          });
+        },
+        onItemEvent: async (payload: {
+          kind?: string;
+          title?: string;
+          name?: string;
+          phase?: string;
+          status?: string;
+          summary?: string;
+          progressText?: string;
+        }) => {
+          emit("running", {
+            kind: payload.kind ?? "item",
+            phase: payload.phase,
+            status: payload.status,
+            title: payload.title,
+            name: payload.name,
+            summary: payload.summary,
+            progressText: payload.progressText,
+          });
+        },
+        onPlanUpdate: async (payload: { phase?: string; title?: string; explanation?: string }) => {
+          emit("running", {
+            kind: "plan",
+            phase: payload.phase,
+            title: payload.title ?? "Plan updated",
+            summary: payload.explanation,
+          });
+        },
+        onApprovalEvent: async (payload: {
+          phase?: string;
+          kind?: string;
+          status?: string;
+          title?: string;
+        }) => {
+          emit("running", {
+            kind: "approval",
+            phase: payload.phase,
+            status: payload.status,
+            title: payload.title ?? "Approval requested",
+            name: payload.kind,
+          });
+        },
+        onCommandOutput: async (payload: {
+          phase?: string;
+          title?: string;
+          name?: string;
+          status?: string;
+        }) => {
+          emit("running", {
+            kind: "command-output",
+            phase: payload.phase,
+            status: payload.status,
+            title: payload.title ?? "Command output",
+            name: payload.name,
+          });
+        },
+        onPatchSummary: async (payload: {
+          phase?: string;
+          title?: string;
+          name?: string;
+          summary?: string;
+        }) => {
+          emit("running", {
+            kind: "patch",
+            phase: payload.phase,
+            title: payload.title ?? "Patch updated",
+            name: payload.name,
+            summary: payload.summary,
+          });
+        },
+        onCompactionStart: async () => {
+          emit("running", {
+            kind: "compaction",
+            phase: "start",
+            title: "Compacting context",
+          });
+        },
+        onCompactionEnd: async () => {
+          emit("running", {
+            kind: "compaction",
+            phase: "end",
+            status: "done",
+            title: "Context compaction complete",
+          });
+        },
+      },
+    };
+  }
+
   async function appendEvent(
     event: ServerMessage,
     userId: string,
@@ -6705,7 +8314,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   }
 
   async function persistAssistantMessage(
-    session: Session,
     targetUserId: string,
     content: string,
     sessionKey: string,
@@ -6824,6 +8432,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       attachments: [] as NormalizedAttachment[],
       assetIds: [] as string[],
     };
+    let outboundMediaFailed = false;
     if (rawAttachments.length > 0) {
       try {
         outboundAttachments = await materializeOutboundAttachments({
@@ -6833,15 +8442,21 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         });
       } catch (err) {
         logger.warn?.(`[clawline] outbound_attachment_materialize_failed: ${formatError(err)}`);
+        if (err instanceof InteractiveHTMLAttachmentError) {
+          throw err;
+        }
       }
     } else if (mediaUrl) {
       try {
         outboundAttachments = await materializeOutboundMediaUrls({
           mediaUrls: [mediaUrl],
+          agentId: resolveAgentIdFromSessionKey(normalizedResolvedSessionKey),
           ownerUserId: target.userId,
           uploaderDeviceId: target.kind === "device" ? target.deviceId : "server",
         });
+        outboundMediaFailed = outboundAttachments.attachments.length === 0;
       } catch (err) {
+        outboundMediaFailed = true;
         logger.warn?.(`[clawline] outbound_media_attachment_failed: ${formatError(err)}`);
       }
     }
@@ -6857,7 +8472,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       id: generateServerMessageId(),
       role: "assistant",
       sender: resolveAssistantSenderName(normalizedResolvedSessionKey),
-      content: text,
+      content: outboundMediaFailed ? withMediaFailureIndicator(text) : text,
       timestamp: nowMs(),
       streaming: false,
       sessionKey: normalizedResolvedSessionKey,
@@ -7303,6 +8918,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
           // Track activity state for typing indicator
           let activitySignaled = false;
+          let activeRunForProgress: SessionStatusActiveRun | null = null;
           const sendActivitySignal = async (isActive: boolean) => {
             logger.info?.("[clawline] activity_signal", {
               isActive,
@@ -7319,6 +8935,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               },
             }).catch(() => {});
           };
+          const agentProgress = createAgentProgressEmitter({
+            sessionKey: resolvedSessionKey,
+            messageId,
+            getActiveRun: () => activeRunForProgress,
+          });
 
           markProcessStage("create_reply_dispatcher");
           const { dispatcher, replyOptions, markDispatchIdle } = createReplyDispatcherWithTyping({
@@ -7346,25 +8967,28 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
                   ? [replyPayload.mediaUrl]
                   : [];
               let attachments: NormalizedAttachment[] = [];
-              const trimmedText = replyPayload.text?.trim();
+              let mediaFailed = false;
               if (mediaUrls.length > 0) {
                 try {
                   const materialized = await materializeOutboundMediaUrls({
                     mediaUrls,
+                    agentId: route.agentId,
                     ownerUserId: targetUserId,
                     uploaderDeviceId: session.deviceId,
                   });
                   attachments = materialized.attachments;
+                  mediaFailed = attachments.length === 0;
                 } catch (err) {
+                  mediaFailed = true;
                   logger.warn?.(`[clawline] reply_media_attachment_failed: ${formatError(err)}`);
                 }
               }
-              const assistantText =
-                trimmedText && trimmedText.length > 0
-                  ? trimmedText
-                  : attachments.length > 0
-                    ? ""
-                    : buildAssistantTextFromPayload(replyPayload, fallbackText);
+              const assistantText = buildAssistantTextFromMediaOutcome({
+                payload: replyPayload,
+                fallback: fallbackText,
+                attachments,
+                mediaFailed,
+              });
               if (assistantText === null) {
                 return;
               }
@@ -7372,7 +8996,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
                 return;
               }
               const assistantEvent = await persistAssistantMessage(
-                session,
                 targetUserId,
                 assistantText,
                 route.sessionKey,
@@ -7423,11 +9046,17 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               runId: event.id,
               messageId,
               sessionKey: resolvedSessionKey,
+              agentSessionId: normalizeStatusString(
+                loadSessionStoreEntryForKey(resolvedSessionKey).entry?.sessionId,
+              ),
               startedAt: Date.now(),
               provider: null,
               model: null,
               thinkingLevel: null,
+              fastMode: null,
+              cancelRequested: false,
             };
+            activeRunForProgress = activeRun;
             activeSessionRuns.set(normalizeSessionKey(resolvedSessionKey), activeRun);
 
             let queuedFinal = false;
@@ -7452,15 +9081,24 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
                     dispatcher,
                     replyOptions: {
                       ...replyOptions,
+                      ...agentProgress.replyOptions,
                       images: inboundImages.length > 0 ? inboundImages : undefined,
                       onModelSelected: (ctx) => {
                         prefixContext.provider = ctx.provider;
                         prefixContext.model = extractClawlineShortModelName(ctx.model);
                         prefixContext.modelFull = `${ctx.provider}/${ctx.model}`;
                         prefixContext.thinkingLevel = ctx.thinkLevel ?? "off";
+                        prefixContext.fastMode = ctx.fastMode;
                         activeRun.provider = ctx.provider;
                         activeRun.model = ctx.model;
                         activeRun.thinkingLevel = ctx.thinkLevel ?? "off";
+                        activeRun.fastMode = ctx.fastMode ?? null;
+                        rememberSessionRuntimeStatus(resolvedSessionKey, {
+                          provider: ctx.provider,
+                          model: ctx.model,
+                          thinkingLevel: ctx.thinkLevel ?? "off",
+                          fastMode: ctx.fastMode ?? null,
+                        });
                       },
                     },
                     replyResolver: options.replyResolver,
@@ -7505,6 +9143,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               void sendActivitySignal(false);
             }
             if (markMessageFailedIfDeviceRevoked(session.deviceId, messageId)) {
+              activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
+              activeRunForProgress = null;
               return;
             }
 
@@ -7531,6 +9171,17 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             });
 
             if (!wasDelivered && !wasQueued) {
+              if (activeRun.cancelRequested) {
+                updateMessageStreamingStmt.run(
+                  MessageStreamingState.Finalized,
+                  session.deviceId,
+                  messageId,
+                );
+                agentProgress.emitDone();
+                activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
+                activeRunForProgress = null;
+                return;
+              }
               logger.warn?.("[clawline] agent_run_no_delivery", {
                 messageId,
                 sessionId: session.sessionId,
@@ -7558,7 +9209,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
                 deviceId: session.deviceId,
                 errorSent,
               });
+              agentProgress.emitError();
               activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
+              activeRunForProgress = null;
               return;
             }
 
@@ -7568,7 +9221,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               session.deviceId,
               messageId,
             );
+            agentProgress.emitDone();
             activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
+            activeRunForProgress = null;
           };
           markProcessStage("dispatch_agent_run");
           await runAgentDispatch();
@@ -7684,6 +9339,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       }
       if (streamSuffix === "global" && !session.isAdmin) {
         throw new ClientMessageError("forbidden", "Admin channel requires admin access");
+      }
+
+      if (await handleDeviceApprovalCallback(session, sourceMessageId, action, dataValue)) {
+        return;
       }
 
       const callbackEnvelope = {
@@ -7812,6 +9471,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
           // Track activity state for typing indicator
           let activitySignaled = false;
+          let activeRunForProgress: SessionStatusActiveRun | null = null;
           const sendActivitySignal = async (isActive: boolean) => {
             logger.info?.("[clawline] activity_signal", {
               isActive,
@@ -7828,6 +9488,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               },
             }).catch(() => {});
           };
+          const agentProgress = createAgentProgressEmitter({
+            sessionKey: resolvedSessionKey,
+            messageId: clientId,
+            getActiveRun: () => activeRunForProgress,
+          });
 
           const { dispatcher, replyOptions, markDispatchIdle } = createReplyDispatcherWithTyping({
             responsePrefix: resolveEffectiveMessagesConfig(openClawCfg, route.agentId)
@@ -7856,25 +9521,28 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
                   ? [replyPayload.mediaUrl]
                   : [];
               let replyAttachments: NormalizedAttachment[] = [];
-              const trimmedText = replyPayload.text?.trim();
+              let mediaFailed = false;
               if (mediaUrls.length > 0) {
                 try {
                   const materialized = await materializeOutboundMediaUrls({
                     mediaUrls,
+                    agentId: route.agentId,
                     ownerUserId: targetUserId,
                     uploaderDeviceId: session.deviceId,
                   });
                   replyAttachments = materialized.attachments;
+                  mediaFailed = replyAttachments.length === 0;
                 } catch (err) {
+                  mediaFailed = true;
                   logger.warn?.(`[clawline] reply_media_attachment_failed: ${formatError(err)}`);
                 }
               }
-              const assistantText =
-                trimmedText && trimmedText.length > 0
-                  ? trimmedText
-                  : replyAttachments.length > 0
-                    ? ""
-                    : buildAssistantTextFromPayload(replyPayload, fallbackText);
+              const assistantText = buildAssistantTextFromMediaOutcome({
+                payload: replyPayload,
+                fallback: fallbackText,
+                attachments: replyAttachments,
+                mediaFailed,
+              });
               if (assistantText === null) {
                 return;
               }
@@ -7882,7 +9550,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
                 return;
               }
               const assistantEvent = await persistAssistantMessage(
-                session,
                 targetUserId,
                 assistantText,
                 route.sessionKey,
@@ -7934,11 +9601,17 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               runId: event.id,
               messageId: clientId,
               sessionKey: resolvedSessionKey,
+              agentSessionId: normalizeStatusString(
+                loadSessionStoreEntryForKey(resolvedSessionKey).entry?.sessionId,
+              ),
               startedAt: Date.now(),
               provider: null,
               model: null,
               thinkingLevel: null,
+              fastMode: null,
+              cancelRequested: false,
             };
+            activeRunForProgress = activeRun;
             activeSessionRuns.set(normalizeSessionKey(resolvedSessionKey), activeRun);
 
             let queuedFinal = false;
@@ -7965,15 +9638,24 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
                     dispatcher,
                     replyOptions: {
                       ...replyOptions,
+                      ...agentProgress.replyOptions,
                       images: inboundImages.length > 0 ? inboundImages : undefined,
                       onModelSelected: (ctx) => {
                         prefixContext.provider = ctx.provider;
                         prefixContext.model = extractClawlineShortModelName(ctx.model);
                         prefixContext.modelFull = `${ctx.provider}/${ctx.model}`;
                         prefixContext.thinkingLevel = ctx.thinkLevel ?? "off";
+                        prefixContext.fastMode = ctx.fastMode;
                         activeRun.provider = ctx.provider;
                         activeRun.model = ctx.model;
                         activeRun.thinkingLevel = ctx.thinkLevel ?? "off";
+                        activeRun.fastMode = ctx.fastMode ?? null;
+                        rememberSessionRuntimeStatus(resolvedSessionKey, {
+                          provider: ctx.provider,
+                          model: ctx.model,
+                          thinkingLevel: ctx.thinkLevel ?? "off",
+                          fastMode: ctx.fastMode ?? null,
+                        });
                       },
                     },
                     replyResolver: options.replyResolver,
@@ -8024,6 +9706,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               void sendActivitySignal(false);
             }
             if (markMessageFailedIfDeviceRevoked(session.deviceId, clientId)) {
+              activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
+              activeRunForProgress = null;
               return;
             }
 
@@ -8048,6 +9732,17 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             });
 
             if (!wasDelivered && !wasQueued) {
+              if (activeRun.cancelRequested) {
+                updateMessageStreamingStmt.run(
+                  MessageStreamingState.Finalized,
+                  session.deviceId,
+                  clientId,
+                );
+                agentProgress.emitDone();
+                activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
+                activeRunForProgress = null;
+                return;
+              }
               updateMessageStreamingStmt.run(
                 MessageStreamingState.Failed,
                 session.deviceId,
@@ -8059,7 +9754,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
                 message: "Unable to deliver reply",
                 messageId: clientId,
               }).catch(() => {});
+              agentProgress.emitError();
               activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
+              activeRunForProgress = null;
               return;
             }
 
@@ -8068,7 +9765,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
               session.deviceId,
               clientId,
             );
+            agentProgress.emitDone();
             activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
+            activeRunForProgress = null;
           };
           await runAgentDispatch();
           runAgentDispatch = null;
@@ -8456,7 +10155,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             return;
           }
           if (state.paneId && state.tmuxBackend) {
-            void resizeTmuxPane(state.paneId, cols, rows, state.tmuxBackend, state.destination);
+            void resizeTmuxPane(state.paneId, cols, rows, state.tmuxBackend);
           }
         } else {
           await sendJson(ws, { type: "terminal_error", message: "Invalid terminal resize" });
@@ -8483,7 +10182,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       }
       case "terminal_close": {
         if (state.tmuxSessionName && state.tmuxBackend) {
-          void killTmuxSession(state.tmuxSessionName, state.tmuxBackend, state.destination);
+          void killTmuxSession(state.tmuxSessionName, state.tmuxBackend);
         }
         try {
           state.pty.kill();
@@ -8590,7 +10289,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         destination: dbRecord.destination,
         ...(dbRecord.legacyGlobalTmuxFallback ? { legacyGlobalTmuxFallback: true } : {}),
       };
-      await rememberTerminalSession(hydrated);
+      rememberTerminalSession(hydrated);
       record = hydrated;
     }
     if (!record) {
@@ -8617,7 +10316,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       logger.info?.("[clawline:terminal] terminal_auth_start", {
         terminalSessionId,
         tmuxSessionName: record.tmuxSessionName,
-        destinationAddress: record.destination?.address ?? null,
         userId: entry.userId,
         deviceId,
         cols,
@@ -8626,18 +10324,14 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       });
       let paneId: string | null = null;
       if (tmuxSessionName) {
-        paneId = await resolveTmuxPaneId(tmuxSessionName, tmuxBackend, record.destination);
+        paneId = await resolveTmuxPaneId(tmuxSessionName, tmuxBackend);
       }
       if (tmuxSessionName && !paneId) {
         // If the session was referenced by a bubble but the tmux session hasn't been created yet,
         // create it on-demand so auth succeeds.
-        const ensured = await ensureTmuxSessionExists(
-          tmuxSessionName,
-          tmuxBackend,
-          record.destination,
-        );
+        const ensured = await ensureTmuxSessionExists(tmuxSessionName, tmuxBackend);
         if (ensured) {
-          paneId = await resolveTmuxPaneId(tmuxSessionName, tmuxBackend, record.destination);
+          paneId = await resolveTmuxPaneId(tmuxSessionName, tmuxBackend);
         }
       }
       if (tmuxSessionName && !paneId) {
@@ -8651,7 +10345,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       }
 
       record.lastSeenAt = nowMs();
-      await persistTerminalSessionsToDisk();
       await sendJson(ws, {
         type: "terminal_ready",
         terminalSessionId,
@@ -8668,7 +10361,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           paneId,
           Math.min(backfillLines, 5000),
           tmuxBackend,
-          record.destination,
         );
         if (backfill.length > 0 && ws.readyState === WebSocket.OPEN) {
           // Chunk to avoid giant frames.
@@ -8703,7 +10395,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       logger.info?.("[clawline:terminal] terminal_auth_ready", {
         terminalSessionId,
         tmuxSessionName: record.tmuxSessionName,
-        destinationAddress: record.destination?.address ?? null,
         paneId,
       });
 
@@ -8748,7 +10439,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   async function resolveTmuxPaneId(
     tmuxSessionName: string,
     tmuxBackend: TerminalTmuxBackend,
-    destination?: TerminalDestinationSnapshot,
   ): Promise<string | null> {
     try {
       const { stdout } = await tmuxBackend.execTmux(
@@ -8760,7 +10450,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     } catch (err) {
       logger.warn?.("[clawline:terminal] tmux_resolve_pane_failed", {
         tmuxSessionName,
-        destinationAddress: destination?.address ?? null,
         error: formatError(err),
       });
       return null;
@@ -8771,7 +10460,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     paneId: string,
     backfillLines: number,
     tmuxBackend: TerminalTmuxBackend,
-    destination?: TerminalDestinationSnapshot,
   ): Promise<Buffer> {
     if (backfillLines <= 0) {
       return Buffer.alloc(0);
@@ -8786,7 +10474,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       logger.warn?.("[clawline:terminal] tmux_capture_backfill_failed", {
         paneId,
         backfillLines,
-        destinationAddress: destination?.address ?? null,
         error: formatError(err),
       });
       return Buffer.alloc(0);
@@ -8796,7 +10483,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   async function ensureTmuxSessionExists(
     tmuxSessionName: string,
     tmuxBackend: TerminalTmuxBackend,
-    destination?: TerminalDestinationSnapshot,
   ): Promise<boolean> {
     const name = typeof tmuxSessionName === "string" ? tmuxSessionName.trim() : "";
     if (!name) {
@@ -8828,7 +10514,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     } catch (err) {
       logger.warn?.("[clawline:terminal] tmux_new_session_failed", {
         sessionName: name,
-        destinationAddress: destination?.address ?? null,
         error: formatError(err),
       });
       return false;
@@ -8840,19 +10525,14 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     cols: number,
     rows: number,
     tmuxBackend: TerminalTmuxBackend,
-    destination?: TerminalDestinationSnapshot,
   ) {
     try {
       await tmuxBackend.execTmux(
         ["resize-pane", "-t", paneId, "-x", String(cols), "-y", String(rows)],
-        {
-          timeout: 2_000,
-          maxBuffer: 1024 * 1024,
-        },
+        { timeout: 2_000, maxBuffer: 1024 * 1024 },
       );
     } catch (err) {
       logger.warn?.("[clawline:terminal] tmux_resize_pane_failed", {
-        destinationAddress: destination?.address ?? null,
         paneId,
         cols,
         rows,
@@ -8861,11 +10541,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
   }
 
-  async function killTmuxSession(
-    tmuxSessionName: string,
-    tmuxBackend: TerminalTmuxBackend,
-    destination?: TerminalDestinationSnapshot,
-  ) {
+  async function killTmuxSession(tmuxSessionName: string, tmuxBackend: TerminalTmuxBackend) {
     try {
       await tmuxBackend.execTmux(["kill-session", "-t", tmuxSessionName], {
         timeout: 2_000,
@@ -8873,7 +10549,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       });
     } catch (err) {
       logger.warn?.("[clawline:terminal] tmux_kill_session_failed", {
-        destinationAddress: destination?.address ?? null,
         tmuxSessionName,
         error: formatError(err),
       });
@@ -8995,14 +10670,14 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           });
           return;
         }
-        const pendingEntry: PendingEntry = {
+        const now = nowMs();
+        const { entry: pendingEntry } = await upsertPendingEntryForPairRequest({
           deviceId,
           claimedName: sanitizedClaimedName,
           deviceInfo: sanitizedInfo,
-          requestedAt: existingPendingEntry ? existingPendingEntry.requestedAt : nowMs(),
-        };
-        await upsertPendingEntry(pendingEntry);
-        await notifyGatewayOfPending(pendingEntry).catch(() => {});
+          now,
+        });
+        void notifyPendingDeviceOnce(pendingEntry);
         await sendJson(ws, { type: "pair_result", success: false, reason: "pair_pending" });
         ws.close();
         return;
@@ -9035,31 +10710,19 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       return;
     }
     const now = nowMs();
-    const pendingEntry: PendingEntry = {
+    const { entry: pendingEntry } = await upsertPendingEntryForPairRequest({
       deviceId,
       claimedName: sanitizedClaimedName,
       deviceInfo: sanitizedInfo,
-      requestedAt: existingPendingEntry ? existingPendingEntry.requestedAt : now,
-    };
+      now,
+    });
     logger.info?.(
-      `[clawline:http] pair_request_upsert_pending ${describePairingEntry(pendingEntry)} pendingCount=${pendingFile.entries.length + (existingPendingEntry ? 0 : 1)}`,
+      `[clawline:http] pair_request_upsert_pending ${describePairingEntry(pendingEntry)} pendingCount=${pendingCount}`,
     );
-    await upsertPendingEntry(pendingEntry);
     logger.info?.(
       `[clawline:http] pair_request_pending_persisted ${describePairingEntry(pendingEntry)} pendingEntries=${pendingFile.entries.length}`,
     );
-    notifyGatewayOfPending(pendingEntry)
-      .then(() =>
-        logger.info?.(
-          `[clawline:http] pair_request_pending_notified ${describePairingEntry(pendingEntry)}`,
-        ),
-      )
-      .catch((err) =>
-        logger.warn?.("[clawline:http] pair_request_pending_notify_failed", {
-          deviceId,
-          error: err.message,
-        }),
-      );
+    void notifyPendingDeviceOnce(pendingEntry);
     const existingSocket = pendingSockets.get(deviceId);
     if (existingSocket) {
       existingSocket.socket.close(1000);

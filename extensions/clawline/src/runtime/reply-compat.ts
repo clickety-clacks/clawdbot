@@ -5,6 +5,7 @@ export type ClawlineResponsePrefixContext = {
   modelFull?: string;
   provider?: string;
   thinkingLevel?: string;
+  fastMode?: boolean;
   identityName?: string;
 };
 

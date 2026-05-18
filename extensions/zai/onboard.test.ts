@@ -1,16 +1,14 @@
 import { resolveAgentModelPrimaryValue } from "openclaw/plugin-sdk/provider-onboard";
+import { expectProviderOnboardPreservesPrimary } from "openclaw/plugin-sdk/provider-test-contracts";
 import { describe, expect, it } from "vitest";
-import { expectProviderOnboardPreservesPrimary } from "../../test/helpers/plugins/provider-onboard.js";
 import { ZAI_CODING_CN_BASE_URL, ZAI_GLOBAL_BASE_URL } from "./model-definitions.js";
 import { applyZaiConfig, applyZaiProviderConfig } from "./onboard.js";
 
 describe("zai onboard", () => {
   it("adds zai provider with correct settings", () => {
     const cfg = applyZaiConfig({});
-    expect(cfg.models?.providers?.zai).toMatchObject({
-      baseUrl: ZAI_GLOBAL_BASE_URL,
-      api: "openai-completions",
-    });
+    expect(cfg.models?.providers?.zai?.baseUrl).toBe(ZAI_GLOBAL_BASE_URL);
+    expect(cfg.models?.providers?.zai?.api).toBe("openai-completions");
     const ids = cfg.models?.providers?.zai?.models?.map((m) => m.id);
     expect(ids).toContain("glm-5");
     expect(ids).toContain("glm-5-turbo");

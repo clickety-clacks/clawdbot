@@ -3,9 +3,13 @@ import type { AuthHealthSummary } from "../../agents/auth-health.js";
 import type { GatewayRequestHandlerOptions } from "./types.js";
 
 const mocks = vi.hoisted(() => ({
-  loadConfig: vi.fn(() => ({})),
-  resolveOpenClawAgentDir: vi.fn(() => "/tmp/agent"),
-  ensureAuthProfileStore: vi.fn(() => ({ profiles: {} })),
+  getRuntimeConfig: vi.fn(() => ({})),
+  resolveDefaultAgentDir: vi.fn(() => "/tmp/agent"),
+  ensureAuthProfileStore: vi.fn((agentDir?: string, options?: unknown) => {
+    void agentDir;
+    void options;
+    return { profiles: {} };
+  }),
   buildAuthHealthSummary: vi.fn(
     (): AuthHealthSummary => ({ now: 0, warnAfterMs: 0, profiles: [], providers: [] }),
   ),
@@ -13,16 +17,22 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../../config/config.js", () => ({
-  loadConfig: mocks.loadConfig,
+  getRuntimeConfig: mocks.getRuntimeConfig,
 }));
 
-vi.mock("../../agents/agent-paths.js", () => ({
-  resolveOpenClawAgentDir: mocks.resolveOpenClawAgentDir,
+vi.mock("../../agents/agent-scope.js", () => ({
+  resolveDefaultAgentDir: mocks.resolveDefaultAgentDir,
 }));
 
-vi.mock("../../agents/auth-profiles.js", () => ({
-  ensureAuthProfileStore: mocks.ensureAuthProfileStore,
-}));
+vi.mock("../../agents/auth-profiles.js", async () => {
+  const actual = await vi.importActual<typeof import("../../agents/auth-profiles.js")>(
+    "../../agents/auth-profiles.js",
+  );
+  return {
+    ...actual,
+    ensureAuthProfileStore: mocks.ensureAuthProfileStore,
+  };
+});
 
 vi.mock("../../agents/auth-health.js", async () => {
   const actual = await vi.importActual<typeof import("../../agents/auth-health.js")>(
@@ -55,11 +65,18 @@ function createOptions(
     client: null,
     isWebchatConnect: () => false,
     respond,
-    context: {} as unknown,
+    context: { getRuntimeConfig: mocks.getRuntimeConfig } as unknown,
   } as unknown as GatewayRequestHandlerOptions & { respond: ReturnType<typeof vi.fn> };
 }
 
 const handler = modelsAuthStatusHandlers["models.authStatus"];
+
+function requireRecord(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Expected a non-array record");
+  }
+  return value as Record<string, unknown>;
+}
 
 function createOpenAiCodexOauthHealthSummary(): AuthHealthSummary {
   const profile = {
@@ -92,7 +109,7 @@ describe("models.authStatus", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     invalidateModelAuthStatusCache();
-    mocks.loadConfig.mockReturnValue({});
+    mocks.getRuntimeConfig.mockReturnValue({});
     mocks.ensureAuthProfileStore.mockReturnValue({ profiles: {} });
     mocks.buildAuthHealthSummary.mockReturnValue({
       now: 0,
@@ -133,7 +150,7 @@ describe("models.authStatus", () => {
     expect(mocks.buildAuthHealthSummary).toHaveBeenCalledTimes(1);
 
     const lastCall = opts2.respond.mock.calls.at(-1);
-    expect(lastCall?.[3]).toEqual(expect.objectContaining({ cached: true }));
+    expect(requireRecord(lastCall?.[3]).cached).toBe(true);
   });
 
   it("bypasses cache when params.refresh is set", async () => {
@@ -185,6 +202,55 @@ describe("models.authStatus", () => {
 
     await handler(createOptions());
     expect(mocks.loadProviderUsageSummary).not.toHaveBeenCalled();
+  });
+
+  it("scopes external CLI auth overlays to configured providers", async () => {
+    mocks.getRuntimeConfig.mockReturnValue({
+      auth: {
+        profiles: {
+          "opencode-go:default": { provider: "opencode-go", mode: "api_key" },
+        },
+      },
+      agents: {
+        defaults: {
+          model: { primary: "opencode-go/kimi-k2.6" },
+        },
+      },
+      models: {
+        providers: {
+          "opencode-go": {
+            baseUrl: "https://example.test/v1",
+            auth: "api-key",
+            models: [],
+          },
+        },
+      },
+    });
+
+    await handler(createOptions());
+
+    expect(mocks.ensureAuthProfileStore).toHaveBeenCalledTimes(1);
+    expect(mocks.ensureAuthProfileStore.mock.calls[0]?.[0]).toBe("/tmp/agent");
+    const [, options] = mocks.ensureAuthProfileStore.mock.calls[0] ?? [];
+    const externalCli = requireRecord(requireRecord(options).externalCli);
+    expect(externalCli.mode).toBe("scoped");
+    expect(externalCli.allowKeychainPrompt).toBe(false);
+    requireRecord(externalCli.config);
+    expect(externalCli.providerIds).toContain("opencode-go");
+    expect(externalCli.providerIds).not.toContain("claude-cli");
+    expect(externalCli.profileIds).toEqual(["opencode-go:default"]);
+  });
+
+  it("disables external CLI auth overlays when config has no provider signal", async () => {
+    await handler(createOptions());
+
+    expect(mocks.ensureAuthProfileStore).toHaveBeenCalledTimes(1);
+    expect(mocks.ensureAuthProfileStore.mock.calls[0]?.[0]).toBe("/tmp/agent");
+    const [, options] = mocks.ensureAuthProfileStore.mock.calls[0] ?? [];
+    const externalCli = requireRecord(requireRecord(options).externalCli);
+    expect(externalCli.mode).toBe("none");
+    expect(externalCli.allowKeychainPrompt).toBe(false);
+    requireRecord(externalCli.config);
   });
 
   it("still returns providers when usage fetch fails", async () => {
@@ -258,7 +324,7 @@ describe("models.authStatus", () => {
     // auth already satisfies it, so forwarding to buildAuthHealthSummary
     // would flag it as missing and cry wolf. Inline string is the simplest
     // "available" SecretInput for testing.
-    mocks.loadConfig.mockReturnValue({
+    mocks.getRuntimeConfig.mockReturnValue({
       models: {
         providers: {
           "openai-codex": { auth: "oauth", apiKey: "sk-xxxxx" },
@@ -278,7 +344,7 @@ describe("models.authStatus", () => {
     // through to the normal missing synthesis so the dashboard surfaces
     // the broken config instead of masking it.
     delete process.env.MODELS_AUTH_STATUS_TEST_MISSING_KEY;
-    mocks.loadConfig.mockReturnValue({
+    mocks.getRuntimeConfig.mockReturnValue({
       models: {
         providers: {
           "openai-codex": {
@@ -301,7 +367,7 @@ describe("models.authStatus", () => {
 
   it("env SecretRef pointing at a set env var is treated as env-backed", async () => {
     process.env.MODELS_AUTH_STATUS_TEST_SET_KEY = "sk-real-value";
-    mocks.loadConfig.mockReturnValue({
+    mocks.getRuntimeConfig.mockReturnValue({
       models: {
         providers: {
           "openai-codex": {
@@ -331,7 +397,7 @@ describe("models.authStatus", () => {
     // models.providers loop — otherwise a provider with resolvable apiKey
     // plus a matching auth.profiles entry re-adds itself and triggers the
     // false-missing alert we just fixed.
-    mocks.loadConfig.mockReturnValue({
+    mocks.getRuntimeConfig.mockReturnValue({
       models: {
         providers: {
           "openai-codex": { auth: "oauth", apiKey: "sk-xxxxx" },
@@ -355,7 +421,7 @@ describe("models.authStatus", () => {
     // Without normalization, expectsOAuth.has(prov.provider) fires on the
     // raw `z.ai` key but prov.provider is `zai`, so the "configured oauth
     // but no oauth profile" signal silently skipped the alias path.
-    mocks.loadConfig.mockReturnValue({
+    mocks.getRuntimeConfig.mockReturnValue({
       models: { providers: { "z.ai": { auth: "oauth" } } },
     });
     mocks.buildAuthHealthSummary.mockReturnValue({
@@ -389,7 +455,7 @@ describe("models.authStatus", () => {
   it("flags provider configured auth:oauth but with only api_key profile as missing", async () => {
     // Config says provider should use OAuth; store has only an api_key
     // credential (e.g. operator switched modes but forgot to login).
-    mocks.loadConfig.mockReturnValue({
+    mocks.getRuntimeConfig.mockReturnValue({
       models: { providers: { anthropic: { auth: "oauth" } } },
     });
     mocks.buildAuthHealthSummary.mockReturnValue({
@@ -431,7 +497,7 @@ describe("models.authStatus", () => {
     const [ok, payload, error] = opts.respond.mock.calls[0] ?? [];
     expect(ok).toBe(false);
     expect(payload).toBeUndefined();
-    expect(error).toEqual(expect.objectContaining({ code: expect.stringMatching(/unavailable/i) }));
+    expect(String(requireRecord(error).code)).toMatch(/unavailable/i);
   });
 });
 
@@ -479,6 +545,22 @@ describe("aggregateOAuthStatus", () => {
       NOW,
     );
     expect(result.status).toBe("ok");
+  });
+
+  it("uses effective OAuth profiles while keeping stale inventory visible", () => {
+    const healthy = oauth("ok", expiring + 10_000_000);
+    const stale = oauth("expired", NOW - 1);
+    const result = aggregateOAuthStatus(
+      {
+        provider: "openai-codex",
+        status: "ok",
+        effectiveProfiles: [healthy],
+        profiles: [stale, healthy],
+      },
+      NOW,
+    );
+    expect(result.status).toBe("ok");
+    expect(result.expiresAt).toBe(healthy.expiresAt);
   });
 
   it("falls back to prov.status when no OAuth profiles exist", () => {

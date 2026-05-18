@@ -2,6 +2,7 @@ import type { OpenClawConfig } from "openclaw/plugin-sdk/plugin-entry";
 import { CLAUDE_CLI_BACKEND_ID, CLAUDE_CLI_DEFAULT_ALLOWLIST_REFS } from "./cli-constants.js";
 
 const ANTHROPIC_PROVIDER_API = "anthropic-messages";
+const ANTHROPIC_API_KEY_DEFAULT_ALLOWLIST_REFS = ["anthropic/claude-haiku-4-5"] as const;
 
 function normalizeLowercaseStringOrEmpty(value: unknown): string {
   return typeof value === "string" ? value.trim().toLowerCase() : "";
@@ -140,6 +141,9 @@ function isAnthropicCacheRetentionTarget(
 }
 
 function usesClaudeCliModelSelection(config: OpenClawConfig): boolean {
+  if (config.agents?.defaults?.agentRuntime?.id === CLAUDE_CLI_BACKEND_ID) {
+    return true;
+  }
   const primary = resolveModelPrimaryValue(
     config.agents?.defaults?.model as
       | string
@@ -156,7 +160,13 @@ function usesClaudeCliModelSelection(config: OpenClawConfig): boolean {
   });
 }
 
-export function normalizeAnthropicProviderConfig<T extends { api?: string; models?: unknown[] }>(
+function toCanonicalAnthropicModelRef(ref: string): string {
+  return ref.startsWith(`${CLAUDE_CLI_BACKEND_ID}/`)
+    ? `anthropic/${ref.slice(CLAUDE_CLI_BACKEND_ID.length + 1)}`
+    : ref;
+}
+
+function normalizeAnthropicProviderConfig<T extends { api?: string; models?: unknown[] }>(
   providerConfig: T,
 ): T {
   if (
@@ -258,6 +268,19 @@ export function applyAnthropicConfigDefaults(params: {
       }
     }
 
+    const hasAnthropicApiKeyModel = Object.keys(nextModels).some((key) =>
+      isAnthropicCacheRetentionTarget(parseProviderModelRef(key, "anthropic")),
+    );
+    if (hasAnthropicApiKeyModel) {
+      for (const ref of ANTHROPIC_API_KEY_DEFAULT_ALLOWLIST_REFS) {
+        if (ref in nextModels) {
+          continue;
+        }
+        nextModels[ref] = { params: { cacheRetention: "short" } };
+        modelsMutated = true;
+      }
+    }
+
     if (modelsMutated) {
       nextDefaults.models = nextModels;
       mutated = true;
@@ -267,7 +290,8 @@ export function applyAnthropicConfigDefaults(params: {
   if (authMode === "oauth" && usesClaudeCliModelSelection(params.config)) {
     const nextModels = defaults.models ? { ...defaults.models } : {};
     let modelsMutated = false;
-    for (const ref of CLAUDE_CLI_DEFAULT_ALLOWLIST_REFS) {
+    for (const rawRef of CLAUDE_CLI_DEFAULT_ALLOWLIST_REFS) {
+      const ref = toCanonicalAnthropicModelRef(rawRef);
       if (ref in nextModels) {
         continue;
       }

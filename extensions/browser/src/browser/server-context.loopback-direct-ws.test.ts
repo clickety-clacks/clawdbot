@@ -2,13 +2,30 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { withBrowserFetchPreconnect } from "../../test-fetch.js";
 import * as cdpModule from "./cdp.js";
 import { BrowserCdpEndpointBlockedError } from "./errors.js";
-import { createBrowserRouteContext } from "./server-context.js";
-import { makeState, originalFetch } from "./server-context.remote-tab-ops.harness.js";
+import {
+  createTestBrowserRouteContext,
+  makeState,
+  originalFetch,
+} from "./server-context.remote-tab-ops.harness.js";
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
   vi.restoreAllMocks();
 });
+
+function expectFetchCalledWithManualRedirect(
+  fetchMock: ReturnType<typeof vi.fn>,
+  expectedUrl: string,
+) {
+  const call = fetchMock.mock.calls.find(([url]) => String(url) === expectedUrl);
+  if (!call) {
+    throw new Error(`Expected fetch call for ${expectedUrl}`);
+  }
+  const init = call[1] as RequestInit | undefined;
+  expect(init?.redirect).toBe("manual");
+  expect(init?.headers).toEqual({});
+  expect(init?.signal).toBeInstanceOf(AbortSignal);
+}
 
 describe("browser server-context loopback direct WebSocket profiles", () => {
   it("uses an HTTP /json/list base when opening about:blank under strict SSRF", async () => {
@@ -40,7 +57,7 @@ describe("browser server-context loopback direct WebSocket profiles", () => {
       cdpUrl: "ws://127.0.0.1:18800/devtools/browser/SESSION?token=abc",
       color: "#FF4500",
     };
-    const ctx = createBrowserRouteContext({ getState: () => state });
+    const ctx = createTestBrowserRouteContext({ getState: () => state });
     const openclaw = ctx.forProfile("openclaw");
 
     const opened = await openclaw.openTab("about:blank");
@@ -85,19 +102,19 @@ describe("browser server-context loopback direct WebSocket profiles", () => {
       cdpUrl: "ws://127.0.0.1:18800/devtools/browser/SESSION?token=abc",
       color: "#FF4500",
     };
-    const ctx = createBrowserRouteContext({ getState: () => state });
+    const ctx = createTestBrowserRouteContext({ getState: () => state });
     const openclaw = ctx.forProfile("openclaw");
 
     await openclaw.focusTab("T1");
     await openclaw.closeTab("T1");
 
-    expect(fetchMock).toHaveBeenCalledWith(
+    expectFetchCalledWithManualRedirect(
+      fetchMock,
       "http://127.0.0.1:18800/json/activate/T1?token=abc",
-      expect.any(Object),
     );
-    expect(fetchMock).toHaveBeenCalledWith(
+    expectFetchCalledWithManualRedirect(
+      fetchMock,
       "http://127.0.0.1:18800/json/close/T1?token=abc",
-      expect.any(Object),
     );
   });
 
@@ -133,7 +150,7 @@ describe("browser server-context loopback direct WebSocket profiles", () => {
       cdpUrl: "wss://127.0.0.1:18800/cdp?token=abc",
       color: "#FF4500",
     };
-    const ctx = createBrowserRouteContext({ getState: () => state });
+    const ctx = createTestBrowserRouteContext({ getState: () => state });
     const openclaw = ctx.forProfile("openclaw");
 
     const tabs = await openclaw.listTabs();
@@ -158,7 +175,7 @@ describe("browser server-context loopback direct WebSocket profiles", () => {
       cdpUrl: "ws://10.0.0.42:18800/devtools/browser/SESSION?token=abc",
       color: "#FF4500",
     };
-    const ctx = createBrowserRouteContext({ getState: () => state });
+    const ctx = createTestBrowserRouteContext({ getState: () => state });
     const openclaw = ctx.forProfile("openclaw");
 
     await expect(openclaw.listTabs()).rejects.toBeInstanceOf(BrowserCdpEndpointBlockedError);

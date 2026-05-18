@@ -137,7 +137,7 @@ vi.mock("../plugins/tools.js", () => ({
   getPluginToolMeta: () => undefined,
 }));
 
-vi.mock("@mariozechner/pi-coding-agent", () => ({
+vi.mock("@earendil-works/pi-coding-agent", () => ({
   AuthStorage: vi.fn(),
   CURRENT_SESSION_VERSION: 1,
   ModelRegistry: vi.fn(),
@@ -230,6 +230,7 @@ async function withSafeBinsExecTool(
     await withEnvAsync(
       {
         OPENCLAW_SHELL_ENV_TIMEOUT_MS: "1",
+        PATH: "/usr/bin:/bin",
         SHELL: "/bin/sh",
       },
       async () => {

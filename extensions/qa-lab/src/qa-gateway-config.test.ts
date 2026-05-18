@@ -23,6 +23,7 @@ function createQaChannelTransportParams(baseUrl = "http://127.0.0.1:43124") {
       messages: {
         groupChat: {
           mentionPatterns: ["\\b@?openclaw\\b"],
+          visibleReplies: "automatic",
         },
       },
     } satisfies QaTransportGatewayConfig,
@@ -51,7 +52,7 @@ describe("buildQaGatewayConfig", () => {
       ...createQaChannelTransportParams(),
     });
 
-    expect(getPrimaryModel(cfg.agents?.defaults?.model)).toBe("mock-openai/gpt-5.4");
+    expect(getPrimaryModel(cfg.agents?.defaults?.model)).toBe("mock-openai/gpt-5.5");
     expect(cfg.models?.providers?.["mock-openai"]?.baseUrl).toBe("http://127.0.0.1:44080/v1");
     expect(cfg.models?.providers?.["mock-openai"]?.request).toEqual({ allowPrivateNetwork: true });
     expect(cfg.models?.providers?.openai?.baseUrl).toBe("http://127.0.0.1:44080/v1");
@@ -72,12 +73,11 @@ describe("buildQaGatewayConfig", () => {
     expect(cfg.gateway?.reload?.deferralTimeoutMs).toBe(1_000);
     expect(cfg.tools?.profile).toBe("coding");
     expect(cfg.agents?.list?.[0]?.tools?.profile).toBe("coding");
-    expect(cfg.channels?.["qa-channel"]).toMatchObject({
-      enabled: true,
-      baseUrl: "http://127.0.0.1:43124",
-      pollTimeoutMs: 250,
-    });
+    expect(cfg.channels?.["qa-channel"]?.enabled).toBe(true);
+    expect(cfg.channels?.["qa-channel"]?.baseUrl).toBe("http://127.0.0.1:43124");
+    expect(cfg.channels?.["qa-channel"]?.pollTimeoutMs).toBe(250);
     expect(cfg.messages?.groupChat?.mentionPatterns).toEqual(["\\b@?openclaw\\b"]);
+    expect(cfg.messages?.groupChat?.visibleReplies).toBe("automatic");
   });
 
   it("maps provider-qualified openai and anthropic refs through the mock provider lane", () => {
@@ -88,14 +88,14 @@ describe("buildQaGatewayConfig", () => {
       providerBaseUrl: "http://127.0.0.1:44080/v1",
       workspaceDir: "/tmp/qa-workspace",
       providerMode: "mock-openai",
-      primaryModel: "openai/gpt-5.4",
+      primaryModel: "openai/gpt-5.5",
       alternateModel: "anthropic/claude-opus-4-6",
     });
 
-    expect(getPrimaryModel(cfg.agents?.defaults?.model)).toBe("openai/gpt-5.4");
+    expect(getPrimaryModel(cfg.agents?.defaults?.model)).toBe("openai/gpt-5.5");
     expect(cfg.models?.providers?.openai?.api).toBe("openai-responses");
     expect(cfg.models?.providers?.openai?.request).toEqual({ allowPrivateNetwork: true });
-    expect(cfg.models?.providers?.openai?.models.map((model) => model.id)).toContain("gpt-5.4");
+    expect(cfg.models?.providers?.openai?.models.map((model) => model.id)).toContain("gpt-5.5");
     expect(cfg.models?.providers?.anthropic?.api).toBe("anthropic-messages");
     expect(cfg.models?.providers?.anthropic?.baseUrl).toBe("http://127.0.0.1:44080");
     expect(cfg.models?.providers?.anthropic?.request).toEqual({ allowPrivateNetwork: true });
@@ -103,6 +103,22 @@ describe("buildQaGatewayConfig", () => {
       "claude-opus-4-6",
     );
     expect(cfg.plugins?.allow).toEqual(["acpx", "memory-core"]);
+  });
+
+  it("falls back to provider defaults for blank model refs", () => {
+    const cfg = buildQaGatewayConfig({
+      bind: "loopback",
+      gatewayPort: 18789,
+      gatewayToken: "token",
+      providerBaseUrl: "http://127.0.0.1:44080/v1",
+      workspaceDir: "/tmp/qa-workspace",
+      providerMode: "mock-openai",
+      primaryModel: " ",
+      alternateModel: "",
+    });
+
+    expect(getPrimaryModel(cfg.agents?.defaults?.model)).toBe("mock-openai/gpt-5.5");
+    expect(cfg.agents?.defaults?.models).toHaveProperty("mock-openai/gpt-5.5-alt");
   });
 
   it("can wire AIMock as a separate mock provider lane", () => {
@@ -113,14 +129,12 @@ describe("buildQaGatewayConfig", () => {
       providerBaseUrl: "http://127.0.0.1:45080/v1",
       workspaceDir: "/tmp/qa-workspace",
       providerMode: "aimock",
-      primaryModel: "aimock/gpt-5.4",
-      alternateModel: "aimock/gpt-5.4-alt",
+      primaryModel: "aimock/gpt-5.5",
+      alternateModel: "aimock/gpt-5.5-alt",
     });
 
-    expect(getPrimaryModel(cfg.agents?.defaults?.model)).toBe("aimock/gpt-5.4");
-    expect(cfg.agents?.defaults?.imageGenerationModel).toEqual({
-      primary: "aimock/gpt-image-1",
-    });
+    expect(getPrimaryModel(cfg.agents?.defaults?.model)).toBe("aimock/gpt-5.5");
+    expect(cfg.agents?.defaults).not.toHaveProperty("imageGenerationModel");
     expect(cfg.models?.providers?.aimock?.baseUrl).toBe("http://127.0.0.1:45080/v1");
     expect(cfg.models?.providers?.aimock?.api).toBe("openai-responses");
     expect(cfg.models?.providers?.openai?.baseUrl).toBe("http://127.0.0.1:45080/v1");
@@ -167,17 +181,17 @@ describe("buildQaGatewayConfig", () => {
       workspaceDir: "/tmp/qa-workspace",
       providerMode: "live-frontier",
       fastMode: true,
-      primaryModel: "openai/gpt-5.4",
-      alternateModel: "openai/gpt-5.4",
+      primaryModel: "openai/gpt-5.5",
+      alternateModel: "openai/gpt-5.5",
       ...createQaChannelTransportParams(),
     });
 
-    expect(getPrimaryModel(cfg.agents?.defaults?.model)).toBe("openai/gpt-5.4");
-    expect(getPrimaryModel(cfg.agents?.list?.[0]?.model)).toBe("openai/gpt-5.4");
+    expect(getPrimaryModel(cfg.agents?.defaults?.model)).toBe("openai/gpt-5.5");
+    expect(getPrimaryModel(cfg.agents?.list?.[0]?.model)).toBe("openai/gpt-5.5");
     expect(cfg.models).toBeUndefined();
     expect(cfg.plugins?.allow).toEqual(["acpx", "memory-core", "openai", "qa-channel"]);
     expect(cfg.plugins?.entries?.openai).toEqual({ enabled: true });
-    expect(cfg.agents?.defaults?.models?.["openai/gpt-5.4"]).toEqual({
+    expect(cfg.agents?.defaults?.models?.["openai/gpt-5.5"]).toEqual({
       params: { transport: "sse", openaiWsWarmup: false, fastMode: true },
     });
   });
@@ -273,16 +287,14 @@ describe("buildQaGatewayConfig", () => {
       gatewayToken: "token",
       workspaceDir: "/tmp/qa-workspace",
       providerMode: "live-frontier",
-      primaryModel: "openai/gpt-5.4",
-      alternateModel: "openai/gpt-5.4",
+      primaryModel: "openai/gpt-5.5",
+      alternateModel: "openai/gpt-5.5",
       thinkingDefault: "xhigh",
       ...createQaChannelTransportParams(),
     });
 
     expect(cfg.agents?.defaults?.thinkingDefault).toBe("xhigh");
-    expect(cfg.agents?.defaults?.models?.["openai/gpt-5.4"]?.params).toMatchObject({
-      thinking: "xhigh",
-    });
+    expect(cfg.agents?.defaults?.models?.["openai/gpt-5.5"]?.params?.thinking).toBe("xhigh");
   });
 
   it("can disable control ui for suite-only gateway children", () => {

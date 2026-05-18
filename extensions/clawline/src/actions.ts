@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
-import type { AgentToolResult } from "@mariozechner/pi-agent-core";
+import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Type } from "@sinclair/typebox";
 import BetterSqlite3 from "better-sqlite3";
 import { jsonResult } from "openclaw/plugin-sdk/agent-runtime";
@@ -14,6 +14,7 @@ import type { NormalizedAttachment } from "./runtime/domain.js";
 import { sendClawlineOutboundMessage } from "./runtime/outbound.js";
 
 const TERMINAL_SESSION_MIME = "application/vnd.clawline.terminal-session+json";
+const INTERACTIVE_HTML_MIME = "application/vnd.clawline.interactive-html+json";
 const TERMINAL_BUBBLE_CAPABILITIES = {
   interactive: true,
   supportsBinaryFrames: true,
@@ -161,20 +162,95 @@ function readNestedStringParam(value: unknown, key: string): string | undefined 
   return typeof raw === "string" && raw.trim().length > 0 ? raw.trim() : undefined;
 }
 
-function decodeBase64OrDataUrl(value: string): string {
+function isStrictBase64(input: string): boolean {
+  const compact = input.replace(/\s+/g, "");
+  if (!compact || compact.length % 4 !== 0) {
+    return false;
+  }
+  if (!/^[a-zA-Z0-9+/]*={0,2}$/.test(compact)) {
+    return false;
+  }
+  try {
+    const roundTrip = Buffer.from(compact, "base64").toString("base64");
+    const stripPadding = (value: string) => value.replace(/=+$/g, "");
+    return stripPadding(roundTrip) === stripPadding(compact);
+  } catch {
+    return false;
+  }
+}
+
+function decodeBase64OrDataUrl(value: string, errorLabel: string): string {
   const trimmed = value.trim();
+  let base64Payload = trimmed;
   if (trimmed.startsWith("data:")) {
     const commaIndex = trimmed.indexOf(",");
     if (commaIndex < 0) {
-      throw new Error("Clawline terminal bubble descriptor is not valid base64 JSON");
+      throw new Error(`${errorLabel} is not valid base64 JSON`);
     }
     const metadata = trimmed.slice(5, commaIndex);
     if (!/;base64(?:;|$)/i.test(metadata)) {
-      throw new Error("Clawline terminal bubble descriptor is not valid base64 JSON");
+      throw new Error(`${errorLabel} is not valid base64 JSON`);
     }
-    return Buffer.from(trimmed.slice(commaIndex + 1), "base64").toString("utf8");
+    base64Payload = trimmed.slice(commaIndex + 1);
   }
-  return Buffer.from(trimmed, "base64").toString("utf8");
+  if (!isStrictBase64(base64Payload)) {
+    throw new Error(`${errorLabel} is not valid base64 JSON`);
+  }
+  return Buffer.from(base64Payload.replace(/\s+/g, ""), "base64").toString("utf8");
+}
+
+function isInteractiveHTMLDescriptor(value: unknown): value is { version: unknown; html: unknown } {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function metaTags(html: string): string[] {
+  return html.match(/<meta\b[^>]*>/gi) ?? [];
+}
+
+function hasMetaAttribute(tag: string, attribute: string, value: string): boolean {
+  const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(
+    `\\b${attribute}\\s*=\\s*(?:"${escaped}"|'${escaped}'|${escaped})(?:\\s|/?>)`,
+    "i",
+  ).test(tag);
+}
+
+function hasViewportMeta(html: string): boolean {
+  return metaTags(html).some((tag) => hasMetaAttribute(tag, "name", "viewport"));
+}
+
+function hasCustomCSPMeta(html: string): boolean {
+  return metaTags(html).some((tag) =>
+    hasMetaAttribute(tag, "http-equiv", "Content-Security-Policy"),
+  );
+}
+
+function validateInteractiveHTMLAttachment(buffer: string): void {
+  let descriptor: unknown;
+  try {
+    descriptor = JSON.parse(
+      decodeBase64OrDataUrl(buffer, "Clawline interactive HTML descriptor"),
+    ) as unknown;
+  } catch {
+    throw new Error("Clawline interactive HTML descriptor is not valid base64 JSON");
+  }
+
+  if (!isInteractiveHTMLDescriptor(descriptor)) {
+    throw new Error("Clawline interactive HTML descriptor must be a JSON object");
+  }
+  if (descriptor.version !== 1) {
+    throw new Error("Clawline interactive HTML descriptor requires version 1");
+  }
+  const html = typeof descriptor.html === "string" ? descriptor.html.trim() : "";
+  if (!html) {
+    throw new Error("Clawline interactive HTML descriptor requires non-empty html");
+  }
+  if (!hasViewportMeta(html)) {
+    throw new Error("Clawline interactive HTML descriptor requires viewport meta tag");
+  }
+  if (hasCustomCSPMeta(html)) {
+    throw new Error("Clawline interactive HTML descriptor must not include custom CSP");
+  }
 }
 
 function readTerminalBubbleRequest(params: Record<string, unknown>): TerminalBubbleRequest | null {
@@ -262,7 +338,9 @@ function validateTerminalBubbleAttachment(buffer: string): void {
     terminalSession?: { name?: unknown } | null;
   };
   try {
-    descriptor = JSON.parse(decodeBase64OrDataUrl(buffer)) as {
+    descriptor = JSON.parse(
+      decodeBase64OrDataUrl(buffer, "Clawline terminal bubble descriptor"),
+    ) as {
       version?: unknown;
       terminalSessionId?: unknown;
       destination?: { address?: unknown } | null;
@@ -301,6 +379,9 @@ function resolveSendAttachmentBuffer(params: {
   if (params.mimeType !== TERMINAL_SESSION_MIME) {
     if (!explicitBuffer) {
       throw new Error("Clawline sendAttachment requires buffer (base64 or data: URL)");
+    }
+    if (params.mimeType === INTERACTIVE_HTML_MIME) {
+      validateInteractiveHTMLAttachment(explicitBuffer);
     }
     return explicitBuffer;
   }

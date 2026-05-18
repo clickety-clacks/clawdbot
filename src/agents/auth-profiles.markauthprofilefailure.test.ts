@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 vi.mock("./cli-credentials.js", () => ({
+  readClaudeCliCredentialsCached: () => null,
   readCodexCliCredentialsCached: () => null,
   readMiniMaxCliCredentialsCached: () => null,
 }));
@@ -348,8 +349,7 @@ describe("markAuthProfileFailure", () => {
     expect(stats?.failureCounts?.rate_limit).toBe(1);
     const cooldownMs = (stats?.cooldownUntil ?? 0) - now;
     // calculateAuthProfileCooldownMs(1) = 30_000 (stepped: 30s -> 1m -> 5m)
-    expect(cooldownMs).toBeLessThan(60_000);
-    expect(cooldownMs).toBeGreaterThan(0);
+    expectCooldownInRange(cooldownMs, 25_000, 35_000);
   });
 
   it("does not persist cooldown windows for OpenRouter profiles", async () => {

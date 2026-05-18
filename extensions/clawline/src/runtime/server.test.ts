@@ -11,11 +11,13 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import type { getReplyFromConfig } from "../../../../src/auto-reply/reply.js";
 import type { OpenClawConfig } from "../../../../src/config/config.js";
+import { resolvePreferredOpenClawTmpDir } from "../../../../src/infra/tmp-openclaw-dir.js";
 import { clawlineMessageActions } from "../actions.js";
 import type {
   AllowlistEntry,
   ClawlineOutboundSendResult,
   Logger,
+  PendingEntry,
   ProviderConfig,
   ProviderServer,
 } from "./domain.js";
@@ -24,11 +26,17 @@ import { enqueueSystemEvent, resetSystemEventsForTest } from "./system-events.js
 
 const gatewayCallMock = vi.fn();
 const enqueueAnnounceMock = vi.fn();
+const abortAgentHarnessRunMock = vi.fn();
+const resolveActiveAgentHarnessRunSessionIdMock = vi.fn();
+const loadModelCatalogMock = vi.fn();
 const loadSessionStoreMock = vi.fn();
 vi.mock("../runtime-api.js", async () => {
   const actual = await vi.importActual("../runtime-api.js");
   return {
     ...actual,
+    abortAgentHarnessRun: (...args: unknown[]) => abortAgentHarnessRunMock(...args),
+    resolveActiveAgentHarnessRunSessionId: (...args: unknown[]) =>
+      resolveActiveAgentHarnessRunSessionIdMock(...args),
     enqueueAnnounce: (...args: unknown[]) => enqueueAnnounceMock(...args),
     loadSessionStore: (...args: unknown[]) => {
       loadSessionStoreMock(...args);
@@ -38,6 +46,7 @@ vi.mock("../runtime-api.js", async () => {
         }
       ).loadSessionStore(...args);
     },
+    loadModelCatalog: (...args: unknown[]) => loadModelCatalogMock(...args),
   };
 });
 
@@ -66,11 +75,19 @@ const silentLogger: Logger = {
 const testReplyResolver: typeof getReplyFromConfig = async () => ({ text: "ok" });
 const withMainAlertReplyRequirement = (text: string) =>
   `${text}\n\n${MAIN_SESSION_ALERT_REPLY_TEXT}`;
+const tinyPngBytes = () =>
+  Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAwUBAQGzL2zQAAAAAElFTkSuQmCC",
+    "base64",
+  );
 
 const testOpenClawConfig = {
   agents: { default: "main", list: [{ id: "main" }] },
   bindings: [],
 } as OpenClawConfig;
+const INTERACTIVE_HTML_MIME = "application/vnd.clawline.interactive-html+json";
+const DEVICE_APPROVAL_APPROVE_ACTION = "clawline.deviceApproval.approve";
+const DEVICE_APPROVAL_DENY_ACTION = "clawline.deviceApproval.deny";
 
 type ParsedWsFrame = Record<string, unknown>;
 
@@ -143,6 +160,71 @@ exec /bin/sh -lc "$remote_cmd"
       await fs.rm(root, { recursive: true, force: true });
     },
   };
+}
+
+async function createFakeTerminalCommandBin(
+  root: string,
+  options: { failSshTargets?: string[] } = {},
+): Promise<{
+  binDir: string;
+  tmuxLogPath: string;
+  sshLogPath: string;
+}> {
+  const binDir = path.join(root, "fake-bin");
+  await fs.mkdir(binDir, { recursive: true });
+  const tmuxLogPath = path.join(root, "tmux.log");
+  const sshLogPath = path.join(root, "ssh.log");
+  const failSshTargets = options.failSshTargets ?? [];
+
+  const tmuxScript = `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "${tmuxLogPath}"
+cmd="\${1:-}"
+case "$cmd" in
+  list-panes)
+    printf '%%local-pane\\n'
+    ;;
+  capture-pane)
+    printf 'backfill\\n'
+    ;;
+  has-session|new-session|resize-pane|kill-session)
+    ;;
+  attach-session)
+    sleep 1
+    ;;
+esac
+`;
+  const sshScript = `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "${sshLogPath}"
+for arg in "$@"; do
+  case "$arg" in
+${failSshTargets.map((target) => `    ${target}) exit 255 ;;`).join("\n")}
+    __clawline_never_match__) ;;
+  esac
+done
+remote_cmd=""
+for arg in "$@"; do
+  remote_cmd="$arg"
+done
+case "$remote_cmd" in
+  *"list-panes"*)
+    printf '%%ssh-pane\\n'
+    ;;
+  *"capture-pane"*)
+    printf 'ssh-backfill\\n'
+    ;;
+  *"has-session"*|*"new-session"*|*"resize-pane"*|*"kill-session"*)
+    ;;
+  *"attach-session"*)
+    sleep 1
+    ;;
+esac
+`;
+
+  await fs.writeFile(path.join(binDir, "tmux"), tmuxScript, { mode: 0o755 });
+  await fs.writeFile(path.join(binDir, "ssh"), sshScript, { mode: 0o755 });
+  return { binDir, tmuxLogPath, sshLogPath };
 }
 
 async function createTerminalAuthToken(
@@ -279,6 +361,37 @@ beforeEach(() => {
   gatewayCallMock.mockResolvedValue({ ok: true });
   enqueueAnnounceMock.mockReset();
   enqueueAnnounceMock.mockReturnValue(true);
+  abortAgentHarnessRunMock.mockReset();
+  abortAgentHarnessRunMock.mockReturnValue(false);
+  resolveActiveAgentHarnessRunSessionIdMock.mockReset();
+  resolveActiveAgentHarnessRunSessionIdMock.mockReturnValue(undefined);
+  loadModelCatalogMock.mockReset();
+  loadModelCatalogMock.mockResolvedValue([
+    {
+      id: "gpt-5",
+      name: "GPT-5",
+      provider: "openai",
+      contextWindow: 400000,
+      reasoning: true,
+      input: ["text"],
+    },
+    {
+      id: "gpt-5.5",
+      name: "GPT-5.5",
+      provider: "openai",
+      contextWindow: 400000,
+      reasoning: true,
+      input: ["text"],
+    },
+    {
+      id: "claude-sonnet-4-6",
+      name: "Claude Sonnet 4.6",
+      provider: "anthropic",
+      contextWindow: 200000,
+      reasoning: true,
+      input: ["text", "image"],
+    },
+  ]);
   loadSessionStoreMock.mockClear();
   sendMessageMock.mockReset();
   sendMessageMock.mockResolvedValue({
@@ -345,134 +458,23 @@ const createAuthToken = async (ctx: TestServerContext, entry: AllowlistEntry): P
   return authHeader.replace(/^Bearer\s+/i, "");
 };
 
-function insertHistoricalTerminalEvent(params: {
-  statePath: string;
-  userId: string;
-  sessionKey: string;
-  descriptor: Record<string, unknown>;
-}) {
-  const dbPath = path.join(params.statePath, "clawline.sqlite");
-  const db = new BetterSqlite3(dbPath);
-  try {
-    const now = Date.now();
-    const eventId = `s_${randomUUID()}`;
-    const payload = JSON.stringify({
-      type: "message",
-      id: eventId,
-      role: "assistant",
-      content: "",
-      timestamp: now,
-      streaming: false,
-      sessionKey: params.sessionKey,
-      attachments: [
-        {
-          type: "document",
-          mimeType: "application/vnd.clawline.terminal-session+json",
-          data: Buffer.from(JSON.stringify(params.descriptor), "utf8").toString("base64"),
-        },
-      ],
-    });
-    db.prepare(
-      `INSERT INTO events
-        (id, userId, sequence, originatingDeviceId, payloadJson, payloadBytes, timestamp, eventType, sessionKey)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(
-      eventId,
-      params.userId,
-      now,
-      null,
-      payload,
-      Buffer.byteLength(payload, "utf8"),
-      now,
-      "message",
-      params.sessionKey,
-    );
-  } finally {
-    db.close();
-  }
-}
-
-async function createFakeTerminalCommandBin(
-  root: string,
-  options: { failSshTargets?: string[] } = {},
-): Promise<{
-  binDir: string;
-  tmuxLogPath: string;
-  sshLogPath: string;
-}> {
-  const binDir = path.join(root, "fake-bin");
-  await fs.mkdir(binDir, { recursive: true });
-  const tmuxLogPath = path.join(root, "tmux.log");
-  const sshLogPath = path.join(root, "ssh.log");
-  const failSshTargets = options.failSshTargets ?? [];
-
-  const tmuxScript = `#!/bin/sh
-set -eu
-printf '%s\n' "$*" >> "${tmuxLogPath}"
-cmd="\${1:-}"
-case "$cmd" in
-  list-panes)
-    printf '%%local-pane\\n'
-    ;;
-  capture-pane)
-    printf 'backfill\\n'
-    ;;
-  has-session|new-session|resize-pane|kill-session)
-    ;;
-  attach-session)
-    sleep 1
-    ;;
-esac
-`;
-  const sshScript = `#!/bin/sh
-set -eu
-printf '%s\n' "$*" >> "${sshLogPath}"
-for arg in "$@"; do
-  case "$arg" in
-${failSshTargets.map((target) => `    ${target}) exit 255 ;;`).join("\n")}
-    __clawline_never_match__) ;;
-  esac
-done
-remote_cmd=""
-for arg in "$@"; do
-  remote_cmd="$arg"
-done
-case "$remote_cmd" in
-  *"list-panes"*)
-    printf '%%ssh-pane\\n'
-    ;;
-  *"capture-pane"*)
-    printf 'ssh-backfill\\n'
-    ;;
-  *"has-session"*|*"new-session"*|*"resize-pane"*|*"kill-session"*)
-    ;;
-  *"attach-session"*)
-    sleep 1
-    ;;
-esac
-`;
-
-  await fs.writeFile(path.join(binDir, "tmux"), tmuxScript, { mode: 0o755 });
-  await fs.writeFile(path.join(binDir, "ssh"), sshScript, { mode: 0o755 });
-  return { binDir, tmuxLogPath, sshLogPath };
-}
-
 async function setupTestServer(
   initialAllowlist: AllowlistEntry[] = [],
   options: {
     alertInstructionsText?: string | null;
-    network?: ProviderConfig["network"];
+    network?: Partial<ProviderConfig["network"]>;
     sessionStorePathRelative?: string;
     webRootFollowSymlinks?: boolean;
     webRootPathRelative?: string;
     seedLegacyDatabase?: (dbPath: string) => Promise<void>;
+    initialPending?: PendingEntry[];
     replyResolver?: typeof getReplyFromConfig;
     logger?: Logger;
+    openClawConfig?: OpenClawConfig;
     terminalTmux?: {
       mode?: "local" | "ssh";
       sshTarget?: string;
     };
-    terminal?: ProviderConfig["terminal"];
   } = {},
 ): Promise<TestServerContext> {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "clawline-server-test-"));
@@ -500,7 +502,10 @@ async function setupTestServer(
     JSON.stringify({ version: 1, entries: initialAllowlist }, null, 2),
   );
   const pendingPath = path.join(statePath, "pending.json");
-  await fs.writeFile(pendingPath, JSON.stringify({ version: 1, entries: [] }, null, 2));
+  await fs.writeFile(
+    pendingPath,
+    JSON.stringify({ version: 1, entries: options.initialPending ?? [] }, null, 2),
+  );
   await fs.writeFile(path.join(statePath, "denylist.json"), "[]");
   const dbPath = path.join(statePath, "clawline.sqlite");
   if (typeof options.seedLegacyDatabase === "function") {
@@ -548,9 +553,8 @@ async function setupTestServer(
             },
           }
         : {}),
-      ...(options.terminal ? { terminal: options.terminal } : {}),
     },
-    openClawConfig: testOpenClawConfig,
+    openClawConfig: options.openClawConfig ?? testOpenClawConfig,
     replyResolver: options.replyResolver ?? testReplyResolver,
     logger: options.logger ?? silentLogger,
     sessionStorePath,
@@ -587,6 +591,12 @@ async function setupTestServer(
 
 type PairRequestOverrides = {
   claimedName?: string;
+  deviceInfo?: Partial<{
+    platform: string;
+    model: string;
+    osVersion: string;
+    appVersion: string;
+  }>;
 };
 
 function createPairRequestPayload(deviceId: string, overrides: PairRequestOverrides = {}) {
@@ -599,6 +609,7 @@ function createPairRequestPayload(deviceId: string, overrides: PairRequestOverri
       model: "iPhone",
       osVersion: "17.0",
       appVersion: "1.0",
+      ...overrides.deviceInfo,
     },
     ...(overrides.claimedName ? { claimedName: overrides.claimedName } : {}),
   };
@@ -1030,11 +1041,53 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
-  it("exposes read-only session status and typed unsupported control actions", async () => {
+  it("exposes session status and typed control capabilities", async () => {
     const entry = createAllowlistEntry();
     const sessionKey = "agent:main:clawline:flynn:main";
-    const ctx = await setupTestServer([entry]);
+    const adoptedSessionKey = "agent:heimdal:main";
+    const ctx = await setupTestServer([entry], {
+      openClawConfig: {
+        agents: {
+          default: "main",
+          defaults: {
+            model: { primary: "openai/gpt-5.5" },
+            models: {
+              "openai/gpt-5": {},
+              "openai/gpt-5.5": { alias: "5.5" },
+              "anthropic/claude-sonnet-4-6": {},
+            },
+          },
+          list: [{ id: "main" }],
+        },
+        bindings: [],
+      } as OpenClawConfig,
+    });
     try {
+      await fs.writeFile(
+        ctx.sessionStorePath,
+        JSON.stringify(
+          {
+            [sessionKey]: {
+              sessionId: "session-status-test",
+              updatedAt: Date.now(),
+              modelProvider: "anthropic",
+              model: "claude-opus-4-6",
+              thinkingLevel: "high",
+              fastMode: false,
+              verboseLevel: "off",
+              reasoningLevel: "on",
+            },
+            [adoptedSessionKey]: {
+              sessionId: "adopted-session-status-test",
+              updatedAt: Date.now(),
+              modelProvider: "openai",
+              model: "gpt-5",
+            },
+          },
+          null,
+          2,
+        ),
+      );
       const pairResult = await performPairRequest(ctx.port, entry.deviceId, {
         claimedName: entry.claimedName,
       });
@@ -1049,26 +1102,64 @@ describe.sequential("clawline provider server", () => {
         { headers: { Authorization: authHeader } },
       );
       expect(statusResponse.status).toBe(200);
-      expect(await statusResponse.json()).toMatchObject({
+      const statusJson = await statusResponse.json();
+      expect(statusJson).toMatchObject({
         sessionKey,
         display: {
-          model: null,
-          provider: null,
-          thinkingLevel: null,
-          verbosity: null,
+          model: "claude-opus-4-6",
+          provider: "anthropic",
+          thinkingLevel: "high",
+          fastMode: false,
+          mode: "normal",
+          verbosity: "off",
+          reasoningLevel: "on",
         },
         run: {
           state: "idle",
           queueDepth: 0,
         },
         capabilities: {
-          cancelCurrentRun: { supported: false },
-          setModel: { supported: false },
-          setReasoning: { supported: false },
-          setMode: { supported: false },
-          setVerbosity: { supported: false },
+          cancelCurrentRun: { supported: true },
+          setModel: { supported: true },
+          setThinking: { supported: true },
+          setReasoning: { supported: true },
+          setFastMode: { supported: true },
+          setMode: { supported: true },
+          setVerbosity: { supported: true },
+        },
+        modelCatalog: {
+          available: true,
+          models: expect.arrayContaining([
+            expect.objectContaining({
+              id: "gpt-5",
+              provider: "openai",
+              ref: "openai/gpt-5",
+              name: "GPT-5",
+            }),
+            expect.objectContaining({
+              id: "gpt-5.5",
+              provider: "openai",
+              ref: "openai/gpt-5.5",
+              name: "GPT-5.5",
+              alias: "5.5",
+            }),
+            expect.objectContaining({
+              id: "claude-sonnet-4-6",
+              provider: "anthropic",
+              ref: "anthropic/claude-sonnet-4-6",
+              name: "Claude Sonnet 4.6",
+            }),
+          ]),
         },
       });
+      const catalogModels = (statusJson as { modelCatalog?: { models?: Array<{ ref?: string }> } })
+        .modelCatalog?.models;
+      const sonnetModelRef = catalogModels?.find(
+        (model) => model.ref === "anthropic/claude-sonnet-4-6",
+      )?.ref;
+      expect(sonnetModelRef).toBe("anthropic/claude-sonnet-4-6");
+      const gpt55ModelRef = catalogModels?.find((model) => model.ref === "openai/gpt-5.5")?.ref;
+      expect(gpt55ModelRef).toBe("openai/gpt-5.5");
 
       const controlResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/session-control`, {
         method: "POST",
@@ -1083,13 +1174,860 @@ describe.sequential("clawline provider server", () => {
         ok: false,
         sessionKey,
         action: "cancel_current_run",
-        code: "unsupported",
+        code: "no_active_run",
         capabilities: {
-          cancelCurrentRun: { supported: false },
+          cancelCurrentRun: { supported: true },
+        },
+      });
+      expect(abortAgentHarnessRunMock).not.toHaveBeenCalled();
+
+      const adoptResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams/adopt`, {
+        method: "POST",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ sessionKey: adoptedSessionKey }),
+      });
+      expect(adoptResponse.status).toBe(200);
+
+      const adoptedModelResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/session-control`, {
+        method: "POST",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          sessionKey: adoptedSessionKey,
+          action: "set_model",
+          model: "openai/gpt-5",
+        }),
+      });
+      expect(adoptedModelResponse.status).toBe(200);
+      expect(await adoptedModelResponse.json()).toMatchObject({
+        ok: true,
+        sessionKey: adoptedSessionKey,
+        action: "set_model",
+        status: {
+          display: {
+            model: "gpt-5",
+            provider: "openai",
+          },
+        },
+        capabilities: {
+          readOnlyStatus: true,
+          setModel: { supported: true },
+          setThinking: { supported: false, reason: "adopted_session_read_only" },
+        },
+      });
+
+      const thinkingResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/session-control`, {
+        method: "POST",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ sessionKey, action: "set_thinking", thinkingLevel: "low" }),
+      });
+      expect(thinkingResponse.status).toBe(200);
+      expect(await thinkingResponse.json()).toMatchObject({
+        ok: true,
+        sessionKey,
+        action: "set_thinking",
+        status: {
+          display: {
+            thinkingLevel: "low",
+          },
+        },
+      });
+
+      const fastResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/session-control`, {
+        method: "POST",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ sessionKey, action: "set_fast_mode", fastMode: true }),
+      });
+      expect(fastResponse.status).toBe(200);
+      expect(await fastResponse.json()).toMatchObject({
+        ok: true,
+        status: {
+          display: {
+            fastMode: true,
+            mode: "fast",
+          },
+        },
+      });
+
+      const nullModelResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/session-control`, {
+        method: "POST",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ sessionKey, action: "set_model", model: null }),
+      });
+      expect(nullModelResponse.status).toBe(400);
+      expect(await nullModelResponse.json()).toMatchObject({
+        error: {
+          code: "invalid_control_payload",
+        },
+      });
+
+      const badModelResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/session-control`, {
+        method: "POST",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ sessionKey, action: "set_model", model: "anthropic/not-real" }),
+      });
+      expect(badModelResponse.status).toBe(200);
+      expect(await badModelResponse.json()).toMatchObject({
+        ok: false,
+        sessionKey,
+        action: "set_model",
+        code: "INVALID_REQUEST",
+      });
+
+      const modelResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/session-control`, {
+        method: "POST",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          sessionKey,
+          action: "set_model",
+          model: sonnetModelRef,
+        }),
+      });
+      expect(modelResponse.status).toBe(200);
+      expect(await modelResponse.json()).toMatchObject({
+        ok: true,
+        sessionKey,
+        action: "set_model",
+        status: {
+          display: {
+            model: "claude-sonnet-4-6",
+            provider: "anthropic",
+          },
+        },
+        capabilities: {
+          setModel: { supported: true },
+        },
+      });
+
+      const gpt55Response = await fetch(`http://127.0.0.1:${ctx.port}/api/session-control`, {
+        method: "POST",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          sessionKey,
+          action: "set_model",
+          model: gpt55ModelRef,
+        }),
+      });
+      expect(gpt55Response.status).toBe(200);
+      expect(await gpt55Response.json()).toMatchObject({
+        ok: true,
+        sessionKey,
+        action: "set_model",
+        status: {
+          display: {
+            model: "gpt-5.5",
+            provider: "openai",
+          },
+        },
+      });
+
+      const updatedStatusResponse = await fetch(
+        `http://127.0.0.1:${ctx.port}/api/session-status?sessionKey=${encodeURIComponent(
+          sessionKey,
+        )}`,
+        { headers: { Authorization: authHeader } },
+      );
+      expect(updatedStatusResponse.status).toBe(200);
+      expect(await updatedStatusResponse.json()).toMatchObject({
+        display: {
+          model: "gpt-5.5",
+          provider: "openai",
+          thinkingLevel: "low",
+          fastMode: null,
+          mode: null,
         },
       });
 
       ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("filters session-control status and controls by Codex versus Pi runtime", async () => {
+    const codexEntry = createAllowlistEntry();
+    const sessionKey = "agent:main:clawline:flynn:main";
+    const codexCtx = await setupTestServer([codexEntry], {
+      openClawConfig: {
+        agents: {
+          default: "main",
+          defaults: {
+            model: { primary: "openai/gpt-5.5" },
+            models: {
+              "openai/gpt-5.5": {},
+              "anthropic/claude-sonnet-4-6": {},
+            },
+          },
+          list: [{ id: "main" }],
+        },
+        bindings: [],
+      } as OpenClawConfig,
+    });
+    try {
+      const codexSessionFile = path.join(
+        path.dirname(codexCtx.sessionStorePath),
+        "codex-session-control-test.jsonl",
+      );
+      await fs.writeFile(
+        `${codexSessionFile}.codex-app-server.json`,
+        JSON.stringify(
+          {
+            schemaVersion: 1,
+            threadId: "thread-1",
+            sessionFile: codexSessionFile,
+            cwd: path.dirname(codexSessionFile),
+            model: "gpt-5.5",
+            modelProvider: "openai",
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          },
+          null,
+          2,
+        ),
+      );
+      await fs.writeFile(
+        codexCtx.sessionStorePath,
+        JSON.stringify(
+          {
+            [sessionKey]: {
+              sessionId: "codex-session-control-test",
+              sessionFile: codexSessionFile,
+              updatedAt: Date.now(),
+              modelProvider: "openai",
+              model: "gpt-5.5",
+              thinkingLevel: "medium",
+              fastMode: false,
+            },
+          },
+          null,
+          2,
+        ),
+      );
+      const pairResult = await performPairRequest(codexCtx.port, codexEntry.deviceId, {
+        claimedName: codexEntry.claimedName,
+      });
+      const authToken = pairResult.token as string;
+      const { ws } = await authenticateDevice(codexCtx.port, codexEntry.deviceId, authToken);
+      const authHeader = `Bearer ${authToken}`;
+
+      const codexStatusResponse = await fetch(
+        `http://127.0.0.1:${codexCtx.port}/api/session-status?sessionKey=${encodeURIComponent(
+          sessionKey,
+        )}`,
+        { headers: { Authorization: authHeader } },
+      );
+      expect(codexStatusResponse.status).toBe(200);
+      const codexStatusJson = await codexStatusResponse.json();
+      expect(codexStatusJson).toMatchObject({
+        display: {
+          provider: "openai",
+          model: "gpt-5.5",
+          harness: "codex",
+          fastMode: false,
+          mode: "normal",
+        },
+        capabilities: {
+          setThinking: {
+            supported: true,
+            options: [
+              { title: "off", value: "off" },
+              { title: "minimal", value: "minimal" },
+              { title: "low", value: "low" },
+              { title: "medium", value: "medium" },
+              { title: "high", value: "high" },
+              { title: "xhigh", value: "xhigh" },
+            ],
+          },
+          setReasoning: {
+            supported: false,
+            reason: "codex_reasoning_uses_thinking_level",
+          },
+          setFastMode: {
+            supported: true,
+            options: [
+              { title: "On", enabled: true },
+              { title: "Off", enabled: false },
+            ],
+          },
+          setMode: {
+            supported: true,
+            options: [
+              { title: "On", value: "fast" },
+              { title: "Off", value: "normal" },
+            ],
+          },
+        },
+        modelCatalog: {
+          available: true,
+          runtime: "codex",
+          models: expect.arrayContaining([expect.objectContaining({ ref: "openai/gpt-5.5" })]),
+        },
+      });
+      const codexCatalogRefs = (
+        codexStatusJson as { modelCatalog?: { models?: Array<{ ref?: string }> } }
+      ).modelCatalog?.models?.map((model) => model.ref);
+      expect(codexCatalogRefs).not.toContain("anthropic/claude-sonnet-4-6");
+      expect(
+        (
+          codexStatusJson as {
+            capabilities?: { setThinking?: { options?: Array<{ value?: string }> } };
+          }
+        ).capabilities?.setThinking?.options?.map((option) => option.value),
+      ).not.toContain("adaptive");
+
+      const codexFastResponse = await fetch(
+        `http://127.0.0.1:${codexCtx.port}/api/session-control`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: authHeader,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ sessionKey, action: "set_fast_mode", fastMode: true }),
+        },
+      );
+      expect(codexFastResponse.status).toBe(200);
+      const codexFastJson = await codexFastResponse.json();
+      expect(codexFastJson).toMatchObject({
+        ok: true,
+        sessionKey,
+        action: "set_fast_mode",
+        status: {
+          display: {
+            fastMode: true,
+            mode: "fast",
+          },
+        },
+      });
+      await fs.rm(`${codexSessionFile}.codex-app-server.json`);
+      const codexDetachedStatusResponse = await fetch(
+        `http://127.0.0.1:${codexCtx.port}/api/session-status?sessionKey=${encodeURIComponent(
+          sessionKey,
+        )}`,
+        { headers: { Authorization: authHeader } },
+      );
+      expect(codexDetachedStatusResponse.status).toBe(200);
+      expect(await codexDetachedStatusResponse.json()).toMatchObject({
+        display: {
+          harness: "codex",
+          fastMode: null,
+          mode: null,
+        },
+        capabilities: {
+          setFastMode: {
+            supported: false,
+            reason: "codex_thread_not_attached",
+          },
+        },
+      });
+
+      const codexThinkingResponse = await fetch(
+        `http://127.0.0.1:${codexCtx.port}/api/session-control`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: authHeader,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            sessionKey,
+            action: "set_thinking",
+            thinkingLevel: "adaptive",
+          }),
+        },
+      );
+      expect(codexThinkingResponse.status).toBe(200);
+      expect(await codexThinkingResponse.json()).toMatchObject({
+        ok: false,
+        sessionKey,
+        action: "set_thinking",
+        code: "unsupported_control_option",
+      });
+
+      const codexNullThinkingResponse = await fetch(
+        `http://127.0.0.1:${codexCtx.port}/api/session-control`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: authHeader,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            sessionKey,
+            action: "set_thinking",
+            thinkingLevel: null,
+          }),
+        },
+      );
+      expect(codexNullThinkingResponse.status).toBe(200);
+      expect(await codexNullThinkingResponse.json()).toMatchObject({
+        ok: false,
+        sessionKey,
+        action: "set_thinking",
+        code: "unsupported_control_option",
+      });
+
+      const codexPiModelResponse = await fetch(
+        `http://127.0.0.1:${codexCtx.port}/api/session-control`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: authHeader,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            sessionKey,
+            action: "set_model",
+            model: "anthropic/claude-sonnet-4-6",
+          }),
+        },
+      );
+      expect(codexPiModelResponse.status).toBe(200);
+      expect(await codexPiModelResponse.json()).toMatchObject({
+        ok: false,
+        sessionKey,
+        action: "set_model",
+        code: "unsupported_runtime_model",
+      });
+
+      ws.terminate();
+    } finally {
+      await codexCtx.cleanup();
+    }
+
+    const piEntry = createAllowlistEntry();
+    const piCtx = await setupTestServer([piEntry], {
+      openClawConfig: {
+        agents: {
+          default: "main",
+          defaults: {
+            model: { primary: "openai/gpt-5.5" },
+            models: {
+              "openai/gpt-5.5": { agentRuntime: { id: "pi" } },
+              "anthropic/claude-sonnet-4-6": {},
+            },
+          },
+          list: [{ id: "main" }],
+        },
+        bindings: [],
+      } as OpenClawConfig,
+    });
+    try {
+      await fs.writeFile(
+        piCtx.sessionStorePath,
+        JSON.stringify(
+          {
+            [sessionKey]: {
+              sessionId: "pi-session-control-test",
+              updatedAt: Date.now(),
+              modelProvider: "openai",
+              model: "gpt-5.5",
+              thinkingLevel: "medium",
+              fastMode: false,
+            },
+          },
+          null,
+          2,
+        ),
+      );
+      const pairResult = await performPairRequest(piCtx.port, piEntry.deviceId, {
+        claimedName: piEntry.claimedName,
+      });
+      const authToken = pairResult.token as string;
+      const { ws } = await authenticateDevice(piCtx.port, piEntry.deviceId, authToken);
+      const authHeader = `Bearer ${authToken}`;
+
+      const piStatusResponse = await fetch(
+        `http://127.0.0.1:${piCtx.port}/api/session-status?sessionKey=${encodeURIComponent(
+          sessionKey,
+        )}`,
+        { headers: { Authorization: authHeader } },
+      );
+      expect(piStatusResponse.status).toBe(200);
+      const piStatusJson = await piStatusResponse.json();
+      expect(piStatusJson).toMatchObject({
+        display: {
+          provider: "openai",
+          model: "gpt-5.5",
+          harness: "pi",
+        },
+        capabilities: {
+          setThinking: {
+            supported: true,
+            options: expect.arrayContaining([{ title: "adaptive", value: "adaptive" }]),
+          },
+          setFastMode: {
+            supported: true,
+            options: [
+              { title: "On", enabled: true },
+              { title: "Off", enabled: false },
+            ],
+          },
+        },
+        modelCatalog: {
+          available: true,
+          runtime: "pi",
+          models: expect.arrayContaining([
+            expect.objectContaining({ ref: "openai/gpt-5.5" }),
+            expect.objectContaining({ ref: "anthropic/claude-sonnet-4-6" }),
+          ]),
+        },
+      });
+
+      const piFastResponse = await fetch(`http://127.0.0.1:${piCtx.port}/api/session-control`, {
+        method: "POST",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ sessionKey, action: "set_fast_mode", fastMode: true }),
+      });
+      expect(piFastResponse.status).toBe(200);
+      expect(await piFastResponse.json()).toMatchObject({
+        ok: true,
+        sessionKey,
+        action: "set_fast_mode",
+        status: {
+          display: {
+            fastMode: true,
+            mode: "fast",
+          },
+        },
+      });
+
+      ws.terminate();
+    } finally {
+      await piCtx.cleanup();
+    }
+  });
+
+  it("validates session controls against the active runtime status model", async () => {
+    const entry = createAllowlistEntry();
+    const sessionKey = "agent:main:clawline:flynn:main";
+    let releaseReply: (() => void) | undefined;
+    let markModelSelected: (() => void) | undefined;
+    const modelSelected = new Promise<void>((resolve) => {
+      markModelSelected = resolve;
+    });
+    const replyResolver: typeof testReplyResolver = async (_ctx, opts) => {
+      opts?.onModelSelected?.({
+        provider: "openai",
+        model: "gpt-5.5",
+        thinkLevel: "medium",
+        fastMode: false,
+      });
+      markModelSelected?.();
+      await new Promise<void>((release) => {
+        releaseReply = release;
+      });
+      return { text: "active runtime ok" };
+    };
+    const ctx = await setupTestServer([entry], {
+      replyResolver,
+      openClawConfig: {
+        agents: {
+          default: "main",
+          defaults: {
+            model: { primary: "anthropic/claude-sonnet-4-6" },
+            models: {
+              "anthropic/claude-sonnet-4-6": {},
+              "openai/gpt-5.5": {},
+            },
+          },
+          list: [{ id: "main" }],
+        },
+        bindings: [],
+      } as OpenClawConfig,
+    });
+    try {
+      const pairResult = await performPairRequest(ctx.port, entry.deviceId, {
+        claimedName: entry.claimedName,
+      });
+      const authToken = pairResult.token as string;
+      const { ws, queue } = await authenticateDeviceWithQueue(ctx.port, entry.deviceId, authToken);
+      const messageId = `c_${randomUUID()}`;
+      try {
+        ws.send(
+          JSON.stringify({
+            type: "message",
+            id: messageId,
+            content: "hold active runtime",
+          }),
+        );
+        await waitForQueuedMessage(queue, (value) => {
+          const typed = value as { type?: string; id?: string };
+          return typed.type === "ack" && typed.id === messageId;
+        });
+        await modelSelected;
+
+        const authHeader = `Bearer ${authToken}`;
+        const statusResponse = await fetch(
+          `http://127.0.0.1:${ctx.port}/api/session-status?sessionKey=${encodeURIComponent(
+            sessionKey,
+          )}`,
+          { headers: { Authorization: authHeader } },
+        );
+        expect(statusResponse.status).toBe(200);
+        expect(await statusResponse.json()).toMatchObject({
+          display: {
+            provider: "openai",
+            model: "gpt-5.5",
+            harness: "codex",
+          },
+        });
+
+        const fastResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/session-control`, {
+          method: "POST",
+          headers: {
+            Authorization: authHeader,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ sessionKey, action: "set_fast_mode", fastMode: true }),
+        });
+        expect(fastResponse.status).toBe(200);
+        expect(await fastResponse.json()).toMatchObject({
+          ok: false,
+          sessionKey,
+          action: "set_fast_mode",
+          code: "codex_thread_not_attached",
+        });
+      } finally {
+        releaseReply?.();
+        queue.dispose();
+        ws.terminate();
+      }
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("surfaces fastMode from the model-selected callback in runtime session status", async () => {
+    const entry = createAllowlistEntry();
+    const sessionKey = "agent:main:clawline:flynn:main";
+    const replyResolver: typeof testReplyResolver = async (_ctx, opts) => {
+      opts?.onModelSelected?.({
+        provider: "anthropic",
+        model: "claude-sonnet-4-6",
+        thinkLevel: "medium",
+        fastMode: true,
+      });
+      return { text: "fast status ok" };
+    };
+    const ctx = await setupTestServer([entry], { replyResolver });
+    try {
+      const pairResult = await performPairRequest(ctx.port, entry.deviceId, {
+        claimedName: entry.claimedName,
+      });
+      const authToken = pairResult.token as string;
+      const { ws, queue } = await authenticateDeviceWithQueue(ctx.port, entry.deviceId, authToken);
+      const messageId = `c_${randomUUID()}`;
+      try {
+        ws.send(
+          JSON.stringify({
+            type: "message",
+            id: messageId,
+            content: "report fast status",
+          }),
+        );
+
+        await waitForQueuedMessage(queue, (value) => {
+          const typed = value as { type?: string; id?: string };
+          return typed.type === "ack" && typed.id === messageId;
+        });
+        await waitForQueuedMessage(queue, (value) => {
+          const typed = value as { type?: string; role?: string; content?: string };
+          return (
+            typed.type === "message" &&
+            typed.role === "assistant" &&
+            typed.content === "fast status ok"
+          );
+        });
+
+        const statusResponse = await fetch(
+          `http://127.0.0.1:${ctx.port}/api/session-status?sessionKey=${encodeURIComponent(
+            sessionKey,
+          )}`,
+          { headers: { Authorization: `Bearer ${authToken}` } },
+        );
+        expect(statusResponse.status).toBe(200);
+        expect(await statusResponse.json()).toMatchObject({
+          sessionKey,
+          display: {
+            provider: "anthropic",
+            model: "claude-sonnet-4-6",
+            thinkingLevel: "medium",
+            fastMode: true,
+            mode: "fast",
+          },
+          run: {
+            state: "idle",
+          },
+        });
+      } finally {
+        queue.dispose();
+        ws.terminate();
+      }
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("cancels an in-flight session run through the provider abort seam", async () => {
+    const entry = createAllowlistEntry();
+    const sessionKey = "agent:main:clawline:flynn:main";
+    let releaseReply: (() => void) | undefined;
+    const replyResolver: typeof testReplyResolver = async () => {
+      await new Promise<void>((resolve) => {
+        releaseReply = resolve;
+      });
+      return { text: "" };
+    };
+    const ctx = await setupTestServer([entry], { replyResolver });
+    try {
+      await fs.writeFile(
+        ctx.sessionStorePath,
+        JSON.stringify(
+          {
+            [sessionKey]: {
+              sessionId: "session-cancel-test",
+              updatedAt: Date.now(),
+              channel: "clawline",
+              lastChannel: "clawline",
+              lastTo: "device:test",
+            },
+          },
+          null,
+          2,
+        ),
+      );
+      abortAgentHarnessRunMock.mockReturnValue(true);
+      resolveActiveAgentHarnessRunSessionIdMock.mockReturnValue("session-cancel-live");
+      const pairResult = await performPairRequest(ctx.port, entry.deviceId, {
+        claimedName: entry.claimedName,
+      });
+      const authToken = pairResult.token as string;
+      const { ws, queue } = await authenticateDeviceWithQueue(ctx.port, entry.deviceId, authToken);
+      const messageId = `c_${randomUUID()}`;
+      try {
+        ws.send(
+          JSON.stringify({
+            type: "message",
+            id: messageId,
+            sessionKey,
+            content: "cancel me",
+          }),
+        );
+        await waitForQueuedMessage(queue, (value) => {
+          const typed = value as { type?: string; id?: string };
+          return typed?.type === "ack" && typed.id === messageId;
+        });
+
+        let runningStatus: Record<string, unknown> | undefined;
+        for (let attempt = 0; attempt < 400; attempt += 1) {
+          const response = await fetch(
+            `http://127.0.0.1:${ctx.port}/api/session-status?sessionKey=${encodeURIComponent(
+              sessionKey,
+            )}`,
+            { headers: { Authorization: `Bearer ${authToken}` } },
+          );
+          const status = (await response.json()) as Record<string, unknown>;
+          if ((status.run as { state?: string } | undefined)?.state === "running") {
+            runningStatus = status;
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        expect(runningStatus).toMatchObject({
+          capabilities: {
+            cancelCurrentRun: { supported: true },
+          },
+          run: {
+            state: "running",
+            messageId,
+          },
+        });
+
+        const controlResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/session-control`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${authToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ sessionKey, action: "cancel_current_run" }),
+        });
+        expect(controlResponse.status).toBe(200);
+        expect(await controlResponse.json()).toMatchObject({
+          ok: true,
+          sessionKey,
+          action: "cancel_current_run",
+        });
+        expect(resolveActiveAgentHarnessRunSessionIdMock).toHaveBeenCalledWith(sessionKey);
+        expect(abortAgentHarnessRunMock).toHaveBeenCalledWith("session-cancel-live");
+
+        releaseReply?.();
+        releaseReply = undefined;
+        let idleStatus: Record<string, unknown> | undefined;
+        for (let attempt = 0; attempt < 400; attempt += 1) {
+          const response = await fetch(
+            `http://127.0.0.1:${ctx.port}/api/session-status?sessionKey=${encodeURIComponent(
+              sessionKey,
+            )}`,
+            { headers: { Authorization: `Bearer ${authToken}` } },
+          );
+          const status = (await response.json()) as Record<string, unknown>;
+          if ((status.run as { state?: string } | undefined)?.state === "idle") {
+            idleStatus = status;
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        expect(idleStatus).toMatchObject({
+          run: {
+            state: "idle",
+          },
+        });
+        await expect(
+          waitForQueuedMessageWithTimeout(
+            queue,
+            (value) => {
+              const typed = value as { type?: string; code?: string; messageId?: string };
+              return (
+                typed?.type === "error" &&
+                typed.code === "server_error" &&
+                typed.messageId === messageId
+              );
+            },
+            { attempts: 2, timeoutMs: 50 },
+          ),
+        ).rejects.toThrow(/Timed out|Did not receive/);
+      } finally {
+        releaseReply?.();
+        queue.dispose();
+        ws.terminate();
+      }
     } finally {
       await ctx.cleanup();
     }
@@ -1332,7 +2270,853 @@ describe.sequential("clawline provider server", () => {
       );
       expect(call?.item?.origin).toEqual({ channel: "clawline", to: "agent:main:main" });
       expect(gatewayCallMock).not.toHaveBeenCalled();
+      const repeatResponse = await performPairRequest(ctx.port, deviceId, {
+        claimedName: "QA Sim",
+      });
+      expect(repeatResponse).toMatchObject({
+        type: "pair_result",
+        success: false,
+        reason: "pair_pending",
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(enqueueAnnounceMock).toHaveBeenCalledTimes(1);
     } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("sends inline approval cards for pending devices to admin global streams", async () => {
+    const adminEntry = createAllowlistEntry({ deviceId: randomUUID(), isAdmin: true });
+    const pendingDeviceId = randomUUID();
+    const ctx = await setupTestServer([adminEntry]);
+    try {
+      const response = await performPairRequest(ctx.port, pendingDeviceId, {
+        claimedName: "QA Sim",
+      });
+      expect(response).toMatchObject({
+        type: "pair_result",
+        success: false,
+        reason: "pair_pending",
+      });
+
+      const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
+      let row: { id: string; sessionKey: string; payloadJson: string } | undefined;
+      await vi.waitFor(() => {
+        const db = new BetterSqlite3(dbPath, { readonly: true });
+        try {
+          row = db
+            .prepare(
+              `SELECT id, sessionKey, payloadJson
+                 FROM events
+                WHERE userId = ?
+                  AND payloadJson LIKE ?
+                ORDER BY sequence DESC
+                LIMIT 1`,
+            )
+            .get("flynn", `%${INTERACTIVE_HTML_MIME}%`) as
+            | { id: string; sessionKey: string; payloadJson: string }
+            | undefined;
+        } finally {
+          db.close();
+        }
+        expect(row).toBeTruthy();
+      });
+      expect(row?.sessionKey).toBe("agent:main:main");
+      const payload = JSON.parse(row!.payloadJson) as {
+        content?: string;
+        attachments?: Array<{ mimeType?: string; data?: string }>;
+      };
+      expect(payload.content).toBe(
+        `Device approval requested: qa sim (iOS/iPhone) [deviceId: ${pendingDeviceId}]`,
+      );
+      const attachment = payload.attachments?.[0];
+      expect(attachment?.mimeType).toBe(INTERACTIVE_HTML_MIME);
+      const descriptor = JSON.parse(Buffer.from(attachment!.data!, "base64").toString("utf8")) as {
+        version?: number;
+        html?: string;
+      };
+      expect(descriptor.version).toBe(1);
+      expect(descriptor.html).toContain('<meta name="viewport"');
+      expect(descriptor.html).toContain("Approve");
+      expect(descriptor.html).toContain("Deny");
+      expect(descriptor.html).toContain(pendingDeviceId);
+      expect(descriptor.html).toContain(DEVICE_APPROVAL_APPROVE_ACTION);
+      expect(descriptor.html).toContain(DEVICE_APPROVAL_DENY_ACTION);
+      expect(descriptor.html).toContain("messageHandlers.clawline");
+      expect(descriptor.html).toContain('action: "_close"');
+      expect(descriptor.html).not.toContain("clawlineInteractive");
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("coalesces concurrent duplicate pending approval alerts for one device", async () => {
+    const adminEntry = createAllowlistEntry({ deviceId: randomUUID(), isAdmin: true });
+    const pendingDeviceId = randomUUID();
+    const ctx = await setupTestServer([adminEntry]);
+    try {
+      const responses = await Promise.all(
+        Array.from({ length: 5 }, () =>
+          performPairRequest(ctx.port, pendingDeviceId, {
+            claimedName: "Flynn",
+            deviceInfo: {
+              platform: "Web",
+              model: "MacIntel",
+              osVersion: "macOS",
+              appVersion: "web",
+            },
+          }),
+        ),
+      );
+      for (const response of responses) {
+        expect(response).toMatchObject({
+          type: "pair_result",
+          success: false,
+          reason: "pair_pending",
+        });
+      }
+      await vi.waitFor(() => {
+        expect(enqueueAnnounceMock).toHaveBeenCalledTimes(1);
+      });
+      const call = enqueueAnnounceMock.mock.calls[0]?.[0] as
+        | { item?: { prompt?: string } }
+        | undefined;
+      expect(call?.item?.prompt).toBe(
+        `New device pending approval: flynn (Web/MacIntel) [deviceId: ${pendingDeviceId}]`,
+      );
+
+      const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
+      await vi.waitFor(() => {
+        const db = new BetterSqlite3(dbPath, { readonly: true });
+        try {
+          const count = db
+            .prepare(
+              `SELECT COUNT(*) AS count
+                 FROM events
+                WHERE userId = ?
+                  AND payloadJson LIKE ?`,
+            )
+            .get("flynn", `%${pendingDeviceId}%`) as { count: number };
+          expect(count.count).toBe(1);
+        } finally {
+          db.close();
+        }
+      });
+      const pending = JSON.parse(await fs.readFile(ctx.pendingPath, "utf8")) as {
+        entries: Array<{ deviceId: string; notifiedAt?: number; requestCount?: number }>;
+      };
+      const entries = pending.entries.filter((entry) => entry.deviceId === pendingDeviceId);
+      expect(entries).toHaveLength(1);
+      expect(entries[0]?.requestCount).toBeGreaterThan(1);
+      expect(entries[0]?.notifiedAt).toEqual(expect.any(Number));
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("coalesces duplicate alerts for pending devices loaded from disk", async () => {
+    const adminEntry = createAllowlistEntry({ deviceId: randomUUID(), isAdmin: true });
+    const pendingDeviceId = randomUUID();
+    const initialPending: PendingEntry = {
+      deviceId: pendingDeviceId,
+      claimedName: "flynn",
+      deviceInfo: {
+        platform: "Web",
+        model: "MacIntel",
+        osVersion: "macOS",
+        appVersion: "web",
+      },
+      requestedAt: Date.now() - 1_000,
+      lastSeenAt: Date.now() - 500,
+      requestCount: 1,
+    };
+    const ctx = await setupTestServer([adminEntry], { initialPending: [initialPending] });
+    try {
+      const response = await performPairRequest(ctx.port, pendingDeviceId, {
+        claimedName: "Flynn",
+        deviceInfo: {
+          platform: "Web",
+          model: "MacIntel",
+          osVersion: "macOS",
+          appVersion: "web",
+        },
+      });
+      expect(response).toMatchObject({
+        type: "pair_result",
+        success: false,
+        reason: "pair_pending",
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(enqueueAnnounceMock).not.toHaveBeenCalled();
+      const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
+      const db = new BetterSqlite3(dbPath, { readonly: true });
+      try {
+        const count = db
+          .prepare(
+            `SELECT COUNT(*) AS count
+               FROM events
+              WHERE payloadJson LIKE ?`,
+          )
+          .get(`%${pendingDeviceId}%`) as { count: number };
+        expect(count.count).toBe(0);
+      } finally {
+        db.close();
+      }
+      const pendingFile = JSON.parse(await fs.readFile(ctx.pendingPath, "utf8")) as {
+        entries: Array<{ deviceId: string; notifiedAt?: number; requestCount?: number }>;
+      };
+      const pendingEntry = pendingFile.entries.find((entry) => entry.deviceId === pendingDeviceId);
+      expect(pendingEntry?.requestCount).toBe(2);
+      expect(pendingEntry?.notifiedAt).toBeUndefined();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("retries pending approval notification after a failed wake", async () => {
+    const adminEntry = createAllowlistEntry({ deviceId: randomUUID(), isAdmin: true });
+    const pendingDeviceId = randomUUID();
+    enqueueAnnounceMock.mockImplementationOnce(() => {
+      throw new Error("wake unavailable");
+    });
+    const ctx = await setupTestServer([adminEntry]);
+    try {
+      const firstResponse = await performPairRequest(ctx.port, pendingDeviceId, {
+        claimedName: "QA Sim",
+        deviceInfo: {
+          platform: "Web",
+          model: "MacIntel",
+          osVersion: "macOS",
+          appVersion: "web",
+        },
+      });
+      expect(firstResponse).toMatchObject({ success: false, reason: "pair_pending" });
+      await vi.waitFor(() => {
+        expect(enqueueAnnounceMock).toHaveBeenCalledTimes(1);
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await vi.waitFor(async () => {
+        const pendingFile = JSON.parse(await fs.readFile(ctx.pendingPath, "utf8")) as {
+          entries: Array<{ deviceId: string; notifiedAt?: number }>;
+        };
+        const pendingEntry = pendingFile.entries.find(
+          (entry) => entry.deviceId === pendingDeviceId,
+        );
+        expect(pendingEntry?.notifiedAt).toBeUndefined();
+      });
+
+      const secondResponse = await performPairRequest(ctx.port, pendingDeviceId, {
+        claimedName: "QA Sim",
+        deviceInfo: {
+          platform: "Web",
+          model: "MacIntel",
+          osVersion: "macOS",
+          appVersion: "web",
+        },
+      });
+      expect(secondResponse).toMatchObject({ success: false, reason: "pair_pending" });
+      await vi.waitFor(() => {
+        expect(enqueueAnnounceMock).toHaveBeenCalledTimes(2);
+      });
+      await vi.waitFor(async () => {
+        const pendingFile = JSON.parse(await fs.readFile(ctx.pendingPath, "utf8")) as {
+          entries: Array<{ deviceId: string; notifiedAt?: number; requestCount?: number }>;
+        };
+        const pendingEntry = pendingFile.entries.find(
+          (entry) => entry.deviceId === pendingDeviceId,
+        );
+        expect(pendingEntry?.requestCount).toBe(2);
+        expect(pendingEntry?.notifiedAt).toEqual(expect.any(Number));
+      });
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("coalesces pending approval retries when device details change", async () => {
+    const adminEntry = createAllowlistEntry({ deviceId: randomUUID(), isAdmin: true });
+    const pendingDeviceId = randomUUID();
+    const ctx = await setupTestServer([adminEntry]);
+    try {
+      const firstResponse = await performPairRequest(ctx.port, pendingDeviceId, {
+        claimedName: "QA Sim",
+        deviceInfo: {
+          platform: "Web",
+          model: "MacIntel",
+          osVersion: "macOS",
+          appVersion: "web",
+        },
+      });
+      expect(firstResponse).toMatchObject({ success: false, reason: "pair_pending" });
+      const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
+      await vi.waitFor(() => {
+        const db = new BetterSqlite3(dbPath, { readonly: true });
+        try {
+          const count = db
+            .prepare(
+              `SELECT COUNT(*) AS count
+                 FROM events
+                WHERE userId = ?
+                  AND payloadJson LIKE ?`,
+            )
+            .get("flynn", `%${INTERACTIVE_HTML_MIME}%`) as { count: number };
+          expect(count.count).toBe(1);
+        } finally {
+          db.close();
+        }
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const secondResponse = await performPairRequest(ctx.port, pendingDeviceId, {
+        claimedName: "Flynn",
+        deviceInfo: {
+          platform: "Web",
+          model: "Linux x86_64",
+          osVersion: "Linux",
+          appVersion: "web",
+        },
+      });
+      expect(secondResponse).toMatchObject({ success: false, reason: "pair_pending" });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const db = new BetterSqlite3(dbPath, { readonly: true });
+      try {
+        const count = db
+          .prepare(
+            `SELECT COUNT(*) AS count
+               FROM events
+              WHERE userId = ?
+                AND payloadJson LIKE ?`,
+          )
+          .get("flynn", `%${INTERACTIVE_HTML_MIME}%`) as { count: number };
+        expect(count.count).toBe(1);
+      } finally {
+        db.close();
+      }
+      expect(enqueueAnnounceMock).toHaveBeenCalledTimes(1);
+      const pendingFile = JSON.parse(await fs.readFile(ctx.pendingPath, "utf8")) as {
+        entries: Array<{
+          deviceId: string;
+          claimedName?: string;
+          deviceInfo?: { platform?: string; model?: string };
+          requestedAt?: number;
+          lastSeenAt?: number;
+          requestCount?: number;
+        }>;
+      };
+      const pendingEntry = pendingFile.entries.find((entry) => entry.deviceId === pendingDeviceId);
+      expect(pendingEntry).toMatchObject({
+        claimedName: "qa sim",
+        deviceInfo: { platform: "Web", model: "MacIntel" },
+        requestCount: 2,
+      });
+      expect(pendingEntry?.lastSeenAt).toBeGreaterThan(pendingEntry?.requestedAt ?? 0);
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("coalesces native-shaped stalled pending approval retries for one device", async () => {
+    const adminEntry = createAllowlistEntry({ deviceId: randomUUID(), isAdmin: true });
+    const pendingDeviceId = randomUUID();
+    const ctx = await setupTestServer([adminEntry]);
+    try {
+      const firstResponse = await performPairRequest(ctx.port, pendingDeviceId, {
+        claimedName: "QA iPad",
+        deviceInfo: {
+          platform: "iOS",
+          model: "iPad",
+          osVersion: "26.0",
+          appVersion: "native-test",
+        },
+      });
+      expect(firstResponse).toMatchObject({ success: false, reason: "pair_pending" });
+
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const retryResponse = await performPairRequest(ctx.port, pendingDeviceId, {
+        claimedName: "QA iPad",
+        deviceInfo: {
+          platform: "iOS",
+          model: "iPad",
+          osVersion: "26.0",
+          appVersion: "native-test",
+        },
+      });
+      expect(retryResponse).toMatchObject({ success: false, reason: "pair_pending" });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(enqueueAnnounceMock).toHaveBeenCalledTimes(1);
+      const pendingFile = JSON.parse(await fs.readFile(ctx.pendingPath, "utf8")) as {
+        entries: Array<{
+          deviceId: string;
+          deviceInfo?: { platform?: string; model?: string };
+          requestedAt?: number;
+          lastSeenAt?: number;
+          requestCount?: number;
+        }>;
+      };
+      const pendingEntry = pendingFile.entries.find((entry) => entry.deviceId === pendingDeviceId);
+      expect(pendingEntry).toMatchObject({
+        deviceInfo: { platform: "iOS", model: "iPad" },
+        requestCount: 2,
+      });
+      expect(pendingEntry?.lastSeenAt).toBeGreaterThan(pendingEntry?.requestedAt ?? 0);
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("stores one canonical global approval card when multiple admin users share the session", async () => {
+    const flynnEntry = createAllowlistEntry({ deviceId: randomUUID(), isAdmin: true });
+    const otherAdminEntry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      claimedName: "clawline web test",
+      userId: "clawline_web_test",
+      isAdmin: true,
+    });
+    const pendingDeviceId = randomUUID();
+    const ctx = await setupTestServer([flynnEntry, otherAdminEntry]);
+    const otherAdminToken = await createAuthToken(ctx, otherAdminEntry);
+    const { ws, queue } = await authenticateDeviceWithQueue(
+      ctx.port,
+      otherAdminEntry.deviceId,
+      otherAdminToken,
+    );
+    try {
+      const response = await performPairRequest(ctx.port, pendingDeviceId, {
+        claimedName: "QA Sim",
+      });
+      expect(response).toMatchObject({ success: false, reason: "pair_pending" });
+      const pendingFile = JSON.parse(await fs.readFile(ctx.pendingPath, "utf8")) as {
+        entries: Array<{
+          deviceId: string;
+          claimedName?: string;
+          requestedAt: number;
+          deviceInfo: { platform?: string; model?: string };
+        }>;
+      };
+      const pendingEntry = pendingFile.entries.find((entry) => entry.deviceId === pendingDeviceId);
+      expect(pendingEntry).toBeTruthy();
+      const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
+      let messageId = "";
+      await vi.waitFor(() => {
+        const db = new BetterSqlite3(dbPath, { readonly: true });
+        try {
+          const rows = db
+            .prepare(
+              `SELECT id, userId, sessionKey, payloadJson
+                 FROM events
+                WHERE payloadJson LIKE ?
+                ORDER BY sequence ASC`,
+            )
+            .all(`%${INTERACTIVE_HTML_MIME}%`) as Array<{
+            id: string;
+            userId: string;
+            sessionKey: string;
+            payloadJson: string;
+          }>;
+          expect(rows).toHaveLength(1);
+          expect(rows[0]).toMatchObject({ userId: "flynn", sessionKey: "agent:main:main" });
+          expect(rows[0]?.payloadJson).toContain(pendingDeviceId);
+          messageId = rows[0]?.id ?? "";
+          expect(messageId).not.toBe("");
+        } finally {
+          db.close();
+        }
+      });
+      ws.send(
+        JSON.stringify({
+          type: "interactive-callback",
+          messageId,
+          payload: {
+            action: DEVICE_APPROVAL_APPROVE_ACTION,
+            data: {
+              deviceId: pendingDeviceId,
+              requestedAt: pendingEntry!.requestedAt,
+              claimedName: pendingEntry!.claimedName ?? "",
+              platform: pendingEntry!.deviceInfo.platform ?? "",
+              model: pendingEntry!.deviceInfo.model ?? "",
+            },
+          },
+        }),
+      );
+      await waitForQueuedMessage(queue, (value) => {
+        const message =
+          typeof value === "object" && value !== null
+            ? (value as { type?: string; role?: string; content?: string; sessionKey?: string })
+            : null;
+        return (
+          message?.type === "message" &&
+          message.role === "assistant" &&
+          message.sessionKey === "agent:main:main" &&
+          typeof message.content === "string" &&
+          message.content.includes("Approved")
+        );
+      });
+      const allowlist = JSON.parse(await fs.readFile(ctx.allowlistPath, "utf8")) as {
+        entries: AllowlistEntry[];
+      };
+      expect(allowlist.entries.find((entry) => entry.deviceId === pendingDeviceId)).toMatchObject({
+        deviceId: pendingDeviceId,
+        userId: "qa_sim",
+        isAdmin: false,
+      });
+    } finally {
+      queue.dispose();
+      ws.terminate();
+      await ctx.cleanup();
+    }
+  });
+
+  it("approves the exact pending device request from an inline callback", async () => {
+    const adminEntry = createAllowlistEntry({ deviceId: randomUUID(), isAdmin: true });
+    const pendingDeviceId = randomUUID();
+    const ctx = await setupTestServer([adminEntry]);
+    const token = await createAuthToken(ctx, adminEntry);
+    const { ws, queue } = await authenticateDeviceWithQueue(ctx.port, adminEntry.deviceId, token);
+    const pendingWs = new WebSocket(`ws://127.0.0.1:${ctx.port}/ws`);
+    await waitForOpen(pendingWs);
+    const pendingQueue = createMessageQueue(pendingWs);
+    try {
+      pendingWs.send(
+        JSON.stringify(createPairRequestPayload(pendingDeviceId, { claimedName: "Flynn" })),
+      );
+      const response = await waitForQueuedMessage(pendingQueue, (value) => {
+        const message =
+          typeof value === "object" && value !== null
+            ? (value as { type?: string; reason?: string })
+            : null;
+        return message?.type === "pair_result" && message.reason === "pair_pending";
+      });
+      expect(response).toMatchObject({ success: false, reason: "pair_pending" });
+      const pendingFile = JSON.parse(await fs.readFile(ctx.pendingPath, "utf8")) as {
+        entries: Array<{
+          deviceId: string;
+          claimedName?: string;
+          requestedAt: number;
+          deviceInfo: { platform?: string; model?: string };
+        }>;
+      };
+      const pendingEntry = pendingFile.entries.find((entry) => entry.deviceId === pendingDeviceId);
+      expect(pendingEntry).toBeTruthy();
+      const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
+      let messageId = "";
+      await vi.waitFor(() => {
+        const db = new BetterSqlite3(dbPath, { readonly: true });
+        try {
+          const row = db
+            .prepare(
+              `SELECT id
+                 FROM events
+                WHERE userId = ?
+                  AND payloadJson LIKE ?
+                ORDER BY sequence DESC
+                LIMIT 1`,
+            )
+            .get("flynn", `%${pendingDeviceId}%`) as { id: string } | undefined;
+          expect(row).toBeTruthy();
+          messageId = row!.id;
+        } finally {
+          db.close();
+        }
+      });
+
+      ws.send(
+        JSON.stringify({
+          type: "interactive-callback",
+          messageId,
+          payload: {
+            action: DEVICE_APPROVAL_APPROVE_ACTION,
+            data: {
+              deviceId: pendingDeviceId,
+              requestedAt: pendingEntry!.requestedAt,
+              claimedName: pendingEntry!.claimedName ?? "",
+              platform: pendingEntry!.deviceInfo.platform ?? "",
+              model: pendingEntry!.deviceInfo.model ?? "",
+            },
+          },
+        }),
+      );
+      const confirmation = await waitForQueuedMessage(queue, (value) => {
+        const message =
+          typeof value === "object" && value !== null
+            ? (value as { type?: string; role?: string; content?: string })
+            : null;
+        return (
+          message?.type === "message" &&
+          message.role === "assistant" &&
+          typeof message.content === "string" &&
+          message.content.includes("Approved")
+        );
+      });
+      expect((confirmation as { content?: string }).content).toContain("state verified");
+      const delivered = await waitForQueuedMessage(pendingQueue, (value) => {
+        const message =
+          typeof value === "object" && value !== null
+            ? (value as { type?: string; success?: boolean })
+            : null;
+        return message?.type === "pair_result" && message.success === true;
+      });
+      expect(delivered).toMatchObject({
+        type: "pair_result",
+        success: true,
+        userId: "flynn",
+      });
+      expect((delivered as { token?: string }).token).toEqual(expect.any(String));
+      await vi.waitFor(async () => {
+        const allowlist = JSON.parse(await fs.readFile(ctx.allowlistPath, "utf8")) as {
+          entries: AllowlistEntry[];
+        };
+        const approvedEntries = allowlist.entries.filter(
+          (entry) => entry.deviceId === pendingDeviceId,
+        );
+        expect(approvedEntries).toHaveLength(1);
+        const approved = approvedEntries[0];
+        expect(approved).toMatchObject({
+          deviceId: pendingDeviceId,
+          claimedName: "flynn",
+          userId: "flynn",
+          isAdmin: true,
+          tokenDelivered: true,
+        });
+        const pending = JSON.parse(await fs.readFile(ctx.pendingPath, "utf8")) as {
+          entries: Array<{ deviceId: string }>;
+        };
+        expect(pending.entries.some((entry) => entry.deviceId === pendingDeviceId)).toBe(false);
+      });
+    } finally {
+      pendingQueue.dispose();
+      pendingWs.terminate();
+      queue.dispose();
+      ws.terminate();
+      await ctx.cleanup();
+    }
+  });
+
+  it("updates an existing allowlist entry when approving an account switch", async () => {
+    const adminEntry = createAllowlistEntry({ deviceId: randomUUID(), isAdmin: true });
+    const switchingDeviceId = randomUUID();
+    const switchingEntry = createAllowlistEntry({
+      deviceId: switchingDeviceId,
+      claimedName: "old user",
+      userId: "old_user",
+      isAdmin: false,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([adminEntry, switchingEntry]);
+    const token = await createAuthToken(ctx, adminEntry);
+    const { ws, queue } = await authenticateDeviceWithQueue(ctx.port, adminEntry.deviceId, token);
+    const switchingToken = await createAuthToken(ctx, switchingEntry);
+    const { ws: oldWs, queue: oldQueue } = await authenticateDeviceWithQueue(
+      ctx.port,
+      switchingEntry.deviceId,
+      switchingToken,
+    );
+    try {
+      const response = await performPairRequest(ctx.port, switchingDeviceId, {
+        claimedName: "Flynn",
+      });
+      expect(response).toMatchObject({ success: false, reason: "pair_pending" });
+      const pendingFile = JSON.parse(await fs.readFile(ctx.pendingPath, "utf8")) as {
+        entries: Array<{
+          deviceId: string;
+          claimedName?: string;
+          requestedAt: number;
+          deviceInfo: { platform?: string; model?: string };
+        }>;
+      };
+      const pendingEntry = pendingFile.entries.find(
+        (entry) => entry.deviceId === switchingDeviceId,
+      );
+      expect(pendingEntry).toBeTruthy();
+      ws.send(
+        JSON.stringify({
+          type: "interactive-callback",
+          messageId: `s_${randomUUID()}`,
+          payload: {
+            action: DEVICE_APPROVAL_APPROVE_ACTION,
+            data: {
+              deviceId: switchingDeviceId,
+              requestedAt: pendingEntry!.requestedAt,
+              claimedName: pendingEntry!.claimedName ?? "",
+              platform: pendingEntry!.deviceInfo.platform ?? "",
+              model: pendingEntry!.deviceInfo.model ?? "",
+            },
+          },
+        }),
+      );
+      await waitForQueuedMessage(queue, (value) => {
+        const message =
+          typeof value === "object" && value !== null
+            ? (value as { type?: string; role?: string; content?: string })
+            : null;
+        return (
+          message?.type === "message" &&
+          message.role === "assistant" &&
+          typeof message.content === "string" &&
+          message.content.includes("Approved")
+        );
+      });
+      const oldSessionError = await waitForQueuedMessage(oldQueue, (value) => {
+        const message =
+          typeof value === "object" && value !== null
+            ? (value as { type?: string; code?: string })
+            : null;
+        return message?.type === "error" && message.code === "token_revoked";
+      });
+      expect(oldSessionError).toMatchObject({
+        type: "error",
+        code: "token_revoked",
+      });
+      const allowlist = JSON.parse(await fs.readFile(ctx.allowlistPath, "utf8")) as {
+        entries: AllowlistEntry[];
+      };
+      const switched = allowlist.entries.find((entry) => entry.deviceId === switchingDeviceId);
+      expect(switched).toMatchObject({
+        deviceId: switchingDeviceId,
+        claimedName: "flynn",
+        userId: "flynn",
+        isAdmin: true,
+        tokenDelivered: false,
+      });
+      const pending = JSON.parse(await fs.readFile(ctx.pendingPath, "utf8")) as {
+        entries: Array<{ deviceId: string }>;
+      };
+      expect(pending.entries.some((entry) => entry.deviceId === switchingDeviceId)).toBe(false);
+    } finally {
+      queue.dispose();
+      ws.terminate();
+      oldQueue.dispose();
+      oldWs.terminate();
+      await ctx.cleanup();
+    }
+  });
+
+  it("does not approve stale device approval callbacks", async () => {
+    const adminEntry = createAllowlistEntry({ deviceId: randomUUID(), isAdmin: true });
+    const pendingDeviceId = randomUUID();
+    const ctx = await setupTestServer([adminEntry]);
+    const token = await createAuthToken(ctx, adminEntry);
+    const { ws, queue } = await authenticateDeviceWithQueue(ctx.port, adminEntry.deviceId, token);
+    try {
+      const response = await performPairRequest(ctx.port, pendingDeviceId, {
+        claimedName: "QA Sim",
+      });
+      expect(response).toMatchObject({ success: false, reason: "pair_pending" });
+      const pendingFile = JSON.parse(await fs.readFile(ctx.pendingPath, "utf8")) as {
+        entries: Array<{
+          deviceId: string;
+          claimedName?: string;
+          requestedAt: number;
+          deviceInfo: { platform?: string; model?: string };
+        }>;
+      };
+      const pendingEntry = pendingFile.entries.find((entry) => entry.deviceId === pendingDeviceId);
+      expect(pendingEntry).toBeTruthy();
+      ws.send(
+        JSON.stringify({
+          type: "interactive-callback",
+          messageId: `s_${randomUUID()}`,
+          payload: {
+            action: DEVICE_APPROVAL_APPROVE_ACTION,
+            data: {
+              deviceId: pendingDeviceId,
+              requestedAt: pendingEntry!.requestedAt + 1,
+              claimedName: pendingEntry!.claimedName ?? "",
+              platform: pendingEntry!.deviceInfo.platform ?? "",
+              model: pendingEntry!.deviceInfo.model ?? "",
+            },
+          },
+        }),
+      );
+      const confirmation = await waitForQueuedMessage(queue, (value) => {
+        const message =
+          typeof value === "object" && value !== null
+            ? (value as { type?: string; role?: string; content?: string })
+            : null;
+        return (
+          message?.type === "message" &&
+          message.role === "assistant" &&
+          typeof message.content === "string" &&
+          message.content.includes("changed")
+        );
+      });
+      expect((confirmation as { content?: string }).content).toContain("No changes made");
+      const allowlist = JSON.parse(await fs.readFile(ctx.allowlistPath, "utf8")) as {
+        entries: AllowlistEntry[];
+      };
+      expect(allowlist.entries.some((entry) => entry.deviceId === pendingDeviceId)).toBe(false);
+      const pending = JSON.parse(await fs.readFile(ctx.pendingPath, "utf8")) as {
+        entries: Array<{ deviceId: string }>;
+      };
+      expect(pending.entries.some((entry) => entry.deviceId === pendingDeviceId)).toBe(true);
+    } finally {
+      queue.dispose();
+      ws.terminate();
+      await ctx.cleanup();
+    }
+  });
+
+  it("denies exact pending device requests without denylisting", async () => {
+    const adminEntry = createAllowlistEntry({ deviceId: randomUUID(), isAdmin: true });
+    const pendingDeviceId = randomUUID();
+    const ctx = await setupTestServer([adminEntry]);
+    const token = await createAuthToken(ctx, adminEntry);
+    const { ws, queue } = await authenticateDeviceWithQueue(ctx.port, adminEntry.deviceId, token);
+    try {
+      const response = await performPairRequest(ctx.port, pendingDeviceId, {
+        claimedName: "QA Sim",
+      });
+      expect(response).toMatchObject({ success: false, reason: "pair_pending" });
+      const pendingFile = JSON.parse(await fs.readFile(ctx.pendingPath, "utf8")) as {
+        entries: Array<{
+          deviceId: string;
+          claimedName?: string;
+          requestedAt: number;
+          deviceInfo: { platform?: string; model?: string };
+        }>;
+      };
+      const pendingEntry = pendingFile.entries.find((entry) => entry.deviceId === pendingDeviceId);
+      expect(pendingEntry).toBeTruthy();
+      ws.send(
+        JSON.stringify({
+          type: "interactive-callback",
+          messageId: `s_${randomUUID()}`,
+          payload: {
+            action: DEVICE_APPROVAL_DENY_ACTION,
+            data: {
+              deviceId: pendingDeviceId,
+              requestedAt: pendingEntry!.requestedAt,
+              claimedName: pendingEntry!.claimedName ?? "",
+              platform: pendingEntry!.deviceInfo.platform ?? "",
+              model: pendingEntry!.deviceInfo.model ?? "",
+            },
+          },
+        }),
+      );
+      const confirmation = await waitForQueuedMessage(queue, (value) => {
+        const message =
+          typeof value === "object" && value !== null
+            ? (value as { type?: string; role?: string; content?: string })
+            : null;
+        return (
+          message?.type === "message" &&
+          message.role === "assistant" &&
+          typeof message.content === "string" &&
+          message.content.includes("Denied")
+        );
+      });
+      expect((confirmation as { content?: string }).content).toContain("No denylist entry");
+      const pending = JSON.parse(await fs.readFile(ctx.pendingPath, "utf8")) as {
+        entries: Array<{ deviceId: string }>;
+      };
+      expect(pending.entries.some((entry) => entry.deviceId === pendingDeviceId)).toBe(false);
+      const denylist = JSON.parse(
+        await fs.readFile(path.join(path.dirname(ctx.allowlistPath), "denylist.json"), "utf8"),
+      ) as Array<{ deviceId: string }>;
+      expect(denylist.some((entry) => entry.deviceId === pendingDeviceId)).toBe(false);
+    } finally {
+      queue.dispose();
+      ws.terminate();
       await ctx.cleanup();
     }
   });
@@ -1433,7 +3217,7 @@ describe.sequential("clawline provider server", () => {
     try {
       const descriptor = {
         version: 1,
-        html: "<div>Hello</div>",
+        html: '<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"></head><body><div>Hello</div></body></html>',
         metadata: { title: "Card", height: 80 },
       };
       const base64 = Buffer.from(JSON.stringify(descriptor), "utf8").toString("base64");
@@ -1462,6 +3246,243 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("delivers outbound interactive HTML attachments addressed by canonical session key", async () => {
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      userId: "flynn",
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry]);
+    try {
+      const sessionKey = "agent:main:clawline:flynn:main";
+      const descriptor = {
+        version: 1,
+        html: '<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"></head><body><button>Hello</button></body></html>',
+        metadata: { title: "Session Key Card", height: 96 },
+      };
+      const base64 = Buffer.from(JSON.stringify(descriptor), "utf8").toString("base64");
+
+      const result = await ctx.server.sendMessage({
+        target: sessionKey,
+        text: "",
+        attachments: [
+          {
+            data: base64,
+            mimeType: INTERACTIVE_HTML_MIME,
+          },
+        ],
+      });
+
+      expect(result.attachments).toEqual([
+        {
+          type: "document",
+          mimeType: INTERACTIVE_HTML_MIME,
+          data: base64,
+        },
+      ]);
+      expect(result.assetIds).toEqual([]);
+
+      const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
+      const db = new BetterSqlite3(dbPath);
+      try {
+        const row = db
+          .prepare(`SELECT userId, sessionKey FROM events WHERE id = ?`)
+          .get(result.messageId) as { userId: string; sessionKey: string } | undefined;
+        expect(row).toEqual({ userId: entry.userId, sessionKey });
+      } finally {
+        db.close();
+      }
+
+      const pair = await performPairRequest(ctx.port, entry.deviceId);
+      const { ws, queue } = await authenticateDeviceWithQueue(
+        ctx.port,
+        entry.deviceId,
+        pair.token as string,
+      );
+      try {
+        const replay = await waitForQueuedMessage(queue, (value) => {
+          const frame = value as { type?: string; id?: string };
+          return frame.type === "message" && frame.id === result.messageId;
+        });
+        expect(replay).toMatchObject({
+          type: "message",
+          id: result.messageId,
+          sessionKey,
+          attachments: [
+            {
+              type: "document",
+              mimeType: INTERACTIVE_HTML_MIME,
+              data: base64,
+            },
+          ],
+        });
+      } finally {
+        queue.dispose();
+        ws.terminate();
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("rejects outbound interactive HTML attachments with malformed descriptor JSON", async () => {
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry]);
+    try {
+      const base64 = Buffer.from(String.raw`{"version":1,"html":"bad \u201\V"}`, "utf8").toString(
+        "base64",
+      );
+
+      await expect(
+        ctx.server.sendMessage({
+          target: entry.userId,
+          text: "",
+          attachments: [
+            {
+              data: base64,
+              mimeType: "application/vnd.clawline.interactive-html+json",
+            },
+          ],
+        }),
+      ).rejects.toThrow(/interactive HTML descriptor is not valid base64 JSON/i);
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("rejects outbound interactive HTML attachments with non-base64 suffixes", async () => {
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry]);
+    try {
+      const descriptor = {
+        version: 1,
+        html: '<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"></head><body><div>Hello</div></body></html>',
+      };
+      const base64 = Buffer.from(JSON.stringify(descriptor), "utf8").toString("base64");
+
+      await expect(
+        ctx.server.sendMessage({
+          target: entry.userId,
+          text: "",
+          attachments: [
+            {
+              data: `${base64}!`,
+              mimeType: "application/vnd.clawline.interactive-html+json",
+            },
+          ],
+        }),
+      ).rejects.toThrow(/interactive HTML descriptor is not valid base64 JSON/i);
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("rejects outbound interactive HTML attachments with custom CSP meta", async () => {
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry]);
+    try {
+      const descriptor = {
+        version: 1,
+        html: '<!doctype html><html><head><meta name=viewport content="width=device-width, initial-scale=1"><meta content="default-src \'none\'" http-equiv=Content-Security-Policy></head><body>Nope</body></html>',
+      };
+      const base64 = Buffer.from(JSON.stringify(descriptor), "utf8").toString("base64");
+
+      await expect(
+        ctx.server.sendMessage({
+          target: entry.userId,
+          text: "",
+          attachments: [
+            {
+              data: base64,
+              mimeType: "application/vnd.clawline.interactive-html+json",
+            },
+          ],
+        }),
+      ).rejects.toThrow(/must not include custom CSP/i);
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("rejects outbound interactive HTML data URIs with malformed descriptor JSON", async () => {
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry]);
+    try {
+      const base64 = Buffer.from(String.raw`{"version":1,"html":"bad \u201\V"}`, "utf8").toString(
+        "base64",
+      );
+
+      await expect(
+        ctx.server.sendMessage({
+          target: entry.userId,
+          text: "",
+          attachments: [
+            {
+              data: `data:application/vnd.clawline.interactive-html+json;base64,${base64}`,
+            },
+          ],
+        }),
+      ).rejects.toThrow(/interactive HTML descriptor is not valid base64 JSON/i);
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("keeps existing best-effort behavior when an unrelated mixed attachment fails", async () => {
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry]);
+    try {
+      const descriptor = {
+        version: 1,
+        html: '<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"></head><body><div>Hello</div></body></html>',
+      };
+      const base64 = Buffer.from(JSON.stringify(descriptor), "utf8").toString("base64");
+      const oversizedImage = Buffer.alloc(8_000_001, 1).toString("base64");
+
+      const result = await ctx.server.sendMessage({
+        target: entry.userId,
+        text: "fallback text",
+        attachments: [
+          {
+            data: base64,
+            mimeType: "application/vnd.clawline.interactive-html+json",
+          },
+          {
+            data: oversizedImage,
+            mimeType: "image/png",
+          },
+        ],
+      });
+
+      expect(result.attachments).toEqual([]);
+      expect(result.assetIds).toEqual([]);
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("accepts raw JSON terminal descriptors in outbound attachments", async () => {
     const entry = createAllowlistEntry({
       deviceId: randomUUID(),
@@ -1471,12 +3492,8 @@ describe.sequential("clawline provider server", () => {
     const ctx = await setupTestServer([entry]);
     try {
       const descriptor = {
-        version: 2,
         terminalSessionId: `term_${randomUUID()}`,
         title: "Term",
-        destination: {
-          address: "mike@example-host",
-        },
       };
       const jsonPayload = JSON.stringify(descriptor);
       const expectedBase64 = Buffer.from(jsonPayload, "utf8").toString("base64");
@@ -1996,6 +4013,39 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("rejects outbound terminal descriptors with non-base64 suffixes", async () => {
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry]);
+    try {
+      const descriptor = {
+        version: 3,
+        terminalSessionId: `term_${randomUUID()}`,
+        title: "Term",
+        destination: { address: "mike@eezo" },
+      };
+      const base64 = Buffer.from(JSON.stringify(descriptor), "utf8").toString("base64");
+
+      await expect(
+        ctx.server.sendMessage({
+          target: entry.userId,
+          text: "",
+          attachments: [
+            {
+              data: `${base64}!`,
+              mimeType: "application/vnd.clawline.terminal-session+json",
+            },
+          ],
+        }),
+      ).rejects.toThrow("terminal session descriptor is invalid");
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("accepts data URI terminal descriptors without blocking on tmux startup", async () => {
     const entry = createAllowlistEntry({
       deviceId: randomUUID(),
@@ -2010,12 +4060,8 @@ describe.sequential("clawline provider server", () => {
     });
     try {
       const descriptor = {
-        version: 2,
         terminalSessionId: `term_${randomUUID()}`,
         title: "Term",
-        destination: {
-          address: "mike@example-host",
-        },
       };
       const base64 = Buffer.from(JSON.stringify(descriptor), "utf8").toString("base64");
       const dataUri = `data:application/vnd.clawline.terminal-session+json;base64,${base64}`;
@@ -2058,12 +4104,8 @@ describe.sequential("clawline provider server", () => {
     });
     try {
       const descriptor = {
-        version: 2,
         terminalSessionId: `term_${randomUUID()}`,
         title: "Term",
-        destination: {
-          address: "mike@example-host",
-        },
       };
       const base64 = Buffer.from(JSON.stringify(descriptor), "utf8").toString("base64");
       const dataUri =
@@ -2128,7 +4170,7 @@ describe.sequential("clawline provider server", () => {
 
       const descriptor = {
         version: 1,
-        html: "<button>Hi</button>",
+        html: '<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"></head><body><button>Hi</button></body></html>',
         metadata: { title: "Test" },
       };
       const base64 = Buffer.from(JSON.stringify(descriptor), "utf8").toString("base64");
@@ -2162,14 +4204,158 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
-  it("does not crash outbound sends when mediaUrl is an invalid local path", async () => {
+  it("renders agent MEDIA workspace references as native attachments", async () => {
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const workspaceDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawline-agent-workspace-"));
+    const ctx = await setupTestServer([entry], {
+      webRootPathRelative: "custom-web-ui",
+      openClawConfig: {
+        ...testOpenClawConfig,
+        agents: {
+          default: "main",
+          defaults: { workspace: workspaceDir },
+          list: [{ id: "main" }],
+        },
+      } as OpenClawConfig,
+      replyResolver: async () => ({
+        text: "caption",
+        mediaUrl: "MEDIA:/workspace/out/image.png",
+      }),
+    });
+    let ws: WebSocket | null = null;
+    let queue: ReturnType<typeof createMessageQueue> | null = null;
+    try {
+      const outputPath = path.join(workspaceDir, "out", "image.png");
+      await fs.mkdir(path.dirname(outputPath), { recursive: true });
+      await fs.writeFile(outputPath, tinyPngBytes());
+
+      const pair = await performPairRequest(ctx.port, entry.deviceId);
+      const authed = await authenticateDeviceWithQueue(
+        ctx.port,
+        entry.deviceId,
+        pair.token as string,
+      );
+      ws = authed.ws;
+      queue = authed.queue;
+
+      const inboundId = `c_${randomUUID()}`;
+      ws.send(
+        JSON.stringify({
+          type: "message",
+          id: inboundId,
+          content: "make media",
+        }),
+      );
+      await waitForQueuedMessage(queue, (value) => {
+        const typed = value as { type?: string; id?: string };
+        return typed.type === "ack" && typed.id === inboundId;
+      });
+      const reply = await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const typed = value as { type?: string; role?: string; content?: string };
+        return typed.type === "message" && typed.role === "assistant";
+      });
+
+      expect(reply.content).toBe("caption");
+      expect(JSON.stringify(reply)).not.toContain("MEDIA:");
+      expect(reply.attachments).toHaveLength(1);
+      const attachment = (reply.attachments as Array<Record<string, unknown>>)[0];
+      expect(attachment).toMatchObject({
+        type: "image",
+        mimeType: expect.stringMatching(/^image\//),
+      });
+      expect(typeof attachment.data).toBe("string");
+    } finally {
+      queue?.dispose();
+      ws?.terminate();
+      await ctx.cleanup();
+      await fs.rm(workspaceDir, { recursive: true, force: true });
+    }
+  });
+
+  it("renders normalized outbound-media store paths as native attachments", async () => {
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const mediaRoot = await fs.mkdtemp(
+      path.join(resolvePreferredOpenClawTmpDir(), "clawline-outbound-media-"),
+    );
+    const outputPath = path.join(mediaRoot, "image.png");
+    const ctx = await setupTestServer([entry], {
+      replyResolver: async () => ({
+        text: "caption",
+        mediaUrl: outputPath,
+      }),
+    });
+    let ws: WebSocket | null = null;
+    let queue: ReturnType<typeof createMessageQueue> | null = null;
+    try {
+      await fs.writeFile(outputPath, tinyPngBytes());
+
+      const pair = await performPairRequest(ctx.port, entry.deviceId);
+      const authed = await authenticateDeviceWithQueue(
+        ctx.port,
+        entry.deviceId,
+        pair.token as string,
+      );
+      ws = authed.ws;
+      queue = authed.queue;
+
+      const inboundId = `c_${randomUUID()}`;
+      ws.send(
+        JSON.stringify({
+          type: "message",
+          id: inboundId,
+          content: "make normalized media",
+        }),
+      );
+      await waitForQueuedMessage(queue, (value) => {
+        const typed = value as { type?: string; id?: string };
+        return typed.type === "ack" && typed.id === inboundId;
+      });
+      const reply = await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const typed = value as { type?: string; role?: string; content?: string };
+        return typed.type === "message" && typed.role === "assistant";
+      });
+
+      expect(reply.content).toBe("caption");
+      expect(reply.attachments).toHaveLength(1);
+      expect((reply.attachments as Array<Record<string, unknown>>)[0]).toMatchObject({
+        type: "image",
+        mimeType: expect.stringMatching(/^image\//),
+      });
+    } finally {
+      queue?.dispose();
+      ws?.terminate();
+      await ctx.cleanup();
+      await fs.rm(mediaRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("adds an explicit media failure indicator for mixed text and failed mediaUrl", async () => {
     const entry = createAllowlistEntry({
       deviceId: randomUUID(),
       isAdmin: true,
       tokenDelivered: true,
     });
     const ctx = await setupTestServer([entry]);
+    let ws: WebSocket | null = null;
+    let queue: ReturnType<typeof createMessageQueue> | null = null;
     try {
+      const pair = await performPairRequest(ctx.port, entry.deviceId);
+      const authed = await authenticateDeviceWithQueue(
+        ctx.port,
+        entry.deviceId,
+        pair.token as string,
+      );
+      ws = authed.ws;
+      queue = authed.queue;
+
       const result = await ctx.server.sendMessage({
         target: entry.userId,
         text: "fallback text",
@@ -2177,7 +4363,14 @@ describe.sequential("clawline provider server", () => {
       });
       expect(result.attachments).toEqual([]);
       expect(result.assetIds).toEqual([]);
+      const delivered = await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const typed = value as { type?: string; id?: string };
+        return typed.type === "message" && typed.id === result.messageId;
+      });
+      expect(delivered.content).toBe("fallback text\n\n[Media attachment failed]");
     } finally {
+      queue?.dispose();
+      ws?.terminate();
       await ctx.cleanup();
     }
   });
@@ -2468,6 +4661,220 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("exposes a per-user DM stream when dmScope is not main", async () => {
+    const deviceId = randomUUID();
+    const entry = createAllowlistEntry({
+      deviceId,
+      userId: "flynn",
+      isAdmin: false,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry], {
+      openClawConfig: {
+        ...testOpenClawConfig,
+        session: { dmScope: "per-peer" },
+      } as OpenClawConfig,
+    });
+    try {
+      const pair = await performPairRequest(ctx.port, deviceId);
+      const { ws, streamSnapshot, sessionInfo } = await authenticateDevice(
+        ctx.port,
+        deviceId,
+        pair.token as string,
+      );
+
+      expect((sessionInfo as { dmScope?: string; sessionKeys?: string[] } | null)?.dmScope).toBe(
+        "per-peer",
+      );
+      expect((sessionInfo as { sessionKeys?: string[] } | null)?.sessionKeys).toEqual([
+        "agent:main:clawline:flynn:main",
+        "agent:main:clawline:flynn:dm",
+      ]);
+      expect(streamSnapshot.streams).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            sessionKey: "agent:main:clawline:flynn:dm",
+            displayName: "flynn DM",
+            kind: "dm",
+          }),
+        ]),
+      );
+
+      ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("retires stale built-in DM streams when dmScope rolls back to main", async () => {
+    const deviceId = randomUUID();
+    const entry = createAllowlistEntry({
+      deviceId,
+      userId: "flynn",
+      isAdmin: false,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry], {
+      seedLegacyDatabase: async (dbPath) => {
+        const seededDb = new BetterSqlite3(dbPath);
+        seededDb.exec(`
+          CREATE TABLE stream_sessions (
+            userId TEXT NOT NULL,
+            sessionKey TEXT NOT NULL,
+            displayName TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            orderIndex INTEGER NOT NULL,
+            isBuiltIn INTEGER NOT NULL,
+            adopted INTEGER NOT NULL DEFAULT 0,
+            createdAt INTEGER NOT NULL,
+            updatedAt INTEGER NOT NULL,
+            PRIMARY KEY (userId, sessionKey),
+            UNIQUE (userId, orderIndex)
+          );
+          INSERT INTO stream_sessions
+            (userId, sessionKey, displayName, kind, orderIndex, isBuiltIn, adopted, createdAt, updatedAt)
+          VALUES
+            ('flynn', 'agent:main:clawline:flynn:main', 'Personal', 'main', 0, 1, 0, 1, 1),
+            ('flynn', 'agent:main:clawline:flynn:dm', 'flynn DM', 'dm', 1, 1, 0, 1, 1);
+        `);
+        seededDb.close();
+      },
+    });
+    try {
+      const pair = await performPairRequest(ctx.port, deviceId);
+      const { ws, streamSnapshot, sessionInfo } = await authenticateDevice(
+        ctx.port,
+        deviceId,
+        pair.token as string,
+      );
+      const staleDmKey = "agent:main:clawline:flynn:dm";
+
+      expect((sessionInfo as { dmScope?: string; sessionKeys?: string[] } | null)?.dmScope).toBe(
+        "main",
+      );
+      expect((sessionInfo as { sessionKeys?: string[] } | null)?.sessionKeys).toEqual([
+        "agent:main:clawline:flynn:main",
+      ]);
+      expect(streamSnapshot.streams).not.toEqual(
+        expect.arrayContaining([expect.objectContaining({ sessionKey: staleDmKey })]),
+      );
+
+      const queue = createMessageQueue(ws);
+      const messageId = `c_${randomUUID()}`;
+      ws.send(
+        JSON.stringify({
+          type: "message",
+          id: messageId,
+          sessionKey: staleDmKey,
+          content: "should reject stale dm",
+        }),
+      );
+      await expect(
+        waitForQueuedMessageWithTimeout(
+          queue,
+          (value) => {
+            const typed = value as { type?: string; code?: string };
+            return typed.type === "error" && typed.code === "stream_not_found";
+          },
+          { timeoutMs: 1_000 },
+        ),
+      ).resolves.toMatchObject({
+        type: "error",
+        code: "stream_not_found",
+      });
+
+      queue.dispose();
+      ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("preserves admin global streams when a non-admin device for the same user connects", async () => {
+    const adminDeviceId = randomUUID();
+    const userDeviceId = randomUUID();
+    const baseEntry = {
+      claimedName: "Flynn",
+      userId: "flynn",
+      tokenDelivered: true,
+      createdAt: Date.now() - 1_000,
+      lastSeenAt: Date.now() - 500,
+      deviceInfo: {
+        platform: "iOS",
+        model: "iPhone",
+        osVersion: "17.0",
+        appVersion: "1.0",
+      },
+    };
+    const ctx = await setupTestServer(
+      [
+        {
+          ...baseEntry,
+          deviceId: adminDeviceId,
+          isAdmin: true,
+        },
+        {
+          ...baseEntry,
+          deviceId: userDeviceId,
+          isAdmin: false,
+        },
+      ],
+      {
+        seedLegacyDatabase: async (dbPath) => {
+          const seededDb = new BetterSqlite3(dbPath);
+          seededDb.exec(`
+            CREATE TABLE stream_sessions (
+              userId TEXT NOT NULL,
+              sessionKey TEXT NOT NULL,
+              displayName TEXT NOT NULL,
+              kind TEXT NOT NULL,
+              orderIndex INTEGER NOT NULL,
+              isBuiltIn INTEGER NOT NULL,
+              adopted INTEGER NOT NULL DEFAULT 0,
+              createdAt INTEGER NOT NULL,
+              updatedAt INTEGER NOT NULL,
+              PRIMARY KEY (userId, sessionKey),
+              UNIQUE (userId, orderIndex)
+            );
+            INSERT INTO stream_sessions
+              (userId, sessionKey, displayName, kind, orderIndex, isBuiltIn, adopted, createdAt, updatedAt)
+            VALUES
+              ('flynn', 'agent:main:clawline:flynn:main', 'Personal', 'main', 0, 1, 0, 1, 1),
+              ('flynn', 'agent:main:main', 'Global DM', 'global_dm', 1, 1, 0, 1, 1);
+          `);
+          seededDb.close();
+        },
+      },
+    );
+    try {
+      const userPair = await performPairRequest(ctx.port, userDeviceId);
+      const { ws: userWs, sessionInfo: userSessionInfo } = await authenticateDevice(
+        ctx.port,
+        userDeviceId,
+        userPair.token as string,
+      );
+      expect((userSessionInfo as { sessionKeys?: string[] } | null)?.sessionKeys).toEqual([
+        "agent:main:clawline:flynn:main",
+      ]);
+
+      const adminPair = await performPairRequest(ctx.port, adminDeviceId);
+      const { ws: adminWs, sessionInfo: adminSessionInfo } = await authenticateDevice(
+        ctx.port,
+        adminDeviceId,
+        adminPair.token as string,
+      );
+      expect((adminSessionInfo as { sessionKeys?: string[] } | null)?.sessionKeys).toEqual([
+        "agent:main:clawline:flynn:main",
+        "agent:main:main",
+      ]);
+
+      userWs.terminate();
+      adminWs.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("echoes terminal_bubbles_v1 in auth_result when client advertises support", async () => {
     const entry = createAllowlistEntry({
       deviceId: randomUUID(),
@@ -2496,6 +4903,121 @@ describe.sequential("clawline provider server", () => {
       expect(auth.features).toEqual(
         expect.arrayContaining(["session_info", "terminal_bubbles_v1"]),
       );
+      ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("emits feature-gated live agent progress from real reply callbacks", async () => {
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      userId: "progress_user",
+      isAdmin: false,
+      tokenDelivered: false,
+      lastSeenAt: null,
+    });
+    const ctx = await setupTestServer([entry], {
+      replyResolver: async (_ctx, opts) => {
+        await opts?.onToolStart?.({
+          name: "read",
+          phase: "start",
+          args: { path: "/private/raw-arg.txt" },
+        });
+        await opts?.onItemEvent?.({
+          kind: "tool",
+          phase: "end",
+          status: "completed",
+          name: "read",
+          progressText: "Read complete",
+        });
+        await opts?.onCommandOutput?.({
+          phase: "end",
+          name: "exec",
+          output: "raw command output must not leave provider",
+          status: "completed",
+          cwd: "/tmp",
+        });
+        return { text: "ok" };
+      },
+    });
+    try {
+      const pair = await performPairRequest(ctx.port, entry.deviceId);
+      const { ws, queue, auth } = await authenticateDeviceWithQueue(
+        ctx.port,
+        entry.deviceId,
+        pair.token as string,
+        {
+          authPayload: {
+            clientFeatures: ["live_agent_progress_v1"],
+          },
+        },
+      );
+      expect(auth.features).toEqual(
+        expect.arrayContaining(["session_info", "live_agent_progress_v1"]),
+      );
+
+      const clientMessageId = `c_${randomUUID()}`;
+      ws.send(JSON.stringify({ type: "message", id: clientMessageId, content: "show progress" }));
+
+      await waitForQueuedMessageWithTimeout(queue, (value) => {
+        return (
+          typeof value === "object" &&
+          value !== null &&
+          (value as ParsedWsFrame).type === "ack" &&
+          (value as ParsedWsFrame).id === clientMessageId
+        );
+      });
+
+      const toolProgress = await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const event = (value as { event?: { kind?: unknown; name?: unknown } }).event;
+        return (
+          typeof value === "object" &&
+          value !== null &&
+          (value as ParsedWsFrame).type === "agent_progress" &&
+          event?.kind === "tool" &&
+          event?.name === "read"
+        );
+      });
+      expect(toolProgress).toMatchObject({
+        type: "agent_progress",
+        version: 1,
+        messageId: clientMessageId,
+        state: "running",
+        event: {
+          kind: "tool",
+          name: "read",
+        },
+      });
+      expect(typeof toolProgress.runId).toBe("string");
+      expect(typeof toolProgress.sessionKey).toBe("string");
+      expect(typeof toolProgress.seq).toBe("number");
+      expect(JSON.stringify(toolProgress)).not.toContain("/private/raw-arg.txt");
+
+      const commandProgress = await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const event = (value as { event?: { kind?: unknown; name?: unknown } }).event;
+        return (
+          typeof value === "object" &&
+          value !== null &&
+          (value as ParsedWsFrame).type === "agent_progress" &&
+          event?.kind === "command-output" &&
+          event?.name === "exec"
+        );
+      });
+      expect(JSON.stringify(commandProgress)).not.toContain("raw command output");
+      expect(JSON.stringify(commandProgress)).not.toContain("/tmp");
+
+      const doneProgress = await waitForQueuedMessageWithTimeout(queue, (value) => {
+        return (
+          typeof value === "object" &&
+          value !== null &&
+          (value as ParsedWsFrame).type === "agent_progress" &&
+          (value as ParsedWsFrame).state === "final"
+        );
+      });
+      expect(doneProgress.messageId).toBe(clientMessageId);
+
+      queue.dispose();
       ws.terminate();
     } finally {
       await ctx.cleanup();
@@ -2816,12 +5338,9 @@ describe.sequential("clawline provider server", () => {
       );
 
       const descriptor = {
-        version: 2,
+        version: 1,
         terminalSessionId: `ts_${randomUUID()}`,
         title: "gateway logs",
-        destination: {
-          address: "mike@gateway",
-        },
       };
       const base64 = Buffer.from(JSON.stringify(descriptor), "utf8").toString("base64");
       const noFeatureEventPromise = waitForMessage(noFeatureWs);
@@ -5537,7 +8056,7 @@ describe.sequential("clawline provider server", () => {
 
   it("routes terminal auth from the persisted descriptor address instead of the global tmux host", async () => {
     const pathRoot = await fs.mkdtemp(path.join(os.tmpdir(), "clawline-terminal-routing-bin-"));
-    const { binDir, sshLogPath } = await createFakeTerminalCommandBin(pathRoot);
+    const { binDir, tmuxLogPath, sshLogPath } = await createFakeTerminalCommandBin(pathRoot);
     const originalPath = process.env.PATH ?? "";
     process.env.PATH = `${binDir}:${originalPath}`;
 
@@ -5546,15 +8065,9 @@ describe.sequential("clawline provider server", () => {
       isAdmin: false,
       tokenDelivered: true,
     });
-    const terminalConfig: ProviderConfig["terminal"] = {
-      tmux: {
-        mode: "ssh",
-        ssh: {
-          target: "mike@global-host",
-        },
-      },
-    };
-    const ctx = await setupTestServer([entry], { terminal: terminalConfig });
+    const ctx = await setupTestServer([entry], {
+      terminalTmux: { mode: "ssh", sshTarget: "mike@global-host" },
+    });
     let restarted: ProviderServer | null = null;
 
     const authTerminal = async (port: number, terminalSessionId: string, authToken: string) => {
@@ -5627,10 +8140,11 @@ describe.sequential("clawline provider server", () => {
       );
 
       let sshLog = await fs.readFile(sshLogPath, "utf8");
+      let tmuxLog = await fs.readFile(tmuxLogPath, "utf8");
       expect(sshLog).toContain("mike@eezo");
       expect(sshLog).toContain(eezoTerminalSessionId);
-      expect(sshLog).toContain("mike@tars");
-      expect(sshLog).toContain(tarsTerminalSessionId);
+      expect(sshLog).not.toContain("mike@tars");
+      expect(tmuxLog).toContain(tarsTerminalSessionId);
       expect(sshLog).not.toContain("mike@global-host");
 
       await ctx.server.stop();
@@ -5673,8 +8187,10 @@ describe.sequential("clawline provider server", () => {
       });
 
       sshLog = await fs.readFile(sshLogPath, "utf8");
+      tmuxLog = await fs.readFile(tmuxLogPath, "utf8");
       expect(sshLog).toContain("mike@eezo");
       expect(sshLog).toContain(eezoTerminalSessionId);
+      expect(tmuxLog).toContain(tarsTerminalSessionId);
       expect(sshLog).not.toContain("mike@changed-global-host");
     } finally {
       process.env.PATH = originalPath;
@@ -5698,12 +8214,7 @@ describe.sequential("clawline provider server", () => {
       tokenDelivered: true,
     });
     const ctx = await setupTestServer([entry], {
-      terminal: {
-        tmux: {
-          mode: "ssh",
-          ssh: { target: "mike@global-host" },
-        },
-      },
+      terminalTmux: { mode: "ssh", sshTarget: "mike@global-host" },
     });
     const terminalSessionId = `termmsg_${randomUUID().replace(/-/g, "").slice(0, 10)}`;
 
@@ -5771,14 +8282,7 @@ describe.sequential("clawline provider server", () => {
       tokenDelivered: true,
     });
     const ctx = await setupTestServer([entry], {
-      terminal: {
-        tmux: {
-          mode: "ssh",
-          ssh: {
-            target: "mike@global-host",
-          },
-        },
-      },
+      terminalTmux: { mode: "ssh", sshTarget: "mike@global-host" },
     });
 
     try {
@@ -5857,11 +8361,15 @@ describe.sequential("clawline provider server", () => {
         terminalSessionId,
         title: "legacy",
       };
-      insertHistoricalTerminalEvent({
-        statePath: path.dirname(ctx.allowlistPath),
-        userId: entry.userId,
-        sessionKey: `agent:main:clawline:${entry.userId}:main`,
-        descriptor,
+      await ctx.server.sendMessage({
+        target: entry.userId,
+        text: "terminal",
+        attachments: [
+          {
+            data: Buffer.from(JSON.stringify(descriptor), "utf8").toString("base64"),
+            mimeType: "application/vnd.clawline.terminal-session+json",
+          },
+        ],
       });
 
       const authToken = await createAuthToken(ctx, entry);
@@ -5930,13 +8438,18 @@ describe.sequential("clawline provider server", () => {
     const terminalSessionId = `term_t001_${randomUUID().replace(/-/g, "").slice(0, 12)}`;
 
     try {
-      // Historical v1 bubbles are rehydrated from the event tail and use the legacy local tmux fallback.
+      // Register the terminal session by sending a message with a terminal descriptor.
       const descriptor = { terminalSessionId, title: "T001 test session", version: 1 };
-      insertHistoricalTerminalEvent({
-        statePath: path.dirname(ctx.allowlistPath),
-        userId: entry.userId,
-        sessionKey: `agent:main:clawline:${entry.userId}:main`,
-        descriptor,
+      const base64 = Buffer.from(JSON.stringify(descriptor), "utf8").toString("base64");
+      await ctx.server.sendMessage({
+        target: entry.userId,
+        text: "terminal",
+        attachments: [
+          {
+            data: base64,
+            mimeType: "application/vnd.clawline.terminal-session+json",
+          },
+        ],
       });
 
       // Build a JWT auth token for the terminal WS.
@@ -6034,7 +8547,7 @@ describe.sequential("clawline provider server", () => {
 
     try {
       for (const [index, terminalSessionId] of terminalSessionIds.entries()) {
-        const destinationAddress = index === 0 ? "mike@eezo" : "mike@tars";
+        const destinationAddress = index === 0 ? "mike@eezo" : "mike@shrdlu";
         const descriptor = {
           terminalSessionId,
           title: destinationAddress,
@@ -6077,13 +8590,69 @@ describe.sequential("clawline provider server", () => {
 
       const targets = await readFakeSshTargets(fakeSsh.logPath);
       expect(targets).toContain("mike@eezo");
-      expect(targets).toContain("mike@tars");
+      expect(targets).toContain("mike@shrdlu");
       expect(targets.at(-1)).toBe("mike@eezo");
       expect(targets).not.toContain("global.invalid");
     } finally {
       for (const terminalSessionId of terminalSessionIds) {
         await killLocalTmuxSession(terminalSessionId);
       }
+      await ctx.cleanup();
+      await fakeSsh.cleanup();
+    }
+  }, 30_000);
+
+  it("routes local TARS terminal bubbles directly to local tmux without ssh", async () => {
+    if (!(await ensureTmuxAvailable())) {
+      console.warn("Skipping terminal local TARS routing test: tmux not found");
+      return;
+    }
+
+    const fakeSsh = await setupFakeSshProxy();
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      isAdmin: false,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry], {
+      terminalTmux: { mode: "ssh", sshTarget: "global.invalid" },
+    });
+    const terminalSessionId = `term_local_tars_${randomUUID().replace(/-/g, "").slice(0, 10)}`;
+
+    try {
+      const descriptor = {
+        terminalSessionId,
+        title: "mike@tars",
+        version: 2,
+        destination: { address: "mike@tars" },
+      };
+      const base64 = Buffer.from(JSON.stringify(descriptor), "utf8").toString("base64");
+      await ctx.server.sendMessage({
+        target: entry.userId,
+        text: "terminal",
+        attachments: [
+          {
+            data: base64,
+            mimeType: "application/vnd.clawline.terminal-session+json",
+          },
+        ],
+      });
+
+      const { ws, response } = await authenticateTerminalSession({
+        port: ctx.port,
+        allowlistPath: ctx.allowlistPath,
+        entry,
+        terminalSessionId,
+      });
+      expect((response as { type: string }).type).toBe("terminal_ready");
+      ws.terminate();
+
+      const targets = await readFakeSshTargets(fakeSsh.logPath);
+      expect(targets).not.toContain("mike@tars");
+      expect(targets).not.toContain("global.invalid");
+      expect(targets).toHaveLength(0);
+    } finally {
+      await killLocalTmuxSession(terminalSessionId);
       await ctx.cleanup();
       await fakeSsh.cleanup();
     }
@@ -6243,8 +8812,8 @@ describe.sequential("clawline provider server", () => {
 
       const targets = await readFakeSshTargets(fakeSsh.logPath);
       expect(targets).toContain("mike@eezo");
-      expect(targets).toContain("mike@tars");
       expect(targets.at(-1)).toBe("mike@eezo");
+      expect(targets).not.toContain("mike@tars");
       expect(targets).not.toContain("global.invalid");
     } finally {
       setClawlineOutboundSender(null);
@@ -6394,11 +8963,16 @@ describe.sequential("clawline provider server", () => {
         title: "legacy terminal",
         version: 1,
       };
-      insertHistoricalTerminalEvent({
-        statePath: path.dirname(ctx.allowlistPath),
-        userId: entry.userId,
-        sessionKey: `agent:main:clawline:${entry.userId}:main`,
-        descriptor,
+      const base64 = Buffer.from(JSON.stringify(descriptor), "utf8").toString("base64");
+      await ctx.server.sendMessage({
+        target: entry.userId,
+        text: "terminal",
+        attachments: [
+          {
+            data: base64,
+            mimeType: "application/vnd.clawline.terminal-session+json",
+          },
+        ],
       });
 
       const { ws, response } = await authenticateTerminalSession({

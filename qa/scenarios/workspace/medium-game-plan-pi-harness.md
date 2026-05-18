@@ -25,12 +25,11 @@ codeRefs:
   - extensions/qa-lab/src/suite.ts
 execution:
   kind: flow
-  summary: Run with `pnpm openclaw qa suite --provider-mode live-frontier --model openai/gpt-5.5 --alt-model openai/gpt-5.5 --scenario medium-game-plan-pi-harness`.
+  summary: Run with `pnpm openclaw qa suite --provider-mode live-frontier --model openai/gpt-5.5 --alt-model openai/gpt-5.5 --fast --thinking medium --scenario medium-game-plan-pi-harness`.
   config:
     requiredProvider: openai
     requiredModel: gpt-5.5
     harnessRuntime: pi
-    harnessFallback: pi
     artifactFile: star-garden-defenders-pi.html
     gameTitle: Star Garden Defenders
     minBytes: 5000
@@ -78,11 +77,9 @@ steps:
                   patch:
                     agents:
                       defaults:
-                        embeddedHarness:
-                          runtime:
+                        agentRuntime:
+                          id:
                             expr: config.harnessRuntime
-                          fallback:
-                            expr: config.harnessFallback
             - call: waitForGatewayHealthy
               args:
                 - ref: env
@@ -96,10 +93,10 @@ steps:
               args:
                 - ref: env
             - assert:
-                expr: "snapshot.config.agents?.defaults?.embeddedHarness?.runtime === config.harnessRuntime"
+                expr: "snapshot.config.agents?.defaults?.agentRuntime?.id === config.harnessRuntime"
                 message:
-                  expr: "`expected embeddedHarness.runtime=${config.harnessRuntime}, got ${JSON.stringify(snapshot.config.agents?.defaults?.embeddedHarness)}`"
-    detailsExpr: "env.providerMode === 'live-frontier' ? `provider=${selected?.provider} model=${selected?.model} runtime=${snapshot.config.agents?.defaults?.embeddedHarness?.runtime}` : `mock mode: parsed ${scenario.id}`"
+                  expr: "`expected agentRuntime.id=${config.harnessRuntime}, got ${JSON.stringify(snapshot.config.agents?.defaults?.agentRuntime)}`"
+    detailsExpr: "env.providerMode === 'live-frontier' ? `provider=${selected?.provider} model=${selected?.model} runtime=${snapshot.config.agents?.defaults?.agentRuntime?.id}` : `mock mode: parsed ${scenario.id}`"
   - name: builds the medium game artifact
     actions:
       - if:

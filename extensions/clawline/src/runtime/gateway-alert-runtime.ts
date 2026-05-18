@@ -1,4 +1,4 @@
-import { callGatewayFromCli } from "openclaw/plugin-sdk/browser-node-runtime";
+import { callGatewayFromCli } from "openclaw/plugin-sdk/gateway-runtime";
 
 export async function callClawlineGatewayAgent(params: {
   token?: string;

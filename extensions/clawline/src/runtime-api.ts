@@ -3,18 +3,32 @@
 // public `openclaw/plugin-sdk/*` subpaths.
 
 export {
+  buildAllowedModelSet,
   enqueueAnnounce,
+  loadModelCatalog,
+  listThinkingLevelOptions,
+  resolveAgentHarnessPolicy,
+  resolveDefaultModelForAgent,
+  resolveAgentWorkspaceDir,
   resolveAgentIdentity,
   resolveEffectiveMessagesConfig,
   resolveHumanDelayConfig,
 } from "openclaw/plugin-sdk/agent-runtime";
+export type { ModelCatalogEntry } from "openclaw/plugin-sdk/agent-runtime";
+export {
+  abortAgentHarnessRun,
+  resolveActiveAgentHarnessRunSessionId,
+} from "openclaw/plugin-sdk/agent-harness-runtime";
 export type { OpenClawConfig } from "openclaw/plugin-sdk/core";
 export { resolveUserPath } from "openclaw/plugin-sdk/account-resolution";
 export {
+  applySessionsPatchToStore,
   loadSessionStore,
+  resolveAllAgentSessionStoreTargetsSync,
   resolveSessionStoreEntry,
   resolveStorePath,
-} from "openclaw/plugin-sdk/config-runtime";
+  updateSessionStore,
+} from "openclaw/plugin-sdk/session-store-runtime";
 export { recordInboundSession } from "openclaw/plugin-sdk/conversation-runtime";
 export {
   createReplyDispatcherWithTyping,
@@ -23,33 +37,40 @@ export {
   getReplyFromConfig,
   type ReplyPayload,
 } from "openclaw/plugin-sdk/reply-runtime";
-export { isLoopbackHost, rawDataToString } from "openclaw/plugin-sdk/browser-node-runtime";
+export { isLoopbackHost, rawDataToString } from "openclaw/plugin-sdk/gateway-runtime";
 export {
   closeDispatcher,
   createPinnedDispatcher,
+  resolvePinnedHostname,
+  type PinnedHostname,
+} from "openclaw/plugin-sdk/ssrf-runtime";
+export {
   enqueueSystemEvent,
   peekSystemEvents,
   resetSystemEventsForTest,
-  resolvePinnedHostname,
-  type PinnedHostname,
-} from "openclaw/plugin-sdk/infra-runtime";
+} from "openclaw/plugin-sdk/system-event-runtime";
 export {
   detectMime,
   hasAlphaChannel,
   maxBytesForKind,
   mediaKindFromMime,
 } from "openclaw/plugin-sdk/media-runtime";
-export { optimizeImageToJpeg, optimizeImageToPng } from "openclaw/plugin-sdk/web-media";
+export {
+  getDefaultLocalRoots,
+  loadWebMedia,
+  optimizeImageToJpeg,
+  optimizeImageToPng,
+} from "openclaw/plugin-sdk/web-media";
 export { isPrivateOrLoopbackHost } from "openclaw/plugin-sdk/ssrf-runtime";
+export {
+  readCodexAppServerFastMode,
+  setCodexAppServerFastMode,
+} from "openclaw/plugin-sdk/codex-app-server-control";
 export {
   DEFAULT_ACCOUNT_ID,
   parseAgentSessionKey,
   resolveAgentIdFromSessionKey,
 } from "openclaw/plugin-sdk/routing";
-export {
-  resolveAllAgentSessionStoreTargetsSync,
-  updateSessionStore,
-} from "openclaw/plugin-sdk/config-runtime";
 
 // Remaining gaps after T187:
 // - Clawline runtime production code no longer reaches into repo `src/**`.

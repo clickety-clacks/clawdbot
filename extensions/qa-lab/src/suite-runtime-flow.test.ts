@@ -28,6 +28,7 @@ const resolveGeneratedImagePath = vi.hoisted(() => vi.fn());
 const startAgentRun = vi.hoisted(() => vi.fn());
 const waitForAgentRun = vi.hoisted(() => vi.fn());
 const listCronJobs = vi.hoisted(() => vi.fn());
+const findManagedDreamingCronJob = vi.hoisted(() => vi.fn());
 const waitForCronRunCompletion = vi.hoisted(() => vi.fn());
 const readDoctorMemoryStatus = vi.hoisted(() => vi.fn());
 const forceMemoryIndex = vi.hoisted(() => vi.fn());
@@ -92,6 +93,7 @@ vi.mock("./suite-runtime-agent.js", () => ({
   startAgentRun,
   waitForAgentRun,
   listCronJobs,
+  findManagedDreamingCronJob,
   readDoctorMemoryStatus,
   forceMemoryIndex,
   findSkill,
@@ -183,8 +185,8 @@ describe("qa suite runtime flow", () => {
       },
       repoRoot: "/repo",
       providerMode: "mock-openai",
-      primaryModel: "openai/gpt-5.4",
-      alternateModel: "openai/gpt-5.4-mini",
+      primaryModel: "openai/gpt-5.5",
+      alternateModel: "openai/gpt-5.5-mini",
       mock: null,
       cfg: {} as QaSuiteRuntimeEnv["cfg"],
     } satisfies Parameters<typeof createQaSuiteScenarioFlowApi>[0]["env"];
@@ -225,13 +227,14 @@ describe("qa suite runtime flow", () => {
 
     expect(result).toEqual({ api: "ok" });
     expect(createQaScenarioRuntimeApi).toHaveBeenCalledTimes(1);
-    const call = createQaScenarioRuntimeApi.mock.calls[0]?.[0] as {
+    const call = createQaScenarioRuntimeApi.mock.calls.at(0)?.[0] as {
       env: typeof env;
       scenario: typeof scenario;
       deps: {
         runScenario: typeof runScenario;
         waitForQaChannelReady: typeof waitForQaChannelReady;
         waitForOutboundMessage: typeof waitForOutboundMessage;
+        findManagedDreamingCronJob: typeof findManagedDreamingCronJob;
         forceMemoryIndex: typeof forceMemoryIndex;
         runAgentPrompt: typeof runAgentPrompt;
         qaChannelPlugin: typeof qaChannelPlugin;
@@ -248,6 +251,7 @@ describe("qa suite runtime flow", () => {
     expect(call.deps.runScenario).toBe(runScenario);
     expect(call.deps.waitForQaChannelReady).toBe(waitForQaChannelReady);
     expect(call.deps.waitForOutboundMessage).toBe(waitForOutboundMessage);
+    expect(call.deps.findManagedDreamingCronJob).toBe(findManagedDreamingCronJob);
     expect(call.deps.forceMemoryIndex).toBe(forceMemoryIndex);
     expect(call.deps.runAgentPrompt).toBe(runAgentPrompt);
     expect(call.deps.qaChannelPlugin).toBe(qaChannelPlugin);

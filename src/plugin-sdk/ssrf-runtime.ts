@@ -4,11 +4,14 @@
 export {
   closeDispatcher,
   createPinnedDispatcher,
+  SsrFBlockedError,
   isBlockedHostnameOrIp,
+  isPrivateIpAddress,
   resolvePinnedHostname,
   resolvePinnedHostnameWithPolicy,
   ssrfPolicyFromHttpBaseUrlAllowedHostname,
   type LookupFn,
+  type PinnedHostname,
   type SsrFPolicy,
 } from "../infra/net/ssrf.js";
 export { formatErrorMessage } from "../infra/errors.js";

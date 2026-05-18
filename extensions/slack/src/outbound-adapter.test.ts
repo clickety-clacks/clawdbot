@@ -50,40 +50,35 @@ describe("slackOutbound", () => {
     });
 
     expect(sendMessageSlackMock).toHaveBeenCalledTimes(3);
-    expect(sendMessageSlackMock).toHaveBeenNthCalledWith(
-      1,
-      "C123",
-      "",
-      expect.objectContaining({
-        cfg,
-        mediaUrl: "https://example.com/1.png",
-        mediaLocalRoots: ["/tmp/workspace"],
-      }),
-    );
-    expect(sendMessageSlackMock).toHaveBeenNthCalledWith(
-      2,
-      "C123",
-      "",
-      expect.objectContaining({
-        cfg,
-        mediaUrl: "https://example.com/2.png",
-        mediaLocalRoots: ["/tmp/workspace"],
-      }),
-    );
-    expect(sendMessageSlackMock).toHaveBeenNthCalledWith(
-      3,
-      "C123",
-      "final text",
-      expect.objectContaining({
-        cfg,
-        blocks: [
-          {
-            type: "section",
-            text: { type: "mrkdwn", text: "Block body" },
-          },
-        ],
-      }),
-    );
+    expect(sendMessageSlackMock).toHaveBeenNthCalledWith(1, "C123", "", {
+      cfg,
+      threadTs: undefined,
+      accountId: "default",
+      mediaUrl: "https://example.com/1.png",
+      mediaAccess: undefined,
+      mediaLocalRoots: ["/tmp/workspace"],
+      mediaReadFile: undefined,
+    });
+    expect(sendMessageSlackMock).toHaveBeenNthCalledWith(2, "C123", "", {
+      cfg,
+      threadTs: undefined,
+      accountId: "default",
+      mediaUrl: "https://example.com/2.png",
+      mediaAccess: undefined,
+      mediaLocalRoots: ["/tmp/workspace"],
+      mediaReadFile: undefined,
+    });
+    expect(sendMessageSlackMock).toHaveBeenNthCalledWith(3, "C123", "final text", {
+      cfg,
+      threadTs: undefined,
+      accountId: "default",
+      blocks: [
+        {
+          type: "section",
+          text: { type: "mrkdwn", text: "Block body" },
+        },
+      ],
+    });
     expect(result).toEqual({ channel: "slack", messageId: "m-final" });
   });
 
@@ -105,14 +100,68 @@ describe("slackOutbound", () => {
       accountId: "default",
     });
 
-    expect(sendMessageSlackMock).toHaveBeenCalledWith(
-      "C123",
-      "fallback text",
-      expect.objectContaining({
-        cfg,
-        blocks: [{ type: "divider" }],
-      }),
-    );
+    expect(sendMessageSlackMock).toHaveBeenCalledWith("C123", "fallback text", {
+      cfg,
+      threadTs: undefined,
+      accountId: "default",
+      blocks: [{ type: "divider" }],
+    });
     expect(result).toEqual({ channel: "slack", messageId: "m-blocks" });
+  });
+
+  it("falls back to threadId when payload replyToId is not a Slack thread timestamp", async () => {
+    sendMessageSlackMock.mockResolvedValueOnce({ messageId: "m-blocks" });
+
+    await slackOutbound.sendPayload!({
+      cfg,
+      to: "C123",
+      text: "",
+      replyToId: "msg-internal-1",
+      threadId: "1712345678.123456",
+      payload: {
+        text: "fallback text",
+        channelData: {
+          slack: {
+            blocks: [{ type: "divider" }],
+          },
+        },
+      },
+      accountId: "default",
+    });
+
+    expect(sendMessageSlackMock).toHaveBeenCalledWith("C123", "fallback text", {
+      cfg,
+      threadTs: "1712345678.123456",
+      accountId: "default",
+      blocks: [{ type: "divider" }],
+    });
+  });
+
+  it("does not thread payloads without a valid Slack thread timestamp", async () => {
+    sendMessageSlackMock.mockResolvedValueOnce({ messageId: "m-blocks" });
+
+    await slackOutbound.sendPayload!({
+      cfg,
+      to: "C123",
+      text: "",
+      replyToId: "msg-internal-1",
+      threadId: "thread-root",
+      payload: {
+        text: "fallback text",
+        channelData: {
+          slack: {
+            blocks: [{ type: "divider" }],
+          },
+        },
+      },
+      accountId: "default",
+    });
+
+    expect(sendMessageSlackMock).toHaveBeenCalledWith("C123", "fallback text", {
+      cfg,
+      threadTs: undefined,
+      accountId: "default",
+      blocks: [{ type: "divider" }],
+    });
   });
 });

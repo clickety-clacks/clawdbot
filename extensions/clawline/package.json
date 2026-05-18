@@ -1,6 +1,6 @@
 {
   "name": "@openclaw/clawline",
-  "version": "2026.4.11",
+  "version": "2026.5.4",
   "description": "OpenClaw Clawline channel plugin",
   "type": "module",
   "dependencies": {
@@ -10,8 +10,8 @@
     "busboy": "1.6.0",
     "jsonwebtoken": "9.0.3",
     "undici": "8.1.0",
-    "ws": "^8.20.0",
-    "zod": "^4.3.6"
+    "ws": "8.20.0",
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@openclaw/plugin-sdk": "workspace:*",
@@ -20,7 +20,7 @@
     "openclaw": "workspace:*"
   },
   "peerDependencies": {
-    "openclaw": ">=2026.4.11"
+    "openclaw": ">=2026.5.4"
   },
   "peerDependenciesMeta": {
     "openclaw": {
@@ -45,36 +45,13 @@
       "npmSpec": "@openclaw/clawline",
       "localPath": "extensions/clawline",
       "defaultChoice": "local",
-      "minHostVersion": ">=2026.4.11"
+      "minHostVersion": ">=2026.5.4"
     },
     "compat": {
-      "pluginApi": ">=2026.4.11"
+      "pluginApi": ">=2026.5.4"
     },
     "build": {
-      "openclawVersion": "2026.4.11"
-    },
-    "bundle": {
-      "stageRuntimeDependencies": true,
-      "nativeRuntimeDependencies": [
-        {
-          "name": "better-sqlite3",
-          "loadPaths": [
-            "build/Release/better_sqlite3.node"
-          ]
-        }
-      ]
-    },
-    "releaseChecks": {
-      "rootDependencyMirrorAllowlist": [
-        "@lydell/node-pty",
-        "@sinclair/typebox",
-        "better-sqlite3",
-        "busboy",
-        "jsonwebtoken",
-        "undici",
-        "ws",
-        "zod"
-      ]
+      "openclawVersion": "2026.5.4"
     }
   }
 }

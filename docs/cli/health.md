@@ -1,7 +1,7 @@
 ---
 summary: "CLI reference for `openclaw health` (gateway health snapshot via RPC)"
 read_when:
-  - You want to quickly check the running Gateway’s health
+  - You want to quickly check the running Gateway's health
 title: "Health"
 ---
 
@@ -9,12 +9,14 @@ title: "Health"
 
 Fetch health from the running Gateway.
 
-Options:
+## Options
 
-- `--json`: machine-readable output
-- `--timeout <ms>`: connection timeout in milliseconds (default `10000`)
-- `--verbose`: verbose logging
-- `--debug`: alias for `--verbose`
+| Flag             | Default | Description                                                        |
+| ---------------- | ------- | ------------------------------------------------------------------ |
+| `--json`         | `false` | Print machine-readable JSON instead of text.                       |
+| `--timeout <ms>` | `10000` | Connection timeout in milliseconds.                                |
+| `--verbose`      | `false` | Verbose logging. Forces a live probe and expands per-agent output. |
+| `--debug`        | `false` | Alias for `--verbose`.                                             |
 
 Examples:
 
@@ -34,3 +36,8 @@ Notes:
 - `--verbose` forces a live probe, prints gateway connection details, and expands the
   human-readable output across all configured accounts and agents.
 - Output includes per-agent session stores when multiple agents are configured.
+
+## Related
+
+- [CLI reference](/cli)
+- [Gateway health](/gateway/health)
