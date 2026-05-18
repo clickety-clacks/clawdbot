@@ -25,6 +25,7 @@ type TerminalBubbleRequest = {
   destination: {
     address: string;
   };
+  terminalSessionId?: string;
   title?: string;
 };
 
@@ -161,14 +162,16 @@ function readTerminalBubbleRequest(params: Record<string, unknown>): TerminalBub
     throw new Error("Clawline terminal bubble request requires destination.address");
   }
   const title = readStringParam(params, ["title"]);
+  const terminalSessionId = readStringParam(params, ["terminalSessionId"]);
   return {
     destination: { address },
+    ...(terminalSessionId ? { terminalSessionId } : {}),
     ...(title ? { title } : {}),
   };
 }
 
 function buildTerminalBubbleDescriptorRequest(request: TerminalBubbleRequest): string {
-  const terminalSessionId = `term_${randomUUID().replace(/-/g, "")}`;
+  const terminalSessionId = request.terminalSessionId ?? `term_${randomUUID().replace(/-/g, "")}`;
   const descriptor = {
     version: 2,
     terminalSessionId,
@@ -390,6 +393,12 @@ export const clawlineMessageActions: ChannelMessageActionAdapter = {
             Type.String({
               description:
                 "Optional Clawline terminal bubble title. When omitted, the provider defaults it from destination.address.",
+            }),
+          ),
+          terminalSessionId: Type.Optional(
+            Type.String({
+              description:
+                "Optional Clawline terminal bubble tmux session identity/name. When omitted, the provider generates a fresh id.",
             }),
           ),
         },

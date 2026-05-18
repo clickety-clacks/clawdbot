@@ -40,6 +40,7 @@ describe("clawlineMessageActions", () => {
       properties: {
         destination: expect.any(Object),
         title: expect.any(Object),
+        terminalSessionId: expect.any(Object),
       },
     });
   });
@@ -267,6 +268,59 @@ describe("clawlineMessageActions", () => {
       supportsBinaryFrames: true,
       supportsResize: true,
       supportsDetach: true,
+    });
+  });
+
+  it("sendAttachment builds a structured terminal bubble for a caller-supplied tmux session id", async () => {
+    const cfg: OpenClawConfig = { channels: { clawline: { enabled: true } } };
+    vi.mocked(sendClawlineOutboundMessage).mockResolvedValueOnce({
+      messageId: "msg-existing-term-request",
+      userId: "flynn",
+      deviceId: "device-1",
+      attachments: [
+        {
+          type: "document",
+          mimeType: "application/vnd.clawline.terminal-session+json",
+          data: "placeholder",
+        },
+      ],
+      assetIds: [],
+    });
+
+    await runClawlineAction({
+      action: "sendAttachment",
+      params: {
+        target: "flynn:main",
+        mimeType: "application/vnd.clawline.terminal-session+json",
+        terminalSessionId: "flynn-existing-agent",
+        title: "existing agent on eezo",
+        destination: {
+          address: "mike@eezo",
+        },
+      },
+      cfg,
+      accountId: null,
+    });
+
+    const call = vi.mocked(sendClawlineOutboundMessage).mock.calls[0]?.[0];
+    const attachment = call?.attachments?.[0];
+    const descriptor = JSON.parse(
+      Buffer.from((attachment as { data: string }).data, "base64").toString("utf8"),
+    ) as {
+      version: number;
+      terminalSessionId: string;
+      title?: string;
+      destination?: { address?: string };
+      provider?: { wsPath?: string };
+      auth?: { mode?: string };
+    };
+    expect(descriptor).toMatchObject({
+      version: 2,
+      terminalSessionId: "flynn-existing-agent",
+      title: "existing agent on eezo",
+      destination: { address: "mike@eezo" },
+      provider: { wsPath: "/ws/terminal" },
+      auth: { mode: "chat_token" },
     });
   });
 

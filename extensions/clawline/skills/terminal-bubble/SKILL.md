@@ -30,7 +30,7 @@ If Flynn specifies a different stream, use that.
 
 Every new terminal bubble must carry an explicit destination address. In the current routing model this is an SSH target string such as `mike@eezo` or `eezo`.
 
-You do not need to hand-author a descriptor or choose a `terminalSessionId`. The provider now generates the destination-aware descriptor and tmux session id from the request.
+You do not need to hand-author a descriptor. Omit `terminalSessionId` for a new bubble, or provide it when attaching the bubble to an existing tmux session on the destination.
 
 ### 3. Send the terminal-bubble request
 
@@ -43,6 +43,7 @@ Send a structured `message sendAttachment` request with terminal mime type plus 
   "target": "<stream>",
   "mimeType": "application/vnd.clawline.terminal-session+json",
   "title": "<human-readable title>",
+  "terminalSessionId": "<optional-existing-tmux-session-name>",
   "destination": {
     "address": "<destination-address>"
   }
@@ -51,6 +52,7 @@ Send a structured `message sendAttachment` request with terminal mime type plus 
 
 **Required fields:** `mimeType`, `target`, `destination.address`
 **Title rule:** `title` is presentation only. It may match the destination, but routing authority is `destination.address`.
+**Session rule:** `terminalSessionId` is optional. When supplied, it identifies the tmux session to attach on the destination host; when omitted, the provider generates a fresh session id.
 
 **Send:**
 
@@ -58,7 +60,7 @@ Send a structured `message sendAttachment` request with terminal mime type plus 
 message(action=sendAttachment, channel=clawline, target=<stream>, mimeType=application/vnd.clawline.terminal-session+json, destination={"address":"<destination-address>"}, title="<optional title>")
 ```
 
-The provider emits the version 2 descriptor attachment, generates a fresh `terminalSessionId`, and creates the tmux session on first attach if needed.
+The provider emits the version 2 descriptor attachment. When `terminalSessionId` is omitted, it generates a fresh id; when supplied, the descriptor uses that caller-supplied tmux session identity.
 
 ### 4. Verify
 
@@ -70,15 +72,15 @@ After sending, ask Flynn what they see. Expected: a chromeless terminal bubble w
 
 ## Quick reference
 
-| Field              | Value                                            |
-| ------------------ | ------------------------------------------------ |
-| MIME type          | `application/vnd.clawline.terminal-session+json` |
-| WS path            | `/ws/terminal`                                   |
-| Auth mode          | `chat_token`                                     |
-| Descriptor version | provider-generated `2`                           |
-| Routing authority  | `destination.address`                            |
-| tmux session id    | provider-generated from the new bubble request   |
-| tmux location      | Host named by `destination.address`              |
+| Field              | Value                                                                      |
+| ------------------ | -------------------------------------------------------------------------- |
+| MIME type          | `application/vnd.clawline.terminal-session+json`                           |
+| WS path            | `/ws/terminal`                                                             |
+| Auth mode          | `chat_token`                                                               |
+| Descriptor version | provider-generated `2`                                                     |
+| Routing authority  | `destination.address`                                                      |
+| tmux session id    | optional caller-supplied `terminalSessionId`, otherwise provider-generated |
+| tmux location      | Host named by `destination.address`                                        |
 
 ## Common patterns
 
@@ -86,7 +88,7 @@ After sending, ask Flynn what they see. Expected: a chromeless terminal bubble w
 Send a new destination-aware request. The provider will create the backing tmux session on first attach. Good for showing live logs, running commands, or debugging.
 
 **Attach to existing agent session:**
-Not part of this routing spec. The minimal flow is one new bubble request naming one destination address; the provider owns the generated session id and tmux lifecycle.
+Send a destination-aware request with `terminalSessionId` set to the existing tmux session name on that destination host.
 
 **Tail logs:**
 Out of scope for this minimal routing slice unless another product surface intentionally writes that command into the created shell.
