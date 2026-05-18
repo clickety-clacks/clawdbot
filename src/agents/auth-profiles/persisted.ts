@@ -366,29 +366,12 @@ function resolveOAuthProfileSecretKeySeed(options?: { create?: boolean }): strin
   return undefined;
 }
 
-function buildOAuthProfileSecretKeyFromSeed(seed: string): Buffer {
-  return createHash("sha256").update(`openclaw:auth-profile-oauth:${seed}`).digest();
-}
-
 function buildOAuthProfileSecretKey(options?: { create?: boolean }): Buffer | null {
   const externalKey = resolveOAuthProfileSecretKeySeed(options);
   if (!externalKey) {
     return null;
   }
-  return buildOAuthProfileSecretKeyFromSeed(externalKey);
-}
-
-function listOAuthProfileSecretKeySeedsForRead(): string[] {
-  const seeds = [
-    process.env[OAUTH_PROFILE_SECRET_KEY_ENV]?.trim() || undefined,
-    process.env.NODE_ENV === "test" && process.env.VITEST === "true"
-      ? "openclaw-test-oauth-profile-secret-key"
-      : undefined,
-    shouldUseMacKeychainForOAuthProfileSecrets() ? readMacOAuthProfileSecretKey() : undefined,
-    readFallbackOAuthProfileSecretKeyFile(),
-  ].filter((seed): seed is string => !!seed);
-
-  return [...new Set(seeds)];
+  return createHash("sha256").update(`openclaw:auth-profile-oauth:${externalKey}`).digest();
 }
 
 function encryptOAuthProfileSecretMaterial(params: {
@@ -431,39 +414,36 @@ function decryptOAuthProfileSecretMaterial(params: {
   if (params.encrypted.algorithm !== OAUTH_PROFILE_SECRET_ALGORITHM) {
     return null;
   }
-  const keys = listOAuthProfileSecretKeySeedsForRead().map(buildOAuthProfileSecretKeyFromSeed);
-  if (keys.length === 0) {
+  const key = buildOAuthProfileSecretKey();
+  if (!key) {
     return null;
   }
-  for (const key of keys) {
-    try {
-      const decipher = createDecipheriv(
-        OAUTH_PROFILE_SECRET_ALGORITHM,
-        key,
-        Buffer.from(params.encrypted.iv, "base64url"),
-      );
-      decipher.setAAD(
-        buildOAuthProfileSecretAad({
-          ref: params.ref,
-          profileId: params.profileId,
-          provider: params.provider,
-        }),
-      );
-      decipher.setAuthTag(Buffer.from(params.encrypted.tag, "base64url"));
-      const plaintext = Buffer.concat([
-        decipher.update(Buffer.from(params.encrypted.ciphertext, "base64url")),
-        decipher.final(),
-      ]).toString("utf8");
-      const raw = JSON.parse(plaintext) as unknown;
-      if (!raw || typeof raw !== "object") {
-        continue;
-      }
-      return normalizeOAuthProfileSecretMaterial(raw as OAuthProfileSecretMaterial);
-    } catch {
-      continue;
+  try {
+    const decipher = createDecipheriv(
+      OAUTH_PROFILE_SECRET_ALGORITHM,
+      key,
+      Buffer.from(params.encrypted.iv, "base64url"),
+    );
+    decipher.setAAD(
+      buildOAuthProfileSecretAad({
+        ref: params.ref,
+        profileId: params.profileId,
+        provider: params.provider,
+      }),
+    );
+    decipher.setAuthTag(Buffer.from(params.encrypted.tag, "base64url"));
+    const plaintext = Buffer.concat([
+      decipher.update(Buffer.from(params.encrypted.ciphertext, "base64url")),
+      decipher.final(),
+    ]).toString("utf8");
+    const raw = JSON.parse(plaintext) as unknown;
+    if (!raw || typeof raw !== "object") {
+      return null;
     }
+    return normalizeOAuthProfileSecretMaterial(raw as OAuthProfileSecretMaterial);
+  } catch {
+    return null;
   }
-  return null;
 }
 
 function writeOAuthProfileSecretMaterial(params: {
