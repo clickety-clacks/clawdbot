@@ -996,6 +996,10 @@ describe.sequential("clawline provider server", () => {
         bindings: [],
       } as OpenClawConfig,
     });
+    const previousAnthropicOauthToken = process.env.ANTHROPIC_OAUTH_TOKEN;
+    const previousOpenAiApiKey = process.env.OPENAI_API_KEY;
+    process.env.ANTHROPIC_OAUTH_TOKEN = "t318-fake-anthropic-oauth-token";
+    process.env.OPENAI_API_KEY = "t318-fake-openai-api-key";
     try {
       await fs.writeFile(
         ctx.sessionStorePath,
@@ -1042,6 +1046,7 @@ describe.sequential("clawline provider server", () => {
         display: {
           model: "claude-opus-4-6",
           provider: "anthropic",
+          authMode: "oauth",
           thinkingLevel: "high",
           fastMode: false,
           mode: "normal",
@@ -1086,6 +1091,9 @@ describe.sequential("clawline provider server", () => {
           ]),
         },
       });
+      expect(JSON.stringify(statusJson)).not.toContain("t318-fake-anthropic-oauth-token");
+      expect(JSON.stringify(statusJson)).not.toContain("t318-fake-openai-api-key");
+
       const catalogModels = (statusJson as { modelCatalog?: { models?: Array<{ ref?: string }> } })
         .modelCatalog?.models;
       const sonnetModelRef = catalogModels?.find(
@@ -1289,14 +1297,61 @@ describe.sequential("clawline provider server", () => {
         display: {
           model: "gpt-5.5",
           provider: "openai",
+          authMode: "api_key",
           thinkingLevel: "low",
           fastMode: null,
           mode: null,
         },
       });
 
+      await fs.writeFile(
+        ctx.sessionStorePath,
+        JSON.stringify(
+          {
+            [sessionKey]: {
+              sessionId: "unknown-auth-session-status-test",
+              updatedAt: Date.now(),
+              modelProvider: "local-runtime",
+              model: "local-model",
+            },
+          },
+          null,
+          2,
+        ),
+      );
+      const unknownAuthStatusResponse = await fetch(
+        `http://127.0.0.1:${ctx.port}/api/session-status?sessionKey=${encodeURIComponent(
+          sessionKey,
+        )}`,
+        { headers: { Authorization: authHeader } },
+      );
+      expect(unknownAuthStatusResponse.status).toBe(200);
+      const unknownAuthStatusJson = await unknownAuthStatusResponse.json();
+      expect(unknownAuthStatusJson).toMatchObject({
+        sessionKey,
+        display: {
+          provider: "local-runtime",
+          model: "local-model",
+          authMode: "unknown",
+        },
+      });
+      expect(JSON.stringify(unknownAuthStatusJson)).not.toContain(
+        "t318-fake-anthropic-oauth-token",
+      );
+      expect(JSON.stringify(unknownAuthStatusJson)).not.toContain("t318-fake-openai-api-key");
+
       ws.terminate();
     } finally {
+      if (previousAnthropicOauthToken === undefined) {
+        delete process.env.ANTHROPIC_OAUTH_TOKEN;
+      } else {
+        process.env.ANTHROPIC_OAUTH_TOKEN = previousAnthropicOauthToken;
+      }
+      if (previousOpenAiApiKey === undefined) {
+        delete process.env.OPENAI_API_KEY;
+      } else {
+        process.env.OPENAI_API_KEY = previousOpenAiApiKey;
+      }
       await ctx.cleanup();
     }
   });
