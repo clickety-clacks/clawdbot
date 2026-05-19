@@ -798,6 +798,42 @@ describe("buildInboundUserContextPrefix", () => {
     });
   });
 
+  it("renders clawline message reference context through untrusted metadata JSON", () => {
+    const text = buildInboundUserContextPrefix({
+      ChatType: "direct",
+      OriginatingChannel: "clawline",
+      UntrustedStructuredContext: [
+        {
+          label: "Referenced message",
+          source: "clawline",
+          type: "message_reference",
+          payload: {
+            session_key: "agent:main:clawline:flynn:main",
+            message_id: "m_1",
+            message_role: "assistant",
+            created_at_ms: 1_700_000_000_000,
+            body: "This is the referenced body.",
+          },
+        },
+      ],
+    } as TemplateContext);
+
+    const structured = parseUntrustedJsonBlock(
+      text,
+      "Referenced message (untrusted metadata):",
+    ) as Record<string, unknown>;
+    expect(structured["source"]).toBe("clawline");
+    expect(structured["type"]).toBe("message_reference");
+    expect(structured["payload"]).toEqual({
+      session_key: "agent:main:clawline:flynn:main",
+      message_id: "m_1",
+      message_role: "assistant",
+      created_at_ms: 1_700_000_000_000,
+      body: "This is the referenced body.",
+    });
+    expect(text).toContain("This is the referenced body.");
+  });
+
   it("renders chat window structured context as compact transcript text", () => {
     const text = buildInboundUserContextPrefix(
       {

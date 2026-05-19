@@ -90,6 +90,10 @@ import type {
 import { ClientMessageError, HttpError } from "./errors.js";
 import { callClawlineGatewayAgent } from "./gateway-alert-runtime.js";
 import { createAssetHandlers } from "./http-assets.js";
+import {
+  resolveClawlineMessageReferenceContexts,
+  type ClawlineTranscriptMessageRecord,
+} from "./message-reference-context.js";
 import { runWithClawlineOutboundCorrelation } from "./outbound.js";
 import { createPerUserTaskQueue } from "./per-user-task-queue.js";
 import { SlidingWindowRateLimiter } from "./rate-limiter.js";
@@ -6919,6 +6923,40 @@ button.deny { background: #9b1c31; color: white; }
     };
   }
 
+  async function readClawlineTranscriptMessages(
+    sessionFile: string,
+  ): Promise<ClawlineTranscriptMessageRecord[] | null> {
+    try {
+      const raw = await fs.readFile(sessionFile, "utf8");
+      const lines = raw.split(/\r?\n/).filter((line) => line.trim().length > 0);
+      const messages: ClawlineTranscriptMessageRecord[] = [];
+      for (const line of lines) {
+        try {
+          const parsed = JSON.parse(line) as Record<string, unknown>;
+          const message = parsed.message;
+          if (!message || typeof message !== "object" || Array.isArray(message)) {
+            continue;
+          }
+          messages.push({
+            id: typeof parsed.id === "string" ? parsed.id : undefined,
+            clientMessageId:
+              typeof parsed.clientMessageId === "string" ? parsed.clientMessageId : undefined,
+            timestamp: typeof parsed.timestamp === "number" ? parsed.timestamp : undefined,
+            message: {
+              role: (message as Record<string, unknown>).role,
+              content: (message as Record<string, unknown>).content,
+            },
+          });
+        } catch {
+          continue;
+        }
+      }
+      return messages;
+    } catch {
+      return null;
+    }
+  }
+
   type AlertSessionStoreSignature = {
     storePath: string;
     exists: boolean;
@@ -8698,6 +8736,27 @@ button.deny { background: #9b1c31; color: white; }
             return;
           }
 
+          markProcessStage("resolve_references");
+          const referenceResolution = await resolveClawlineMessageReferenceContexts({
+            references: payload.references,
+            resolveTranscriptMessages: async (referenceSessionKey: string) => {
+              const referenceSession = loadSessionStoreEntryForKey(referenceSessionKey);
+              const referenceSessionId = referenceSession.entry?.sessionId;
+              if (!referenceSessionId) {
+                return null;
+              }
+              const transcriptPath =
+                typeof referenceSession.entry?.sessionFile === "string" &&
+                referenceSession.entry.sessionFile.trim().length > 0
+                  ? referenceSession.entry.sessionFile
+                  : resolveClawlineSessionTranscriptPath(referenceSessionId, mainSessionAgentId);
+              return await readClawlineTranscriptMessages(transcriptPath);
+            },
+          });
+          if (!referenceResolution.ok) {
+            throw new ClientMessageError(referenceResolution.code, referenceResolution.message);
+          }
+
           markProcessStage("message_rate_limit");
           if (!messageRateLimiter.attempt(session.deviceId)) {
             throw new ClientMessageError("rate_limited", "Too many messages");
@@ -8792,6 +8851,14 @@ button.deny { background: #9b1c31; color: white; }
             GroupSystemPrompt: groupSystemPrompt,
             CommandAuthorized: true,
           });
+          if (referenceResolution.contexts.length > 0) {
+            ctxPayload.UntrustedStructuredContext = [
+              ...(Array.isArray(ctxPayload.UntrustedStructuredContext)
+                ? ctxPayload.UntrustedStructuredContext
+                : []),
+              ...referenceResolution.contexts,
+            ];
+          }
           markProcessStage("record_inbound_session");
           await recordInboundSession({
             storePath: sessionStorePath,
