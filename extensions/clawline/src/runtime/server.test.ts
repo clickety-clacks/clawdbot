@@ -6622,7 +6622,7 @@ describe.sequential("clawline provider server", () => {
           content: "first prompt",
         }),
       );
-      await waitForQueuedMessage(queue, (value) => {
+      await waitForQueuedMessageWithTimeout(queue, (value) => {
         const typed = value as { type?: string; id?: string };
         return typed.type === "ack" && typed.id === firstMessageId;
       });
@@ -6701,6 +6701,135 @@ describe.sequential("clawline provider server", () => {
       expect(await response.json()).toMatchObject({
         error: { code: "forbidden", message: "Admin access required" },
       });
+      ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("resolves a referenced echoed server message id into model-visible context", async () => {
+    const deviceId = randomUUID();
+    const firstMessageId = `c_${randomUUID()}`;
+    const secondMessageId = `c_${randomUUID()}`;
+    const sessionKey = "agent:main:clawline:flynn:main";
+    let capturedCtx: Record<string, unknown> | null = null;
+    const replyResolver: typeof testReplyResolver = async (ctx) => {
+      if ((ctx as { MessageSid?: unknown }).MessageSid === secondMessageId) {
+        capturedCtx = ctx as unknown as Record<string, unknown>;
+        return { text: "second reply" };
+      }
+      return { text: "first reply" };
+    };
+    const entry = createAllowlistEntry({
+      deviceId,
+      userId: "flynn",
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry], { replyResolver });
+    try {
+      const pair = await performPairRequest(ctx.port, deviceId);
+      const token = pair.token as string;
+      const { ws } = await authenticateDevice(ctx.port, deviceId, token);
+      const queue = createMessageQueue(ws);
+
+      ws.send(
+        JSON.stringify({
+          type: "message",
+          id: firstMessageId,
+          content: "referenced body",
+        }),
+      );
+
+      await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const typed = value as { type?: string; id?: string };
+        return typed.type === "ack" && typed.id === firstMessageId;
+      });
+      const firstEcho = (await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const typed = value as {
+          type?: string;
+          role?: string;
+          content?: string;
+          clientMessageId?: string;
+          sessionKey?: string;
+          timestamp?: number;
+          id?: string;
+        };
+        return (
+          typed.type === "message" && typed.role === "user" && typed.content === "referenced body"
+        );
+      })) as {
+        id?: string;
+        clientMessageId?: string;
+        sessionKey?: string;
+        timestamp?: number;
+      };
+      expect(firstEcho.id?.startsWith("s_")).toBe(true);
+      expect(firstEcho.clientMessageId).toBe(firstMessageId);
+      expect(firstEcho.sessionKey).toBe(sessionKey);
+      expect(typeof firstEcho.timestamp).toBe("number");
+
+      const firstAssistant = (await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const typed = value as { type?: string; role?: string; content?: string };
+        return typed.type === "message" && typed.role === "assistant";
+      })) as { content?: string };
+      expect(firstAssistant.content).toBe("first reply");
+
+      ws.send(
+        JSON.stringify({
+          type: "message",
+          id: secondMessageId,
+          content: "use the referenced message",
+          references: [
+            {
+              kind: "message",
+              sessionKey,
+              messageId: firstEcho.id,
+              messageRole: "user",
+              createdAt: firstEcho.timestamp,
+              clientMessageId: firstMessageId,
+            },
+          ],
+        }),
+      );
+      await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const typed = value as { type?: string; id?: string };
+        return typed.type === "ack" && typed.id === secondMessageId;
+      });
+      await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const typed = value as { type?: string; role?: string; content?: string };
+        return (
+          typed.type === "message" &&
+          typed.role === "user" &&
+          typed.content === "use the referenced message"
+        );
+      });
+      const secondAssistant = (await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const typed = value as { type?: string; role?: string; content?: string };
+        return typed.type === "message" && typed.role === "assistant";
+      })) as { content?: string };
+      expect(secondAssistant.content).toBe("second reply");
+
+      expect(capturedCtx).toMatchObject({
+        SessionKey: sessionKey,
+        UntrustedStructuredContext: [
+          expect.objectContaining({
+            label: "Referenced message",
+            source: "clawline",
+            type: "message_reference",
+            payload: expect.objectContaining({
+              session_key: sessionKey,
+              message_id: firstEcho.id,
+              client_message_id: firstMessageId,
+              message_role: "user",
+              created_at_ms: firstEcho.timestamp,
+              body: "referenced body",
+            }),
+          }),
+        ],
+      });
+
+      queue.dispose();
       ws.terminate();
     } finally {
       await ctx.cleanup();

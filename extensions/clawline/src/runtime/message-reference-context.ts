@@ -112,8 +112,38 @@ function buildReferenceContext(
   };
 }
 
+function matchesResolvedIdentity(
+  reference: ClawlineMessageReference,
+  record: ClawlineTranscriptMessageRecord,
+): boolean {
+  if (normalizeString(record.id) !== reference.messageId) {
+    return false;
+  }
+  if (normalizeMessageRole(record.message?.role) !== reference.messageRole) {
+    return false;
+  }
+  if (
+    reference.clientMessageId &&
+    record.clientMessageId !== undefined &&
+    normalizeString(record.clientMessageId) !== reference.clientMessageId
+  ) {
+    return false;
+  }
+  if (
+    reference.createdAt !== undefined &&
+    record.timestamp !== undefined &&
+    normalizeCreatedAt(record.timestamp) !== reference.createdAt
+  ) {
+    return false;
+  }
+  return true;
+}
+
 export async function resolveClawlineMessageReferenceContexts(params: {
   references: unknown;
+  resolveReferenceMessage?: (
+    reference: ClawlineMessageReference,
+  ) => Promise<ClawlineTranscriptMessageRecord | null>;
   resolveTranscriptMessages: (
     sessionKey: string,
   ) => Promise<ClawlineTranscriptMessageRecord[] | null>;
@@ -146,6 +176,29 @@ export async function resolveClawlineMessageReferenceContexts(params: {
       };
     }
 
+    const directMessage = params.resolveReferenceMessage
+      ? await params.resolveReferenceMessage(reference)
+      : null;
+    if (directMessage) {
+      if (!matchesResolvedIdentity(reference, directMessage)) {
+        return {
+          ok: false,
+          code: "unresolved_reference",
+          message: "Referenced message is unavailable.",
+        };
+      }
+      const resolvedText = extractReadableContent(directMessage.message?.content);
+      if (!resolvedText) {
+        return {
+          ok: false,
+          code: "unresolved_reference",
+          message: "Referenced message is unavailable.",
+        };
+      }
+      contexts.push(buildReferenceContext(reference, resolvedText));
+      continue;
+    }
+
     const transcriptMessages = await params.resolveTranscriptMessages(reference.sessionKey);
     if (!transcriptMessages) {
       return {
@@ -157,20 +210,7 @@ export async function resolveClawlineMessageReferenceContexts(params: {
 
     let resolvedText: string | undefined;
     for (const entry of transcriptMessages) {
-      if (normalizeString(entry.id) !== reference.messageId) {
-        continue;
-      }
-      if (normalizeMessageRole(entry.message?.role) !== reference.messageRole) {
-        continue;
-      }
-      if (typeof entry.timestamp === "number" && entry.timestamp !== reference.createdAt) {
-        continue;
-      }
-      if (
-        reference.clientMessageId &&
-        normalizeString(entry.clientMessageId) &&
-        normalizeString(entry.clientMessageId) !== reference.clientMessageId
-      ) {
+      if (!matchesResolvedIdentity(reference, entry)) {
         continue;
       }
       resolvedText = extractReadableContent(entry.message?.content);
