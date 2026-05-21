@@ -1,5 +1,6 @@
 import { applyPluginAutoEnable } from "../../config/plugin-auto-enable.js";
 import { sanitizeForLog } from "../../terminal/ansi.js";
+import { maybeRepairLegacyOAuthSidecarProfiles } from "../doctor-auth-oauth-sidecar.js";
 import {
   maybeRepairManagedNpmOpenClawPeerLinks,
   maybeRepairStaleManagedNpmBundledPlugins,
@@ -22,6 +23,7 @@ import { maybeRepairLegacyToolsBySenderKeys } from "./shared/legacy-tools-by-sen
 import { repairMissingConfiguredPluginInstalls } from "./shared/missing-configured-plugin-install.js";
 import { maybeRepairOpenPolicyAllowFrom } from "./shared/open-policy-allowfrom.js";
 import { cleanupLegacyPluginDependencyState } from "./shared/plugin-dependency-cleanup.js";
+import { repairStaleOAuthProfileShadows } from "./shared/stale-oauth-profile-shadows.js";
 import { maybeRepairStalePluginConfig } from "./shared/stale-plugin-config.js";
 import { isUpdatePackageSwapInProgress } from "./shared/update-phase.js";
 
@@ -65,7 +67,6 @@ export async function runDoctorRepairSequence(params: {
   })) {
     applyMutation(mutation);
   }
-  applyMutation(maybeRepairOpenPolicyAllowFrom(state.candidate));
   applyMutation(maybeRepairBundledPluginLoadPaths(state.candidate, env));
   maybeRepairStaleManagedNpmBundledPlugins({
     config: state.candidate,
@@ -105,6 +106,7 @@ export async function runDoctorRepairSequence(params: {
   }
   applyMutation(maybeRepairInvalidPluginConfig(state.candidate));
   applyMutation(await maybeRepairAllowlistPolicyAllowFrom(state.candidate));
+  applyMutation(maybeRepairOpenPolicyAllowFrom(state.candidate));
 
   const emptyAllowlistWarnings = scanEmptyAllowlistPolicyWarnings(state.candidate, {
     doctorFixCommand: params.doctorFixCommand,
@@ -122,6 +124,28 @@ export async function runDoctorRepairSequence(params: {
   }
   if (pluginDependencyCleanup.warnings.length > 0) {
     warningNotes.push(sanitizeLines(pluginDependencyCleanup.warnings));
+  }
+  const legacyOAuthSidecarRepair = await maybeRepairLegacyOAuthSidecarProfiles({
+    cfg: state.candidate,
+    prompter: { confirmAutoFix: async () => true },
+    emitNotes: false,
+    env,
+  });
+  if (legacyOAuthSidecarRepair.changes.length > 0) {
+    changeNotes.push(sanitizeLines(legacyOAuthSidecarRepair.changes));
+  }
+  if (legacyOAuthSidecarRepair.warnings.length > 0) {
+    warningNotes.push(sanitizeLines(legacyOAuthSidecarRepair.warnings));
+  }
+  const staleOAuthShadowRepair = await repairStaleOAuthProfileShadows({
+    cfg: state.candidate,
+    env,
+  });
+  if (staleOAuthShadowRepair.changes.length > 0) {
+    changeNotes.push(sanitizeLines(staleOAuthShadowRepair.changes));
+  }
+  if (staleOAuthShadowRepair.warnings.length > 0) {
+    warningNotes.push(sanitizeLines(staleOAuthShadowRepair.warnings));
   }
 
   return { state, changeNotes, warningNotes };

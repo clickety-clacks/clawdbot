@@ -140,3 +140,8 @@ export {
 } from "../context-engine/delegate.js";
 export { onDiagnosticEvent } from "../infra/diagnostic-events.js";
 export { optionalStringEnum, stringEnum } from "../agents/schema/typebox.js";
+export {
+  readCodexAppServerFastMode,
+  setCodexAppServerFastMode,
+  type CodexAppServerFastModeStatus,
+} from "./codex-app-server-control.js";

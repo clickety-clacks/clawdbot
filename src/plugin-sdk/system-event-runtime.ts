@@ -2,6 +2,7 @@
 
 export {
   enqueueSystemEvent,
+  peekSystemEvents,
   peekSystemEventEntries,
   resetSystemEventsForTest,
 } from "../infra/system-events.js";

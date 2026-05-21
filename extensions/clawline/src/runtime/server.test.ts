@@ -996,6 +996,10 @@ describe.sequential("clawline provider server", () => {
         bindings: [],
       } as OpenClawConfig,
     });
+    const previousAnthropicOauthToken = process.env.ANTHROPIC_OAUTH_TOKEN;
+    const previousOpenAiApiKey = process.env.OPENAI_API_KEY;
+    process.env.ANTHROPIC_OAUTH_TOKEN = "t318-fake-anthropic-oauth-token";
+    process.env.OPENAI_API_KEY = "t318-fake-openai-api-key";
     try {
       await fs.writeFile(
         ctx.sessionStorePath,
@@ -1042,6 +1046,7 @@ describe.sequential("clawline provider server", () => {
         display: {
           model: "claude-opus-4-6",
           provider: "anthropic",
+          authMode: "oauth",
           thinkingLevel: "high",
           fastMode: false,
           mode: "normal",
@@ -1086,6 +1091,9 @@ describe.sequential("clawline provider server", () => {
           ]),
         },
       });
+      expect(JSON.stringify(statusJson)).not.toContain("t318-fake-anthropic-oauth-token");
+      expect(JSON.stringify(statusJson)).not.toContain("t318-fake-openai-api-key");
+
       const catalogModels = (statusJson as { modelCatalog?: { models?: Array<{ ref?: string }> } })
         .modelCatalog?.models;
       const sonnetModelRef = catalogModels?.find(
@@ -1289,14 +1297,61 @@ describe.sequential("clawline provider server", () => {
         display: {
           model: "gpt-5.5",
           provider: "openai",
+          authMode: "api_key",
           thinkingLevel: "low",
           fastMode: null,
           mode: null,
         },
       });
 
+      await fs.writeFile(
+        ctx.sessionStorePath,
+        JSON.stringify(
+          {
+            [sessionKey]: {
+              sessionId: "unknown-auth-session-status-test",
+              updatedAt: Date.now(),
+              modelProvider: "local-runtime",
+              model: "local-model",
+            },
+          },
+          null,
+          2,
+        ),
+      );
+      const unknownAuthStatusResponse = await fetch(
+        `http://127.0.0.1:${ctx.port}/api/session-status?sessionKey=${encodeURIComponent(
+          sessionKey,
+        )}`,
+        { headers: { Authorization: authHeader } },
+      );
+      expect(unknownAuthStatusResponse.status).toBe(200);
+      const unknownAuthStatusJson = await unknownAuthStatusResponse.json();
+      expect(unknownAuthStatusJson).toMatchObject({
+        sessionKey,
+        display: {
+          provider: "local-runtime",
+          model: "local-model",
+          authMode: "unknown",
+        },
+      });
+      expect(JSON.stringify(unknownAuthStatusJson)).not.toContain(
+        "t318-fake-anthropic-oauth-token",
+      );
+      expect(JSON.stringify(unknownAuthStatusJson)).not.toContain("t318-fake-openai-api-key");
+
       ws.terminate();
     } finally {
+      if (previousAnthropicOauthToken === undefined) {
+        delete process.env.ANTHROPIC_OAUTH_TOKEN;
+      } else {
+        process.env.ANTHROPIC_OAUTH_TOKEN = previousAnthropicOauthToken;
+      }
+      if (previousOpenAiApiKey === undefined) {
+        delete process.env.OPENAI_API_KEY;
+      } else {
+        process.env.OPENAI_API_KEY = previousOpenAiApiKey;
+      }
       await ctx.cleanup();
     }
   });
@@ -1321,12 +1376,34 @@ describe.sequential("clawline provider server", () => {
       } as OpenClawConfig,
     });
     try {
+      const codexSessionFile = path.join(
+        path.dirname(codexCtx.sessionStorePath),
+        "codex-session-control-test.jsonl",
+      );
+      await fs.writeFile(
+        `${codexSessionFile}.codex-app-server.json`,
+        JSON.stringify(
+          {
+            schemaVersion: 1,
+            threadId: "thread-1",
+            sessionFile: codexSessionFile,
+            cwd: path.dirname(codexSessionFile),
+            model: "gpt-5.5",
+            modelProvider: "openai",
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          },
+          null,
+          2,
+        ),
+      );
       await fs.writeFile(
         codexCtx.sessionStorePath,
         JSON.stringify(
           {
             [sessionKey]: {
               sessionId: "codex-session-control-test",
+              sessionFile: codexSessionFile,
               updatedAt: Date.now(),
               modelProvider: "openai",
               model: "gpt-5.5",
@@ -1358,8 +1435,8 @@ describe.sequential("clawline provider server", () => {
           provider: "openai",
           model: "gpt-5.5",
           harness: "codex",
-          fastMode: null,
-          mode: null,
+          fastMode: false,
+          mode: "normal",
         },
         capabilities: {
           setThinking: {
@@ -1378,12 +1455,18 @@ describe.sequential("clawline provider server", () => {
             reason: "codex_reasoning_uses_thinking_level",
           },
           setFastMode: {
-            supported: false,
-            reason: "codex_fast_mode_not_supported_by_session_control",
+            supported: true,
+            options: [
+              { title: "On", enabled: true },
+              { title: "Off", enabled: false },
+            ],
           },
           setMode: {
-            supported: false,
-            reason: "codex_fast_mode_not_supported_by_session_control",
+            supported: true,
+            options: [
+              { title: "On", value: "fast" },
+              { title: "Off", value: "normal" },
+            ],
           },
         },
         modelCatalog: {
@@ -1416,11 +1499,38 @@ describe.sequential("clawline provider server", () => {
         },
       );
       expect(codexFastResponse.status).toBe(200);
-      expect(await codexFastResponse.json()).toMatchObject({
-        ok: false,
+      const codexFastJson = await codexFastResponse.json();
+      expect(codexFastJson).toMatchObject({
+        ok: true,
         sessionKey,
         action: "set_fast_mode",
-        code: "codex_fast_mode_not_supported_by_session_control",
+        status: {
+          display: {
+            fastMode: true,
+            mode: "fast",
+          },
+        },
+      });
+      await fs.rm(`${codexSessionFile}.codex-app-server.json`);
+      const codexDetachedStatusResponse = await fetch(
+        `http://127.0.0.1:${codexCtx.port}/api/session-status?sessionKey=${encodeURIComponent(
+          sessionKey,
+        )}`,
+        { headers: { Authorization: authHeader } },
+      );
+      expect(codexDetachedStatusResponse.status).toBe(200);
+      expect(await codexDetachedStatusResponse.json()).toMatchObject({
+        display: {
+          harness: "codex",
+          fastMode: null,
+          mode: null,
+        },
+        capabilities: {
+          setFastMode: {
+            supported: false,
+            reason: "codex_thread_not_attached",
+          },
+        },
       });
 
       const codexThinkingResponse = await fetch(
@@ -1691,7 +1801,7 @@ describe.sequential("clawline provider server", () => {
           ok: false,
           sessionKey,
           action: "set_fast_mode",
-          code: "codex_fast_mode_not_supported_by_session_control",
+          code: "codex_thread_not_attached",
         });
       } finally {
         releaseReply?.();
@@ -4895,6 +5005,121 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("emits feature-gated live agent progress from real reply callbacks", async () => {
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      userId: "progress_user",
+      isAdmin: false,
+      tokenDelivered: false,
+      lastSeenAt: null,
+    });
+    const ctx = await setupTestServer([entry], {
+      replyResolver: async (_ctx, opts) => {
+        await opts?.onToolStart?.({
+          name: "read",
+          phase: "start",
+          args: { path: "/private/raw-arg.txt" },
+        });
+        await opts?.onItemEvent?.({
+          kind: "tool",
+          phase: "end",
+          status: "completed",
+          name: "read",
+          progressText: "Read complete",
+        });
+        await opts?.onCommandOutput?.({
+          phase: "end",
+          name: "exec",
+          output: "raw command output must not leave provider",
+          status: "completed",
+          cwd: "/tmp",
+        });
+        return { text: "ok" };
+      },
+    });
+    try {
+      const pair = await performPairRequest(ctx.port, entry.deviceId);
+      const { ws, queue, auth } = await authenticateDeviceWithQueue(
+        ctx.port,
+        entry.deviceId,
+        pair.token as string,
+        {
+          authPayload: {
+            clientFeatures: ["live_agent_progress_v1"],
+          },
+        },
+      );
+      expect(auth.features).toEqual(
+        expect.arrayContaining(["session_info", "live_agent_progress_v1"]),
+      );
+
+      const clientMessageId = `c_${randomUUID()}`;
+      ws.send(JSON.stringify({ type: "message", id: clientMessageId, content: "show progress" }));
+
+      await waitForQueuedMessageWithTimeout(queue, (value) => {
+        return (
+          typeof value === "object" &&
+          value !== null &&
+          (value as ParsedWsFrame).type === "ack" &&
+          (value as ParsedWsFrame).id === clientMessageId
+        );
+      });
+
+      const toolProgress = await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const event = (value as { event?: { kind?: unknown; name?: unknown } }).event;
+        return (
+          typeof value === "object" &&
+          value !== null &&
+          (value as ParsedWsFrame).type === "agent_progress" &&
+          event?.kind === "tool" &&
+          event?.name === "read"
+        );
+      });
+      expect(toolProgress).toMatchObject({
+        type: "agent_progress",
+        version: 1,
+        messageId: clientMessageId,
+        state: "running",
+        event: {
+          kind: "tool",
+          name: "read",
+        },
+      });
+      expect(typeof toolProgress.runId).toBe("string");
+      expect(typeof toolProgress.sessionKey).toBe("string");
+      expect(typeof toolProgress.seq).toBe("number");
+      expect(JSON.stringify(toolProgress)).not.toContain("/private/raw-arg.txt");
+
+      const commandProgress = await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const event = (value as { event?: { kind?: unknown; name?: unknown } }).event;
+        return (
+          typeof value === "object" &&
+          value !== null &&
+          (value as ParsedWsFrame).type === "agent_progress" &&
+          event?.kind === "command-output" &&
+          event?.name === "exec"
+        );
+      });
+      expect(JSON.stringify(commandProgress)).not.toContain("raw command output");
+      expect(JSON.stringify(commandProgress)).not.toContain("/tmp");
+
+      const doneProgress = await waitForQueuedMessageWithTimeout(queue, (value) => {
+        return (
+          typeof value === "object" &&
+          value !== null &&
+          (value as ParsedWsFrame).type === "agent_progress" &&
+          (value as ParsedWsFrame).state === "final"
+        );
+      });
+      expect(doneProgress.messageId).toBe(clientMessageId);
+
+      queue.dispose();
+      ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("includes stream read and tail state snapshots in auth_result", async () => {
     const primaryDeviceId = randomUUID();
     const secondaryDeviceId = randomUUID();
@@ -6537,7 +6762,7 @@ describe.sequential("clawline provider server", () => {
           content: "first prompt",
         }),
       );
-      await waitForQueuedMessage(queue, (value) => {
+      await waitForQueuedMessageWithTimeout(queue, (value) => {
         const typed = value as { type?: string; id?: string };
         return typed.type === "ack" && typed.id === firstMessageId;
       });
@@ -6616,6 +6841,135 @@ describe.sequential("clawline provider server", () => {
       expect(await response.json()).toMatchObject({
         error: { code: "forbidden", message: "Admin access required" },
       });
+      ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("resolves a referenced echoed server message id into model-visible context", async () => {
+    const deviceId = randomUUID();
+    const firstMessageId = `c_${randomUUID()}`;
+    const secondMessageId = `c_${randomUUID()}`;
+    const sessionKey = "agent:main:clawline:flynn:main";
+    let capturedCtx: Record<string, unknown> | null = null;
+    const replyResolver: typeof testReplyResolver = async (ctx) => {
+      if ((ctx as { MessageSid?: unknown }).MessageSid === secondMessageId) {
+        capturedCtx = ctx as unknown as Record<string, unknown>;
+        return { text: "second reply" };
+      }
+      return { text: "first reply" };
+    };
+    const entry = createAllowlistEntry({
+      deviceId,
+      userId: "flynn",
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry], { replyResolver });
+    try {
+      const pair = await performPairRequest(ctx.port, deviceId);
+      const token = pair.token as string;
+      const { ws } = await authenticateDevice(ctx.port, deviceId, token);
+      const queue = createMessageQueue(ws);
+
+      ws.send(
+        JSON.stringify({
+          type: "message",
+          id: firstMessageId,
+          content: "referenced body",
+        }),
+      );
+
+      await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const typed = value as { type?: string; id?: string };
+        return typed.type === "ack" && typed.id === firstMessageId;
+      });
+      const firstEcho = (await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const typed = value as {
+          type?: string;
+          role?: string;
+          content?: string;
+          clientMessageId?: string;
+          sessionKey?: string;
+          timestamp?: number;
+          id?: string;
+        };
+        return (
+          typed.type === "message" && typed.role === "user" && typed.content === "referenced body"
+        );
+      })) as {
+        id?: string;
+        clientMessageId?: string;
+        sessionKey?: string;
+        timestamp?: number;
+      };
+      expect(firstEcho.id?.startsWith("s_")).toBe(true);
+      expect(firstEcho.clientMessageId).toBe(firstMessageId);
+      expect(firstEcho.sessionKey).toBe(sessionKey);
+      expect(typeof firstEcho.timestamp).toBe("number");
+
+      const firstAssistant = (await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const typed = value as { type?: string; role?: string; content?: string };
+        return typed.type === "message" && typed.role === "assistant";
+      })) as { content?: string };
+      expect(firstAssistant.content).toBe("first reply");
+
+      ws.send(
+        JSON.stringify({
+          type: "message",
+          id: secondMessageId,
+          content: "use the referenced message",
+          references: [
+            {
+              kind: "message",
+              sessionKey,
+              messageId: firstEcho.id,
+              messageRole: "user",
+              createdAt: firstEcho.timestamp,
+              clientMessageId: firstMessageId,
+            },
+          ],
+        }),
+      );
+      await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const typed = value as { type?: string; id?: string };
+        return typed.type === "ack" && typed.id === secondMessageId;
+      });
+      await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const typed = value as { type?: string; role?: string; content?: string };
+        return (
+          typed.type === "message" &&
+          typed.role === "user" &&
+          typed.content === "use the referenced message"
+        );
+      });
+      const secondAssistant = (await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const typed = value as { type?: string; role?: string; content?: string };
+        return typed.type === "message" && typed.role === "assistant";
+      })) as { content?: string };
+      expect(secondAssistant.content).toBe("second reply");
+
+      expect(capturedCtx).toMatchObject({
+        SessionKey: sessionKey,
+        UntrustedStructuredContext: [
+          expect.objectContaining({
+            label: "Referenced message",
+            source: "clawline",
+            type: "message_reference",
+            payload: expect.objectContaining({
+              session_key: sessionKey,
+              message_id: firstEcho.id,
+              client_message_id: firstMessageId,
+              message_role: "user",
+              created_at_ms: firstEcho.timestamp,
+              body: "referenced body",
+            }),
+          }),
+        ],
+      });
+
+      queue.dispose();
       ws.terminate();
     } finally {
       await ctx.cleanup();

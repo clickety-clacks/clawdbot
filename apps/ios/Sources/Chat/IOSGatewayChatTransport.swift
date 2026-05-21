@@ -12,6 +12,12 @@ struct IOSGatewayChatTransport: OpenClawChatTransport {
         self.gateway = gateway
     }
 
+    func listModels() async throws -> [OpenClawChatModelChoice] {
+        let res = try await self.gateway.request(method: "models.list", paramsJSON: "{}", timeoutSeconds: 15)
+        let decoded = try JSONDecoder().decode(ModelsListResult.self, from: res)
+        return decoded.models.map(Self.mapModelChoice)
+    }
+
     func abortRun(sessionKey: String, runId: String) async throws {
         struct Params: Codable {
             var sessionKey: String
@@ -151,5 +157,13 @@ struct IOSGatewayChatTransport: OpenClawChatTransport {
                 task.cancel()
             }
         }
+    }
+
+    private static func mapModelChoice(_ model: OpenClawProtocol.ModelChoice) -> OpenClawChatModelChoice {
+        OpenClawChatModelChoice(
+            modelID: model.id,
+            name: model.name,
+            provider: model.provider,
+            contextWindow: model.contextwindow)
     }
 }

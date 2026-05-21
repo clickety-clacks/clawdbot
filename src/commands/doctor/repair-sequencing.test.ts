@@ -4,14 +4,17 @@ import { runDoctorRepairSequence } from "./repair-sequencing.js";
 
 const mocks = vi.hoisted(() => ({
   applyPluginAutoEnable: vi.fn(),
+  cleanupLegacyPluginDependencyState: vi.fn(),
   ensureAuthProfileStore: vi.fn(),
   evaluateStoredCredentialEligibility: vi.fn(),
   getInstalledPluginRecord: vi.fn(),
   isInstalledPluginEnabled: vi.fn(),
   loadInstalledPluginIndex: vi.fn(),
+  maybeRepairLegacyOAuthSidecarProfiles: vi.fn(),
   maybeRepairManagedNpmOpenClawPeerLinks: vi.fn(),
   maybeRepairStaleManagedNpmBundledPlugins: vi.fn(),
   maybeRepairStalePluginConfig: vi.fn(),
+  repairStaleOAuthProfileShadows: vi.fn(),
   repairMissingConfiguredPluginInstalls: vi.fn(),
   resolveAuthProfileOrder: vi.fn(),
   resolveProfileUnusableUntilForDisplay: vi.fn(),
@@ -24,6 +27,14 @@ vi.mock("../../config/plugin-auto-enable.js", () => ({
 vi.mock("../doctor-plugin-registry.js", () => ({
   maybeRepairManagedNpmOpenClawPeerLinks: mocks.maybeRepairManagedNpmOpenClawPeerLinks,
   maybeRepairStaleManagedNpmBundledPlugins: mocks.maybeRepairStaleManagedNpmBundledPlugins,
+}));
+
+vi.mock("../doctor-auth-oauth-sidecar.js", () => ({
+  maybeRepairLegacyOAuthSidecarProfiles: mocks.maybeRepairLegacyOAuthSidecarProfiles,
+}));
+
+vi.mock("./shared/plugin-dependency-cleanup.js", () => ({
+  cleanupLegacyPluginDependencyState: mocks.cleanupLegacyPluginDependencyState,
 }));
 
 vi.mock("./shared/missing-configured-plugin-install.js", () => ({
@@ -118,6 +129,10 @@ vi.mock("./shared/stale-plugin-config.js", () => ({
   maybeRepairStalePluginConfig: mocks.maybeRepairStalePluginConfig,
 }));
 
+vi.mock("./shared/stale-oauth-profile-shadows.js", () => ({
+  repairStaleOAuthProfileShadows: mocks.repairStaleOAuthProfileShadows,
+}));
+
 vi.mock("./shared/invalid-plugin-config.js", () => ({
   maybeRepairInvalidPluginConfig: (cfg: OpenClawConfig) => ({
     config: cfg,
@@ -189,6 +204,18 @@ describe("doctor repair sequencing", () => {
     mocks.loadInstalledPluginIndex.mockReturnValue({ plugins: [] });
     mocks.maybeRepairManagedNpmOpenClawPeerLinks.mockResolvedValue(false);
     mocks.maybeRepairStaleManagedNpmBundledPlugins.mockReturnValue(false);
+    mocks.cleanupLegacyPluginDependencyState.mockResolvedValue({
+      changes: [],
+      warnings: [],
+    });
+    mocks.maybeRepairLegacyOAuthSidecarProfiles.mockResolvedValue({
+      changes: [],
+      warnings: [],
+    });
+    mocks.repairStaleOAuthProfileShadows.mockResolvedValue({
+      changes: [],
+      warnings: [],
+    });
     mocks.repairMissingConfiguredPluginInstalls.mockResolvedValue({
       changes: [],
       warnings: [],

@@ -1,3 +1,7 @@
+import {
+  readCodexAppServerFastMode,
+  setCodexAppServerFastMode,
+} from "openclaw/plugin-sdk/codex-app-server-control";
 import { CODEX_CONTROL_METHODS } from "./app-server/capabilities.js";
 import {
   isCodexFastServiceTier,
@@ -138,18 +142,26 @@ export async function setCodexConversationFastMode(params: {
   enabled?: boolean;
   pluginConfig?: unknown;
 }): Promise<string> {
-  const binding = await requireThreadBinding(params.sessionFile);
   if (params.enabled == null) {
-    return `Codex fast mode: ${isCodexFastServiceTier(binding.serviceTier) ? "on" : "off"}.`;
+    const status = await readCodexAppServerFastMode({ sessionFile: params.sessionFile });
+    if (!status.available) {
+      return "Codex fast mode unavailable.";
+    }
+    return `Codex fast mode: ${isCodexFastServiceTier(status.serviceTier) ? "on" : "off"}.`;
   }
-  const serviceTier: CodexServiceTier = params.enabled ? "priority" : "flex";
   // Fast mode is sent on each later turn; do not require Codex to accept an
   // immediate thread/resume control request just to persist the preference.
-  await writeCodexAppServerBinding(params.sessionFile, {
-    ...binding,
-    serviceTier,
-  });
+  await setCodexAppServerFastMode({ sessionFile: params.sessionFile, enabled: params.enabled });
   return `Codex fast mode ${params.enabled ? "enabled" : "disabled"}.`;
+}
+
+export async function readCodexConversationFastMode(params: {
+  sessionFile: string;
+}): Promise<
+  | { available: true; enabled: boolean; serviceTier?: CodexServiceTier }
+  | { available: false; reason: string }
+> {
+  return await readCodexAppServerFastMode(params);
 }
 
 export async function setCodexConversationPermissions(params: {

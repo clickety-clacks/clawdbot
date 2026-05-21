@@ -87,6 +87,7 @@ private func makeViewModel(
     historyResponses: [OpenClawChatHistoryPayload],
     sessionsResponses: [OpenClawChatSessionsListResponse] = [],
     modelResponses: [[OpenClawChatModelChoice]] = [],
+    modelsError: Error? = nil,
     resetSessionHook: (@Sendable (String) async throws -> Void)? = nil,
     compactSessionHook: (@Sendable (String) async throws -> Void)? = nil,
     setSessionModelHook: (@Sendable (String?) async throws -> Void)? = nil,
@@ -99,6 +100,7 @@ private func makeViewModel(
         historyResponses: historyResponses,
         sessionsResponses: sessionsResponses,
         modelResponses: modelResponses,
+        modelsError: modelsError,
         resetSessionHook: resetSessionHook,
         compactSessionHook: compactSessionHook,
         setSessionModelHook: setSessionModelHook,
@@ -244,6 +246,7 @@ private actor TestChatTransportState {
     var modelsCallCount: Int = 0
     var resetSessionKeys: [String] = []
     var compactSessionKeys: [String] = []
+    var sentMessages: [String] = []
     var sentRunIds: [String] = []
     var sentThinkingLevels: [String] = []
     var abortedRunIds: [String] = []
@@ -256,6 +259,7 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
     private let historyResponses: [OpenClawChatHistoryPayload]
     private let sessionsResponses: [OpenClawChatSessionsListResponse]
     private let modelResponses: [[OpenClawChatModelChoice]]
+    private let modelsError: Error?
     private let resetSessionHook: (@Sendable (String) async throws -> Void)?
     private let compactSessionHook: (@Sendable (String) async throws -> Void)?
     private let setSessionModelHook: (@Sendable (String?) async throws -> Void)?
@@ -268,6 +272,7 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
         historyResponses: [OpenClawChatHistoryPayload],
         sessionsResponses: [OpenClawChatSessionsListResponse] = [],
         modelResponses: [[OpenClawChatModelChoice]] = [],
+        modelsError: Error? = nil,
         resetSessionHook: (@Sendable (String) async throws -> Void)? = nil,
         compactSessionHook: (@Sendable (String) async throws -> Void)? = nil,
         setSessionModelHook: (@Sendable (String?) async throws -> Void)? = nil,
@@ -276,6 +281,7 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
         self.historyResponses = historyResponses
         self.sessionsResponses = sessionsResponses
         self.modelResponses = modelResponses
+        self.modelsError = modelsError
         self.resetSessionHook = resetSessionHook
         self.compactSessionHook = compactSessionHook
         self.setSessionModelHook = setSessionModelHook
@@ -308,11 +314,12 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
 
     func sendMessage(
         sessionKey _: String,
-        message _: String,
+        message: String,
         thinking: String,
         idempotencyKey: String,
         attachments _: [OpenClawChatAttachmentPayload]) async throws -> OpenClawChatSendResponse
     {
+        await self.state.sentMessagesAppend(message)
         await self.state.sentRunIdsAppend(idempotencyKey)
         await self.state.sentThinkingLevelsAppend(thinking)
         return OpenClawChatSendResponse(runId: idempotencyKey, status: "ok")
@@ -339,6 +346,9 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
     func listModels() async throws -> [OpenClawChatModelChoice] {
         let idx = await self.state.modelsCallCount
         await self.state.setModelsCallCount(idx + 1)
+        if let modelsError {
+            throw modelsError
+        }
         if idx < self.modelResponses.count {
             return self.modelResponses[idx]
         }
@@ -386,6 +396,10 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
         return ids.last
     }
 
+    func sentMessages() async -> [String] {
+        await self.state.sentMessages
+    }
+
     func abortedRunIds() async -> [String] {
         await self.state.abortedRunIds
     }
@@ -409,6 +423,10 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
     func compactSessionKeys() async -> [String] {
         await self.state.compactSessionKeys
     }
+
+    func modelsCallCount() async -> Int {
+        await self.state.modelsCallCount
+    }
 }
 
 extension TestChatTransportState {
@@ -426,6 +444,10 @@ extension TestChatTransportState {
 
     fileprivate func sentRunIdsAppend(_ v: String) {
         self.sentRunIds.append(v)
+    }
+
+    fileprivate func sentMessagesAppend(_ v: String) {
+        self.sentMessages.append(v)
     }
 
     fileprivate func abortedRunIdsAppend(_ v: String) {
@@ -986,34 +1008,40 @@ extension TestChatTransportState {
         #expect(keys == ["agent:main:main"])
     }
 
-    @Test func resetTriggerResetsSessionAndReloadsHistory() async throws {
-        let before = historyPayload(
-            messages: [
-                chatTextMessage(role: "assistant", text: "before reset", timestamp: 1),
-            ])
-        let after = historyPayload(
-            messages: [
-                chatTextMessage(role: "assistant", text: "after reset", timestamp: 2),
-            ])
+    @Test func openClawResetTriggersSendThroughChatTransport() async throws {
+        for command in ["/new", "/reset"] {
+            let history = historyPayload()
+            let (transport, vm) = await makeViewModel(historyResponses: [history])
+            try await loadAndWaitBootstrap(vm: vm)
 
-        let (transport, vm) = await makeViewModel(historyResponses: [before, after])
-        try await loadAndWaitBootstrap(vm: vm)
-        try await waitUntil("initial history loaded") {
-            await MainActor.run { vm.messages.first?.content.first?.text == "before reset" }
+            await MainActor.run {
+                vm.input = command
+                vm.send()
+            }
+
+            try await waitUntil("\(command) sent through chat transport") {
+                await transport.sentMessages() == [command]
+            }
+            #expect(await transport.resetSessionKeys().isEmpty)
+            #expect(await transport.lastSentRunId() != nil)
+            #expect(await MainActor.run { vm.input.isEmpty })
         }
+    }
+
+    @Test func clearSlashTextDoesNotUseClawlineResetAlias() async throws {
+        let history = historyPayload()
+        let (transport, vm) = await makeViewModel(historyResponses: [history])
+        try await loadAndWaitBootstrap(vm: vm)
 
         await MainActor.run {
-            vm.input = "/new"
+            vm.input = "/clear"
             vm.send()
         }
 
-        try await waitUntil("reset called") {
-            await transport.resetSessionKeys() == ["main"]
+        try await waitUntil("/clear sent through chat transport") {
+            await transport.sentMessages() == ["/clear"]
         }
-        try await waitUntil("history reloaded") {
-            await MainActor.run { vm.messages.first?.content.first?.text == "after reset" }
-        }
-        #expect(await transport.lastSentRunId() == nil)
+        #expect(await transport.resetSessionKeys().isEmpty)
     }
 
     @Test func compactTriggerCompactsSessionAndReloadsHistory() async throws {
@@ -1044,6 +1072,67 @@ extension TestChatTransportState {
             await MainActor.run { vm.messages.first?.content.first?.text == "after compact" }
         }
         #expect(await transport.lastSentRunId() == nil)
+    }
+
+    @Test func modelsTriggerShowsLocalModelListWithoutSendingChat() async throws {
+        let history = historyPayload()
+        let models = [
+            modelChoice(id: "gpt-5.5", name: "GPT-5.5", provider: "openai"),
+            modelChoice(id: "claude-opus-4-6", name: "Claude Opus 4.6", provider: "anthropic"),
+        ]
+
+        let (transport, vm) = await makeViewModel(
+            historyResponses: [history],
+            modelResponses: [models])
+        try await loadAndWaitBootstrap(vm: vm)
+        try await waitUntil("initial models loaded") {
+            await MainActor.run { vm.modelChoices.count == models.count }
+        }
+
+        await MainActor.run {
+            vm.input = "/models"
+            vm.send()
+        }
+
+        try await waitUntil("models command rendered local reply") {
+            await MainActor.run {
+                vm.messages.contains { message in
+                    message.role == "assistant" &&
+                        message.content.compactMap(\.text).joined(separator: "\n")
+                            .contains("Available models:\n- GPT-5.5 - openai/gpt-5.5 (openai)")
+                }
+            }
+        }
+        #expect(await transport.lastSentRunId() == nil)
+        #expect(await transport.modelsCallCount() == 2)
+        #expect(await MainActor.run { vm.input.isEmpty })
+    }
+
+    @Test func modelsTriggerShowsVisibleErrorWithoutSendingChat() async throws {
+        let history = historyPayload()
+        let (transport, vm) = await makeViewModel(
+            historyResponses: [history],
+            modelsError: NSError(
+                domain: "TestModels",
+                code: 42,
+                userInfo: [NSLocalizedDescriptionKey: "models unavailable"]))
+        try await loadAndWaitBootstrap(vm: vm)
+
+        await MainActor.run {
+            vm.input = "/models"
+            vm.send()
+        }
+
+        try await waitUntil("models command rendered local error") {
+            await MainActor.run {
+                vm.messages.last?.role == "assistant" &&
+                    vm.messages.last?.content.first?.text == "Unable to load models: models unavailable"
+            }
+        }
+
+        #expect(await transport.lastSentRunId() == nil)
+        #expect(await MainActor.run { vm.errorText } == "Unable to load models: models unavailable")
+        #expect(await MainActor.run { vm.input.isEmpty })
     }
 
     @Test func compactTriggerShowsGenericErrorMessageOnFailure() async throws {
