@@ -3370,7 +3370,7 @@ describe.sequential("clawline provider server", () => {
             },
           ],
         }),
-      ).rejects.toThrow(/interactive HTML descriptor is not valid base64 JSON/i);
+      ).rejects.toThrow(/Clawline outbound attachment data is not valid base64/i);
     } finally {
       await ctx.cleanup();
     }
@@ -3435,7 +3435,7 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
-  it("keeps existing best-effort behavior when an unrelated mixed attachment fails", async () => {
+  it("rejects mixed outbound attachments when one attachment fails materialization", async () => {
     const entry = createAllowlistEntry({
       deviceId: randomUUID(),
       isAdmin: true,
@@ -3450,23 +3450,22 @@ describe.sequential("clawline provider server", () => {
       const base64 = Buffer.from(JSON.stringify(descriptor), "utf8").toString("base64");
       const oversizedImage = Buffer.alloc(8_000_001, 1).toString("base64");
 
-      const result = await ctx.server.sendMessage({
-        target: entry.userId,
-        text: "fallback text",
-        attachments: [
-          {
-            data: base64,
-            mimeType: "application/vnd.clawline.interactive-html+json",
-          },
-          {
-            data: oversizedImage,
-            mimeType: "image/png",
-          },
-        ],
-      });
-
-      expect(result.attachments).toEqual([]);
-      expect(result.assetIds).toEqual([]);
+      await expect(
+        ctx.server.sendMessage({
+          target: entry.userId,
+          text: "fallback text",
+          attachments: [
+            {
+              data: base64,
+              mimeType: "application/vnd.clawline.interactive-html+json",
+            },
+            {
+              data: oversizedImage,
+              mimeType: "image/png",
+            },
+          ],
+        }),
+      ).rejects.toThrow(/exceeds max upload size/i);
     } finally {
       await ctx.cleanup();
     }
