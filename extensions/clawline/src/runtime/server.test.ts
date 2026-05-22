@@ -7277,6 +7277,99 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("includes auth-time opaque adopted read and tail states in auth snapshots", async () => {
+    const deviceId = randomUUID();
+    const adoptedSessionKey = "agent:main:subagent:opaque";
+    const messageId = `s_${randomUUID()}`;
+    const entry = createAllowlistEntry({
+      deviceId,
+      userId: "flynn",
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry]);
+    try {
+      const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
+      const payload = JSON.stringify({
+        type: "message",
+        id: messageId,
+        role: "assistant",
+        content: "opaque adopted tail",
+        timestamp: Date.now(),
+        streaming: false,
+        sessionKey: adoptedSessionKey,
+      });
+      const db = new BetterSqlite3(dbPath);
+      try {
+        db.prepare(
+          `INSERT INTO events
+            (id, userId, sequence, originatingDeviceId, payloadJson, payloadBytes, timestamp, eventType, sessionKey)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          messageId,
+          "flynn",
+          1,
+          null,
+          payload,
+          Buffer.byteLength(payload, "utf8"),
+          Date.now(),
+          "message",
+          adoptedSessionKey,
+        );
+        db.prepare(
+          `INSERT INTO stream_read_state
+            (userId, sessionKey, lastReadMessageId, lastReadSequence, updatedAt)
+           VALUES (?, ?, ?, ?, ?)`,
+        ).run("flynn", adoptedSessionKey, messageId, 1, Date.now());
+      } finally {
+        db.close();
+      }
+
+      const pair = await performPairRequest(ctx.port, deviceId);
+      const { ws, auth, sessionInfo } = await authenticateDevice(
+        ctx.port,
+        deviceId,
+        pair.token as string,
+        {
+          authPayload: {
+            adoptedSessionKeys: [adoptedSessionKey],
+          },
+        },
+      );
+
+      expect(auth.streamReadStates).toMatchObject({
+        [adoptedSessionKey]: messageId,
+      });
+      expect(auth.streamTailStates).toMatchObject({
+        [adoptedSessionKey]: {
+          lastMessageId: messageId,
+          lastMessageRole: "assistant",
+        },
+      });
+      expect(
+        (sessionInfo as { streamReadStates?: Record<string, string> } | null)?.streamReadStates,
+      ).toMatchObject({
+        [adoptedSessionKey]: messageId,
+      });
+      expect(
+        (
+          sessionInfo as {
+            streamTailStates?: Record<string, { lastMessageId: string; lastMessageRole: string }>;
+          } | null
+        )?.streamTailStates,
+      ).toMatchObject({
+        [adoptedSessionKey]: {
+          lastMessageId: messageId,
+          lastMessageRole: "assistant",
+        },
+      });
+
+      ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("ignores auth-time adopted session keys for non-admin users", async () => {
     const deviceId = randomUUID();
     const adoptedSessionKey = "agent:main:main";
@@ -7442,11 +7535,43 @@ describe.sequential("clawline provider server", () => {
         return typed?.type === "ack" && typed.id === afterAdoptMessageId;
       });
       expect(afterAdoptAck).toMatchObject({ type: "ack", id: afterAdoptMessageId });
+      const afterAdoptMessage = (await waitForQueuedMessage(queue, (value) => {
+        const typed = value as { type?: string; content?: string; sessionKey?: string };
+        return (
+          typed?.type === "message" &&
+          typed.content === "allowed after adopt" &&
+          typed.sessionKey === adoptedSessionKey
+        );
+      })) as { id: string };
+      authed.ws.send(
+        JSON.stringify({
+          type: "stream_read",
+          sessionKey: adoptedSessionKey,
+          lastReadMessageId: afterAdoptMessage.id,
+        }),
+      );
+      await waitForQueuedMessage(queue, (value) => {
+        const typed = value as { type?: string; sessionKey?: string; lastReadMessageId?: string };
+        return (
+          typed?.type === "stream_read_state" &&
+          typed.sessionKey === adoptedSessionKey &&
+          typed.lastReadMessageId === afterAdoptMessage.id
+        );
+      });
 
       queue.dispose();
       authed.ws.terminate();
 
       const reauthed = await authenticateDevice(ctx.port, deviceId, token);
+      expect(reauthed.auth.streamReadStates).toMatchObject({
+        [adoptedSessionKey]: afterAdoptMessage.id,
+      });
+      expect(reauthed.auth.streamTailStates).toMatchObject({
+        [adoptedSessionKey]: {
+          lastMessageId: afterAdoptMessage.id,
+          lastMessageRole: "user",
+        },
+      });
       const replayQueue = createMessageQueue(reauthed.ws);
       const afterReconnectMessageId = `c_${randomUUID()}`;
       reauthed.ws.send(

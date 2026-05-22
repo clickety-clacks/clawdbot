@@ -1958,8 +1958,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       isAdmin: session.isAdmin,
       dmScope: resolved.dmScope,
       sessionKeys: resolved.streamSessionKeys,
-      streamReadStates: readStreamReadStatesForUser(session.userId, resolved.streamSessionKeys),
-      streamTailStates: readStreamTailStatesForUser(session.userId, resolved.streamSessionKeys),
+      streamReadStates: readStreamReadStatesForUser(session.userId, resolved.subscribedSessionKeys),
+      streamTailStates: readStreamTailStatesForUser(session.userId, resolved.subscribedSessionKeys),
     };
     return sendJson(session.socket, payload).catch(() => false);
   };
@@ -7865,8 +7865,14 @@ button.deny { background: #9b1c31; color: white; }
       features: buildAuthResultFeatures(session),
       dmScope: sessionInfo.dmScope,
       sessionKeys: sessionInfo.streamSessionKeys,
-      streamReadStates: readStreamReadStatesForUser(session.userId, sessionInfo.streamSessionKeys),
-      streamTailStates: readStreamTailStatesForUser(session.userId, sessionInfo.streamSessionKeys),
+      streamReadStates: readStreamReadStatesForUser(
+        session.userId,
+        sessionInfo.subscribedSessionKeys,
+      ),
+      streamTailStates: readStreamTailStatesForUser(
+        session.userId,
+        sessionInfo.subscribedSessionKeys,
+      ),
     };
     const streams = await runPerUserTask(session.userId, async () =>
       enqueueWriteTask(() => {
