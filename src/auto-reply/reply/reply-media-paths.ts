@@ -260,6 +260,11 @@ export function createReplyMediaPathNormalizer(params: {
 
     return {
       ...payload,
+      text: firstMediaDropError
+        ? payload.text
+          ? `${payload.text}\n${formatBlockedReplyMediaWarning()}`
+          : formatBlockedReplyMediaWarning()
+        : payload.text,
       mediaUrl: normalizedMedia[0],
       mediaUrls: normalizedMedia,
     };

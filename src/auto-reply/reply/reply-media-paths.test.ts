@@ -176,6 +176,28 @@ describe("createReplyMediaPathNormalizer", () => {
     expect(resolveOutboundAttachmentFromUrl).not.toHaveBeenCalled();
   });
 
+  it("keeps successful MEDIA:/workspace alias media and warns when another media item fails", async () => {
+    const normalize = createReplyMediaPathNormalizer({
+      cfg: {},
+      sessionKey: "session-key",
+      workspaceDir: "/tmp/agent-workspace",
+    });
+
+    const result = await normalize({
+      text: "caption",
+      mediaUrls: ["MEDIA:/workspace/out/photo.png", "MEDIA:/workspace/../secret.png"],
+    });
+
+    expectMedia(result, "/tmp/outbound-media/photo.png", ["/tmp/outbound-media/photo.png"]);
+    expect(result.text).toBe("caption\n⚠️ Media failed.");
+    expect(resolveOutboundAttachmentFromUrl).toHaveBeenCalledTimes(1);
+    expect(resolveOutboundAttachmentFromUrl).toHaveBeenCalledWith(
+      path.join("/tmp/agent-workspace", "out", "photo.png"),
+      5 * 1024 * 1024,
+      expect.any(Object),
+    );
+  });
+
   it("maps sandbox-relative media back to the host sandbox workspace before staging", async () => {
     ensureSandboxWorkspaceForSession.mockResolvedValue({
       workspaceDir: "/tmp/sandboxes/session-1",

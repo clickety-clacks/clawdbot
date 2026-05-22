@@ -3449,13 +3449,22 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     return trimmed.replace(/^\s*MEDIA\s*:\s*/i, "").trim();
   }
 
+  function resolveWorkspaceAliasPath(workspaceDir: string, workspacePath: string): string {
+    const resolved = path.resolve(workspaceDir, workspacePath);
+    const relative = path.relative(workspaceDir, resolved);
+    if (relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))) {
+      return resolved;
+    }
+    throw new Error("Path escapes workspace root");
+  }
+
   function resolveOutboundMediaReference(rawUrl: string, workspaceDir: string): string {
     const stripped = stripAgentMediaDirective(rawUrl);
     if (stripped === "/workspace") {
       return workspaceDir;
     }
     if (stripped.startsWith("/workspace/")) {
-      return path.join(workspaceDir, stripped.slice("/workspace/".length));
+      return resolveWorkspaceAliasPath(workspaceDir, stripped.slice("/workspace/".length));
     }
     if (stripped.startsWith("file://")) {
       try {
@@ -3466,7 +3475,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           return workspaceDir;
         }
         if (isLocalFileUrl && parsed.pathname.startsWith("/workspace/")) {
-          return path.join(
+          return resolveWorkspaceAliasPath(
             workspaceDir,
             decodeURIComponent(parsed.pathname.slice("/workspace/".length)),
           );

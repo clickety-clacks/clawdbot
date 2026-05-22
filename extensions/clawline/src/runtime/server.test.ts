@@ -4231,6 +4231,69 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("rejects agent MEDIA workspace references that escape the configured workspace", async () => {
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const workspaceDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawline-agent-workspace-"));
+    const ctx = await setupTestServer([entry], {
+      webRootPathRelative: "custom-web-ui",
+      openClawConfig: {
+        ...testOpenClawConfig,
+        agents: {
+          default: "main",
+          defaults: { workspace: workspaceDir },
+          list: [{ id: "main" }],
+        },
+      } as OpenClawConfig,
+      replyResolver: async () => ({
+        text: "caption",
+        mediaUrl: "MEDIA:/workspace/../secret.png",
+      }),
+    });
+    let ws: WebSocket | null = null;
+    let queue: ReturnType<typeof createMessageQueue> | null = null;
+    try {
+      const pair = await performPairRequest(ctx.port, entry.deviceId);
+      const authed = await authenticateDeviceWithQueue(
+        ctx.port,
+        entry.deviceId,
+        pair.token as string,
+      );
+      ws = authed.ws;
+      queue = authed.queue;
+
+      const inboundId = `c_${randomUUID()}`;
+      ws.send(
+        JSON.stringify({
+          type: "message",
+          id: inboundId,
+          content: "make escaped media",
+        }),
+      );
+      await waitForQueuedMessage(queue, (value) => {
+        const typed = value as { type?: string; id?: string };
+        return typed.type === "ack" && typed.id === inboundId;
+      });
+      const reply = await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const typed = value as { type?: string; role?: string; content?: string };
+        return typed.type === "message" && typed.role === "assistant";
+      });
+
+      expect(reply.content).toBe("caption\n⚠️ Media failed.");
+      expect(JSON.stringify(reply)).not.toContain("MEDIA:");
+      expect(JSON.stringify(reply)).not.toContain("/workspace/../secret.png");
+      expect(reply.attachments).toBeUndefined();
+    } finally {
+      queue?.dispose();
+      ws?.terminate();
+      await ctx.cleanup();
+      await fs.rm(workspaceDir, { recursive: true, force: true });
+    }
+  });
+
   it("renders normalized outbound-media store paths as native attachments", async () => {
     const entry = createAllowlistEntry({
       deviceId: randomUUID(),
