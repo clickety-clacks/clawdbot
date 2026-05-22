@@ -397,6 +397,7 @@ async function setupTestServer(
   options: {
     alertInstructionsText?: string | null;
     network?: Partial<ProviderConfig["network"]>;
+    server?: Partial<ProviderConfig["server"]>;
     sessionStorePathRelative?: string;
     webRootFollowSymlinks?: boolean;
     webRootPathRelative?: string;
@@ -470,6 +471,13 @@ async function setupTestServer(
                 ? { allowedOrigins: options.network.allowedOrigins }
                 : {}),
             } satisfies ProviderConfig["network"],
+          }
+        : {}),
+      ...(options.server
+        ? {
+            server: {
+              cluSecret: options.server.cluSecret ?? null,
+            } satisfies ProviderConfig["server"],
           }
         : {}),
       alertInstructionsPath,
@@ -6397,6 +6405,123 @@ describe.sequential("clawline provider server", () => {
       secondQueue.dispose();
       firstWs.terminate();
       secondWs.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("authorizes stream create and delete with bearer token without an active WebSocket", async () => {
+    const entry = createAllowlistEntry();
+    const ctx = await setupTestServer([entry]);
+    try {
+      const authHeader = await createAuthHeader(ctx, entry);
+
+      const createResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
+        method: "POST",
+        headers: {
+          Authorization: authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          idempotencyKey: "req_create_stream_http_auth_only",
+          displayName: "HTTP Auth Only",
+        }),
+      });
+      expect(createResponse.status).toBe(201);
+      const createdPayload = (await createResponse.json()) as {
+        stream: { sessionKey: string };
+      };
+
+      const deleteResponse = await fetch(
+        `http://127.0.0.1:${ctx.port}/api/streams/${encodeURIComponent(
+          createdPayload.stream.sessionKey,
+        )}`,
+        {
+          method: "DELETE",
+          headers: {
+            Authorization: authHeader,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ idempotencyKey: "req_delete_stream_http_auth_only" }),
+        },
+      );
+      expect(deleteResponse.status).toBe(200);
+      expect(await deleteResponse.json()).toMatchObject({
+        deletedSessionKey: createdPayload.stream.sessionKey,
+      });
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("authorizes stream create and delete with CLU secret without an active WebSocket", async () => {
+    const entry = createAllowlistEntry({ isAdmin: true });
+    const ctx = await setupTestServer([entry], {
+      server: { cluSecret: "test-clu-secret-at-least-22-chars" },
+    });
+    try {
+      const createResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-CLU-Secret": "test-clu-secret-at-least-22-chars",
+          "X-CLU-User-Id": entry.userId,
+        },
+        body: JSON.stringify({
+          idempotencyKey: "req_create_stream_clu_auth",
+          displayName: "CLU Auth",
+        }),
+      });
+      expect(createResponse.status).toBe(201);
+      const createdPayload = (await createResponse.json()) as {
+        stream: { sessionKey: string };
+      };
+
+      const deleteResponse = await fetch(
+        `http://127.0.0.1:${ctx.port}/api/streams/${encodeURIComponent(
+          createdPayload.stream.sessionKey,
+        )}`,
+        {
+          method: "DELETE",
+          headers: {
+            "Content-Type": "application/json",
+            "X-CLU-Secret": "test-clu-secret-at-least-22-chars",
+            "X-CLU-User-Id": entry.userId,
+          },
+          body: JSON.stringify({ idempotencyKey: "req_delete_stream_clu_auth" }),
+        },
+      );
+      expect(deleteResponse.status).toBe(200);
+      expect(await deleteResponse.json()).toMatchObject({
+        deletedSessionKey: createdPayload.stream.sessionKey,
+      });
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("rejects stream mutation without HTTP auth even when a WebSocket is active", async () => {
+    const entry = createAllowlistEntry();
+    const ctx = await setupTestServer([entry]);
+    try {
+      const token = await createAuthToken(ctx, entry);
+      const { ws } = await authenticateDevice(ctx.port, entry.deviceId, token);
+
+      const response = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          idempotencyKey: "req_create_stream_missing_http_auth",
+          displayName: "Missing HTTP Auth",
+        }),
+      });
+      expect(response.status).toBe(401);
+      expect(await response.json()).toMatchObject({
+        error: { code: "auth_failed" },
+      });
+      ws.terminate();
     } finally {
       await ctx.cleanup();
     }

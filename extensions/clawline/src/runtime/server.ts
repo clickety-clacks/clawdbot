@@ -6630,22 +6630,6 @@ button.deny { background: #9b1c31; color: white; }
     return { deviceId: "clu-server", userId: adminEntry.userId, isAdmin: true };
   }
 
-  function authenticateStreamHttpRequest(_req: http.IncomingMessage) {
-    // Stream API is localhost-only internal — no auth required.
-    // Derive userId from the active WebSocket connection.
-    for (const [userId, sessions] of userSessions) {
-      if (sessions.size > 0) {
-        const first = sessions.values().next().value!;
-        return {
-          deviceId: first.deviceId ?? "ws-derived",
-          userId,
-          isAdmin: first.isAdmin ?? false,
-        };
-      }
-    }
-    throw new HttpError(401, "auth_failed", "No connected sessions");
-  }
-
   function authenticateHttpRequest(req: http.IncomingMessage) {
     // CLU-secret path: allows server-side CLU stream management without iOS bearer token.
     const cluSecret = config.server?.cluSecret;
@@ -6838,7 +6822,7 @@ button.deny { background: #9b1c31; color: white; }
   }
 
   async function handleListStreamsRequest(req: http.IncomingMessage, res: http.ServerResponse) {
-    const auth = authenticateStreamHttpRequest(req);
+    const auth = authenticateHttpRequest(req);
     const streams = await ensureStreamsForAuthedUser(auth);
     res.setHeader("Content-Type", "application/json");
     res.writeHead(200);
@@ -6968,7 +6952,7 @@ button.deny { background: #9b1c31; color: white; }
     req: http.IncomingMessage,
     res: http.ServerResponse,
   ) {
-    const auth = authenticateStreamHttpRequest(req);
+    const auth = authenticateHttpRequest(req);
     requireAdminTrackAccess(auth);
     const excludedSessionKeys = new Set(
       new URL(req.url ?? "", "http://localhost").searchParams
@@ -7286,7 +7270,7 @@ button.deny { background: #9b1c31; color: white; }
   }
 
   async function handleAdoptSessionRequest(req: http.IncomingMessage, res: http.ServerResponse) {
-    const auth = authenticateStreamHttpRequest(req);
+    const auth = authenticateHttpRequest(req);
     requireAdminTrackAccess(auth);
     const body = await parseStreamsRequestBody(req);
     const requestedSessionKey = typeof body.sessionKey === "string" ? body.sessionKey.trim() : "";
@@ -7376,7 +7360,7 @@ button.deny { background: #9b1c31; color: white; }
   }
 
   async function handleCreateStreamRequest(req: http.IncomingMessage, res: http.ServerResponse) {
-    const auth = authenticateStreamHttpRequest(req);
+    const auth = authenticateHttpRequest(req);
     const body = await parseStreamsRequestBody(req);
     const idempotencyKey =
       typeof body.idempotencyKey === "string" ? body.idempotencyKey.trim() : "";
@@ -7498,7 +7482,7 @@ button.deny { background: #9b1c31; color: white; }
   }
 
   async function handleRenameStreamRequest(req: http.IncomingMessage, res: http.ServerResponse) {
-    const auth = authenticateStreamHttpRequest(req);
+    const auth = authenticateHttpRequest(req);
     const sessionKeyInput = parseSessionKeyPath(
       new URL(req.url ?? "", "http://localhost").pathname,
     );
@@ -7548,7 +7532,7 @@ button.deny { background: #9b1c31; color: white; }
   }
 
   async function handleDeleteStreamRequest(req: http.IncomingMessage, res: http.ServerResponse) {
-    const auth = authenticateStreamHttpRequest(req);
+    const auth = authenticateHttpRequest(req);
     const userActionHeaderRaw = req.headers["x-clawline-user-action"];
     const userActionHeader = Array.isArray(userActionHeaderRaw)
       ? userActionHeaderRaw[0]
