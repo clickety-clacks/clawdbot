@@ -133,6 +133,49 @@ describe("createReplyMediaPathNormalizer", () => {
       }),
     );
   });
+
+  it("stages MEDIA:/workspace alias media through the configured agent workspace", async () => {
+    const normalize = createReplyMediaPathNormalizer({
+      cfg: {},
+      sessionKey: "session-key",
+      workspaceDir: "/tmp/agent-workspace",
+    });
+
+    const result = await normalize({
+      text: "caption",
+      mediaUrls: ["MEDIA:/workspace/out/photo.png"],
+    });
+
+    expectMedia(result, "/tmp/outbound-media/photo.png", ["/tmp/outbound-media/photo.png"]);
+    expect(result.text).toBe("caption");
+    expect(resolveOutboundAttachmentFromUrl).toHaveBeenCalledWith(
+      path.join("/tmp/agent-workspace", "out", "photo.png"),
+      5 * 1024 * 1024,
+      expect.objectContaining({
+        mediaAccess: expect.objectContaining({
+          workspaceDir: "/tmp/agent-workspace",
+        }),
+      }),
+    );
+  });
+
+  it("drops MEDIA:/workspace alias media that escapes the configured agent workspace", async () => {
+    const normalize = createReplyMediaPathNormalizer({
+      cfg: {},
+      sessionKey: "session-key",
+      workspaceDir: "/tmp/agent-workspace",
+    });
+
+    const result = await normalize({
+      text: "caption",
+      mediaUrls: ["MEDIA:/workspace/../secret.png"],
+    });
+
+    expectNoMedia(result);
+    expect(result.text).toBe("caption\n⚠️ Media failed.");
+    expect(resolveOutboundAttachmentFromUrl).not.toHaveBeenCalled();
+  });
+
   it("maps sandbox-relative media back to the host sandbox workspace before staging", async () => {
     ensureSandboxWorkspaceForSession.mockResolvedValue({
       workspaceDir: "/tmp/sandboxes/session-1",

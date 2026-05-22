@@ -61,9 +61,23 @@ function resolveWorkspaceAliasMediaSource(media: string, workspaceDir: string): 
     return workspaceDir;
   }
   if (media.startsWith("/workspace/")) {
-    return path.join(workspaceDir, media.slice("/workspace/".length));
+    const relativeWorkspacePath = toRelativeWorkspacePath(
+      workspaceDir,
+      media.slice("/workspace/".length),
+      {
+        cwd: workspaceDir,
+      },
+    );
+    return resolvePathFromInput(relativeWorkspacePath, workspaceDir);
   }
   return null;
+}
+
+function stripMediaDirective(media: string): string {
+  if (/^media:\/\//i.test(media)) {
+    return media;
+  }
+  return media.replace(/^\s*MEDIA\s*:\s*/i, "").trim();
 }
 
 export function createReplyMediaPathNormalizer(params: {
@@ -158,7 +172,7 @@ export function createReplyMediaPathNormalizer(params: {
   };
 
   const normalizeMediaSource = async (raw: string): Promise<string> => {
-    const media = raw.trim();
+    const media = stripMediaDirective(raw.trim());
     if (!media) {
       return media;
     }
