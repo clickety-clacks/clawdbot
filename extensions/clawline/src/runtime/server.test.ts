@@ -162,6 +162,71 @@ exec /bin/sh -lc "$remote_cmd"
   };
 }
 
+async function createFakeTerminalCommandBin(
+  root: string,
+  options: { failSshTargets?: string[] } = {},
+): Promise<{
+  binDir: string;
+  tmuxLogPath: string;
+  sshLogPath: string;
+}> {
+  const binDir = path.join(root, "fake-bin");
+  await fs.mkdir(binDir, { recursive: true });
+  const tmuxLogPath = path.join(root, "tmux.log");
+  const sshLogPath = path.join(root, "ssh.log");
+  const failSshTargets = options.failSshTargets ?? [];
+
+  const tmuxScript = `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "${tmuxLogPath}"
+cmd="\${1:-}"
+case "$cmd" in
+  list-panes)
+    printf '%%local-pane\\n'
+    ;;
+  capture-pane)
+    printf 'backfill\\n'
+    ;;
+  has-session|new-session|resize-pane|kill-session)
+    ;;
+  attach-session)
+    sleep 1
+    ;;
+esac
+`;
+  const sshScript = `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "${sshLogPath}"
+for arg in "$@"; do
+  case "$arg" in
+${failSshTargets.map((target) => `    ${target}) exit 255 ;;`).join("\n")}
+    __clawline_never_match__) ;;
+  esac
+done
+remote_cmd=""
+for arg in "$@"; do
+  remote_cmd="$arg"
+done
+case "$remote_cmd" in
+  *"list-panes"*)
+    printf '%%ssh-pane\\n'
+    ;;
+  *"capture-pane"*)
+    printf 'ssh-backfill\\n'
+    ;;
+  *"has-session"*|*"new-session"*|*"resize-pane"*|*"kill-session"*)
+    ;;
+  *"attach-session"*)
+    sleep 1
+    ;;
+esac
+`;
+
+  await fs.writeFile(path.join(binDir, "tmux"), tmuxScript, { mode: 0o755 });
+  await fs.writeFile(path.join(binDir, "ssh"), sshScript, { mode: 0o755 });
+  return { binDir, tmuxLogPath, sshLogPath };
+}
+
 async function createTerminalAuthToken(
   allowlistPath: string,
   entry: AllowlistEntry,
@@ -257,6 +322,7 @@ function decodeTerminalDescriptorFromResult(result: ClawlineOutboundSendResult) 
     terminalSessionId: string;
     title?: string;
     destination?: { address?: string };
+    terminalSession?: { name?: string; provisioning?: string };
   };
 }
 
@@ -3999,6 +4065,39 @@ describe.sequential("clawline provider server", () => {
           attachments: [
             {
               data: base64,
+              mimeType: "application/vnd.clawline.terminal-session+json",
+            },
+          ],
+        }),
+      ).rejects.toThrow("terminal session descriptor is invalid");
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("rejects outbound terminal descriptors with non-base64 suffixes", async () => {
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry]);
+    try {
+      const descriptor = {
+        version: 3,
+        terminalSessionId: `term_${randomUUID()}`,
+        title: "Term",
+        destination: { address: "mike@eezo" },
+      };
+      const base64 = Buffer.from(JSON.stringify(descriptor), "utf8").toString("base64");
+
+      await expect(
+        ctx.server.sendMessage({
+          target: entry.userId,
+          text: "",
+          attachments: [
+            {
+              data: `${base64}!`,
               mimeType: "application/vnd.clawline.terminal-session+json",
             },
           ],
@@ -8591,6 +8690,354 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("routes terminal auth from the persisted descriptor address instead of the global tmux host", async () => {
+    const pathRoot = await fs.mkdtemp(path.join(os.tmpdir(), "clawline-terminal-routing-bin-"));
+    const { binDir, tmuxLogPath, sshLogPath } = await createFakeTerminalCommandBin(pathRoot);
+    const originalPath = process.env.PATH ?? "";
+    process.env.PATH = `${binDir}:${originalPath}`;
+
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      isAdmin: false,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry], {
+      terminalTmux: { mode: "ssh", sshTarget: "mike@global-host" },
+    });
+    let restarted: ProviderServer | null = null;
+
+    const authTerminal = async (port: number, terminalSessionId: string, authToken: string) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/ws/terminal`);
+      await waitForOpen(ws);
+      const queue = createMessageQueue(ws);
+      ws.send(
+        JSON.stringify({
+          type: "terminal_auth",
+          protocolVersion: PROTOCOL_VERSION,
+          terminalSessionId,
+          deviceId: entry.deviceId,
+          authToken,
+          cols: 80,
+          rows: 24,
+          backfillLines: 0,
+        }),
+      );
+      const response = await queue.next();
+      queue.dispose();
+      ws.terminate();
+      return response;
+    };
+
+    try {
+      const eezoTerminalSessionId = `term_eezo_${randomUUID().replace(/-/g, "").slice(0, 8)}`;
+      const tarsTerminalSessionId = `term_tars_${randomUUID().replace(/-/g, "").slice(0, 8)}`;
+      const eezoDescriptor = {
+        version: 2,
+        terminalSessionId: eezoTerminalSessionId,
+        title: "eezo",
+        destination: {
+          address: "mike@eezo",
+        },
+      };
+      const tarsDescriptor = {
+        version: 2,
+        terminalSessionId: tarsTerminalSessionId,
+        title: "tars",
+        destination: {
+          address: "mike@tars",
+        },
+      };
+
+      await ctx.server.sendMessage({
+        target: entry.userId,
+        text: "",
+        attachments: [
+          {
+            data: Buffer.from(JSON.stringify(eezoDescriptor), "utf8").toString("base64"),
+            mimeType: "application/vnd.clawline.terminal-session+json",
+          },
+          {
+            data: Buffer.from(JSON.stringify(tarsDescriptor), "utf8").toString("base64"),
+            mimeType: "application/vnd.clawline.terminal-session+json",
+          },
+        ],
+      });
+
+      const authToken = await createAuthToken(ctx, entry);
+      await expect(authTerminal(ctx.port, eezoTerminalSessionId, authToken)).resolves.toMatchObject(
+        {
+          type: "terminal_ready",
+        },
+      );
+      await expect(authTerminal(ctx.port, tarsTerminalSessionId, authToken)).resolves.toMatchObject(
+        {
+          type: "terminal_ready",
+        },
+      );
+
+      let sshLog = await fs.readFile(sshLogPath, "utf8");
+      let tmuxLog = await fs.readFile(tmuxLogPath, "utf8");
+      expect(sshLog).toContain("mike@eezo");
+      expect(sshLog).toContain(eezoTerminalSessionId);
+      expect(sshLog).not.toContain("mike@tars");
+      expect(tmuxLog).toContain(tarsTerminalSessionId);
+      expect(sshLog).not.toContain("mike@global-host");
+
+      await ctx.server.stop();
+      await fs.rm(path.join(path.dirname(ctx.allowlistPath), "terminal-sessions.json"), {
+        force: true,
+      });
+      restarted = await createProviderServer({
+        config: {
+          port: 0,
+          statePath: path.dirname(ctx.allowlistPath),
+          media: {
+            storagePath: ctx.mediaPath,
+            maxInlineBytes: 256_000,
+            maxUploadBytes: 8_000_000,
+            unreferencedUploadTtlSeconds: 86_400,
+          },
+          alertInstructionsPath: ctx.alertInstructionsPath,
+          webRootPath: ctx.webRootPath,
+          webRoot: { followSymlinks: false },
+          terminal: {
+            tmux: {
+              mode: "ssh",
+              ssh: {
+                target: "mike@changed-global-host",
+              },
+            },
+          },
+        },
+        openClawConfig: testOpenClawConfig,
+        replyResolver: testReplyResolver,
+        logger: silentLogger,
+        sessionStorePath: ctx.sessionStorePath,
+      });
+      await restarted.start();
+
+      await expect(
+        authTerminal(restarted.getPort(), eezoTerminalSessionId, authToken),
+      ).resolves.toMatchObject({
+        type: "terminal_ready",
+      });
+
+      sshLog = await fs.readFile(sshLogPath, "utf8");
+      tmuxLog = await fs.readFile(tmuxLogPath, "utf8");
+      expect(sshLog).toContain("mike@eezo");
+      expect(sshLog).toContain(eezoTerminalSessionId);
+      expect(tmuxLog).toContain(tarsTerminalSessionId);
+      expect(sshLog).not.toContain("mike@changed-global-host");
+    } finally {
+      process.env.PATH = originalPath;
+      if (restarted) {
+        await restarted.stop();
+      }
+      await ctx.cleanup();
+      await fs.rm(pathRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("opens an unnamed version 3 structured terminal as a destination login shell without creating tmux", async () => {
+    const pathRoot = await fs.mkdtemp(path.join(os.tmpdir(), "clawline-terminal-login-bin-"));
+    const { binDir, tmuxLogPath, sshLogPath } = await createFakeTerminalCommandBin(pathRoot);
+    const originalPath = process.env.PATH ?? "";
+    process.env.PATH = `${binDir}:${originalPath}`;
+
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      isAdmin: false,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry], {
+      terminalTmux: { mode: "ssh", sshTarget: "mike@global-host" },
+    });
+    const terminalSessionId = `termmsg_${randomUUID().replace(/-/g, "").slice(0, 10)}`;
+
+    try {
+      const descriptor = {
+        version: 3,
+        terminalSessionId,
+        title: "eezo login",
+        destination: { address: "mike@eezo" },
+      };
+      await ctx.server.sendMessage({
+        target: entry.userId,
+        text: "terminal",
+        attachments: [
+          {
+            data: Buffer.from(JSON.stringify(descriptor), "utf8").toString("base64"),
+            mimeType: "application/vnd.clawline.terminal-session+json",
+          },
+        ],
+      });
+
+      const { ws, response } = await authenticateTerminalSession({
+        port: ctx.port,
+        allowlistPath: ctx.allowlistPath,
+        entry,
+        terminalSessionId,
+      });
+      expect((response as { type: string }).type).toBe("terminal_ready");
+      expect(response).toMatchObject({
+        targetTruth: "explicit",
+        destination: { address: "mike@eezo" },
+        backfillLinesActual: 0,
+      });
+      expect((response as { terminalSession?: unknown }).terminalSession).toBeUndefined();
+
+      await vi.waitFor(async () => {
+        const contents = await fs.readFile(sshLogPath, "utf8").catch(() => "");
+        expect(contents).toContain("mike@eezo");
+      });
+      const sshLog = await fs.readFile(sshLogPath, "utf8");
+      expect(sshLog).toContain("mike@eezo");
+      expect(sshLog).not.toContain("mike@global-host");
+      const tmuxLog = await fs.readFile(tmuxLogPath, "utf8").catch(() => "");
+      expect(tmuxLog).not.toContain("new-session");
+      expect(tmuxLog).not.toContain("attach-session");
+      ws.terminate();
+    } finally {
+      process.env.PATH = originalPath;
+      await ctx.cleanup();
+      await fs.rm(pathRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("fails a refused descriptor destination without rerouting through the global tmux host", async () => {
+    const pathRoot = await fs.mkdtemp(path.join(os.tmpdir(), "clawline-terminal-refused-bin-"));
+    const { binDir, sshLogPath } = await createFakeTerminalCommandBin(pathRoot, {
+      failSshTargets: ["mike@refused"],
+    });
+    const originalPath = process.env.PATH ?? "";
+    process.env.PATH = `${binDir}:${originalPath}`;
+
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      isAdmin: false,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry], {
+      terminalTmux: { mode: "ssh", sshTarget: "mike@global-host" },
+    });
+
+    try {
+      const terminalSessionId = `term_refused_${randomUUID().replace(/-/g, "").slice(0, 8)}`;
+      const descriptor = {
+        version: 2,
+        terminalSessionId,
+        title: "refused",
+        destination: {
+          address: "mike@refused",
+        },
+      };
+      await ctx.server.sendMessage({
+        target: entry.userId,
+        text: "",
+        attachments: [
+          {
+            data: Buffer.from(JSON.stringify(descriptor), "utf8").toString("base64"),
+            mimeType: "application/vnd.clawline.terminal-session+json",
+          },
+        ],
+      });
+
+      const authToken = await createAuthToken(ctx, entry);
+      const ws = new WebSocket(`ws://127.0.0.1:${ctx.port}/ws/terminal`);
+      await waitForOpen(ws);
+      const queue = createMessageQueue(ws);
+      ws.send(
+        JSON.stringify({
+          type: "terminal_auth",
+          protocolVersion: PROTOCOL_VERSION,
+          terminalSessionId,
+          deviceId: entry.deviceId,
+          authToken,
+          cols: 80,
+          rows: 24,
+          backfillLines: 0,
+        }),
+      );
+      await expect(queue.next()).resolves.toMatchObject({ type: "terminal_error" });
+      queue.dispose();
+      ws.terminate();
+
+      const sshLog = await fs.readFile(sshLogPath, "utf8");
+      expect(sshLog).toContain("mike@refused");
+      expect(sshLog).not.toContain("mike@global-host");
+    } finally {
+      process.env.PATH = originalPath;
+      await ctx.cleanup();
+      await fs.rm(pathRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps version 1 terminal bubbles working through the legacy global tmux config", async () => {
+    const pathRoot = await fs.mkdtemp(path.join(os.tmpdir(), "clawline-terminal-legacy-bin-"));
+    const { binDir, sshLogPath } = await createFakeTerminalCommandBin(pathRoot);
+    const originalPath = process.env.PATH ?? "";
+    process.env.PATH = `${binDir}:${originalPath}`;
+
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      isAdmin: false,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry], {
+      terminalTmux: {
+        mode: "ssh",
+        sshTarget: "mike@legacy-host",
+      },
+    });
+
+    try {
+      const terminalSessionId = `term_v1_${randomUUID().replace(/-/g, "").slice(0, 8)}`;
+      const descriptor = {
+        version: 1,
+        terminalSessionId,
+        title: "legacy",
+      };
+      await ctx.server.sendMessage({
+        target: entry.userId,
+        text: "terminal",
+        attachments: [
+          {
+            data: Buffer.from(JSON.stringify(descriptor), "utf8").toString("base64"),
+            mimeType: "application/vnd.clawline.terminal-session+json",
+          },
+        ],
+      });
+
+      const authToken = await createAuthToken(ctx, entry);
+      const ws = new WebSocket(`ws://127.0.0.1:${ctx.port}/ws/terminal`);
+      await waitForOpen(ws);
+      const queue = createMessageQueue(ws);
+      ws.send(
+        JSON.stringify({
+          type: "terminal_auth",
+          protocolVersion: PROTOCOL_VERSION,
+          terminalSessionId,
+          deviceId: entry.deviceId,
+          authToken,
+          cols: 80,
+          rows: 24,
+          backfillLines: 0,
+        }),
+      );
+      await expect(queue.next()).resolves.toMatchObject({ type: "terminal_ready" });
+      queue.dispose();
+      ws.terminate();
+
+      const sshLog = await fs.readFile(sshLogPath, "utf8");
+      expect(sshLog).toContain("mike@legacy-host");
+      expect(sshLog).toContain(terminalSessionId);
+    } finally {
+      process.env.PATH = originalPath;
+      await ctx.cleanup();
+      await fs.rm(pathRoot, { recursive: true, force: true });
+    }
+  });
+
   it("T001: on-demand terminal session stays alive so terminal_ready is returned (not terminal_error)", async () => {
     // This test verifies the sentinel-shell fix: ensureTmuxSessionExists now passes
     // an explicit shell command to `tmux new-session -d -s <name> <shell>` so the
@@ -8887,6 +9334,7 @@ describe.sequential("clawline provider server", () => {
           destination: {
             address: "mike@eezo",
           },
+          terminalSession: { name: "flynn-eezo-agent" },
         },
         cfg: testOpenClawConfig,
         accountId: null,
@@ -8900,6 +9348,7 @@ describe.sequential("clawline provider server", () => {
           destination: {
             address: "mike@tars",
           },
+          terminalSession: { name: "flynn-tars-agent" },
         },
         cfg: testOpenClawConfig,
         accountId: null,
@@ -8908,12 +9357,21 @@ describe.sequential("clawline provider server", () => {
       expect(outboundResults).toHaveLength(2);
       const descriptors = outboundResults.map(decodeTerminalDescriptorFromResult);
       const firstDescriptor = descriptors[0];
-      expect(descriptors[0]?.version).toBe(2);
+      expect(descriptors[0]?.version).toBe(3);
       expect(descriptors[0]?.title).toBe("eezo shell");
       expect(descriptors[0]?.destination?.address).toBe("mike@eezo");
-      expect(descriptors[1]?.version).toBe(2);
+      expect(descriptors[0]?.terminalSession).toEqual({
+        name: "flynn-eezo-agent",
+        provisioning: "attach_or_create",
+      });
+      expect(descriptors[0]?.terminalSessionId).not.toBe("flynn-eezo-agent");
+      expect(descriptors[1]?.version).toBe(3);
       expect(descriptors[1]?.title).toBe("mike@tars");
       expect(descriptors[1]?.destination?.address).toBe("mike@tars");
+      expect(descriptors[1]?.terminalSession).toEqual({
+        name: "flynn-tars-agent",
+        provisioning: "attach_or_create",
+      });
 
       for (const descriptor of descriptors) {
         const { ws, response } = await authenticateTerminalSession({
@@ -8923,6 +9381,11 @@ describe.sequential("clawline provider server", () => {
           terminalSessionId: descriptor.terminalSessionId,
         });
         expect((response as { type: string }).type).toBe("terminal_ready");
+        expect(response).toMatchObject({
+          targetTruth: "explicit",
+          destination: { address: descriptor.destination?.address },
+          terminalSession: { name: descriptor.terminalSession?.name },
+        });
         ws.terminate();
       }
 
@@ -8936,6 +9399,9 @@ describe.sequential("clawline provider server", () => {
         terminalSessionId: firstDescriptor.terminalSessionId,
       });
       expect((reattach.response as { type: string }).type).toBe("terminal_ready");
+      expect(reattach.response).toMatchObject({
+        terminalSession: { name: "flynn-eezo-agent" },
+      });
       reattach.ws.terminate();
 
       await ctx.server.stop();
@@ -8974,6 +9440,10 @@ describe.sequential("clawline provider server", () => {
         terminalSessionId: firstDescriptor.terminalSessionId,
       });
       expect((restartedAuth.response as { type: string }).type).toBe("terminal_ready");
+      expect(restartedAuth.response).toMatchObject({
+        destination: { address: "mike@eezo" },
+        terminalSession: { name: "flynn-eezo-agent" },
+      });
       restartedAuth.ws.terminate();
 
       const targets = await readFakeSshTargets(fakeSsh.logPath);
@@ -8985,7 +9455,10 @@ describe.sequential("clawline provider server", () => {
       setClawlineOutboundSender(null);
       for (const result of outboundResults) {
         try {
-          await killLocalTmuxSession(decodeTerminalDescriptorFromResult(result).terminalSessionId);
+          const descriptor = decodeTerminalDescriptorFromResult(result);
+          await killLocalTmuxSession(
+            descriptor.terminalSession?.name ?? descriptor.terminalSessionId,
+          );
         } catch {
           // Best effort cleanup.
         }
@@ -8997,6 +9470,48 @@ describe.sequential("clawline provider server", () => {
       await fakeSsh.cleanup();
     }
   }, 30_000);
+
+  it("rejects structured terminal bubble requests when session aliases disagree", async () => {
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      isAdmin: false,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry]);
+
+    try {
+      setClawlineOutboundSender(async (payload) => ctx.server.sendMessage(payload));
+      const handleAction = clawlineMessageActions.handleAction;
+      if (!handleAction) {
+        throw new Error("Expected Clawline handleAction to exist");
+      }
+
+      await expect(
+        handleAction({
+          channel: "clawline",
+          action: "sendAttachment",
+          params: {
+            target: entry.userId,
+            mimeType: "application/vnd.clawline.terminal-session+json",
+            destination: { address: "mike@eezo" },
+            terminalSession: { name: "flynn-requested" },
+            terminalSessionId: "flynn-other",
+          },
+          cfg: testOpenClawConfig,
+          accountId: null,
+        }),
+      ).rejects.toMatchObject({
+        details: {
+          error: "clawline_terminal_bubble_request_invalid",
+          destination: { address: "mike@eezo" },
+          terminalSession: { name: "flynn-requested" },
+        },
+      });
+    } finally {
+      setClawlineOutboundSender(null);
+      await ctx.cleanup();
+    }
+  });
 
   it("ignores client-sent destination hints during terminal_auth and routes by the persisted session record", async () => {
     if (!(await ensureTmuxAvailable())) {
@@ -9044,6 +9559,10 @@ describe.sequential("clawline provider server", () => {
         },
       });
       expect((response as { type: string }).type).toBe("terminal_ready");
+      expect(response).toMatchObject({
+        targetTruth: "explicit",
+        destination: { address: "mike@eezo" },
+      });
       ws.terminate();
 
       const targets = await readFakeSshTargets(fakeSsh.logPath);
@@ -9099,6 +9618,7 @@ describe.sequential("clawline provider server", () => {
         terminalSessionId,
       });
       expect((response as { type: string }).type).toBe("terminal_ready");
+      expect(response).toMatchObject({ targetTruth: "legacy_unknown" });
       ws.terminate();
 
       const targets = await readFakeSshTargets(fakeSsh.logPath);
@@ -9110,7 +9630,7 @@ describe.sequential("clawline provider server", () => {
     }
   }, 30_000);
 
-  it("fails a version 2 terminal bubble on its explicit destination instead of silently rerouting through the global ssh target", async () => {
+  it("fails a version 3 named terminal bubble with explicit target context instead of silently rerouting", async () => {
     if (!(await ensureTmuxAvailable())) {
       console.warn("Skipping terminal routing failure test: tmux not found");
       return;
@@ -9126,14 +9646,16 @@ describe.sequential("clawline provider server", () => {
       terminalTmux: { mode: "ssh", sshTarget: "global.invalid" },
     });
     const terminalSessionId = `term_fail_${randomUUID().replace(/-/g, "").slice(0, 10)}`;
+    const terminalSessionName = `named_fail_${randomUUID().replace(/-/g, "").slice(0, 10)}`;
 
     try {
       process.env.FAKE_SSH_FAIL_TARGET = "missing-host.invalid";
       const descriptor = {
         terminalSessionId,
         title: "missing-host",
-        version: 2,
+        version: 3,
         destination: { address: "missing-host.invalid" },
+        terminalSession: { name: terminalSessionName, provisioning: "attach_or_create" },
       };
       const base64 = Buffer.from(JSON.stringify(descriptor), "utf8").toString("base64");
       await ctx.server.sendMessage({
@@ -9155,13 +9677,18 @@ describe.sequential("clawline provider server", () => {
       });
       expect((response as { type: string }).type).toBe("terminal_error");
       expect((response as { message?: string }).message).toBe("Terminal session is not running");
+      expect(response).toMatchObject({
+        targetTruth: "explicit",
+        destination: { address: "missing-host.invalid" },
+        terminalSession: { name: terminalSessionName },
+      });
       ws.terminate();
 
       const targets = await readFakeSshTargets(fakeSsh.logPath);
       expect(targets).toContain("missing-host.invalid");
       expect(targets).not.toContain("global.invalid");
     } finally {
-      await killLocalTmuxSession(terminalSessionId);
+      await killLocalTmuxSession(terminalSessionName);
       await ctx.cleanup();
       await fakeSsh.cleanup();
     }

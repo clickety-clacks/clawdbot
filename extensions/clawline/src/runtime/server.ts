@@ -156,10 +156,24 @@ type TerminalTmuxBackend = {
   spawnAttachPty(params: { sessionName: string; cols: number; rows: number }): Promise<{
     pty: PtyProcess;
   }>;
+  spawnLoginPty(params: { cols: number; rows: number }): Promise<{
+    pty: PtyProcess;
+  }>;
 };
 
 type TerminalDestination = {
   address: string;
+};
+
+type DecodedTerminalSessionDescriptor = {
+  version?: number;
+  terminalSessionId: string;
+  title?: string;
+  destination?: TerminalDestination;
+  terminalSession?: {
+    name: string;
+    provisioning: "attach_or_create";
+  };
 };
 
 function buildSshBaseArgs(cfg: ProviderConfig["terminal"]["tmux"]["ssh"]): string[] {
@@ -269,6 +283,31 @@ function createTerminalTmuxBackend(
         "LANG=en_US.UTF-8 " +
         ["tmux", "attach-session", "-t", params.sessionName].map(shellQuoteArg).join(" ");
       const sshArgs = ["-tt", ...sshBaseArgs, sshTarget, remoteCmd];
+      const pty = ptyModule.spawn("ssh", sshArgs, {
+        name: "xterm-256color",
+        cols: params.cols,
+        rows: params.rows,
+      });
+      return { pty };
+    },
+    async spawnLoginPty(params: { cols: number; rows: number }) {
+      const ptyModule = (await import("@lydell/node-pty")) as unknown as {
+        spawn: (
+          file: string,
+          args: string[],
+          options: { name: string; cols: number; rows: number },
+        ) => PtyProcess;
+      };
+      if (!useRemote) {
+        const shell = process.env.SHELL || "/bin/sh";
+        const pty = ptyModule.spawn(shell, [], {
+          name: "xterm-256color",
+          cols: params.cols,
+          rows: params.rows,
+        });
+        return { pty };
+      }
+      const sshArgs = ["-tt", ...sshBaseArgs, sshTarget];
       const pty = ptyModule.spawn("ssh", sshArgs, {
         name: "xterm-256color",
         cols: params.cols,
@@ -1004,19 +1043,17 @@ function normalizeTerminalDestination(value: unknown): TerminalDestination | und
   return { address };
 }
 
-function decodeTerminalSessionDescriptorFromBase64(data: string): {
-  terminalSessionId: string;
-  title?: string;
-  version?: number;
-  destination?: TerminalDestination;
-} | null {
+function decodeTerminalSessionDescriptorFromBase64(
+  data: string,
+): DecodedTerminalSessionDescriptor | null {
   try {
-    const decoded = Buffer.from(data, "base64").toString("utf8");
+    const decoded = decodeBase64Utf8Payload(data, "Clawline terminal session descriptor");
     const obj = JSON.parse(decoded) as {
       terminalSessionId?: unknown;
       title?: unknown;
       version?: unknown;
       destination?: unknown;
+      terminalSession?: unknown;
     };
     const id = typeof obj.terminalSessionId === "string" ? obj.terminalSessionId.trim() : "";
     if (!id) {
@@ -1032,7 +1069,27 @@ function decodeTerminalSessionDescriptorFromBase64(data: string): {
     if (version === 2 && !destination) {
       return null;
     }
-    return { terminalSessionId: id, title, version, destination };
+    const terminalSessionName =
+      obj.terminalSession &&
+      typeof obj.terminalSession === "object" &&
+      !Array.isArray(obj.terminalSession) &&
+      typeof (obj.terminalSession as { name?: unknown }).name === "string"
+        ? (obj.terminalSession as { name: string }).name.trim()
+        : "";
+    return {
+      version,
+      terminalSessionId: id,
+      title,
+      ...(destination ? { destination } : {}),
+      ...(terminalSessionName
+        ? {
+            terminalSession: {
+              name: terminalSessionName,
+              provisioning: "attach_or_create",
+            },
+          }
+        : {}),
+    };
   } catch {
     return null;
   }
@@ -1351,9 +1408,10 @@ type TerminalSessionRecord = {
   title?: string;
   createdAt: number;
   lastSeenAt: number;
-  // MVP: terminalSessionId maps directly to a tmux session name on the terminal host.
-  tmuxSessionName: string;
+  terminalSessionName?: string;
+  tmuxSessionName?: string;
   destination?: TerminalDestination;
+  legacyGlobalTmuxFallback?: boolean;
 };
 
 export const DEFAULT_ALERT_INSTRUCTIONS_TEXT = `After handling this alert, evaluate: would Flynn want to know what happened? If yes, report to him. Don't just process silently.`;
@@ -4730,9 +4788,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         deviceId: string;
         userId: string;
         terminalSessionId: string;
-        tmuxSessionName: string;
-        paneId: string;
-        tmuxBackend: TerminalTmuxBackend;
+        tmuxSessionName?: string;
+        destination?: TerminalDestination;
+        legacyGlobalTmuxFallback?: boolean;
+        paneId?: string;
+        tmuxBackend?: TerminalTmuxBackend;
         pty: PtyProcess;
       };
   const terminalConnectionState = new WeakMap<WebSocket, TerminalConnectionState>();
@@ -4788,6 +4848,34 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   });
   denylistWatcher.on("error", (err) => logger.warn?.(`denylist_watch_failed: ${formatError(err)}`));
 
+  function rememberTerminalSession(record: TerminalSessionRecord) {
+    terminalSessions.set(record.terminalSessionId, record);
+  }
+
+  function resolveTerminalDestinationForDescriptor(
+    descriptor: DecodedTerminalSessionDescriptor,
+  ): TerminalDestination | undefined {
+    return descriptor.destination ? { address: descriptor.destination.address } : undefined;
+  }
+
+  function getTerminalTmuxBackend(record: TerminalSessionRecord): TerminalTmuxBackend {
+    return createTerminalTmuxBackend(
+      config,
+      logger,
+      record.destination?.address ?? (record.legacyGlobalTmuxFallback === true ? null : undefined),
+    );
+  }
+
+  function terminalTargetContext(record: TerminalSessionRecord): Record<string, unknown> {
+    return {
+      targetTruth: record.legacyGlobalTmuxFallback === true ? "legacy_unknown" : "explicit",
+      ...(record.destination ? { destination: record.destination } : {}),
+      ...(record.terminalSessionName
+        ? { terminalSession: { name: record.terminalSessionName } }
+        : {}),
+    };
+  }
+
   async function filterOutboundAttachmentsForTerminalPolicy(params: {
     attachments: NormalizedAttachment[];
     ownerUserId: string;
@@ -4822,16 +4910,33 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             "Clawline terminal session descriptor is invalid (expected base64 JSON with terminalSessionId).",
           );
         }
+        const destination = resolveTerminalDestinationForDescriptor(descriptor);
+        if (!destination && descriptor.version === 3) {
+          logger.warn?.("[clawline] terminal_attachment_missing_destination", {
+            sessionKey: params.sessionKey,
+            ownerUserId: params.ownerUserId,
+            terminalSessionId: descriptor.terminalSessionId,
+          });
+          throw new Error(
+            "Clawline terminal session descriptor is invalid (version 3 destination.address is required).",
+          );
+        }
         const now = nowMs();
-        terminalSessions.set(descriptor.terminalSessionId, {
+        const terminalSessionName = descriptor.terminalSession?.name;
+        const tmuxSessionName =
+          terminalSessionName ??
+          (descriptor.version === 3 ? undefined : descriptor.terminalSessionId);
+        rememberTerminalSession({
           terminalSessionId: descriptor.terminalSessionId,
           ownerUserId: params.ownerUserId,
           sessionKey: params.sessionKey,
           title: descriptor.title,
           createdAt: now,
           lastSeenAt: now,
-          tmuxSessionName: descriptor.terminalSessionId,
-          destination: descriptor.destination,
+          ...(terminalSessionName ? { terminalSessionName } : {}),
+          ...(tmuxSessionName ? { tmuxSessionName } : {}),
+          ...(destination ? { destination } : {}),
+          ...(!destination ? { legacyGlobalTmuxFallback: true } : {}),
         });
         filtered.push(attachment);
         continue;
@@ -4844,7 +4949,15 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   function lookupTerminalSessionRecordFromDb(params: {
     userId: string;
     terminalSessionId: string;
-  }): { sessionKey: string; title?: string; destination?: TerminalDestination } | null {
+  }): Pick<
+    TerminalSessionRecord,
+    | "sessionKey"
+    | "title"
+    | "terminalSessionName"
+    | "tmuxSessionName"
+    | "destination"
+    | "legacyGlobalTmuxFallback"
+  > | null {
     if (!selectEventsTailStmt) {
       return null;
     }
@@ -4883,10 +4996,18 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         if (!descriptor || descriptor.terminalSessionId !== params.terminalSessionId) {
           continue;
         }
+        const destination = resolveTerminalDestinationForDescriptor(descriptor);
+        const terminalSessionName = descriptor.terminalSession?.name;
+        const tmuxSessionName =
+          terminalSessionName ??
+          (descriptor.version === 3 ? undefined : descriptor.terminalSessionId);
         return {
           sessionKey,
           title: descriptor.title || undefined,
-          destination: descriptor.destination,
+          ...(terminalSessionName ? { terminalSessionName } : {}),
+          ...(tmuxSessionName ? { tmuxSessionName } : {}),
+          ...(destination ? { destination } : {}),
+          ...(!destination ? { legacyGlobalTmuxFallback: true } : {}),
         };
       }
     }
@@ -10312,7 +10433,9 @@ button.deny { background: #9b1c31; color: white; }
             ws.close();
             return;
           }
-          void resizeTmuxPane(state.paneId, cols, rows, state.tmuxBackend);
+          if (state.paneId && state.tmuxBackend) {
+            void resizeTmuxPane(state.paneId, cols, rows, state.tmuxBackend);
+          }
         } else {
           await sendJson(ws, { type: "terminal_error", message: "Invalid terminal resize" });
           ws.close();
@@ -10337,7 +10460,9 @@ button.deny { background: #9b1c31; color: white; }
         break;
       }
       case "terminal_close": {
-        void killTmuxSession(state.tmuxSessionName, state.tmuxBackend);
+        if (state.tmuxSessionName && state.tmuxBackend) {
+          void killTmuxSession(state.tmuxSessionName, state.tmuxBackend);
+        }
         try {
           state.pty.kill();
         } catch (err) {
@@ -10436,10 +10561,14 @@ button.deny { background: #9b1c31; color: white; }
         title: dbRecord.title,
         createdAt: now,
         lastSeenAt: now,
-        tmuxSessionName: terminalSessionId,
+        ...(dbRecord.terminalSessionName
+          ? { terminalSessionName: dbRecord.terminalSessionName }
+          : {}),
+        ...(dbRecord.tmuxSessionName ? { tmuxSessionName: dbRecord.tmuxSessionName } : {}),
         destination: dbRecord.destination,
+        ...(dbRecord.legacyGlobalTmuxFallback ? { legacyGlobalTmuxFallback: true } : {}),
       };
-      terminalSessions.set(terminalSessionId, hydrated);
+      rememberTerminalSession(hydrated);
       record = hydrated;
     }
     if (!record) {
@@ -10459,11 +10588,8 @@ button.deny { background: #9b1c31; color: white; }
       typeof payload.backfillLines === "number"
         ? Math.max(0, Math.floor(payload.backfillLines))
         : 0;
-    const tmuxBackend = createTerminalTmuxBackend(
-      config,
-      logger,
-      record.destination?.address ?? null,
-    );
+    const tmuxBackend = getTerminalTmuxBackend(record);
+    const tmuxSessionName = record.tmuxSessionName;
 
     try {
       logger.info?.("[clawline:terminal] terminal_auth_start", {
@@ -10475,17 +10601,24 @@ button.deny { background: #9b1c31; color: white; }
         rows,
         backfillLines,
       });
-      let paneId = await resolveTmuxPaneId(record.tmuxSessionName, tmuxBackend);
-      if (!paneId) {
+      let paneId: string | null = null;
+      if (tmuxSessionName) {
+        paneId = await resolveTmuxPaneId(tmuxSessionName, tmuxBackend);
+      }
+      if (tmuxSessionName && !paneId) {
         // If the session was referenced by a bubble but the tmux session hasn't been created yet,
         // create it on-demand so auth succeeds.
-        const ensured = await ensureTmuxSessionExists(record.tmuxSessionName, tmuxBackend);
+        const ensured = await ensureTmuxSessionExists(tmuxSessionName, tmuxBackend);
         if (ensured) {
-          paneId = await resolveTmuxPaneId(record.tmuxSessionName, tmuxBackend);
+          paneId = await resolveTmuxPaneId(tmuxSessionName, tmuxBackend);
         }
       }
-      if (!paneId) {
-        await sendJson(ws, { type: "terminal_error", message: "Terminal session is not running" });
+      if (tmuxSessionName && !paneId) {
+        await sendJson(ws, {
+          type: "terminal_error",
+          message: "Terminal session is not running",
+          ...terminalTargetContext(record),
+        });
         ws.close();
         return;
       }
@@ -10494,14 +10627,15 @@ button.deny { background: #9b1c31; color: white; }
       await sendJson(ws, {
         type: "terminal_ready",
         terminalSessionId,
+        ...terminalTargetContext(record),
         cols,
         rows,
         readOnly: false,
         maxBackfillLines: 5000,
-        backfillLinesActual: Math.min(backfillLines, 5000),
+        backfillLinesActual: tmuxSessionName ? Math.min(backfillLines, 5000) : 0,
       });
 
-      if (backfillLines > 0) {
+      if (tmuxSessionName && paneId && backfillLines > 0) {
         const backfill = await captureTmuxBackfill(
           paneId,
           Math.min(backfillLines, 5000),
@@ -10517,20 +10651,24 @@ button.deny { background: #9b1c31; color: white; }
         await sendJson(ws, { type: "terminal_backfill_end" });
       }
 
-      const { pty } = await tmuxBackend.spawnAttachPty({
-        sessionName: record.tmuxSessionName,
-        cols,
-        rows,
-      });
+      const { pty } = tmuxSessionName
+        ? await tmuxBackend.spawnAttachPty({
+            sessionName: tmuxSessionName,
+            cols,
+            rows,
+          })
+        : await tmuxBackend.spawnLoginPty({ cols, rows });
 
       terminalConnectionState.set(ws, {
         authenticated: true,
         deviceId,
         userId: entry.userId,
         terminalSessionId,
-        tmuxSessionName: record.tmuxSessionName,
-        paneId,
-        tmuxBackend,
+        ...(tmuxSessionName ? { tmuxSessionName } : {}),
+        destination: record.destination,
+        ...(record.legacyGlobalTmuxFallback ? { legacyGlobalTmuxFallback: true } : {}),
+        ...(paneId ? { paneId } : {}),
+        ...(tmuxSessionName ? { tmuxBackend } : {}),
         pty,
       });
       logger.info?.("[clawline:terminal] terminal_auth_ready", {
@@ -10563,7 +10701,11 @@ button.deny { background: #9b1c31; color: white; }
         tmuxSessionName: record.tmuxSessionName,
         error: formatError(err),
       });
-      await sendJson(ws, { type: "terminal_error", message: "Failed to attach terminal" });
+      await sendJson(ws, {
+        type: "terminal_error",
+        message: "Failed to attach terminal",
+        ...terminalTargetContext(record),
+      });
       try {
         ws.close();
       } catch {

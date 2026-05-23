@@ -26,8 +26,32 @@ type TerminalBubbleRequest = {
   destination: {
     address: string;
   };
+  terminalSession?: {
+    name: string;
+    provisioning: "attach_or_create";
+  };
   title?: string;
 };
+
+class ClawlineTerminalBubbleRequestError extends Error {
+  readonly details: Record<string, unknown>;
+
+  constructor(
+    message: string,
+    details: {
+      destination?: { address: string };
+      terminalSession?: { name: string };
+    },
+  ) {
+    super(message);
+    this.name = "ClawlineTerminalBubbleRequestError";
+    this.details = {
+      error: "clawline_terminal_bubble_request_invalid",
+      message,
+      ...details,
+    };
+  }
+}
 
 type EventRow = {
   id: string;
@@ -128,6 +152,14 @@ function readStringParam(params: Record<string, unknown>, keys: string[]): strin
     }
   }
   return undefined;
+}
+
+function readNestedStringParam(value: unknown, key: string): string | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const raw = (value as Record<string, unknown>)[key];
+  return typeof raw === "string" && raw.trim().length > 0 ? raw.trim() : undefined;
 }
 
 function isStrictBase64(input: string): boolean {
@@ -237,19 +269,56 @@ function readTerminalBubbleRequest(params: Record<string, unknown>): TerminalBub
     throw new Error("Clawline terminal bubble request requires destination.address");
   }
   const title = readStringParam(params, ["title"]);
+  const terminalSessionName = readNestedStringParam(params.terminalSession, "name");
+  const terminalSessionIdAlias = readStringParam(params, ["terminalSessionId"]);
+  const tmuxSessionNameAlias = readStringParam(params, ["tmuxSessionName"]);
+  const suppliedSessionNames = [
+    terminalSessionName,
+    terminalSessionIdAlias,
+    tmuxSessionNameAlias,
+  ].filter((value): value is string => value !== undefined);
+  const requestedSessionName = suppliedSessionNames[0];
+  if (
+    requestedSessionName &&
+    suppliedSessionNames.some((value) => value !== requestedSessionName)
+  ) {
+    throw new ClawlineTerminalBubbleRequestError(
+      "Clawline terminal bubble request has conflicting terminal session aliases",
+      {
+        destination: { address },
+        terminalSession: { name: requestedSessionName },
+      },
+    );
+  }
   return {
     destination: { address },
+    ...(requestedSessionName
+      ? {
+          terminalSession: {
+            name: requestedSessionName,
+            provisioning: "attach_or_create" as const,
+          },
+        }
+      : {}),
     ...(title ? { title } : {}),
   };
 }
 
 function buildTerminalBubbleDescriptorRequest(request: TerminalBubbleRequest): string {
-  const terminalSessionId = `term_${randomUUID().replace(/-/g, "")}`;
+  const terminalSessionId = `termmsg_${randomUUID().replace(/-/g, "")}`;
   const descriptor = {
-    version: 2,
+    version: 3,
     terminalSessionId,
     title: request.title ?? request.destination.address,
     destination: request.destination,
+    ...(request.terminalSession
+      ? {
+          terminalSession: {
+            name: request.terminalSession.name,
+            provisioning: "attach_or_create",
+          },
+        }
+      : {}),
     provider: {
       wsPath: "/ws/terminal",
     },
@@ -266,6 +335,7 @@ function validateTerminalBubbleAttachment(buffer: string): void {
     version?: unknown;
     terminalSessionId?: unknown;
     destination?: { address?: unknown } | null;
+    terminalSession?: { name?: unknown } | null;
   };
   try {
     descriptor = JSON.parse(
@@ -274,6 +344,7 @@ function validateTerminalBubbleAttachment(buffer: string): void {
       version?: unknown;
       terminalSessionId?: unknown;
       destination?: { address?: unknown } | null;
+      terminalSession?: { name?: unknown } | null;
     };
   } catch {
     throw new Error("Clawline terminal bubble descriptor is not valid base64 JSON");
@@ -289,12 +360,13 @@ function validateTerminalBubbleAttachment(buffer: string): void {
     typeof descriptor.destination?.address === "string"
       ? descriptor.destination.address.trim()
       : "";
-
   if (!terminalSessionId) {
     throw new Error("Clawline terminal bubble descriptor requires terminalSessionId");
   }
-  if (version !== 2 || !destinationAddress) {
-    throw new Error("Clawline terminal bubbles now require version 2 with destination.address");
+  if ((version !== 2 && version !== 3) || !destinationAddress) {
+    throw new Error(
+      "Clawline terminal bubbles now require version 2 or 3 with destination.address",
+    );
   }
 }
 
@@ -471,6 +543,26 @@ export const clawlineMessageActions: ChannelMessageActionAdapter = {
             Type.String({
               description:
                 "Optional Clawline terminal bubble title. When omitted, the provider defaults it from destination.address.",
+            }),
+          ),
+          terminalSession: Type.Optional(
+            Type.Object({
+              name: Type.String({
+                description:
+                  "Optional product-facing terminal/tmux session name to attach or create on the destination.",
+              }),
+            }),
+          ),
+          terminalSessionId: Type.Optional(
+            Type.String({
+              description:
+                "Compatibility alias for terminalSession.name. Must match terminalSession.name when both are supplied.",
+            }),
+          ),
+          tmuxSessionName: Type.Optional(
+            Type.String({
+              description:
+                "Compatibility alias for terminalSession.name. Must match terminalSession.name when both are supplied.",
             }),
           ),
         },

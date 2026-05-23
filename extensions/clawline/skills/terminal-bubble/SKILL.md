@@ -30,7 +30,7 @@ If Flynn specifies a different stream, use that.
 
 Every new terminal bubble must carry an explicit destination address. In the current routing model this is an SSH target string such as `mike@eezo` or `eezo`.
 
-You do not need to hand-author a descriptor or choose a `terminalSessionId`. The provider now generates the destination-aware descriptor and tmux session id from the request.
+You do not need to hand-author a descriptor. Omit `terminalSession.name` for a destination login shell, or provide it when attaching or creating a named tmux session on the destination.
 
 ### 3. Send the terminal-bubble request
 
@@ -43,6 +43,9 @@ Send a structured `message sendAttachment` request with terminal mime type plus 
   "target": "<stream>",
   "mimeType": "application/vnd.clawline.terminal-session+json",
   "title": "<human-readable title>",
+  "terminalSession": {
+    "name": "<optional-existing-tmux-session-name>"
+  },
   "destination": {
     "address": "<destination-address>"
   }
@@ -51,14 +54,15 @@ Send a structured `message sendAttachment` request with terminal mime type plus 
 
 **Required fields:** `mimeType`, `target`, `destination.address`
 **Title rule:** `title` is presentation only. It may match the destination, but routing authority is `destination.address`.
+**Session rule:** `terminalSession.name` is optional. When supplied, it is the caller-facing tmux session name to attach or create on the destination host. When omitted, the provider connects to `destination.address` and leaves the user in the destination login shell; it does not generate a tmux session name. `terminalSessionId` is an opaque descriptor/auth id; `tmuxSessionName` and top-level `terminalSessionId` are compatibility aliases for request input only and must match `terminalSession.name` when supplied together.
 
 **Send:**
 
 ```
-message(action=sendAttachment, channel=clawline, target=<stream>, mimeType=application/vnd.clawline.terminal-session+json, destination={"address":"<destination-address>"}, title="<optional title>")
+message(action=sendAttachment, channel=clawline, target=<stream>, mimeType=application/vnd.clawline.terminal-session+json, destination={"address":"<destination-address>"}, terminalSession={"name":"<optional-existing-tmux-session-name>"}, title="<optional title>")
 ```
 
-The provider emits the version 2 descriptor attachment, generates a fresh `terminalSessionId`, and creates the tmux session on first attach if needed.
+The provider emits a version 3 descriptor attachment. The descriptor always has an opaque `terminalSessionId` for auth/lookup. The tmux identity lives in `terminalSession.name` when supplied and defaults to `attach_or_create`; unnamed requests have no tmux identity.
 
 ### 4. Verify
 
@@ -70,30 +74,30 @@ After sending, ask Flynn what they see. Expected: a chromeless terminal bubble w
 
 ## Quick reference
 
-| Field              | Value                                            |
-| ------------------ | ------------------------------------------------ |
-| MIME type          | `application/vnd.clawline.terminal-session+json` |
-| WS path            | `/ws/terminal`                                   |
-| Auth mode          | `chat_token`                                     |
-| Descriptor version | provider-generated `2`                           |
-| Routing authority  | `destination.address`                            |
-| tmux session id    | provider-generated from the new bubble request   |
-| tmux location      | Host named by `destination.address`              |
+| Field              | Value                                                                               |
+| ------------------ | ----------------------------------------------------------------------------------- |
+| MIME type          | `application/vnd.clawline.terminal-session+json`                                    |
+| WS path            | `/ws/terminal`                                                                      |
+| Auth mode          | `chat_token`                                                                        |
+| Descriptor version | provider-generated `3`                                                              |
+| Routing authority  | `destination.address`                                                               |
+| tmux session name  | optional caller-supplied `terminalSession.name`; unnamed requests use a login shell |
+| tmux location      | Host named by `destination.address`                                                 |
 
 ## Common patterns
 
 **Debug shell for Flynn:**
-Send a new destination-aware request. The provider will create the backing tmux session on first attach. Good for showing live logs, running commands, or debugging.
+Send a destination-aware request without `terminalSession.name`. The provider connects to the destination login shell. Good for ad hoc debugging when a durable tmux session is not required.
 
 **Attach to existing agent session:**
-Not part of this routing spec. The minimal flow is one new bubble request naming one destination address; the provider owns the generated session id and tmux lifecycle.
+Send a destination-aware request with `terminalSession.name` set to the existing tmux session name on that destination host.
 
 **Tail logs:**
 Out of scope for this minimal routing slice unless another product surface intentionally writes that command into the created shell.
 
 ## Routing model
 
-The provider now routes terminal bubbles per bubble, not per process. For a version 2 descriptor with `destination.address`, the provider SSHes to that address for that bubble. The provider-global `terminal.tmux.ssh.target` remains only as compatibility fallback for old version 1 bubbles that lack destination metadata.
+The provider now routes terminal bubbles per bubble, not per process. For a version 3 descriptor with `destination.address` and no `terminalSession.name`, the provider SSHes to that address and opens a login shell. With `terminalSession.name`, it attaches or creates that named tmux session for that bubble. The provider-global `terminal.tmux.ssh.target` remains only as a visibly legacy/unknown compatibility fallback for old version 1 bubbles that lack destination metadata.
 
 Provider SSH config still supplies shared connection defaults such as identity file and host-key settings:
 
