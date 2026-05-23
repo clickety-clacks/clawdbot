@@ -3410,6 +3410,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       }
       const { data, mimeType } = normalizeOutboundAttachmentData(attachment);
       if (!isStrictBase64(data)) {
+        if (mimeType === TERMINAL_SESSION_MIME) {
+          throw new Error(
+            "Clawline terminal session descriptor is invalid (expected base64 JSON with terminalSessionId).",
+          );
+        }
         throw new Error("Clawline outbound attachment data is not valid base64");
       }
       const buffer = Buffer.from(data, "base64");
@@ -6932,6 +6937,9 @@ button.deny { background: #9b1c31; color: white; }
     }
     const sends: Array<Promise<{ session: Session; delivered: boolean }>> = [];
     for (const session of sessions) {
+      if (session.replayInProgress) {
+        continue;
+      }
       sends.push(sendJson(session.socket, payload).then((delivered) => ({ session, delivered })));
     }
     const results = await Promise.allSettled(sends);

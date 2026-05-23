@@ -22,6 +22,7 @@ import type {
   ProviderServer,
 } from "./domain.js";
 import { setClawlineOutboundSender } from "./outbound.js";
+import { resolveClawlineSessionTranscriptPath } from "./session-compat.js";
 import { enqueueSystemEvent, resetSystemEventsForTest } from "./system-events.js";
 
 const gatewayCallMock = vi.fn();
@@ -1431,8 +1432,12 @@ describe.sequential("clawline provider server", () => {
   });
 
   it("filters session-control status and controls by Codex versus Pi runtime", async () => {
-    const codexEntry = createAllowlistEntry();
-    const sessionKey = "agent:main:clawline:flynn:main";
+    const sessionControlUserId = `flynn${randomUUID().replace(/-/g, "")}`;
+    const codexEntry = createAllowlistEntry({
+      userId: sessionControlUserId,
+      claimedName: sessionControlUserId,
+    });
+    const sessionKey = `agent:main:clawline:${sessionControlUserId}:main`;
     const codexCtx = await setupTestServer([codexEntry], {
       openClawConfig: {
         agents: {
@@ -1450,26 +1455,25 @@ describe.sequential("clawline provider server", () => {
       } as OpenClawConfig,
     });
     try {
-      const codexSessionFile = path.join(
-        path.dirname(codexCtx.sessionStorePath),
-        "codex-session-control-test.jsonl",
+      const codexSessionFile = resolveClawlineSessionTranscriptPath(
+        "codex-session-control-test",
+        "main",
       );
+      await fs.mkdir(path.dirname(codexSessionFile), { recursive: true });
+      const codexAppServerBinding = {
+        schemaVersion: 1,
+        threadId: "thread-1",
+        sessionFile: codexSessionFile,
+        cwd: path.dirname(codexSessionFile),
+        model: "gpt-5.5",
+        modelProvider: "openai",
+        serviceTier: "flex",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
       await fs.writeFile(
         `${codexSessionFile}.codex-app-server.json`,
-        JSON.stringify(
-          {
-            schemaVersion: 1,
-            threadId: "thread-1",
-            sessionFile: codexSessionFile,
-            cwd: path.dirname(codexSessionFile),
-            model: "gpt-5.5",
-            modelProvider: "openai",
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
-          },
-          null,
-          2,
-        ),
+        JSON.stringify(codexAppServerBinding, null, 2),
       );
       await fs.writeFile(
         codexCtx.sessionStorePath,
@@ -1478,7 +1482,7 @@ describe.sequential("clawline provider server", () => {
             [sessionKey]: {
               sessionId: "codex-session-control-test",
               sessionFile: codexSessionFile,
-              updatedAt: Date.now(),
+              updatedAt: Date.now() + 60_000,
               modelProvider: "openai",
               model: "gpt-5.5",
               thinkingLevel: "medium",
@@ -1561,6 +1565,10 @@ describe.sequential("clawline provider server", () => {
         ).capabilities?.setThinking?.options?.map((option) => option.value),
       ).not.toContain("adaptive");
 
+      await fs.writeFile(
+        `${codexSessionFile}.codex-app-server.json`,
+        JSON.stringify(codexAppServerBinding, null, 2),
+      );
       const codexFastResponse = await fetch(
         `http://127.0.0.1:${codexCtx.port}/api/session-control`,
         {
@@ -1681,7 +1689,10 @@ describe.sequential("clawline provider server", () => {
       await codexCtx.cleanup();
     }
 
-    const piEntry = createAllowlistEntry();
+    const piEntry = createAllowlistEntry({
+      userId: sessionControlUserId,
+      claimedName: sessionControlUserId,
+    });
     const piCtx = await setupTestServer([piEntry], {
       openClawConfig: {
         agents: {
@@ -7642,6 +7653,14 @@ describe.sequential("clawline provider server", () => {
           typed.sessionKey === adoptedSessionKey
         );
       })) as { id: string };
+      const afterAdoptAssistantMessage = (await waitForQueuedMessage(queue, (value) => {
+        const typed = value as { type?: string; role?: string; sessionKey?: string };
+        return (
+          typed?.type === "message" &&
+          typed.role === "assistant" &&
+          typed.sessionKey === adoptedSessionKey
+        );
+      })) as { id: string };
       authed.ws.send(
         JSON.stringify({
           type: "stream_read",
@@ -7667,8 +7686,8 @@ describe.sequential("clawline provider server", () => {
       });
       expect(reauthed.auth.streamTailStates).toMatchObject({
         [adoptedSessionKey]: {
-          lastMessageId: afterAdoptMessage.id,
-          lastMessageRole: "user",
+          lastMessageId: afterAdoptAssistantMessage.id,
+          lastMessageRole: "assistant",
         },
       });
       const replayQueue = createMessageQueue(reauthed.ws);
