@@ -9,6 +9,7 @@ import jwt from "jsonwebtoken";
 import { FormData, fetch, getGlobalDispatcher } from "undici";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
+import { resetCliCredentialCachesForTest } from "../../../../src/agents/cli-credentials.js";
 import type { getReplyFromConfig } from "../../../../src/auto-reply/reply.js";
 import type { OpenClawConfig } from "../../../../src/config/config.js";
 import { resolvePreferredOpenClawTmpDir } from "../../../../src/infra/tmp-openclaw-dir.js";
@@ -1454,7 +1455,26 @@ describe.sequential("clawline provider server", () => {
         bindings: [],
       } as OpenClawConfig,
     });
+    const previousCodexHome = process.env.CODEX_HOME;
     try {
+      const codexHome = path.join(path.dirname(codexCtx.allowlistPath), "codex-home");
+      await fs.mkdir(codexHome, { recursive: true });
+      await fs.writeFile(
+        path.join(codexHome, "auth.json"),
+        JSON.stringify(
+          {
+            tokens: {
+              access_token: "t318-fake-codex-access-token",
+              refresh_token: "t318-fake-codex-refresh-token",
+            },
+          },
+          null,
+          2,
+        ),
+      );
+      process.env.CODEX_HOME = codexHome;
+      resetCliCredentialCachesForTest();
+
       const codexSessionFile = resolveClawlineSessionTranscriptPath(
         "codex-session-control-test",
         "main",
@@ -1513,6 +1533,7 @@ describe.sequential("clawline provider server", () => {
           provider: "openai",
           model: "gpt-5.5",
           harness: "codex",
+          authMode: "oauth",
           fastMode: false,
           mode: "normal",
         },
@@ -1686,6 +1707,12 @@ describe.sequential("clawline provider server", () => {
 
       ws.terminate();
     } finally {
+      if (previousCodexHome === undefined) {
+        delete process.env.CODEX_HOME;
+      } else {
+        process.env.CODEX_HOME = previousCodexHome;
+      }
+      resetCliCredentialCachesForTest();
       await codexCtx.cleanup();
     }
 
