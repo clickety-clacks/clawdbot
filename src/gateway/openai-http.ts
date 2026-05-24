@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { ClientToolDefinition } from "../agents/command/shared-types.js";
 import type { ImageContent } from "../agents/command/types.js";
 import { isClientToolNameConflictError } from "../agents/pi-tool-definition-adapter.js";
+import { STREAM_ERROR_FALLBACK_TEXT } from "../agents/stream-message-shared.js";
 import {
   hasNonzeroUsage,
   normalizeUsage,
@@ -43,9 +44,9 @@ import {
   resolveGatewayRequestContext,
   resolveOpenAiCompatModelOverride,
   resolveOpenAiCompatibleHttpOperatorScopes,
-  resolveOpenAiCompatibleHttpSenderIsOwner,
 } from "./http-utils.js";
 import { normalizeInputHostnameAllowlist } from "./input-allowlist.js";
+import { resolveOpenAiCompatError, validateOpenAiSamplingParams } from "./openai-compat-errors.js";
 
 type OpenAiHttpOptions = {
   auth: ResolvedGatewayAuth;
@@ -62,6 +63,7 @@ type OpenAiChatMessage = {
   name?: unknown;
   tool_call_id?: unknown;
   tool_calls?: unknown;
+  stopReason?: unknown;
 };
 
 type OpenAiChatCompletionRequest = {
@@ -75,6 +77,9 @@ type OpenAiChatCompletionRequest = {
   user?: unknown;
   max_tokens?: unknown;
   max_completion_tokens?: unknown;
+  temperature?: unknown;
+  top_p?: unknown;
+  response_format?: unknown;
 };
 
 const DEFAULT_OPENAI_CHAT_COMPLETIONS_BODY_BYTES = 20 * 1024 * 1024;
@@ -132,9 +137,13 @@ function buildAgentCommandInput(params: {
   sessionKey: string;
   runId: string;
   messageChannel: string;
-  senderIsOwner: boolean;
   abortSignal?: AbortSignal;
-  streamParams?: { maxTokens?: number };
+  streamParams?: {
+    maxTokens?: number;
+    temperature?: number;
+    topP?: number;
+    responseFormat?: Record<string, unknown>;
+  };
 }) {
   return {
     message: params.prompt.message,
@@ -147,7 +156,6 @@ function buildAgentCommandInput(params: {
     deliver: false as const,
     messageChannel: params.messageChannel,
     bestEffortDeliver: false as const,
-    senderIsOwner: params.senderIsOwner,
     allowModelOverride: true as const,
     abortSignal: params.abortSignal,
     streamParams: params.streamParams,
@@ -574,11 +582,12 @@ async function resolveImagesForRequest(
   return images;
 }
 
-export const __testOnlyOpenAiHttp = {
+export const testOnlyOpenAiHttp = {
   resolveImagesForRequest,
   resolveOpenAiChatCompletionsLimits,
   resolveChatCompletionUsage,
 };
+export { testOnlyOpenAiHttp as __testOnlyOpenAiHttp };
 
 function buildAgentPrompt(
   messagesUnknown: unknown,
@@ -647,6 +656,10 @@ function buildAgentPrompt(
     conversationEntries.push({
       role: normalizedRole,
       entry: { sender, body: messageContent },
+      internalStreamError:
+        normalizedRole === "assistant" &&
+        normalizeOptionalString(msg.stopReason) === "error" &&
+        messageContent.trim() === STREAM_ERROR_FALLBACK_TEXT,
     });
   }
 
@@ -774,6 +787,21 @@ function resolveIncludeUsageForStreaming(payload: OpenAiChatCompletionRequest): 
   return (streamOptions as { include_usage?: unknown }).include_usage === true;
 }
 
+function resolveResponseFormat(value: unknown): Record<string, unknown> | undefined {
+  if (value == null) {
+    return undefined;
+  }
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("response_format must be an object");
+  }
+  const obj = value as Record<string, unknown>;
+  const type = obj.type;
+  if (type !== "text" && type !== "json_object" && type !== "json_schema") {
+    throw new Error("response_format.type must be text, json_object, or json_schema");
+  }
+  return obj;
+}
+
 function resolveErrorMessage(err: unknown): string {
   if (err instanceof Error) {
     const message = err.message.trim();
@@ -808,10 +836,6 @@ export async function handleOpenAiHttpRequest(
   if (!handled) {
     return true;
   }
-  // On the compat surface, shared-secret bearer auth is also treated as an
-  // owner sender so owner-only tool policy matches the documented contract.
-  const senderIsOwner = resolveOpenAiCompatibleHttpSenderIsOwner(req, handled.requestAuth);
-
   const payload = coerceRequest(handled.body);
   const stream = Boolean(payload.stream);
   const streamIncludeUsage = stream && resolveIncludeUsageForStreaming(payload);
@@ -823,7 +847,42 @@ export async function handleOpenAiHttpRequest(
       : typeof payload.max_tokens === "number"
         ? payload.max_tokens
         : undefined;
-  const streamParams = maxTokens !== undefined ? { maxTokens } : undefined;
+  const temperature = typeof payload.temperature === "number" ? payload.temperature : undefined;
+  const topP = typeof payload.top_p === "number" ? payload.top_p : undefined;
+  let responseFormat: Record<string, unknown> | undefined;
+  try {
+    responseFormat = resolveResponseFormat(payload.response_format);
+  } catch (err) {
+    sendJson(res, 400, {
+      error: {
+        message: `Invalid response_format: ${resolveErrorMessage(err)}`,
+        type: "invalid_request_error",
+      },
+    });
+    return true;
+  }
+  const samplingError = validateOpenAiSamplingParams({
+    temperature: payload.temperature,
+    topP: payload.top_p,
+  });
+  if (samplingError) {
+    sendJson(res, 400, {
+      error: { message: samplingError, type: "invalid_request_error" },
+    });
+    return true;
+  }
+  const streamParams =
+    maxTokens !== undefined ||
+    temperature !== undefined ||
+    topP !== undefined ||
+    responseFormat !== undefined
+      ? {
+          ...(maxTokens !== undefined ? { maxTokens } : {}),
+          ...(temperature !== undefined ? { temperature } : {}),
+          ...(topP !== undefined ? { topP } : {}),
+          ...(responseFormat !== undefined ? { responseFormat } : {}),
+        }
+      : undefined;
 
   const { agentId, sessionKey, messageChannel } = resolveGatewayRequestContext({
     req,
@@ -907,7 +966,6 @@ export async function handleOpenAiHttpRequest(
     runId,
     messageChannel,
     abortSignal: abortController.signal,
-    senderIsOwner,
     streamParams,
   });
 
@@ -975,6 +1033,11 @@ export async function handleOpenAiHttpRequest(
         sendJson(res, 400, {
           error: { message: "invalid tool configuration", type: "invalid_request_error" },
         });
+        return true;
+      }
+      const mapped = resolveOpenAiCompatError(err);
+      if (mapped) {
+        sendJson(res, mapped.status, { error: mapped.error });
         return true;
       }
       sendJson(res, 500, {
@@ -1148,6 +1211,16 @@ export async function handleOpenAiHttpRequest(
         writeSse(res, {
           error: { message: "invalid tool configuration", type: "invalid_request_error" },
         });
+        writeDone(res);
+        res.end();
+        return;
+      }
+      const mapped = resolveOpenAiCompatError(err);
+      if (mapped) {
+        closed = true;
+        stopWatchingDisconnect();
+        unsubscribe();
+        writeSse(res, { error: mapped.error });
         writeDone(res);
         res.end();
         return;

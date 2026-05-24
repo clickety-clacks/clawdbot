@@ -52,7 +52,7 @@ type AnnounceQueueState = {
   send: (item: AnnounceQueueItem) => Promise<void>;
   /** Return true while the target parent session is still busy and delivery should wait. */
   shouldDefer?: (item: AnnounceQueueItem) => boolean;
-  /** Consecutive drain failures — drives exponential backoff on errors. */
+  /** Consecutive drain failures drives exponential backoff on errors. */
   consecutiveFailures: number;
 };
 
@@ -254,11 +254,9 @@ function scheduleAnnounceDrain(key: string) {
           break;
         }
       }
-      // Drain succeeded — reset failure counter.
       queue.consecutiveFailures = 0;
     } catch (err) {
       queue.consecutiveFailures++;
-      // Exponential backoff on consecutive failures: 2s, 4s, 8s, ... capped at 60s.
       const errorBackoffMs = Math.min(1000 * 2 ** queue.consecutiveFailures, 60_000);
       const retryDelayMs = Math.max(errorBackoffMs, queue.debounceMs);
       queue.lastEnqueuedAt = Date.now() + retryDelayMs - queue.debounceMs;

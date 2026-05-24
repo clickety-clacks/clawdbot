@@ -149,7 +149,16 @@ run_prestart_cli() {
   # requires the gateway container's network namespace to already exist. That
   # creates a circular dependency for config writes that are needed before the
   # gateway can start cleanly.
-  run_prestart_gateway --entrypoint node openclaw-gateway \
+  # Host OPENCLAW_* paths are Compose bind-mount sources. Setup-time CLI writes
+  # must still resolve state/config paths inside the container.
+  run_prestart_gateway \
+    -e HOME=/home/node \
+    -e OPENCLAW_HOME=/home/node \
+    -e OPENCLAW_STATE_DIR=/home/node/.openclaw \
+    -e OPENCLAW_CONFIG_PATH=/home/node/.openclaw/openclaw.json \
+    -e OPENCLAW_CONFIG_DIR=/home/node/.openclaw \
+    -e OPENCLAW_WORKSPACE_DIR=/home/node/.openclaw/workspace \
+    --entrypoint node openclaw-gateway \
     dist/index.js "$@"
 }
 
@@ -287,7 +296,8 @@ export OPENCLAW_BRIDGE_PORT="${OPENCLAW_BRIDGE_PORT:-18790}"
 export OPENCLAW_GATEWAY_BIND="${OPENCLAW_GATEWAY_BIND:-lan}"
 export OPENCLAW_DISABLE_BONJOUR="${OPENCLAW_DISABLE_BONJOUR:-}"
 export OPENCLAW_IMAGE="$IMAGE_NAME"
-export OPENCLAW_DOCKER_APT_PACKAGES="${OPENCLAW_DOCKER_APT_PACKAGES:-}"
+export OPENCLAW_IMAGE_APT_PACKAGES="${OPENCLAW_IMAGE_APT_PACKAGES-${OPENCLAW_DOCKER_APT_PACKAGES:-}}"
+export OPENCLAW_IMAGE_PIP_PACKAGES="${OPENCLAW_IMAGE_PIP_PACKAGES:-}"
 export OPENCLAW_EXTENSIONS="${OPENCLAW_EXTENSIONS:-}"
 export OPENCLAW_INSTALL_BROWSER="${OPENCLAW_INSTALL_BROWSER:-}"
 export OPENCLAW_EXTRA_MOUNTS="$EXTRA_MOUNTS"
@@ -491,7 +501,8 @@ upsert_env "$ENV_FILE" \
   OPENCLAW_IMAGE \
   OPENCLAW_EXTRA_MOUNTS \
   OPENCLAW_HOME_VOLUME \
-  OPENCLAW_DOCKER_APT_PACKAGES \
+  OPENCLAW_IMAGE_APT_PACKAGES \
+  OPENCLAW_IMAGE_PIP_PACKAGES \
   OPENCLAW_EXTENSIONS \
   OPENCLAW_INSTALL_BROWSER \
   OPENCLAW_SANDBOX \
@@ -513,7 +524,8 @@ upsert_env "$ENV_FILE" \
 if [[ "$IMAGE_NAME" == "openclaw:local" ]]; then
   echo "==> Building Docker image: $IMAGE_NAME"
   run_docker_build \
-    --build-arg "OPENCLAW_DOCKER_APT_PACKAGES=${OPENCLAW_DOCKER_APT_PACKAGES}" \
+    --build-arg "OPENCLAW_IMAGE_APT_PACKAGES=${OPENCLAW_IMAGE_APT_PACKAGES}" \
+    --build-arg "OPENCLAW_IMAGE_PIP_PACKAGES=${OPENCLAW_IMAGE_PIP_PACKAGES}" \
     --build-arg "OPENCLAW_EXTENSIONS=${OPENCLAW_EXTENSIONS}" \
     --build-arg "OPENCLAW_INSTALL_BROWSER=${OPENCLAW_INSTALL_BROWSER}" \
     --build-arg "OPENCLAW_INSTALL_DOCKER_CLI=${OPENCLAW_INSTALL_DOCKER_CLI:-}" \
@@ -560,11 +572,17 @@ else
   else
     echo "Bonjour/mDNS advertising: explicitly enabled (OPENCLAW_DISABLE_BONJOUR=$OPENCLAW_DISABLE_BONJOUR)."
   fi
-  echo "Gateway token: $OPENCLAW_GATEWAY_TOKEN"
+  echo "Gateway token: stored in Docker environment/config (not printed)."
   echo "Tailscale exposure: Off (use host-level tailnet/Tailscale setup separately)."
   echo "Install Gateway daemon: No (managed by Docker Compose)"
   echo ""
-  run_prestart_cli onboard --mode local --no-install-daemon
+  run_prestart_cli onboard \
+    --mode local \
+    --no-install-daemon \
+    --gateway-auth token \
+    --gateway-token-ref-env OPENCLAW_GATEWAY_TOKEN \
+    --skip-ui \
+    --suppress-gateway-token-output
 fi
 
 echo ""
@@ -699,8 +717,8 @@ echo "Gateway running with host port mapping."
 echo "Access from tailnet devices via the host's tailnet IP."
 echo "Config: $OPENCLAW_CONFIG_DIR"
 echo "Workspace: $OPENCLAW_WORKSPACE_DIR"
-echo "Token: $OPENCLAW_GATEWAY_TOKEN"
+echo "Token: stored in Docker environment/config (not printed)."
 echo ""
 echo "Commands:"
 echo "  ${COMPOSE_HINT} logs -f openclaw-gateway"
-echo "  ${COMPOSE_HINT} exec openclaw-gateway node dist/index.js health --token \"$OPENCLAW_GATEWAY_TOKEN\""
+echo "  ${COMPOSE_HINT} exec openclaw-gateway sh -lc 'node dist/index.js health --token \"\$OPENCLAW_GATEWAY_TOKEN\"'"

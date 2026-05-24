@@ -1,4 +1,3 @@
-import { useFrozenTime, useRealTime } from "openclaw/plugin-sdk/test-env";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const harness = await import("./bot.create-telegram-bot.test-harness.js");
@@ -155,6 +154,14 @@ async function queueChannelPostAlbum(
   await Promise.all([first, second]);
 }
 
+function replyPayload(): Record<string, unknown> {
+  const call = replySpy.mock.calls.at(0);
+  if (!call || !call[0] || typeof call[0] !== "object") {
+    throw new Error("Expected reply payload");
+  }
+  return call[0] as Record<string, unknown>;
+}
+
 describe("createTelegramBot channel_post media", () => {
   beforeAll(() => {
     createTelegramBot = (opts) =>
@@ -191,7 +198,7 @@ describe("createTelegramBot channel_post media", () => {
       await flushChannelPostMediaGroup(setTimeoutSpy);
 
       expect(replySpy).toHaveBeenCalledTimes(1);
-      const payload = replySpy.mock.calls[0]?.[0] as { Body?: string };
+      const payload = replyPayload() as { Body?: string };
       expect(payload.Body).toContain("album caption");
     } finally {
       setTimeoutSpy.mockRestore();
@@ -229,7 +236,7 @@ describe("createTelegramBot channel_post media", () => {
       await flushChannelPostMediaGroupForDelay(setTimeoutSpy, 75);
 
       expect(replySpy).toHaveBeenCalledTimes(1);
-      const payload = replySpy.mock.calls[0]?.[0] as { Body?: string };
+      const payload = replyPayload() as { Body?: string };
       expect(payload.Body).toContain("configured album");
     } finally {
       setTimeoutSpy.mockRestore();
@@ -240,7 +247,7 @@ describe("createTelegramBot channel_post media", () => {
   it("coalesces channel_post near-limit text fragments into one message", async () => {
     setOpenChannelPostConfig();
 
-    useFrozenTime("2026-02-20T00:00:00.000Z");
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
     try {
       const handler = getChannelPostHandler();
 
@@ -270,14 +277,17 @@ describe("createTelegramBot channel_post media", () => {
       });
 
       expect(replySpy).not.toHaveBeenCalled();
-      await vi.advanceTimersByTimeAsync(TELEGRAM_TEST_TIMINGS.textFragmentGapMs + 100);
+      await flushChannelPostMediaGroupForDelay(
+        setTimeoutSpy,
+        TELEGRAM_TEST_TIMINGS.textFragmentGapMs,
+      );
 
       expect(replySpy).toHaveBeenCalledTimes(1);
-      const payload = replySpy.mock.calls[0]?.[0] as { RawBody?: string };
+      const payload = replyPayload() as { RawBody?: string };
       expect(payload.RawBody).toContain(part1.slice(0, 32));
       expect(payload.RawBody).toContain(part2.slice(0, 32));
     } finally {
-      useRealTime();
+      setTimeoutSpy.mockRestore();
     }
   });
 
@@ -512,7 +522,7 @@ describe("createTelegramBot channel_post media", () => {
       await flushChannelPostMediaGroup(setTimeoutSpy);
 
       expect(replySpy).toHaveBeenCalledTimes(1);
-      const payload = replySpy.mock.calls[0]?.[0] as { Body?: string };
+      const payload = replyPayload() as { Body?: string };
       expect(payload.Body).toContain("partial album");
     } finally {
       setTimeoutSpy.mockRestore();

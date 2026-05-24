@@ -3,7 +3,7 @@ import path from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetFileLockStateForTest } from "../../infra/file-lock.js";
 import { captureEnv } from "../../test-utils/env.js";
-import { __testing as externalAuthTesting } from "./external-auth.js";
+import { testing as externalAuthTesting } from "./external-auth.js";
 import "./oauth-file-lock-passthrough.test-support.js";
 import { getOAuthProviderRuntimeMocks } from "./oauth-common-mocks.test-support.js";
 import {
@@ -434,6 +434,48 @@ describe("resolveApiKeyForProfile OAuth refresh mirror-to-main (#26322)", () => 
       refresh: "refresh-token",
       accountId: "acct-shared",
     });
+  });
+
+  it("does not satisfy forced refresh from unchanged main-agent credentials after refresh fails", async () => {
+    const profileId = "openai-codex:default";
+    const provider = "openai-codex";
+    const accountId = "acct-shared";
+
+    const subAgentDir = path.join(tempRoot, "agents", "sub-force-catch", "agent");
+    await fs.mkdir(subAgentDir, { recursive: true });
+    saveAuthProfileStore(createExpiredOauthStore({ profileId, provider, accountId }), subAgentDir);
+    saveAuthProfileStore(
+      {
+        version: 1,
+        profiles: {
+          [profileId]: {
+            type: "oauth",
+            provider,
+            access: "main-existing-access",
+            refresh: "main-existing-refresh",
+            expires: Date.now() + 60 * 60 * 1000,
+            accountId,
+          },
+        },
+      },
+      mainAgentDir,
+    );
+
+    refreshProviderOAuthCredentialWithPluginMock.mockImplementationOnce(async (params) => {
+      const context = params?.context as OAuthCredential;
+      expect(context.access).toBe("main-existing-access");
+      throw new Error("upstream 503 service unavailable");
+    });
+
+    await expect(
+      resolveApiKeyForProfileInTest(resolveApiKeyForProfile, {
+        store: ensureAuthProfileStore(subAgentDir),
+        profileId,
+        agentDir: subAgentDir,
+        forceRefresh: true,
+      }),
+    ).rejects.toThrow(/OAuth token refresh failed for openai-codex/);
+    expect(refreshProviderOAuthCredentialWithPluginMock).toHaveBeenCalledTimes(1);
   });
 
   it("mirrors refreshed credentials produced by the plugin-refresh path", async () => {

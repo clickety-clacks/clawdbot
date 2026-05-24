@@ -48,18 +48,6 @@ export function resetRuntimeConfigDeprecationWarningStateForTest(): void {
   warnedDeprecatedConfigApis.clear();
 }
 
-export function createPluginScopedRuntimeConfig(
-  config: PluginRuntime["config"],
-  runWithPluginScope: <T>(run: () => T) => T,
-): PluginRuntime["config"] {
-  return {
-    ...config,
-    loadConfig: () => runWithPluginScope(() => config.loadConfig()),
-    writeConfigFile: (cfg, options) =>
-      runWithPluginScope(() => config.writeConfigFile(cfg, options)),
-  };
-}
-
 export function createRuntimeConfig(): PluginRuntime["config"] {
   return {
     current: getRuntimeConfig,
