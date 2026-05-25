@@ -21,6 +21,7 @@ private final class FakeGatewayWebSocketTask: WebSocketTasking, @unchecked Senda
     private var pendingReceiveHandler:
         (@Sendable (Result<URLSessionWebSocketTask.Message, Error>) -> Void)?
     private var methods: [String] = []
+    private var paramsByMethod: [String: [[String: Any]]] = [:]
 
     init(responsePayloads: [String: [String: Any]]) {
         self.responsePayloads = responsePayloads
@@ -77,6 +78,7 @@ private final class FakeGatewayWebSocketTask: WebSocketTasking, @unchecked Senda
         let responseData = try JSONSerialization.data(withJSONObject: response)
         let handler = self.lock.withLock { () -> (@Sendable (Result<URLSessionWebSocketTask.Message, Error>) -> Void)? in
             self.methods.append(method)
+            self.paramsByMethod[method, default: []].append(frame["params"] as? [String: Any] ?? [:])
             defer { self.pendingReceiveHandler = nil }
             return self.pendingReceiveHandler
         }
@@ -112,6 +114,10 @@ private final class FakeGatewayWebSocketTask: WebSocketTasking, @unchecked Senda
 
     func requestedMethods() -> [String] {
         self.lock.withLock { self.methods }
+    }
+
+    func requestedParams(for method: String) -> [[String: Any]] {
+        self.lock.withLock { self.paramsByMethod[method] ?? [] }
     }
 
     private static func connectChallengeData(nonce: String) -> Data {
@@ -273,5 +279,6 @@ private final class FakeGatewayWebSocketSession: WebSocketSessioning, @unchecked
         #expect(models.first?.name == "GPT-5.5")
         #expect(models.first?.contextWindow == 200_000)
         #expect(session.latestTask()?.requestedMethods().contains("models.list") == true)
+        #expect(session.latestTask()?.requestedParams(for: "models.list").first?["view"] as? String == "configured")
     }
 }

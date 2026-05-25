@@ -13,7 +13,7 @@ struct IOSGatewayChatTransport: OpenClawChatTransport {
     }
 
     func listModels() async throws -> [OpenClawChatModelChoice] {
-        let res = try await self.gateway.request(method: "models.list", paramsJSON: "{}", timeoutSeconds: 15)
+        let res = try await self.gateway.request(method: "models.list", paramsJSON: "{\"view\":\"configured\"}", timeoutSeconds: 15)
         let decoded = try JSONDecoder().decode(ModelsListResult.self, from: res)
         return decoded.models.map(Self.mapModelChoice)
     }

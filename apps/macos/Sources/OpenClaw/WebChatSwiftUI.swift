@@ -26,7 +26,7 @@ struct MacGatewayChatTransport: OpenClawChatTransport {
         do {
             let data = try await GatewayConnection.shared.request(
                 method: "models.list",
-                params: [:],
+                params: ["view": AnyCodable("configured")],
                 timeoutMs: 15000)
             let result = try JSONDecoder().decode(ModelsListResult.self, from: data)
             return result.models.map(Self.mapModelChoice)

@@ -55,6 +55,7 @@ Docs: https://docs.openclaw.ai
 
 ### Fixes
 
+- Clawline: request the configured Gateway model-list view for footer model pickers so configured fallback models such as Qwen appear in the app.
 - WebChat: summarize internal message-tool source replies so tool cards no longer duplicate the visible reply body. (#84773) Thanks @jason-allen-oneal.
 - Gateway: preserve deferred lifecycle-error cleanup across later non-terminal events so provider timeouts can persist failed session state instead of leaving sessions stuck running. (#85256, fixes #63819) Thanks @samzong.
 - Agents/subagents: report tool-only child progress during timeout summaries instead of showing no visible output.
