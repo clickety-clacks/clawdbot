@@ -26,6 +26,36 @@ describe("resolveVisibleModelCatalog", () => {
     expect(result).toEqual([{ provider: "openai", id: "gpt-test", name: "GPT Test" }]);
   });
 
+  it("keeps configured fallback models selectable on read-only configured views", async () => {
+    const authChecker = vi.fn(async (provider: string) => provider === "openai");
+    const cfg = {
+      agents: {
+        defaults: {
+          model: {
+            primary: "openai/gpt-5.5",
+            fallbacks: ["qwen/qwen3.5-plus"],
+          },
+        },
+      },
+    } as OpenClawConfig;
+
+    const result = await resolveVisibleModelCatalog({
+      cfg,
+      catalog: [{ provider: "openai", id: "gpt-5.5", name: "GPT-5.5" }],
+      defaultProvider: "openai",
+      runtimeAuthDiscovery: false,
+      providerAuthChecker: authChecker,
+      view: "configured",
+    });
+
+    expect(result).toEqual([
+      { provider: "openai", id: "gpt-5.5", name: "GPT-5.5" },
+      { provider: "qwen", id: "qwen3.5-plus", name: "qwen3.5-plus" },
+    ]);
+    expect(authChecker).toHaveBeenCalledOnce();
+    expect(authChecker).toHaveBeenCalledWith("openai");
+  });
+
   it("limits visible catalog to provider wildcard entries after default discovery", async () => {
     const authChecker = vi.fn(async (provider: string) => provider !== "blocked");
     const catalog: ModelCatalogEntry[] = [

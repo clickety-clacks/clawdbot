@@ -1173,6 +1173,51 @@ export function createModelVisibilityPolicyWithFallbacks(
       exactConfiguredKeys.add(key);
     }
   }
+  const fallbackCatalogForAllowAny = (() => {
+    if (params.fallbackModels.length === 0) {
+      return [];
+    }
+    const metadata = buildModelCatalogMetadata({
+      cfg: params.cfg,
+      defaultProvider: params.defaultProvider,
+      manifestPlugins: params.manifestPlugins,
+    });
+    const catalog = mergeModelCatalogEntries({
+      primary: params.catalog,
+      secondary: buildConfiguredModelCatalog({
+        cfg: params.cfg,
+        manifestPlugins: params.manifestPlugins,
+      }),
+    });
+    const entries: ModelCatalogEntry[] = [];
+    const seen = new Set<string>();
+    for (const raw of params.fallbackModels) {
+      const parsed = parseModelRefWithCompatAlias({
+        cfg: params.cfg,
+        raw,
+        defaultProvider: params.defaultProvider,
+        manifestPlugins: params.manifestPlugins,
+      });
+      if (!parsed) {
+        continue;
+      }
+      const key = modelKey(parsed.provider, parsed.model);
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      const existing = findModelCatalogEntry(catalog, {
+        provider: parsed.provider,
+        modelId: parsed.model,
+      });
+      entries.push(
+        existing
+          ? applyModelCatalogMetadata({ entry: existing, metadata })
+          : buildSyntheticAllowedCatalogEntry({ parsed, metadata }),
+      );
+    }
+    return entries;
+  })();
   const policy: ModelVisibilityPolicy = {
     allowAny: allowed.allowAny,
     allowedCatalog: allowed.allowedCatalog,
@@ -1197,7 +1242,7 @@ export function createModelVisibilityPolicyWithFallbacks(
         return [...catalog];
       }
       if (allowed.allowAny) {
-        return [...defaultVisibleCatalog];
+        return dedupeModelCatalogEntries([...defaultVisibleCatalog, ...fallbackCatalogForAllowAny]);
       }
       if (visibility.providerWildcards.size === 0) {
         return [...allowed.allowedCatalog];
