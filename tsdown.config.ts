@@ -57,6 +57,7 @@ const env = {
   NODE_ENV: "production",
 };
 const OUTPUT_SOURCE_MAPS = process.env.OUTPUT_SOURCE_MAPS === "1";
+const RUN_NODE_SKIP_DTS_BUILD = process.env.OPENCLAW_RUN_NODE_SKIP_DTS_BUILD === "1";
 
 const SUPPRESSED_EVAL_WARNING_PATHS = [
   "@protobufjs/inquire/index.js",
@@ -105,12 +106,21 @@ function buildInputOptions(options: InputOptionsArg): InputOptionsReturn {
     message?: string;
     id?: string;
     importer?: string;
+    plugin?: string;
   }) {
     if (log.code === "PLUGIN_TIMINGS") {
       return true;
     }
     if (log.code === "UNRESOLVED_IMPORT") {
       return normalizedLogHaystack(log).includes("extensions/");
+    }
+    if (
+      log.code === "PLUGIN_WARNING" &&
+      log.plugin === "rolldown-plugin-dts:fake-js" &&
+      typeof log.message === "string" &&
+      log.message.includes("uses CommonJS dts syntax")
+    ) {
+      return true;
     }
     if (log.code !== "EVAL") {
       return false;
@@ -257,6 +267,8 @@ const bundledPluginFile = (pluginId: string, relativePath: string) =>
   `${bundledPluginRoot(pluginId)}/${relativePath}`;
 const explicitNeverBundleDependencies = [
   "@anthropic-ai/vertex-sdk",
+  "@slack/bolt",
+  "@slack/web-api",
   "@discordjs/voice",
   "@lancedb/lancedb",
   "@larksuiteoapi/node-sdk",
@@ -268,6 +280,7 @@ const explicitNeverBundleDependencies = [
   "matrix-js-sdk",
   "prism-media",
   "qrcode-terminal",
+  "typescript",
   "vitest",
 ].toSorted((left, right) => left.localeCompare(right));
 
@@ -278,7 +291,12 @@ function shouldNeverBundleDependency(id: string): boolean {
 }
 
 function shouldAlwaysBundleDependency(id: string): boolean {
-  return id === "@openclaw/fs-safe" || id.startsWith("@openclaw/fs-safe/");
+  return (
+    id === "@openclaw/fs-safe" ||
+    id.startsWith("@openclaw/fs-safe/") ||
+    id === "zod" ||
+    id.startsWith("zod/")
+  );
 }
 
 function listBundledPluginEntrySources(
@@ -312,10 +330,12 @@ function buildCoreDistEntries(): Record<string, string> {
     "agents/auth-profiles.runtime": "src/agents/auth-profiles.runtime.ts",
     "agents/model-catalog.runtime": "src/agents/model-catalog.runtime.ts",
     "agents/models-config.runtime": "src/agents/models-config.runtime.ts",
+    "agents/code-mode.worker": "src/agents/code-mode.worker.ts",
     "acp/control-plane/manager": "src/acp/control-plane/manager.ts",
     "cli/gateway-lifecycle.runtime": "src/cli/gateway-cli/lifecycle.runtime.ts",
     "provider-dispatcher.runtime": "src/auto-reply/reply/provider-dispatcher.runtime.ts",
     "server-close.runtime": "src/gateway/server-close.runtime.ts",
+    "plugins/hook-runner-global": "src/plugins/hook-runner-global.ts",
     "plugins/memory-state": "src/plugins/memory-state.ts",
     "subagent-registry.runtime": "src/agents/subagent-registry.runtime.ts",
     "task-registry-control.runtime": "src/tasks/task-registry-control.runtime.ts",
@@ -387,8 +407,6 @@ function buildUnifiedDistEntries(): Record<string, string> {
     ...dockerE2eHarnessEntries,
     // Internal compat artifact for the root-alias.cjs lazy loader.
     "plugin-sdk/compat": "src/plugin-sdk/compat.ts",
-    // Private bundled Codex helper for app-server native subagent task mirroring.
-    "plugin-sdk/codex-native-task-runtime": "src/plugin-sdk/codex-native-task-runtime.ts",
     // Private bundled Codex helper for app-server user MCP config projection.
     "plugin-sdk/codex-mcp-projection": "src/plugin-sdk/codex-mcp-projection.ts",
     ...Object.fromEntries(
@@ -413,6 +431,7 @@ export default defineConfig([
     // Build core entrypoints, plugin-sdk subpaths, bundled plugin entrypoints,
     // and bundled hooks in one graph so runtime singletons are emitted once.
     clean: true,
+    dts: RUN_NODE_SKIP_DTS_BUILD ? false : undefined,
     entry: buildUnifiedDistEntries(),
     deps: {
       alwaysBundle: shouldAlwaysBundleDependency,

@@ -11,10 +11,10 @@ vi.mock("../agents/model-catalog.js", () => ({
   loadModelCatalog,
 }));
 
-const ensureAuthProfileStore = vi.hoisted(() =>
-  vi.fn<() => AuthProfileStore>(() => ({ version: 1, profiles: {} })),
+const ensureAuthProfileStore = vi.hoisted(() => vi.fn(() => ({ version: 1, profiles: {} })));
+const listProfilesForProvider = vi.hoisted(() =>
+  vi.fn<(store: AuthProfileStore, provider: string) => string[]>(() => []),
 );
-const listProfilesForProvider = vi.hoisted(() => vi.fn<ListProfilesForProvider>(() => []));
 vi.mock("../agents/auth-profiles.js", () => ({
   ensureAuthProfileStore,
   listProfilesForProvider,
@@ -49,12 +49,10 @@ describe("warnIfModelConfigLooksOff", () => {
     expect(loadModelCatalog).not.toHaveBeenCalled();
     expect(ensureAuthProfileStore).toHaveBeenCalledOnce();
     expect(listProfilesForProvider).toHaveBeenCalledOnce();
-    const [profileStore, providerId] = listProfilesForProvider.mock.calls.at(0) as unknown as [
-      AuthProfileStore,
-      string,
-    ];
-    expect(profileStore?.profiles).toEqual({});
-    expect(providerId).toBe("openai-codex");
+    expect(listProfilesForProvider).toHaveBeenCalledWith(
+      { version: 1, profiles: {} },
+      "openai-codex",
+    );
     expect(note).toHaveBeenCalledWith(
       'No auth configured for provider "openai-codex". The agent may fail until credentials are added. Run `openclaw models auth login --provider openai-codex`, `openclaw configure`, or set an API key env var.',
       "Model check",

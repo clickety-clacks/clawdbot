@@ -22,6 +22,17 @@ Use this skill for release and publish-time workflow. Keep ordinary development 
 - Before release branching, pull latest `main` and confirm current `main` CI is
   green. Then branch from that commit so regular development can continue on
   `main` while release validation runs.
+- After the release branch or release tag exists, treat its base commit as
+  frozen for that release attempt. Do not autonomously pull `main`, rebase the
+  release branch, merge `main`, or move the release baseline just because the
+  operator previously said "rebase" or because `main` advanced. A new rebase
+  needs an explicit, current instruction that names rebasing the active release
+  branch.
+- When a release is blocked by a failing test, first fix the release branch in
+  place. If `main` already has a specific commit that directly fixes that exact
+  blocker, cherry-pick only that targeted fix after confirming the diff is
+  narrow and explaining why it matches the failure. Do not use the blocker as a
+  reason to rebase onto all of `main`.
 - Before release branching, commit any dirty files in coherent groups, push,
   pull/rebase, then run `/changelog` on `main` and commit/push/pull that
   changelog rewrite immediately before creating the release branch.
@@ -65,8 +76,8 @@ Use this skill for release and publish-time workflow. Keep ordinary development 
   stable base version section, for example `v2026.4.20-beta.1` uses
   `## 2026.4.20` release notes.
 - When any beta or stable release is live, make a best-effort Discord
-  announcement using Peter's bot token from `.profile`; do not block or roll
-  back the release if the announcement fails.
+  announcement using the configured secret workflow; do not block or roll back
+  the release if the announcement fails.
 - When asked to announce on X, use `~/Projects/bird/bird` and follow the
   release tweet style below.
 
@@ -170,6 +181,13 @@ live`; keep it clearly beta and avoid implying stable promotion.
   CI, validation, or internal release mechanics unless the release is explicitly
   about those. Peter prefers concrete user wins: features, integrations,
   workflow improvements, and practical reliability fixes.
+- Do not feature QA parity, test coverage, release gates, or validation lanes in
+  user-facing launch tweets. Keep them for release notes or maintainer proof
+  unless the operator explicitly asks for validation-focused copy.
+- Do not feature plugin-author or developer tooling such as SDK helpers,
+  tool-plugin scaffolding, build/validate/init commands, or internal CLI
+  plumbing in general user-facing launch tweets unless the operator explicitly
+  asks for developer-focused copy.
 - Tone: high-signal, slightly cheeky, confident, not corporate. One joke is
   enough. Avoid punching down, insulting users, or promising what was not
   verified.
@@ -288,13 +306,11 @@ node --import tsx scripts/openclaw-npm-postpublish-verify.ts <published-version>
 ## Check all relevant release builds
 
 - Always validate the OpenClaw npm release path before creating the tag.
-- Source Peter's profile before live release validation so OpenAI and Anthropic
-  credentials are available without printing secrets:
-  `set -a; source "$HOME/.profile"; set +a`.
+- Use the configured secret workflow before live release validation so OpenAI
+  and Anthropic credentials are available without printing secrets.
 - Parallels validation and any local live model QA for this train must use both
-  `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`. If either is missing after sourcing
-  `.profile`, stop before starting those local long lanes and report the
-  missing key.
+  `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`. If either cannot be injected, stop
+  before starting those local long lanes and report the missing key.
 - Live credentialed channel QA is the GitHub Actions workflow
   `QA-Lab - All Lanes` (`.github/workflows/qa-live-telegram-convex.yml`), not a
   local substitute. Dispatch it from Actions against the release tag and wait
@@ -592,8 +608,7 @@ node --import tsx scripts/openclaw-npm-postpublish-verify.ts <published-version>
     If a pre-npm lane fails before any tag/package leaves the machine, fix and
     rerun the same intended beta attempt. Repeat up to the operator's
     authorized beta-attempt limit, normally 4.
-24. Announce the beta/stable release on Discord best-effort using Peter's bot
-    token from `.profile`.
+24. Announce the beta/stable release on Discord best-effort using the configured secret workflow.
 25. If the operator requested beta only, stop after beta verification and the
     announcement.
 26. If the stable release was published to `beta`, use the light stable

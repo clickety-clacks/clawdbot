@@ -23,6 +23,8 @@ type ActiveTurn = {
   turnId: string;
 };
 
+type CodexAppServerBindingLookup = NonNullable<Parameters<typeof readCodexAppServerBinding>[1]>;
+
 type PermissionsMode = "default" | "yolo";
 
 const CODEX_CONVERSATION_CONTROL_STATE = Symbol.for("openclaw.codex.conversationControl");
@@ -53,17 +55,21 @@ export function readCodexConversationActiveTurn(sessionFile: string): ActiveTurn
 export async function stopCodexConversationTurn(params: {
   sessionFile: string;
   pluginConfig?: unknown;
+  agentDir?: string;
+  config?: CodexAppServerBindingLookup["config"];
 }): Promise<{ stopped: boolean; message: string }> {
   const active = readCodexConversationActiveTurn(params.sessionFile);
   if (!active) {
     return { stopped: false, message: "No active Codex run to stop." };
   }
   const runtime = resolveCodexAppServerRuntimeOptions({ pluginConfig: params.pluginConfig });
-  const binding = await readCodexAppServerBinding(params.sessionFile);
+  const lookup = buildBindingLookup(params);
+  const binding = await readCodexAppServerBinding(params.sessionFile, lookup);
   const client = await getSharedCodexAppServerClient({
     startOptions: runtime.start,
     timeoutMs: runtime.requestTimeoutMs,
     authProfileId: binding?.authProfileId,
+    ...lookup,
   });
   await client.request(
     "turn/interrupt",
@@ -80,6 +86,8 @@ export async function steerCodexConversationTurn(params: {
   sessionFile: string;
   message: string;
   pluginConfig?: unknown;
+  agentDir?: string;
+  config?: CodexAppServerBindingLookup["config"];
 }): Promise<{ steered: boolean; message: string }> {
   const active = readCodexConversationActiveTurn(params.sessionFile);
   const text = params.message.trim();
@@ -90,11 +98,13 @@ export async function steerCodexConversationTurn(params: {
     return { steered: false, message: "No active Codex run to steer." };
   }
   const runtime = resolveCodexAppServerRuntimeOptions({ pluginConfig: params.pluginConfig });
-  const binding = await readCodexAppServerBinding(params.sessionFile);
+  const lookup = buildBindingLookup(params);
+  const binding = await readCodexAppServerBinding(params.sessionFile, lookup);
   const client = await getSharedCodexAppServerClient({
     startOptions: runtime.start,
     timeoutMs: runtime.requestTimeoutMs,
     authProfileId: binding?.authProfileId,
+    ...lookup,
   });
   await client.request(
     "turn/steer",
@@ -112,28 +122,36 @@ export async function setCodexConversationModel(params: {
   sessionFile: string;
   model: string;
   pluginConfig?: unknown;
+  agentDir?: string;
+  config?: CodexAppServerBindingLookup["config"];
 }): Promise<string> {
   const model = params.model.trim();
   if (!model) {
     return "Usage: /codex model <model>";
   }
-  const binding = await requireThreadBinding(params.sessionFile);
+  const lookup = buildBindingLookup(params);
+  const binding = await requireThreadBinding(params.sessionFile, lookup);
   const runtime = resolveCodexAppServerRuntimeOptions({ pluginConfig: params.pluginConfig });
   const response = await resumeThreadWithOverrides({
     pluginConfig: params.pluginConfig,
     threadId: binding.threadId,
     authProfileId: binding.authProfileId,
+    ...lookup,
     model,
   });
-  await writeCodexAppServerBinding(params.sessionFile, {
-    ...binding,
-    cwd: response.thread.cwd ?? binding.cwd,
-    model: response.model ?? model,
-    modelProvider: response.modelProvider ?? binding.modelProvider,
-    approvalPolicy: binding.approvalPolicy,
-    sandbox: binding.sandbox,
-    serviceTier: binding.serviceTier ?? runtime.serviceTier,
-  });
+  await writeCodexAppServerBinding(
+    params.sessionFile,
+    {
+      ...binding,
+      cwd: response.thread.cwd ?? binding.cwd,
+      model: response.model ?? model,
+      modelProvider: response.modelProvider ?? binding.modelProvider,
+      approvalPolicy: binding.approvalPolicy,
+      sandbox: binding.sandbox,
+      serviceTier: binding.serviceTier ?? runtime.serviceTier,
+    },
+    lookup,
+  );
   return `Codex model set to ${formatCodexDisplayText(response.model ?? model)}.`;
 }
 
@@ -141,6 +159,8 @@ export async function setCodexConversationFastMode(params: {
   sessionFile: string;
   enabled?: boolean;
   pluginConfig?: unknown;
+  agentDir?: string;
+  config?: CodexAppServerBindingLookup["config"];
 }): Promise<string> {
   if (params.enabled == null) {
     const status = await readCodexAppServerFastMode({ sessionFile: params.sessionFile });
@@ -168,19 +188,26 @@ export async function setCodexConversationPermissions(params: {
   sessionFile: string;
   mode?: PermissionsMode;
   pluginConfig?: unknown;
+  agentDir?: string;
+  config?: CodexAppServerBindingLookup["config"];
 }): Promise<string> {
-  const binding = await requireThreadBinding(params.sessionFile);
+  const lookup = buildBindingLookup(params);
+  const binding = await requireThreadBinding(params.sessionFile, lookup);
   if (!params.mode) {
     return `Codex permissions: ${formatPermissionsMode(binding)}.`;
   }
   const policy = permissionsForMode(params.mode);
   // Native bound turns pass these settings at turn/start time, so this command
   // can update the local binding even when app-server resume overrides fail.
-  await writeCodexAppServerBinding(params.sessionFile, {
-    ...binding,
-    approvalPolicy: policy.approvalPolicy,
-    sandbox: policy.sandbox,
-  });
+  await writeCodexAppServerBinding(
+    params.sessionFile,
+    {
+      ...binding,
+      approvalPolicy: policy.approvalPolicy,
+      sandbox: policy.sandbox,
+    },
+    lookup,
+  );
   return `Codex permissions set to ${params.mode === "yolo" ? "full access" : "default"}.`;
 }
 
@@ -221,8 +248,8 @@ export function formatPermissionsMode(binding: {
     : "default";
 }
 
-async function requireThreadBinding(sessionFile: string) {
-  const binding = await readCodexAppServerBinding(sessionFile);
+async function requireThreadBinding(sessionFile: string, lookup: CodexAppServerBindingLookup = {}) {
+  const binding = await readCodexAppServerBinding(sessionFile, lookup);
   if (!binding?.threadId) {
     throw new Error("No Codex thread is attached to this OpenClaw session yet.");
   }
@@ -233,6 +260,8 @@ async function resumeThreadWithOverrides(params: {
   pluginConfig?: unknown;
   threadId: string;
   authProfileId?: string;
+  agentDir?: string;
+  config?: CodexAppServerBindingLookup["config"];
   model?: string;
   approvalPolicy?: CodexAppServerApprovalPolicy;
   sandbox?: CodexAppServerSandboxMode;
@@ -243,6 +272,7 @@ async function resumeThreadWithOverrides(params: {
     startOptions: runtime.start,
     timeoutMs: runtime.requestTimeoutMs,
     authProfileId: params.authProfileId,
+    ...buildBindingLookup(params),
   });
   return await client.request(
     CODEX_CONTROL_METHODS.resumeThread,
@@ -257,6 +287,17 @@ async function resumeThreadWithOverrides(params: {
     },
     { timeoutMs: runtime.requestTimeoutMs },
   );
+}
+
+function buildBindingLookup(params: {
+  agentDir?: string;
+  config?: CodexAppServerBindingLookup["config"];
+}): CodexAppServerBindingLookup {
+  const agentDir = params.agentDir?.trim();
+  return {
+    ...(agentDir ? { agentDir } : {}),
+    ...(params.config ? { config: params.config } : {}),
+  };
 }
 
 function permissionsForMode(mode: PermissionsMode): {

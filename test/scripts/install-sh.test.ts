@@ -34,6 +34,31 @@ describe("install.sh", () => {
     expect(rawAptInstalls).toStrictEqual([]);
   });
 
+  it("clears npm freshness filters for package installs", () => {
+    expect(script).toContain("env -u NPM_CONFIG_BEFORE -u npm_config_before");
+    expect(script).toContain('freshness_flag="--min-release-age=0"');
+    expect(script).toContain('freshness_flag="--before=$(date -u');
+    expect(script).toContain('cmd+=(--no-fund --no-audit "$freshness_flag" install -g "$spec")');
+  });
+
+  it("rejects OpenClaw GitHub source targets for npm installs", () => {
+    const result = runInstallShell(`
+      set -euo pipefail
+      source "${SCRIPT_PATH}"
+      set +e
+      OPENCLAW_VERSION=main
+      USE_BETA=0
+      install_openclaw
+      status=$?
+      printf 'status=%s\\n' "$status"
+    `);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("status=1");
+    expect(result.stdout).toContain("npm installs do not support OpenClaw GitHub source targets");
+    expect(result.stdout).toContain("--install-method git --version main");
+  });
+
   it("exports noninteractive apt env during Linux startup", () => {
     expect(script).toMatch(
       /detect_os_or_die\s+if \[\[ "\$OS" == "linux" \]\]; then\s+export DEBIAN_FRONTEND="\$\{DEBIAN_FRONTEND:-noninteractive\}"\s+export NEEDRESTART_MODE="\$\{NEEDRESTART_MODE:-a\}"\s+fi/m,
@@ -381,110 +406,41 @@ describe("install.sh", () => {
     expect(result.stdout).toContain("main=main");
   });
 
-  it("leaves an existing git checkout on its current ref when git updates are disabled", () => {
-    const tmp = mkdtempSync(join(tmpdir(), "openclaw-install-no-git-update-"));
-    const repo = join(tmp, "repo");
-    const home = join(tmp, "home");
-    mkdirSync(home, { recursive: true });
-    try {
-      expect(spawnSync("git", ["init", repo], { encoding: "utf8" }).status).toBe(0);
-      writeFileSync(join(repo, "README.md"), "fixture\n");
-      expect(spawnSync("git", ["-C", repo, "add", "README.md"], { encoding: "utf8" }).status).toBe(
-        0,
-      );
-      expect(
-        spawnSync(
-          "git",
-          [
-            "-C",
-            repo,
-            "-c",
-            "user.name=Test",
-            "-c",
-            "user.email=test@example.com",
-            "-c",
-            "commit.gpgsign=false",
-            "commit",
-            "-m",
-            "init",
-          ],
-          {
-            encoding: "utf8",
-          },
-        ).status,
-      ).toBe(0);
-
-      const result = runInstallShell(
-        `
-          set -euo pipefail
-          source "${SCRIPT_PATH}"
-          GIT_UPDATE=0
-          check_git() { return 0; }
-          ensure_pnpm() { :; }
-          ensure_pnpm_binary_for_scripts() { :; }
-          cleanup_legacy_submodules() { :; }
-          activate_repo_pnpm_version() { :; }
-          ensure_user_local_bin_on_path() { mkdir -p "$HOME/.local/bin"; }
-          resolve_git_openclaw_ref() { echo SHOULD_NOT_RESOLVE; }
-          checkout_git_openclaw_ref() { echo CHECKOUT_CALLED; return 0; }
-          run_pnpm() { :; }
-          ui_info() { printf 'info:%s\\n' "$*"; }
-          ui_warn() { printf 'warn:%s\\n' "$*"; }
-          ui_success() { printf 'success:%s\\n' "$*"; }
-          install_openclaw_from_git ${JSON.stringify(repo)}
-        `,
-        {
-          HOME: home,
-        },
-      );
-
-      expect(result.status).toBe(0);
-      expect(result.stdout).toContain("Git update disabled; leaving existing checkout unchanged");
-      expect(result.stdout).not.toContain("SHOULD_NOT_RESOLVE");
-      expect(result.stdout).not.toContain("CHECKOUT_CALLED");
-    } finally {
-      rmSync(tmp, { recursive: true, force: true });
-    }
-  });
-
-  it("rejects existing non-git dirs even when git updates are disabled", () => {
-    const tmp = mkdtempSync(join(tmpdir(), "openclaw-install-no-git-update-non-git-"));
-    const repo = join(tmp, "repo");
-    const home = join(tmp, "home");
-    mkdirSync(repo, { recursive: true });
-    mkdirSync(home, { recursive: true });
-    writeFileSync(join(repo, "README.md"), "fixture\n");
-    try {
-      const result = runInstallShell(
-        `
-          set -euo pipefail
-          source "${SCRIPT_PATH}"
-          GIT_UPDATE=0
-          check_git() { return 0; }
-          ensure_pnpm() { :; }
-          ensure_pnpm_binary_for_scripts() { :; }
-          resolve_git_openclaw_ref() { echo SHOULD_NOT_RESOLVE; }
-          checkout_git_openclaw_ref() { echo CHECKOUT_CALLED; return 0; }
-          ui_error() { printf 'error:%s\\n' "$*"; }
-          install_openclaw_from_git ${JSON.stringify(repo)}
-        `,
-        {
-          HOME: home,
-        },
-      );
-
-      expect(result.status).not.toBe(0);
-      expect(result.stdout).toContain("Git install dir exists but is not a git repo");
-      expect(result.stdout).not.toContain("SHOULD_NOT_RESOLVE");
-      expect(result.stdout).not.toContain("CHECKOUT_CALLED");
-    } finally {
-      rmSync(tmp, { recursive: true, force: true });
-    }
-  });
-
-  it("uses frozen lockfile installs for git installs", () => {
+  it("fetches moving git refs without tags for git installs", () => {
+    expect(script).toContain('git -C "$repo_dir" fetch --no-tags origin main');
     expect(script).toContain(
-      'run_quiet_step "Installing dependencies" run_pnpm -C "$repo_dir" install --frozen-lockfile',
+      'git -C "$repo_dir" fetch --no-tags origin "refs/heads/${ref}:refs/remotes/origin/${ref}"',
+    );
+    expect(script).toContain('git -C "$repo_dir" pull --rebase --no-tags || true');
+
+    const branchCheckIndex = script.indexOf('ls-remote --exit-code --heads origin "$ref"');
+    const tagFetchIndex = script.indexOf("fetch --tags origin");
+    expect(branchCheckIndex).toBeGreaterThan(-1);
+    expect(tagFetchIndex).toBeGreaterThan(-1);
+    expect(branchCheckIndex).toBeLessThan(tagFetchIndex);
+  });
+
+  it("uses non-frozen lockfile installs only for moving git refs", () => {
+    const result = runInstallShell(`
+      set -euo pipefail
+      source "${SCRIPT_PATH}"
+      git() {
+        if [[ "$1" == "-C" && "$3" == "ls-remote" && "\${7:-}" == "feature" ]]; then
+          return 0
+        fi
+        return 1
+      }
+      printf 'main=%s\\n' "$(git_install_lockfile_flag /repo main)"
+      printf 'branch=%s\\n' "$(git_install_lockfile_flag /repo feature)"
+      printf 'tag=%s\\n' "$(git_install_lockfile_flag /repo v2026.5.12)"
+    `);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("main=--no-frozen-lockfile");
+    expect(result.stdout).toContain("branch=--no-frozen-lockfile");
+    expect(result.stdout).toContain("tag=--frozen-lockfile");
+    expect(script).toContain(
+      'CI="${CI:-true}" SHARP_IGNORE_GLOBAL_LIBVIPS="$SHARP_IGNORE_GLOBAL_LIBVIPS" run_quiet_step "Installing dependencies" run_pnpm -C "$repo_dir" install "$install_lockfile_flag"',
     );
   });
 
@@ -492,6 +448,19 @@ describe("install.sh", () => {
     expect(script).toContain("activate_repo_pnpm_version()");
     expect(script).toContain('corepack prepare "pnpm@${version}" --activate');
     expect(script).toContain('activate_repo_pnpm_version "$repo_dir"');
+  });
+
+  it("does not treat /dev/tty permissions as a controlling terminal", () => {
+    const result = runInstallShell(`
+      set -euo pipefail
+      source "${SCRIPT_PATH}"
+      if has_controlling_tty; then echo "has_tty=1"; else echo "has_tty=0"; fi
+      if is_promptable; then echo "promptable=1"; else echo "promptable=0"; fi
+    `);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("has_tty=0");
+    expect(result.stdout).toContain("promptable=0");
   });
 });
 

@@ -10,17 +10,21 @@ import {
 import { waitForever } from "./wait.js";
 
 describe("waitForever", () => {
-  it("creates an unref'ed interval and returns a pending promise", () => {
+  it("keeps the event loop alive (ref'd interval) and returns a pending promise", () => {
     const unref = vi.fn();
     const interval = { unref } as unknown as ReturnType<typeof setInterval>;
     const setIntervalSpy = vi.spyOn(global, "setInterval").mockReturnValue(interval);
     try {
       const promise = waitForever();
       expect(setIntervalSpy).toHaveBeenCalledTimes(1);
-      const [callback, delay] = setIntervalSpy.mock.calls.at(0) ?? [];
+      const [callback, delay] = setIntervalSpy.mock.calls[0] ?? [];
       expect(typeof callback).toBe("function");
       expect(delay).toBe(1_000_000);
-      expect(unref).toHaveBeenCalledTimes(1);
+      // Regression guard for the previous `.unref()` bug: an unref'd interval
+      // does NOT keep the event loop alive, so `await waitForever()` would
+      // exit immediately with code 13 ("unsettled top-level await"). The
+      // function must NOT unref the interval.
+      expect(unref).not.toHaveBeenCalled();
       expect(promise).toBeInstanceOf(Promise);
     } finally {
       setIntervalSpy.mockRestore();

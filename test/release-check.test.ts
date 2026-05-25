@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { bundledDistPluginFile, bundledPluginFile } from "openclaw/plugin-sdk/test-fixtures";
@@ -17,7 +17,9 @@ import {
   collectForbiddenPackContentPaths,
   collectForbiddenPackPaths,
   collectMissingPackPaths,
+  collectSkillShellScriptExecutableErrors,
   collectPackUnpackedSizeErrors,
+  collectPackedInstalledPackageVerificationErrors,
   createPackedCompletionSmokeEnv,
   createPackedCliSmokeEnv,
   createPackedBundledPluginPostinstallEnv,
@@ -337,6 +339,41 @@ describe("bundled plugin package dependency checks", () => {
   });
 });
 
+// This suite exists both as regression coverage and as an intentional CI touchpoint for executable-bit fixes.
+// Windows doesn't support Unix permission bits; chmod 0o755 is a no-op and
+// statSync().mode never reports execute bits, so these tests are meaningless there.
+describe.skipIf(process.platform === "win32")("collectSkillShellScriptExecutableErrors", () => {
+  it("flags non-executable shell scripts under skills/*/scripts", () => {
+    const root = mkdtempSync(join(tmpdir(), "openclaw-release-check-"));
+    const scriptPath = join(root, "skills", "openai-whisper-api", "scripts", "transcribe.sh");
+    mkdirSync(join(root, "skills", "openai-whisper-api", "scripts"), { recursive: true });
+    writeFileSync(scriptPath, "#!/usr/bin/env bash\necho test\n", "utf8");
+    chmodSync(scriptPath, 0o644);
+
+    try {
+      expect(collectSkillShellScriptExecutableErrors(root)).toEqual([
+        "skill shell script is not executable: skills/openai-whisper-api/scripts/transcribe.sh",
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts executable shell scripts", () => {
+    const root = mkdtempSync(join(tmpdir(), "openclaw-release-check-"));
+    const scriptPath = join(root, "skills", "openai-whisper-api", "scripts", "transcribe.sh");
+    mkdirSync(join(root, "skills", "openai-whisper-api", "scripts"), { recursive: true });
+    writeFileSync(scriptPath, "#!/usr/bin/env bash\necho test\n", "utf8");
+    chmodSync(scriptPath, 0o755);
+
+    try {
+      expect(collectSkillShellScriptExecutableErrors(root)).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("collectForbiddenPackPaths", () => {
   it("blocks all packaged node_modules payloads", () => {
     expect(
@@ -507,6 +544,7 @@ describe("collectMissingPackPaths", () => {
   it("accepts the shipped upgrade surface when optional bundled metadata is present", () => {
     expect(
       collectMissingPackPaths([
+        "npm-shrinkwrap.json",
         "dist/index.js",
         "dist/entry.js",
         "dist/control-ui/index.html",
@@ -531,6 +569,33 @@ describe("collectMissingPackPaths", () => {
         PACKAGE_DIST_INVENTORY_RELATIVE_PATH,
       ]),
     ).toStrictEqual([]);
+  });
+
+  it("runs postpublish package integrity checks against the packed install before publish", () => {
+    const root = mkdtempSync(join(tmpdir(), "release-check-packed-install-"));
+    try {
+      const packageRoot = join(root, "openclaw");
+      const distDir = join(packageRoot, "dist");
+      mkdirSync(distDir, { recursive: true });
+      writeFileSync(
+        join(packageRoot, "package.json"),
+        `${JSON.stringify({ name: "openclaw", version: "2026.5.14-beta.3", dependencies: {} })}\n`,
+      );
+      writeFileSync(join(distDir, "typescript-compiler.js"), "x".repeat(6 * 1024 * 1024 + 1));
+
+      expect(
+        collectPackedInstalledPackageVerificationErrors({
+          expectedVersion: "2026.5.14-beta.3",
+          installedBinaryVersion: "openclaw 2026.5.14-beta.3",
+          packageRoot,
+        }),
+      ).toEqual([
+        "installed package is missing required plugin SDK artifact: dist/plugin-sdk/zod.js",
+        "installed package root dist file 'typescript-compiler.js' is invalid or exceeds 6291456 bytes.",
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("requires bundled plugin runtime sidecars that dynamic plugin boundaries resolve at runtime", () => {
