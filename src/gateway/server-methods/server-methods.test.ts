@@ -15,7 +15,7 @@ import {
 import { resetLogger, setLoggerOverride } from "../../logging.js";
 import { projectRecentChatDisplayMessages } from "../chat-display-projection.js";
 import { ExecApprovalManager } from "../exec-approval-manager.js";
-import { validateExecApprovalRequestParams } from "../protocol/index.js";
+import { validateChatSendParams, validateExecApprovalRequestParams } from "../protocol/index.js";
 import { waitForAgentJob } from "./agent-job.js";
 import { injectTimestamp, timestampOptsFromConfig } from "./agent-timestamp.js";
 import { normalizeRpcAttachmentsToChatAttachments } from "./attachment-normalize.js";
@@ -608,6 +608,18 @@ describe("sanitizeChatHistoryMessages", () => {
 });
 
 describe("projectRecentChatDisplayMessages", () => {
+  it("includes the LLM-visible transcript id on projected messages", () => {
+    const result = projectRecentChatDisplayMessages([
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "visible reply" }],
+        __openclaw: { id: "s_msg_123", seq: 2 },
+      },
+    ]);
+
+    expect(result[0]?.llmVisibleMessageId).toBe("s_msg_123");
+  });
+
   it("keeps visible assistant progress text from mixed tool-use messages", () => {
     const result = projectRecentChatDisplayMessages([
       {
@@ -1081,6 +1093,26 @@ describe("sanitizeChatSendMessageInput", () => {
     },
   ])("$name", ({ input, expected }) => {
     expect(sanitizeChatSendMessageInput(input)).toEqual(expected);
+  });
+});
+
+describe("validateChatSendParams", () => {
+  it("accepts bounded LLM-visible reply references", () => {
+    expect(
+      validateChatSendParams({
+        sessionKey: "agent:main:main",
+        message: "replying here",
+        idempotencyKey: "run-reference-1",
+        references: [
+          {
+            kind: "reply",
+            llmVisibleMessageId: "s_msg_123",
+            role: "assistant",
+            preview: "Bounded visible snippet",
+          },
+        ],
+      }),
+    ).toBe(true);
   });
 });
 

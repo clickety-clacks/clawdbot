@@ -193,6 +193,25 @@ function formatChatWindowStructuredContext(
   return [`${label} (${qualifiers}):`, ...lines].join("\n");
 }
 
+function formatReferenceContext(
+  entry: NonNullable<TemplateContext["References"]>[number],
+): string | undefined {
+  const llmVisibleMessageId = sanitizeTranscriptField(entry.llmVisibleMessageId);
+  if (!llmVisibleMessageId) {
+    return undefined;
+  }
+  const payload = {
+    kind: "reply",
+    llm_visible_message_id: llmVisibleMessageId,
+    role: sanitizeTranscriptField(entry.role),
+    preview: sanitizePromptBody(entry.preview),
+  };
+  return formatUntrustedJsonBlock(
+    `Reply reference: user is replying to message ${llmVisibleMessageId}`,
+    payload,
+  );
+}
+
 function isChatWindowStructuredContext(
   entry: NonNullable<TemplateContext["UntrustedStructuredContext"]>[number],
 ): entry is NonNullable<TemplateContext["UntrustedStructuredContext"]>[number] & {
@@ -464,6 +483,7 @@ export function buildInboundUserContextPrefix(
   const structuredContext = Array.isArray(ctx.UntrustedStructuredContext)
     ? ctx.UntrustedStructuredContext
     : [];
+  const references = Array.isArray(ctx.References) ? ctx.References : [];
   const chatWindowMessageIds = collectChatWindowMessageIds(structuredContext);
   const replyToId = normalizePromptMetadataString(ctx.ReplyToId);
   const chatWindowCoversReplyContext =
@@ -565,6 +585,13 @@ export function buildInboundUserContextPrefix(
         body: replyToBody,
       }),
     );
+  }
+
+  for (const entry of references) {
+    const referenceBlock = formatReferenceContext(entry);
+    if (referenceBlock) {
+      blocks.push(referenceBlock);
+    }
   }
 
   const forwardedFrom = normalizePromptMetadataString(ctx.ForwardedFrom);

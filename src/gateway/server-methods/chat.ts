@@ -814,6 +814,36 @@ export function sanitizeChatSendMessageInput(
   return { ok: true, message: stripDisallowedChatControlChars(normalized) };
 }
 
+function normalizeChatSendReferences(
+  references:
+    | Array<{
+        kind: "reply";
+        llmVisibleMessageId: string;
+        role?: string;
+        preview?: string;
+      }>
+    | undefined,
+): MsgContext["References"] {
+  if (!references || references.length === 0) {
+    return undefined;
+  }
+  const normalized = references.flatMap((reference) => {
+    const llmVisibleMessageId = normalizeOptionalText(reference.llmVisibleMessageId);
+    if (!llmVisibleMessageId) {
+      return [];
+    }
+    return [
+      {
+        kind: "reply" as const,
+        llmVisibleMessageId,
+        role: normalizeOptionalText(reference.role),
+        preview: normalizeOptionalText(reference.preview),
+      },
+    ];
+  });
+  return normalized.length > 0 ? normalized : undefined;
+}
+
 function normalizeOptionalChatSystemReceipt(
   value: unknown,
 ): { ok: true; receipt?: string } | { ok: false; error: string } {
@@ -2203,6 +2233,12 @@ export const chatHandlers: GatewayRequestHandlers = {
       originatingTo?: string;
       originatingAccountId?: string;
       originatingThreadId?: string;
+      references?: Array<{
+        kind: "reply";
+        llmVisibleMessageId: string;
+        role?: string;
+        preview?: string;
+      }>;
       attachments?: Array<{
         type?: string;
         mimeType?: string;
@@ -2257,6 +2293,7 @@ export const chatHandlers: GatewayRequestHandlers = {
     const inboundMessage = sanitizedMessageResult.message;
     const systemInputProvenance = normalizeInputProvenance(p.systemInputProvenance);
     const systemProvenanceReceipt = systemReceiptResult.receipt;
+    const references = normalizeChatSendReferences(p.references);
     const stopCommand = isChatStopCommandText(inboundMessage);
     const normalizedAttachments = normalizeRpcAttachmentsToChatAttachments(p.attachments);
     const rawMessage = inboundMessage.trim();
@@ -2616,6 +2653,7 @@ export const chatHandlers: GatewayRequestHandlers = {
             }
           : {}),
         GatewayClientScopes: client?.connect?.scopes ?? [],
+        References: references,
         ...pluginBoundMediaFields,
       };
       if (mediaPathOffloadPaths.length > 0) {
