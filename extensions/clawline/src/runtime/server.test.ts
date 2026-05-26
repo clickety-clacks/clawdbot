@@ -1062,8 +1062,8 @@ describe.sequential("clawline provider server", () => {
           defaults: {
             model: { primary: "openai/gpt-5.5" },
             models: {
-              "openai/gpt-5": {},
-              "openai/gpt-5.5": { alias: "5.5" },
+              "openai/gpt-5": { agentRuntime: { id: "pi" } },
+              "openai/gpt-5.5": { alias: "5.5", agentRuntime: { id: "pi" } },
               "anthropic/claude-sonnet-4-6": {},
             },
           },
@@ -1375,8 +1375,8 @@ describe.sequential("clawline provider server", () => {
           provider: "openai",
           authMode: "api_key",
           thinkingLevel: "low",
-          fastMode: null,
-          mode: null,
+          fastMode: true,
+          mode: "fast",
         },
       });
 
@@ -1447,6 +1447,7 @@ describe.sequential("clawline provider server", () => {
             model: { primary: "openai/gpt-5.5" },
             models: {
               "openai/gpt-5.5": {},
+              "gibson/qwen3.6-35b-a3b": {},
               "anthropic/claude-sonnet-4-6": {},
             },
           },
@@ -1577,6 +1578,7 @@ describe.sequential("clawline provider server", () => {
       const codexCatalogRefs = (
         codexStatusJson as { modelCatalog?: { models?: Array<{ ref?: string }> } }
       ).modelCatalog?.models?.map((model) => model.ref);
+      expect(codexCatalogRefs).not.toContain("gibson/qwen3.6-35b-a3b");
       expect(codexCatalogRefs).not.toContain("anthropic/claude-sonnet-4-6");
       expect(
         (
@@ -1728,7 +1730,10 @@ describe.sequential("clawline provider server", () => {
             model: { primary: "openai/gpt-5.5" },
             models: {
               "openai/gpt-5.5": { agentRuntime: { id: "pi" } },
+              "openai-codex/gpt-5.5": {},
+              "gibson/qwen3.6-35b-a3b": {},
               "anthropic/claude-sonnet-4-6": {},
+              "anthropic/claude-cli-only": { agentRuntime: { id: "claude-cli" } },
             },
           },
           list: [{ id: "main" }],
@@ -1793,10 +1798,16 @@ describe.sequential("clawline provider server", () => {
           runtime: "pi",
           models: expect.arrayContaining([
             expect.objectContaining({ ref: "openai/gpt-5.5" }),
+            expect.objectContaining({ ref: "gibson/qwen3.6-35b-a3b" }),
             expect.objectContaining({ ref: "anthropic/claude-sonnet-4-6" }),
           ]),
         },
       });
+      const piCatalogRefs = (
+        piStatusJson as { modelCatalog?: { models?: Array<{ ref?: string }> } }
+      ).modelCatalog?.models?.map((model) => model.ref);
+      expect(piCatalogRefs).not.toContain("openai-codex/gpt-5.5");
+      expect(piCatalogRefs).not.toContain("anthropic/claude-cli-only");
 
       const piFastResponse = await fetch(`http://127.0.0.1:${piCtx.port}/api/session-control`, {
         method: "POST",
@@ -1817,6 +1828,52 @@ describe.sequential("clawline provider server", () => {
             mode: "fast",
           },
         },
+      });
+
+      const piCodexModelResponse = await fetch(
+        `http://127.0.0.1:${piCtx.port}/api/session-control`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: authHeader,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            sessionKey,
+            action: "set_model",
+            model: "openai-codex/gpt-5.5",
+          }),
+        },
+      );
+      expect(piCodexModelResponse.status).toBe(200);
+      expect(await piCodexModelResponse.json()).toMatchObject({
+        ok: false,
+        sessionKey,
+        action: "set_model",
+        code: "unsupported_runtime_model",
+      });
+
+      const piPluginModelResponse = await fetch(
+        `http://127.0.0.1:${piCtx.port}/api/session-control`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: authHeader,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            sessionKey,
+            action: "set_model",
+            model: "anthropic/claude-cli-only",
+          }),
+        },
+      );
+      expect(piPluginModelResponse.status).toBe(200);
+      expect(await piPluginModelResponse.json()).toMatchObject({
+        ok: false,
+        sessionKey,
+        action: "set_model",
+        code: "unsupported_runtime_model",
       });
 
       ws.terminate();

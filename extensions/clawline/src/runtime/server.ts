@@ -5869,6 +5869,17 @@ button.deny { background: #9b1c31; color: white; }
     return normalized === "codex" || normalized === "codex-cli" || normalized === "openai-codex";
   }
 
+  function normalizeSessionControlRuntime(runtime: string | undefined): string {
+    if (isCodexSessionControlRuntime(runtime)) {
+      return "codex";
+    }
+    const normalized = runtime?.trim().toLowerCase();
+    if (!normalized || normalized === "auto" || normalized === "pi") {
+      return "pi";
+    }
+    return normalized;
+  }
+
   function resolveSessionControlRuntimeContext(
     sessionKey: string,
     modelStatus?: { provider: string; model: string },
@@ -5916,12 +5927,13 @@ button.deny { background: #9b1c31; color: white; }
     entries: ModelCatalogEntry[],
     context: SessionControlRuntimeContext,
   ): ModelCatalogEntry[] {
-    if (!isCodexSessionControlRuntime(context.runtime)) {
-      return entries;
-    }
-    return entries.filter((entry) =>
-      isCodexSessionControlRuntime(modelRuntimeForCatalogEntry(entry, context)),
-    );
+    const activeRuntime = normalizeSessionControlRuntime(context.runtime);
+    return entries.filter((entry) => {
+      return (
+        normalizeSessionControlRuntime(modelRuntimeForCatalogEntry(entry, context)) ===
+        activeRuntime
+      );
+    });
   }
 
   function thinkingOptionsForSessionControl(
@@ -6031,6 +6043,7 @@ button.deny { background: #9b1c31; color: white; }
   async function loadSessionControlModelCatalog(
     sessionKey: string,
     context: SessionControlRuntimeContext,
+    options: { runtimeScoped?: boolean } = {},
   ): Promise<SessionControlModelCatalogStatus> {
     try {
       const catalog = await loadModelCatalog({ config: openClawCfg });
@@ -6045,20 +6058,22 @@ button.deny { background: #9b1c31; color: white; }
         defaultModel: defaultModel.model,
         agentId: context.agentId,
       });
-      const models = filterSessionControlCatalogEntries(allowed.allowedCatalog, context).map(
-        (entry) => {
-          const model: SessionControlModelCatalogStatus["models"][number] = {
-            id: entry.id,
-            provider: entry.provider,
-            ref: `${entry.provider}/${entry.id}`,
-            name: entry.name,
-          };
-          if (entry.alias) {
-            model.alias = entry.alias;
-          }
-          return model;
-        },
-      );
+      const catalogEntries =
+        options.runtimeScoped === false
+          ? allowed.allowedCatalog
+          : filterSessionControlCatalogEntries(allowed.allowedCatalog, context);
+      const models = catalogEntries.map((entry) => {
+        const model: SessionControlModelCatalogStatus["models"][number] = {
+          id: entry.id,
+          provider: entry.provider,
+          ref: `${entry.provider}/${entry.id}`,
+          name: entry.name,
+        };
+        if (entry.alias) {
+          model.alias = entry.alias;
+        }
+        return model;
+      });
       return { available: true, runtime: context.runtime, models };
     } catch (err) {
       logger.warn?.(
@@ -6308,10 +6323,26 @@ button.deny { background: #9b1c31; color: white; }
     context: SessionControlRuntimeContext,
     capability: SessionControlCapability,
   ): Promise<{ ok: true } | { ok: false; code: string; message: string }> {
-    if (action === "set_model" && isCodexSessionControlRuntime(context.runtime)) {
+    if (action === "set_model") {
       const catalog = await loadSessionControlModelCatalog(sessionKey, context);
       const model = typeof patch.model === "string" ? patch.model : undefined;
-      if (!catalog.available || !model || !catalog.models.some((entry) => entry.ref === model)) {
+      if (!model) {
+        return { ok: true };
+      }
+      if (!catalog.available) {
+        return {
+          ok: false,
+          code: "unsupported_runtime_model",
+          message: "The selected model is not available for this session runtime.",
+        };
+      }
+      if (catalog.models.some((entry) => entry.ref === model)) {
+        return { ok: true };
+      }
+      const unscopedCatalog = await loadSessionControlModelCatalog(sessionKey, context, {
+        runtimeScoped: false,
+      });
+      if (unscopedCatalog.models.some((entry) => entry.ref === model)) {
         return {
           ok: false,
           code: "unsupported_runtime_model",
