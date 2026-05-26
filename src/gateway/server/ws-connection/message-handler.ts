@@ -102,6 +102,7 @@ import {
   formatValidationErrors,
   MIN_PROBE_PROTOCOL_VERSION,
   PROTOCOL_VERSION,
+  type RequestFrame,
   validateConnectParams,
   validateRequestFrame,
 } from "../../protocol/index.js";
@@ -153,6 +154,52 @@ import { isUnauthorizedRoleError, UnauthorizedFloodGuard } from "./unauthorized-
 type SubsystemLogger = ReturnType<typeof createSubsystemLogger>;
 
 const DEVICE_SIGNATURE_SKEW_MS = 2 * 60 * 1000;
+
+type LegacyClientMessageFrame = {
+  type: "message";
+  id: string;
+  content: string;
+  attachments?: unknown[];
+  sessionKey?: string;
+  references?: unknown;
+};
+
+function legacyClientMessageToChatSendRequest(frame: LegacyClientMessageFrame): RequestFrame {
+  return {
+    type: "req",
+    id: `legacy:${frame.id}`,
+    method: "chat.send",
+    params: {
+      sessionKey: frame.sessionKey,
+      message: frame.content,
+      attachments: Array.isArray(frame.attachments) ? frame.attachments : [],
+      idempotencyKey: frame.id,
+      references: frame.references,
+    },
+  };
+}
+
+function parseLegacyClientMessageFrame(value: unknown): LegacyClientMessageFrame | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const frame = value as Record<string, unknown>;
+  if (
+    frame.type !== "message" ||
+    typeof frame.id !== "string" ||
+    typeof frame.content !== "string"
+  ) {
+    return undefined;
+  }
+  return {
+    type: "message",
+    id: frame.id,
+    content: frame.content,
+    attachments: Array.isArray(frame.attachments) ? frame.attachments : undefined,
+    sessionKey: typeof frame.sessionKey === "string" ? frame.sessionKey : undefined,
+    references: frame.references,
+  };
+}
 
 function sameBootstrapProfile(
   left: DeviceBootstrapProfile,
@@ -1781,8 +1828,9 @@ export function attachGatewayWsMessageHandler(params: GatewayWsMessageHandlerPar
         return;
       }
 
-      // After handshake, accept only req frames
-      if (!validateRequestFrame(parsed)) {
+      // After handshake, accept normal request frames and the legacy Clawline message frame.
+      const legacyClientMessageFrame = parseLegacyClientMessageFrame(parsed);
+      if (!legacyClientMessageFrame && !validateRequestFrame(parsed)) {
         send({
           type: "res",
           id: (parsed as { id?: unknown })?.id ?? "invalid",
@@ -1794,7 +1842,10 @@ export function attachGatewayWsMessageHandler(params: GatewayWsMessageHandlerPar
         });
         return;
       }
-      const req = parsed;
+      const req = legacyClientMessageFrame
+        ? legacyClientMessageToChatSendRequest(legacyClientMessageFrame)
+        : parsed;
+      const legacyClientMessageId = legacyClientMessageFrame?.id;
       logWs("in", "req", { connId, id: req.id, method: req.method });
       if (client.usesSharedGatewayAuth) {
         const requiredSharedGatewaySessionGeneration =
@@ -1817,7 +1868,20 @@ export function attachGatewayWsMessageHandler(params: GatewayWsMessageHandlerPar
         error?: ErrorShape,
         meta?: Record<string, unknown>,
       ) => {
-        send({ type: "res", id: req.id, ok, payload, error });
+        if (legacyClientMessageId) {
+          if (ok) {
+            send({ type: "ack", id: legacyClientMessageId });
+          } else {
+            send({
+              type: "error",
+              code: error?.code ?? ErrorCodes.UNAVAILABLE,
+              message: error?.message,
+              messageId: legacyClientMessageId,
+            });
+          }
+        } else {
+          send({ type: "res", id: req.id, ok, payload, error });
+        }
         const unauthorizedRoleError = isUnauthorizedRoleError(error);
         let logMeta = meta;
         if (unauthorizedRoleError) {
@@ -1906,6 +1970,8 @@ function setSocketMaxPayload(socket: WebSocket, maxPayload: number): void {
 }
 
 export const testing = {
+  legacyClientMessageToChatSendRequest,
+  parseLegacyClientMessageFrame,
   resolvePinnedClientMetadata,
 };
 export { testing as __testing };
