@@ -7476,6 +7476,161 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("routes inbound sends to globally registered session keys without local adoption", async () => {
+    const deviceId = randomUUID();
+    const registeredSessionKey = "agent:codex:discord:channel:123";
+    let capturedCtx: Record<string, unknown> | null = null;
+    const replyResolver: typeof testReplyResolver = async (ctx) => {
+      capturedCtx = ctx as unknown as Record<string, unknown>;
+      return { text: "registered ok" };
+    };
+    const entry = createAllowlistEntry({
+      deviceId,
+      userId: "flynn",
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry], {
+      replyResolver,
+      sessionStorePathRelative: path.join("agents", "main", "sessions", "sessions.json"),
+    });
+    try {
+      const rootDir = path.dirname(path.dirname(path.dirname(path.dirname(ctx.sessionStorePath))));
+      const registeredStorePath = path.join(
+        rootDir,
+        "agents",
+        "codex",
+        "sessions",
+        "sessions.json",
+      );
+      await fs.mkdir(path.dirname(registeredStorePath), { recursive: true });
+      await fs.writeFile(
+        registeredStorePath,
+        JSON.stringify(
+          {
+            [registeredSessionKey]: {
+              sessionId: "sess_registered_inbound",
+              updatedAt: Date.now(),
+              channel: "discord",
+              lastChannel: "discord",
+              lastTo: "channel:123",
+            },
+          },
+          null,
+          2,
+        ),
+      );
+
+      const pair = await performPairRequest(ctx.port, deviceId);
+      const token = pair.token as string;
+      const { ws, auth, sessionInfo } = await authenticateDevice(ctx.port, deviceId, token);
+      expect(auth.sessionKeys).toContain("agent:main:clawline:flynn:main");
+      expect(auth.sessionKeys).not.toContain(registeredSessionKey);
+      expect((sessionInfo as { sessionKeys?: string[] } | null)?.sessionKeys).toContain(
+        "agent:main:clawline:flynn:main",
+      );
+      expect((sessionInfo as { sessionKeys?: string[] } | null)?.sessionKeys).not.toContain(
+        registeredSessionKey,
+      );
+
+      const queue = createMessageQueue(ws);
+      const messageId = `c_${randomUUID()}`;
+      ws.send(
+        JSON.stringify({
+          type: "message",
+          id: messageId,
+          sessionKey: registeredSessionKey,
+          content: "hello registered",
+        }),
+      );
+
+      await waitForQueuedMessage(queue, (value) => {
+        const typed = value as { type?: string; id?: string };
+        return typed?.type === "ack" && typed.id === messageId;
+      });
+      await vi.waitFor(() => expect(capturedCtx).not.toBeNull());
+      expect(capturedCtx).toMatchObject({
+        SessionKey: registeredSessionKey,
+        Provider: "discord",
+        Surface: "discord",
+        OriginatingChannel: "discord",
+        OriginatingTo: "channel:123",
+      });
+
+      queue.dispose();
+      ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("rejects non-admin inbound sends to globally registered session keys", async () => {
+    const deviceId = randomUUID();
+    const registeredSessionKey = "agent:codex:discord:channel:123";
+    const entry = createAllowlistEntry({
+      deviceId,
+      userId: "flynn",
+      isAdmin: false,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry], {
+      sessionStorePathRelative: path.join("agents", "main", "sessions", "sessions.json"),
+    });
+    try {
+      const rootDir = path.dirname(path.dirname(path.dirname(path.dirname(ctx.sessionStorePath))));
+      const registeredStorePath = path.join(
+        rootDir,
+        "agents",
+        "codex",
+        "sessions",
+        "sessions.json",
+      );
+      await fs.mkdir(path.dirname(registeredStorePath), { recursive: true });
+      await fs.writeFile(
+        registeredStorePath,
+        JSON.stringify(
+          {
+            [registeredSessionKey]: {
+              sessionId: "sess_registered_inbound",
+              updatedAt: Date.now(),
+              channel: "discord",
+              lastChannel: "discord",
+              lastTo: "channel:123",
+            },
+          },
+          null,
+          2,
+        ),
+      );
+
+      const pair = await performPairRequest(ctx.port, deviceId);
+      const token = pair.token as string;
+      const { ws } = await authenticateDevice(ctx.port, deviceId, token);
+      const queue = createMessageQueue(ws);
+      ws.send(
+        JSON.stringify({
+          type: "message",
+          id: `c_${randomUUID()}`,
+          sessionKey: registeredSessionKey,
+          content: "should stay blocked",
+        }),
+      );
+      const error = await waitForQueuedMessage(queue, (value) => {
+        const typed = value as { type?: string; code?: string };
+        return typed?.type === "error" && typed.code === "stream_not_found";
+      });
+      expect(error).toMatchObject({
+        type: "error",
+        code: "stream_not_found",
+      });
+
+      queue.dispose();
+      ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("includes auth-time opaque adopted read and tail states in auth snapshots", async () => {
     const deviceId = randomUUID();
     const adoptedSessionKey = "agent:main:subagent:opaque";

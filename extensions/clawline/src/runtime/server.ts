@@ -7438,6 +7438,25 @@ button.deny { background: #9b1c31; color: white; }
     return index.get(normalizeSessionKey(trimmed)) ?? null;
   }
 
+  async function resolveRegisteredInboundSessionKey(
+    session: Session,
+    sessionKey: string,
+  ): Promise<string | null> {
+    const allowedSessionKeys = session.provisionedSessionKeys?.length
+      ? session.provisionedSessionKeys
+      : [session.sessionKey];
+    const allowedSessionKey = allowedSessionKeys.find((allowedKey) =>
+      sessionKeyEq(allowedKey, sessionKey),
+    );
+    if (allowedSessionKey) {
+      return allowedSessionKey;
+    }
+    if (!session.isAdmin) {
+      return null;
+    }
+    return resolveAlertFallbackSessionKey(sessionKey);
+  }
+
   async function handleAdoptSessionRequest(req: http.IncomingMessage, res: http.ServerResponse) {
     const auth = authenticateHttpRequest(req);
     requireAdminTrackAccess(auth);
@@ -9009,28 +9028,24 @@ button.deny { background: #9b1c31; color: white; }
         payloadSessionKey && !normalizedClawlinePayloadSessionKey
           ? normalizeSessionKey(payloadSessionKey)
           : "";
-      const allowedSessionKeys = session.provisionedSessionKeys?.length
-        ? session.provisionedSessionKeys
-        : [session.sessionKey];
       // Legacy clients may omit sessionKey; default to the Main stream session key.
       const resolvedSessionKey =
         normalizedClawlinePayloadSessionKey ||
         normalizedAdoptedPayloadSessionKey ||
         session.sessionKey;
-      if (
-        !allowedSessionKeys.some(
-          (sessionKey) =>
-            normalizeSessionKey(sessionKey) === normalizeSessionKey(resolvedSessionKey),
-        )
-      ) {
+      const registeredSessionKey = await resolveRegisteredInboundSessionKey(
+        session,
+        resolvedSessionKey,
+      );
+      if (!registeredSessionKey) {
         throw new ClientMessageError("stream_not_found", "Stream not found");
       }
-      const inboundTarget = resolveInboundMessageTarget(session, resolvedSessionKey);
+      const inboundTarget = resolveInboundMessageTarget(session, registeredSessionKey);
       markProcessStage("route_inbound_message");
       logger.info?.("[clawline] inbound message routing", {
         messageId,
         payloadSessionKey: payload.sessionKey,
-        resolvedSessionKey,
+        resolvedSessionKey: registeredSessionKey,
         targetKind: inboundTarget.kind,
         streamSuffix: inboundTarget.kind === "clawline" ? inboundTarget.streamSuffix : undefined,
         sessionIsAdmin: session.isAdmin,
@@ -9139,7 +9154,7 @@ button.deny { background: #9b1c31; color: white; }
             ownership.attachments,
             attachmentsHash,
             ownership.assetIds,
-            resolvedSessionKey,
+            registeredSessionKey,
           );
           if (markMessageFailedIfDeviceRevoked(session.deviceId, messageId)) {
             return;
@@ -9159,7 +9174,7 @@ button.deny { background: #9b1c31; color: white; }
             });
           });
           markProcessStage("broadcast_user_message");
-          broadcastToSessionKey(resolvedSessionKey, event);
+          broadcastToSessionKey(registeredSessionKey, event);
           await broadcastStreamTailStateForUser(targetUserId, event);
 
           const attachmentSummary = describeClawlineAttachments(ownership.attachments);
@@ -9170,7 +9185,7 @@ button.deny { background: #9b1c31; color: white; }
           const { images: inboundImages, failureMarkers: inboundImageFailureMarkers } =
             await materializeInboundAttachmentImages(ownership.attachments, {
               messageId,
-              sessionKey: resolvedSessionKey,
+              sessionKey: registeredSessionKey,
               deviceId: session.deviceId,
             });
           if (inboundImageFailureMarkers.length > 0) {
@@ -9178,7 +9193,7 @@ button.deny { background: #9b1c31; color: white; }
           }
 
           markProcessStage("build_delivery_context");
-          const routeSessionKey = resolvedSessionKey;
+          const routeSessionKey = registeredSessionKey;
           const route = {
             agentId: inboundTarget.routeAgentId,
             channel: inboundTarget.channelLabel,
@@ -9252,7 +9267,7 @@ button.deny { background: #9b1c31; color: white; }
             }).catch(() => {});
           };
           const agentProgress = createAgentProgressEmitter({
-            sessionKey: resolvedSessionKey,
+            sessionKey: registeredSessionKey,
             messageId,
             getActiveRun: () => activeRunForProgress,
           });
