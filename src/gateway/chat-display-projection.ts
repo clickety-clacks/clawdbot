@@ -295,6 +295,18 @@ function sanitizeChatHistoryMessage(
     changed = true;
   }
 
+  const transcriptMeta =
+    entry["__openclaw"] &&
+    typeof entry["__openclaw"] === "object" &&
+    !Array.isArray(entry["__openclaw"])
+      ? (entry["__openclaw"] as Record<string, unknown>)
+      : undefined;
+  const llmVisibleMessageId = normalizeOptionalString(transcriptMeta?.id);
+  if (llmVisibleMessageId && entry.llmVisibleMessageId !== llmVisibleMessageId) {
+    entry.llmVisibleMessageId = llmVisibleMessageId;
+    changed = true;
+  }
+
   if (entry.role !== "assistant") {
     if ("usage" in entry) {
       delete entry.usage;

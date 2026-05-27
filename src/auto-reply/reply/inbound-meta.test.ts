@@ -64,6 +64,13 @@ function parseReplyPayload(text: string): Record<string, unknown> {
   ) as Record<string, unknown>;
 }
 
+function parseReplyReferencePayload(text: string, id: string): Record<string, unknown> {
+  return parseUntrustedJsonBlock(
+    text,
+    `Reply reference: user is replying to message ${id}`,
+  ) as Record<string, unknown>;
+}
+
 function parseReplyChainPayload(text: string): Array<Record<string, unknown>> {
   return parseUntrustedJsonBlock(
     text,
@@ -513,6 +520,28 @@ describe("buildInboundUserContextPrefix", () => {
     const reply = parseReplyPayload(text);
     expect(reply["sender_label"]).toBe("Quoter");
     expect(reply["body"]).toBe("quoted body");
+  });
+
+  it("renders LLM-visible reply reference metadata without hydrating it", () => {
+    const text = buildInboundUserContextPrefix({
+      References: [
+        {
+          kind: "reply",
+          llmVisibleMessageId: "s_msg_123",
+          role: "assistant",
+          preview: "The bounded visible bubble text",
+        },
+      ],
+    } as TemplateContext);
+
+    const reference = parseReplyReferencePayload(text, "s_msg_123");
+    expect(reference).toEqual({
+      kind: "reply",
+      llm_visible_message_id: "s_msg_123",
+      role: "assistant",
+      preview: "The bounded visible bubble text",
+    });
+    expect(text).toContain("user is replying to message s_msg_123");
   });
 
   it("renders hydrated reply chain instead of duplicate one-hop reply target", () => {

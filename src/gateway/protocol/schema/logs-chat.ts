@@ -44,6 +44,20 @@ export const ChatSendParamsSchema = Type.Object(
     originatingTo: Type.Optional(Type.String()),
     originatingAccountId: Type.Optional(Type.String()),
     originatingThreadId: Type.Optional(Type.String()),
+    references: Type.Optional(
+      Type.Array(
+        Type.Object(
+          {
+            kind: Type.Literal("reply"),
+            llmVisibleMessageId: Type.String({ minLength: 1, maxLength: 512 }),
+            role: Type.Optional(Type.String({ maxLength: 64 })),
+            preview: Type.Optional(Type.String({ maxLength: 2_000 })),
+          },
+          { additionalProperties: false },
+        ),
+        { maxItems: 4 },
+      ),
+    ),
     attachments: Type.Optional(Type.Array(Type.Unknown())),
     timeoutMs: Type.Optional(Type.Integer({ minimum: 0 })),
     systemInputProvenance: Type.Optional(InputProvenanceSchema),
