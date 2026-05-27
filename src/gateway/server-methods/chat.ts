@@ -1952,11 +1952,21 @@ function nextChatSeq(context: { agentRunSeq: Map<string, number> }, runId: strin
   return next;
 }
 
+function projectLiveChatMessage(
+  message: Record<string, unknown> | undefined,
+  messageId: string | undefined,
+  options?: Parameters<typeof projectChatDisplayMessage>[1],
+) {
+  const projected = projectChatDisplayMessage(message, options);
+  return projected && messageId ? { ...projected, llmVisibleMessageId: messageId } : projected;
+}
+
 function broadcastChatFinal(params: {
   context: Pick<GatewayRequestContext, "broadcast" | "nodeSendToSession" | "agentRunSeq">;
   runId: string;
   sessionKey: string;
   message?: Record<string, unknown>;
+  messageId?: string;
 }) {
   const seq = nextChatSeq({ agentRunSeq: params.context.agentRunSeq }, params.runId);
   const payload = {
@@ -1964,7 +1974,7 @@ function broadcastChatFinal(params: {
     sessionKey: params.sessionKey,
     seq,
     state: "final" as const,
-    message: projectChatDisplayMessage(params.message),
+    message: projectLiveChatMessage(params.message, params.messageId),
   };
   params.context.broadcast("chat", payload);
   params.context.nodeSendToSession(params.sessionKey, "chat", payload);
@@ -3081,6 +3091,7 @@ export const chatHandlers: GatewayRequestHandlers = {
                     buildTranscriptReplyText(finalPayloads) ||
                     displayReply;
                   let message: Record<string, unknown> | undefined;
+                  let messageId: string | undefined;
                   if (
                     transcriptReply ||
                     persistedContentForAppend?.length ||
@@ -3107,6 +3118,7 @@ export const chatHandlers: GatewayRequestHandlers = {
                           blocks: assistantContent,
                         });
                       }
+                      messageId = appended.messageId;
                       message = broadcastAssistantContent?.length
                         ? { ...appended.message, content: broadcastAssistantContent }
                         : appended.message;
@@ -3143,6 +3155,7 @@ export const chatHandlers: GatewayRequestHandlers = {
                     context,
                     runId: clientRunId,
                     sessionKey,
+                    messageId,
                     message,
                   });
                 }
@@ -3309,7 +3322,7 @@ export const chatHandlers: GatewayRequestHandlers = {
     }
 
     // Broadcast to webchat for immediate UI update
-    const message = projectChatDisplayMessage(appended.message, {
+    const message = projectLiveChatMessage(appended.message, appended.messageId, {
       maxChars: resolveEffectiveChatHistoryMaxChars(cfg),
     });
     const chatPayload = {

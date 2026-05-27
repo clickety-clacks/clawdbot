@@ -1140,6 +1140,7 @@ describe("chat directive tag stripping for non-streaming final payloads", () => 
     if (!getMessage(broadcastPayload)) {
       throw new Error("Expected broadcast message");
     }
+    expect(getMessage(broadcastPayload)?.llmVisibleMessageId).toEqual(expect.any(String));
     expect(extractFirstTextBlock(broadcastPayload)).toBe("");
   });
 
@@ -1160,6 +1161,7 @@ describe("chat directive tag stripping for non-streaming final payloads", () => 
     if (!getMessage(payload)) {
       throw new Error("Expected directive-only final message");
     }
+    expect(getMessage(payload)?.llmVisibleMessageId).toEqual(expect.any(String));
     expect(extractFirstTextBlock(payload)).toBe("");
   });
 

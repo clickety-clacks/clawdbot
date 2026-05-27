@@ -4588,6 +4588,7 @@ describe.sequential("clawline provider server", () => {
         return typed.type === "message" && typed.id === result.messageId;
       });
       expect(delivered.content).toBe("fallback text\n\n[Media attachment failed]");
+      expect(delivered.llmVisibleMessageId).toBe(result.messageId);
     } finally {
       queue?.dispose();
       ws?.terminate();
@@ -7055,10 +7056,16 @@ describe.sequential("clawline provider server", () => {
           typed.role === "assistant" &&
           typed.sessionKey === adoptedSessionKey
         );
-      })) as { id: string; sessionKey?: string; content?: string };
+      })) as {
+        id: string;
+        sessionKey?: string;
+        content?: string;
+        llmVisibleMessageId?: string;
+      };
       expect(assistantMessage).toMatchObject({
         sessionKey: adoptedSessionKey,
         content: "heimdal adopted ok",
+        llmVisibleMessageId: assistantMessage.id,
       });
 
       authed.ws.send(
@@ -7282,11 +7289,13 @@ describe.sequential("clawline provider server", () => {
       })) as {
         id?: string;
         clientMessageId?: string;
+        llmVisibleMessageId?: string;
         sessionKey?: string;
         timestamp?: number;
       };
       expect(firstEcho.id?.startsWith("s_")).toBe(true);
       expect(firstEcho.clientMessageId).toBe(firstMessageId);
+      expect(firstEcho.llmVisibleMessageId).toBe(firstMessageId);
       expect(firstEcho.sessionKey).toBe(sessionKey);
       expect(typeof firstEcho.timestamp).toBe("number");
 
@@ -7303,12 +7312,10 @@ describe.sequential("clawline provider server", () => {
           content: "use the referenced message",
           references: [
             {
-              kind: "message",
-              sessionKey,
-              messageId: firstEcho.id,
-              messageRole: "user",
-              createdAt: firstEcho.timestamp,
-              clientMessageId: firstMessageId,
+              kind: "reply",
+              llmVisibleMessageId: firstEcho.llmVisibleMessageId,
+              role: "user",
+              preview: "referenced body",
             },
           ],
         }),
@@ -7335,16 +7342,14 @@ describe.sequential("clawline provider server", () => {
         SessionKey: sessionKey,
         UntrustedStructuredContext: [
           expect.objectContaining({
-            label: "Referenced message",
+            label: `Reply reference: user is replying to message ${firstMessageId}`,
             source: "clawline",
-            type: "message_reference",
+            type: "reply_reference",
             payload: expect.objectContaining({
-              session_key: sessionKey,
-              message_id: firstEcho.id,
-              client_message_id: firstMessageId,
-              message_role: "user",
-              created_at_ms: firstEcho.timestamp,
-              body: "referenced body",
+              kind: "reply",
+              llm_visible_message_id: firstMessageId,
+              role: "user",
+              preview: "referenced body",
             }),
           }),
         ],

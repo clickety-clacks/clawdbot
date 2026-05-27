@@ -575,6 +575,7 @@ function normalizePayloadForSession(
   return {
     ...payload,
     sessionKey: effectiveSessionKey,
+    llmVisibleMessageId: payload.llmVisibleMessageId ?? payload.clientMessageId ?? payload.id,
     content,
     attachments,
   };
@@ -1292,6 +1293,7 @@ type ServerMessage = {
   timestamp: number;
   streaming: boolean;
   sessionKey?: string;
+  llmVisibleMessageId?: string;
   attachments?: unknown[];
   deviceId?: string;
   clientMessageId?: string;
@@ -9101,11 +9103,6 @@ button.deny { background: #9b1c31; color: white; }
           markProcessStage("resolve_references");
           const referenceResolution = await resolveClawlineMessageReferenceContexts({
             references: payload.references,
-            resolveReferenceMessage: async (reference) =>
-              await resolveClawlineReferenceMessage(reference, targetUserId),
-            resolveTranscriptMessages: async (referenceSessionKey: string) => {
-              return await readClawlineReferenceMessages(referenceSessionKey, targetUserId);
-            },
           });
           if (!referenceResolution.ok) {
             throw new ClientMessageError(referenceResolution.code, referenceResolution.message);

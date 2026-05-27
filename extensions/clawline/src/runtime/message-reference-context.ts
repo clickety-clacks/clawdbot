@@ -24,6 +24,13 @@ export type ClawlineTranscriptMessageRecord = {
   };
 };
 
+type ClawlineReplyReference = {
+  kind: "reply";
+  llmVisibleMessageId: string;
+  role?: string;
+  preview?: string;
+};
+
 export type ClawlineMessageReferenceResolution =
   | {
       ok: true;
@@ -43,100 +50,40 @@ function normalizeMessageRole(value: unknown): "user" | "assistant" | undefined 
   return value === "user" || value === "assistant" ? value : undefined;
 }
 
-function normalizeCreatedAt(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
-
-function extractReadableContent(content: unknown): string | undefined {
-  if (typeof content === "string") {
-    const trimmed = content.trim();
-    return trimmed.length > 0 ? trimmed : undefined;
-  }
-  if (!Array.isArray(content)) {
-    return undefined;
-  }
-  const parts = content.flatMap((part) => {
-    if (!part || typeof part !== "object" || Array.isArray(part)) {
-      return [];
-    }
-    const record = part as Record<string, unknown>;
-    const text = normalizeString(record.text);
-    return text ? [text] : [];
-  });
-  const text = parts.join("\n").trim();
-  return text.length > 0 ? text : undefined;
-}
-
-function normalizeReference(value: unknown): ClawlineMessageReference | null {
+function normalizeReference(value: unknown): ClawlineReplyReference | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
   }
   const record = value as Record<string, unknown>;
-  if (record.kind !== "message") {
+  if (record.kind !== "reply") {
     return null;
   }
-  const sessionKey = normalizeString(record.sessionKey);
-  const messageId = normalizeString(record.messageId);
-  const messageRole = normalizeMessageRole(record.messageRole);
-  const createdAt = normalizeCreatedAt(record.createdAt);
-  if (!sessionKey || !messageId || !messageRole || createdAt == null) {
+  const llmVisibleMessageId = normalizeString(record.llmVisibleMessageId);
+  if (!llmVisibleMessageId) {
     return null;
   }
-  const clientMessageId = normalizeString(record.clientMessageId);
+  const role = normalizeMessageRole(record.role);
+  const preview = normalizeString(record.preview);
   return {
-    kind: "message",
-    sessionKey,
-    messageId,
-    messageRole,
-    createdAt,
-    ...(clientMessageId ? { clientMessageId } : {}),
+    kind: "reply",
+    llmVisibleMessageId,
+    ...(role ? { role } : {}),
+    ...(preview ? { preview } : {}),
   };
 }
 
-function buildReferenceContext(
-  reference: ClawlineMessageReference,
-  messageText: string,
-): ClawlineStructuredContextEntry {
+function buildReferenceContext(reference: ClawlineReplyReference): ClawlineStructuredContextEntry {
   return {
-    label: "Referenced message",
+    label: `Reply reference: user is replying to message ${reference.llmVisibleMessageId}`,
     source: "clawline",
-    type: "message_reference",
+    type: "reply_reference",
     payload: {
-      session_key: reference.sessionKey,
-      message_id: reference.messageId,
-      client_message_id: reference.clientMessageId,
-      message_role: reference.messageRole,
-      created_at_ms: reference.createdAt,
-      body: messageText,
+      kind: "reply",
+      llm_visible_message_id: reference.llmVisibleMessageId,
+      role: reference.role,
+      preview: reference.preview,
     },
   };
-}
-
-function matchesResolvedIdentity(
-  reference: ClawlineMessageReference,
-  record: ClawlineTranscriptMessageRecord,
-): boolean {
-  if (normalizeString(record.id) !== reference.messageId) {
-    return false;
-  }
-  if (normalizeMessageRole(record.message?.role) !== reference.messageRole) {
-    return false;
-  }
-  if (
-    reference.clientMessageId &&
-    record.clientMessageId !== undefined &&
-    normalizeString(record.clientMessageId) !== reference.clientMessageId
-  ) {
-    return false;
-  }
-  if (
-    reference.createdAt !== undefined &&
-    record.timestamp !== undefined &&
-    normalizeCreatedAt(record.timestamp) !== reference.createdAt
-  ) {
-    return false;
-  }
-  return true;
 }
 
 export async function resolveClawlineMessageReferenceContexts(params: {
@@ -144,7 +91,7 @@ export async function resolveClawlineMessageReferenceContexts(params: {
   resolveReferenceMessage?: (
     reference: ClawlineMessageReference,
   ) => Promise<ClawlineTranscriptMessageRecord | null>;
-  resolveTranscriptMessages: (
+  resolveTranscriptMessages?: (
     sessionKey: string,
   ) => Promise<ClawlineTranscriptMessageRecord[] | null>;
 }): Promise<ClawlineMessageReferenceResolution> {
@@ -175,59 +122,7 @@ export async function resolveClawlineMessageReferenceContexts(params: {
         message: "Invalid reference",
       };
     }
-
-    const directMessage = params.resolveReferenceMessage
-      ? await params.resolveReferenceMessage(reference)
-      : null;
-    if (directMessage) {
-      if (!matchesResolvedIdentity(reference, directMessage)) {
-        return {
-          ok: false,
-          code: "unresolved_reference",
-          message: "Referenced message is unavailable.",
-        };
-      }
-      const resolvedText = extractReadableContent(directMessage.message?.content);
-      if (!resolvedText) {
-        return {
-          ok: false,
-          code: "unresolved_reference",
-          message: "Referenced message is unavailable.",
-        };
-      }
-      contexts.push(buildReferenceContext(reference, resolvedText));
-      continue;
-    }
-
-    const transcriptMessages = await params.resolveTranscriptMessages(reference.sessionKey);
-    if (!transcriptMessages) {
-      return {
-        ok: false,
-        code: "unresolved_reference",
-        message: "Referenced message is unavailable.",
-      };
-    }
-
-    let resolvedText: string | undefined;
-    for (const entry of transcriptMessages) {
-      if (!matchesResolvedIdentity(reference, entry)) {
-        continue;
-      }
-      resolvedText = extractReadableContent(entry.message?.content);
-      if (!resolvedText) {
-        continue;
-      }
-      contexts.push(buildReferenceContext(reference, resolvedText));
-      break;
-    }
-
-    if (!resolvedText) {
-      return {
-        ok: false,
-        code: "unresolved_reference",
-        message: "Referenced message is unavailable.",
-      };
-    }
+    contexts.push(buildReferenceContext(reference));
   }
 
   return { ok: true, contexts };
