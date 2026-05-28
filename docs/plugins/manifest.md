@@ -638,24 +638,25 @@ read without importing the plugin runtime.
 
 Each list is optional:
 
-| Field                            | Type       | What it means                                                                                       |
-| -------------------------------- | ---------- | --------------------------------------------------------------------------------------------------- |
-| `embeddedExtensionFactories`     | `string[]` | Codex app-server extension factory ids, currently `codex-app-server`.                               |
-| `agentToolResultMiddleware`      | `string[]` | Runtime ids a bundled plugin may register tool-result middleware for.                               |
-| `externalAuthProviders`          | `string[]` | Provider ids whose external auth profile hook this plugin owns.                                     |
-| `embeddingProviders`             | `string[]` | General embedding provider ids this plugin owns for reusable vector embedding use outside memory.   |
-| `speechProviders`                | `string[]` | Speech provider ids this plugin owns.                                                               |
-| `realtimeTranscriptionProviders` | `string[]` | Realtime-transcription provider ids this plugin owns.                                               |
-| `realtimeVoiceProviders`         | `string[]` | Realtime-voice provider ids this plugin owns.                                                       |
-| `memoryEmbeddingProviders`       | `string[]` | Memory embedding provider ids this plugin owns.                                                     |
-| `mediaUnderstandingProviders`    | `string[]` | Media-understanding provider ids this plugin owns.                                                  |
-| `imageGenerationProviders`       | `string[]` | Image-generation provider ids this plugin owns.                                                     |
-| `videoGenerationProviders`       | `string[]` | Video-generation provider ids this plugin owns.                                                     |
-| `webFetchProviders`              | `string[]` | Web-fetch provider ids this plugin owns.                                                            |
-| `webSearchProviders`             | `string[]` | Web-search provider ids this plugin owns.                                                           |
-| `migrationProviders`             | `string[]` | Import provider ids this plugin owns for `openclaw migrate`.                                        |
-| `gatewayMethodDispatch`          | `string[]` | Reserved entitlement for authenticated plugin HTTP routes that dispatch Gateway methods in-process. |
-| `tools`                          | `string[]` | Agent tool names this plugin owns.                                                                  |
+| Field                            | Type       | What it means                                                                                        |
+| -------------------------------- | ---------- | ---------------------------------------------------------------------------------------------------- |
+| `embeddedExtensionFactories`     | `string[]` | Codex app-server extension factory ids, currently `codex-app-server`.                                |
+| `agentToolResultMiddleware`      | `string[]` | Runtime ids a bundled plugin may register tool-result middleware for.                                |
+| `externalAuthProviders`          | `string[]` | Provider ids whose external auth profile hook this plugin owns.                                      |
+| `embeddingProviders`             | `string[]` | General embedding provider ids this plugin owns for reusable vector embedding use, including memory. |
+| `speechProviders`                | `string[]` | Speech provider ids this plugin owns.                                                                |
+| `realtimeTranscriptionProviders` | `string[]` | Realtime-transcription provider ids this plugin owns.                                                |
+| `realtimeVoiceProviders`         | `string[]` | Realtime-voice provider ids this plugin owns.                                                        |
+| `memoryEmbeddingProviders`       | `string[]` | Deprecated memory-specific embedding provider ids this plugin owns.                                  |
+| `mediaUnderstandingProviders`    | `string[]` | Media-understanding provider ids this plugin owns.                                                   |
+| `transcriptSourceProviders`      | `string[]` | Transcript source provider ids this plugin owns.                                                     |
+| `imageGenerationProviders`       | `string[]` | Image-generation provider ids this plugin owns.                                                      |
+| `videoGenerationProviders`       | `string[]` | Video-generation provider ids this plugin owns.                                                      |
+| `webFetchProviders`              | `string[]` | Web-fetch provider ids this plugin owns.                                                             |
+| `webSearchProviders`             | `string[]` | Web-search provider ids this plugin owns.                                                            |
+| `migrationProviders`             | `string[]` | Import provider ids this plugin owns for `openclaw migrate`.                                         |
+| `gatewayMethodDispatch`          | `string[]` | Reserved entitlement for authenticated plugin HTTP routes that dispatch Gateway methods in-process.  |
+| `tools`                          | `string[]` | Agent tool names this plugin owns.                                                                   |
 
 `contracts.embeddedExtensionFactories` is retained for bundled Codex
 app-server-only extension factories. Bundled tool-result transforms should
@@ -673,17 +674,12 @@ Provider plugins that implement `resolveExternalAuthProfiles` should declare
 through a deprecated compatibility fallback, but that fallback is slower and
 will be removed after the migration window.
 
-Bundled memory embedding providers should declare
-`contracts.memoryEmbeddingProviders` for every adapter id they expose, including
-built-in adapters such as `local`. Standalone CLI paths use this manifest
-contract to load only the owning plugin before the full Gateway runtime has
-registered providers.
-
 General embedding providers should declare `contracts.embeddingProviders` for
 each adapter registered with `api.registerEmbeddingProvider(...)`. Use the
-general contract when vectors are meant to be consumed by multiple features,
-tools, or plugins. Keep `contracts.memoryEmbeddingProviders` for adapters whose
-shape and lifecycle are specific to OpenClaw memory indexing.
+general contract for reusable vector generation, including providers consumed by
+memory search. `contracts.memoryEmbeddingProviders` is deprecated
+memory-specific compatibility and remains only while existing providers migrate
+to the generic embedding provider seam.
 
 `contracts.gatewayMethodDispatch` currently accepts
 `"authenticated-request"`. It is an API hygiene gate for native plugin HTTP
@@ -864,6 +860,11 @@ Fields:
 | `modelPrefixes` | `string[]` | Prefixes matched with `startsWith` against shorthand model ids.                 |
 | `modelPatterns` | `string[]` | Regex sources matched against shorthand model ids after profile suffix removal. |
 
+`modelPatterns` entries are compiled through `compileSafeRegex`, which rejects
+patterns containing nested repetition (for example `(a+)+$`). Patterns that fail
+the safety check are silently skipped, the same as syntactically invalid regex.
+Keep patterns simple and avoid nested quantifiers.
+
 ## modelCatalog reference
 
 Use `modelCatalog` when OpenClaw should know provider model metadata before
@@ -921,12 +922,13 @@ is required.
 
 Top-level fields:
 
-| Field          | Type                                                     | What it means                                                                                               |
-| -------------- | -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `providers`    | `Record<string, object>`                                 | Catalog rows for provider ids owned by this plugin. Keys should also appear in top-level `providers`.       |
-| `aliases`      | `Record<string, object>`                                 | Provider aliases that should resolve to an owned provider for catalog or suppression planning.              |
-| `suppressions` | `object[]`                                               | Model rows from another source that this plugin suppresses for a provider-specific reason.                  |
-| `discovery`    | `Record<string, "static" \| "refreshable" \| "runtime">` | Whether the provider catalog can be read from manifest metadata, refreshed into cache, or requires runtime. |
+| Field            | Type                                                     | What it means                                                                                               |
+| ---------------- | -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `providers`      | `Record<string, object>`                                 | Catalog rows for provider ids owned by this plugin. Keys should also appear in top-level `providers`.       |
+| `aliases`        | `Record<string, object>`                                 | Provider aliases that should resolve to an owned provider for catalog or suppression planning.              |
+| `suppressions`   | `object[]`                                               | Model rows from another source that this plugin suppresses for a provider-specific reason.                  |
+| `discovery`      | `Record<string, "static" \| "refreshable" \| "runtime">` | Whether the provider catalog can be read from manifest metadata, refreshed into cache, or requires runtime. |
+| `runtimeAugment` | `boolean`                                                | Set to `true` only when the provider runtime must append catalog rows after manifest/config planning.       |
 
 `aliases` participates in provider ownership lookup for model-catalog planning.
 Alias targets must be top-level providers owned by the same plugin. When a

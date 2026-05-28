@@ -414,6 +414,37 @@ const listRequiredBundledPluginRuntimeOverlayOutputs = (deps) => {
   return [...new Set(runtimePaths)].toSorted((left, right) => left.localeCompare(right));
 };
 
+const isSafePluginSdkSubpathSegment = (subpath) => /^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(subpath);
+
+const readPackageJsonPluginSdkAliasFileNames = (deps) => {
+  let packageJson;
+  try {
+    packageJson = JSON.parse(deps.fs.readFileSync(path.join(deps.cwd, "package.json"), "utf8"));
+  } catch {
+    return null;
+  }
+  const packageExports = packageJson?.exports;
+  if (!packageExports || typeof packageExports !== "object" || Array.isArray(packageExports)) {
+    return null;
+  }
+
+  const fileNames = new Set();
+  for (const exportKey of Object.keys(packageExports)) {
+    if (exportKey === "./plugin-sdk") {
+      fileNames.add("index.js");
+      continue;
+    }
+    if (!exportKey.startsWith("./plugin-sdk/")) {
+      continue;
+    }
+    const subpath = exportKey.slice("./plugin-sdk/".length);
+    if (isSafePluginSdkSubpathSegment(subpath)) {
+      fileNames.add(`${subpath}.js`);
+    }
+  }
+  return fileNames.size > 0 ? fileNames : null;
+};
+
 const listRequiredOpenClawExtensionAliasOutputs = (deps) => {
   const distRoot = resolveRuntimePostBuildDistRoot(deps);
   const distExtensionsRoot = path.join(distRoot, "extensions");
@@ -428,11 +459,15 @@ const listRequiredOpenClawExtensionAliasOutputs = (deps) => {
     return [];
   }
 
+  const exportedPluginSdkFileNames = readPackageJsonPluginSdkAliasFileNames(deps);
   const aliasDir = path.join(distRoot, "extensions", "node_modules", "openclaw");
   return [
     path.join(aliasDir, "package.json"),
     ...dirents
       .filter((dirent) => dirent.isFile() && path.extname(dirent.name) === ".js")
+      .filter(
+        (dirent) => !exportedPluginSdkFileNames || exportedPluginSdkFileNames.has(dirent.name),
+      )
       .map((dirent) => path.join(aliasDir, "plugin-sdk", dirent.name)),
   ].toSorted((left, right) => left.localeCompare(right));
 };
@@ -646,6 +681,28 @@ const createRunNodeOutputTee = (deps) => {
   const outputLogPath = resolveRunNodeOutputLogPath(deps);
   if (!outputLogPath) {
     return null;
+  }
+  try {
+    const existing = deps.fs.statSync(outputLogPath);
+    if (existing.isDirectory()) {
+      return {
+        outputLogPath,
+        write() {},
+        async close() {
+          throw new Error(`output log path is a directory: ${outputLogPath}`);
+        },
+      };
+    }
+  } catch (error) {
+    if (error?.code && error.code !== "ENOENT") {
+      return {
+        outputLogPath,
+        write() {},
+        async close() {
+          throw error;
+        },
+      };
+    }
   }
   deps.fs.mkdirSync(path.dirname(outputLogPath), { recursive: true });
   const stream = deps.fs.createWriteStream(outputLogPath, {
@@ -936,8 +993,9 @@ const runOpenClaw = async (deps) => {
   return res.exitCode ?? 1;
 };
 
-const pipeSpawnedOutput = (childProcess, deps) => {
-  if (!shouldPipeSpawnedOutput(deps)) {
+const pipeSpawnedOutput = (childProcess, deps, options = {}) => {
+  const stdoutTarget = options.stdoutTarget ?? "stdout";
+  if (!shouldPipeSpawnedOutput(deps) && stdoutTarget !== "stderr") {
     return;
   }
   const stderrFilter =
@@ -945,7 +1003,8 @@ const pipeSpawnedOutput = (childProcess, deps) => {
       ? createSyncIoTraceStderrFilter(deps)
       : null;
   childProcess.stdout?.on("data", (chunk) => {
-    writeRunnerStream(deps, deps.stdout, chunk);
+    const target = stdoutTarget === "stderr" ? deps.stderr : deps.stdout;
+    writeRunnerStream(deps, target, chunk);
     deps.outputTee?.write(chunk);
   });
   childProcess.stderr?.on("data", (chunk) => {
@@ -1389,9 +1448,9 @@ export async function runNodeMain(params = {}) {
           const assetBuild = deps.spawn(buildCmd, bundledPluginAssetBuildArgs, {
             cwd: deps.cwd,
             env: deps.env,
-            stdio: shouldPipeSpawnedOutput(deps) ? ["inherit", "pipe", "pipe"] : "inherit",
+            stdio: ["inherit", "pipe", "pipe"],
           });
-          pipeSpawnedOutput(assetBuild, deps);
+          pipeSpawnedOutput(assetBuild, deps, { stdoutTarget: "stderr" });
           const assetBuildRes = await waitForSpawnedProcess(assetBuild, deps);
           const assetBuildInterruptedExitCode = getInterruptedSpawnExitCode(assetBuildRes);
           if (assetBuildInterruptedExitCode !== null) {
@@ -1407,9 +1466,9 @@ export async function runNodeMain(params = {}) {
               ...deps.env,
               [RUN_NODE_SKIP_DTS_BUILD_ENV]: deps.env[RUN_NODE_SKIP_DTS_BUILD_ENV] ?? "1",
             },
-            stdio: shouldPipeSpawnedOutput(deps) ? ["inherit", "pipe", "pipe"] : "inherit",
+            stdio: ["inherit", "pipe", "pipe"],
           });
-          pipeSpawnedOutput(build, deps);
+          pipeSpawnedOutput(build, deps, { stdoutTarget: "stderr" });
 
           const buildRes = await waitForSpawnedProcess(build, deps);
           const interruptedExitCode = getInterruptedSpawnExitCode(buildRes);

@@ -2,6 +2,7 @@
 
 import path from "node:path";
 import { resolveDefaultAgentDir } from "../agents/agent-scope-config.js";
+import { externalCliDiscoveryForProviderAuth } from "../agents/auth-profiles/external-cli-discovery.js";
 import { resolveApiKeyForProfile } from "../agents/auth-profiles/oauth.js";
 import { resolveAuthProfileOrder } from "../agents/auth-profiles/order.js";
 import { listProfilesForProvider } from "../agents/auth-profiles/profiles.js";
@@ -113,6 +114,7 @@ export {
 } from "../agents/copilot-dynamic-headers.js";
 
 const COPILOT_TOKEN_URL = "https://api.github.com/copilot_internal/v2/token";
+const COPILOT_TOKEN_REQUEST_TIMEOUT_MS = 30_000;
 
 /** @deprecated GitHub Copilot provider-owned helper; do not use from third-party plugins. */
 export const DEFAULT_COPILOT_API_BASE_URL = "https://api.individual.githubcopilot.com";
@@ -161,6 +163,61 @@ function parseCopilotTokenResponse(value: unknown): {
   }
 
   return { token, expiresAt: expiresAtMs };
+}
+
+function createCopilotTokenRequestAbort(params: { signal?: AbortSignal; timeoutMs?: number }): {
+  signal: AbortSignal;
+  cleanup: () => void;
+  timedOut: () => boolean;
+} {
+  const timeoutMs = params.timeoutMs ?? COPILOT_TOKEN_REQUEST_TIMEOUT_MS;
+  const controller = new AbortController();
+  let timedOut = false;
+  const abortFromParent = () => controller.abort(params.signal?.reason);
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort(new DOMException("GitHub Copilot token exchange timed out", "TimeoutError"));
+  }, timeoutMs);
+  timeout.unref?.();
+  if (params.signal?.aborted) {
+    abortFromParent();
+  } else {
+    params.signal?.addEventListener("abort", abortFromParent, { once: true });
+  }
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      clearTimeout(timeout);
+      params.signal?.removeEventListener("abort", abortFromParent);
+    },
+    timedOut: () => timedOut,
+  };
+}
+
+function formatCopilotTokenRequestError(
+  error: unknown,
+  params: {
+    signal?: AbortSignal;
+    timeoutMs?: number;
+    timedOut?: boolean;
+  },
+): Error {
+  if (params.timedOut) {
+    return new Error(
+      `GitHub Copilot token exchange timed out after ${params.timeoutMs ?? COPILOT_TOKEN_REQUEST_TIMEOUT_MS}ms`,
+    );
+  }
+  if (params.signal?.aborted) {
+    return new Error("GitHub Copilot token exchange cancelled");
+  }
+  if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) {
+    return new Error(
+      `GitHub Copilot token exchange timed out after ${params.timeoutMs ?? COPILOT_TOKEN_REQUEST_TIMEOUT_MS}ms`,
+    );
+  }
+  return error instanceof Error
+    ? error
+    : new Error(`GitHub Copilot token exchange failed: ${String(error)}`);
 }
 
 function resolveCopilotProxyHost(proxyEp: string): string | null {
@@ -212,6 +269,8 @@ export async function resolveCopilotApiToken(params: {
   cachePath?: string;
   loadJsonFileImpl?: (path: string) => unknown;
   saveJsonFileImpl?: (path: string, value: CachedCopilotToken) => void;
+  signal?: AbortSignal;
+  timeoutMs?: number;
 }): Promise<{
   token: string;
   expiresAt: number;
@@ -235,15 +294,24 @@ export async function resolveCopilotApiToken(params: {
   }
 
   const fetchImpl = params.fetchImpl ?? fetch;
-  const res = await fetchImpl(COPILOT_TOKEN_URL, {
-    method: "GET",
-    headers: {
-      Accept: "application/json",
-      Authorization: `Bearer ${params.githubToken}`,
-      "Copilot-Integration-Id": COPILOT_INTEGRATION_ID,
-      ...buildCopilotIdeHeaders({ includeApiVersion: true }),
-    },
-  });
+  let res: Response;
+  const abort = createCopilotTokenRequestAbort(params);
+  try {
+    res = await fetchImpl(COPILOT_TOKEN_URL, {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${params.githubToken}`,
+        "Copilot-Integration-Id": COPILOT_INTEGRATION_ID,
+        ...buildCopilotIdeHeaders({ includeApiVersion: true }),
+      },
+      signal: abort.signal,
+    });
+  } catch (error) {
+    throw formatCopilotTokenRequestError(error, { ...params, timedOut: abort.timedOut() });
+  } finally {
+    abort.cleanup();
+  }
 
   if (!res.ok) {
     throw new Error(`Copilot token exchange failed: HTTP ${res.status}`);
@@ -288,6 +356,7 @@ export function listUsableProviderAuthProfileIds(params: {
   cfg?: OpenClawConfig;
   agentDir?: string;
   allowKeychainPrompt?: boolean;
+  includeExternalCliAuth?: boolean;
 }): { agentDir: string; profileIds: string[] } {
   try {
     const { agentDir, profileIds } = resolveUsableProviderAuthProfiles(params);
@@ -302,6 +371,7 @@ export function isProviderAuthProfileConfigured(params: {
   cfg?: OpenClawConfig;
   agentDir?: string;
   allowKeychainPrompt?: boolean;
+  includeExternalCliAuth?: boolean;
 }): boolean {
   return listUsableProviderAuthProfileIds(params).profileIds.length > 0;
 }
@@ -311,6 +381,7 @@ export async function resolveProviderAuthProfileApiKey(params: {
   cfg?: OpenClawConfig;
   agentDir?: string;
   allowKeychainPrompt?: boolean;
+  includeExternalCliAuth?: boolean;
 }): Promise<string | undefined> {
   const { agentDir, profileIds, store } = resolveUsableProviderAuthProfiles(params);
   if (!agentDir || profileIds.length === 0) {
@@ -335,9 +406,19 @@ function resolveUsableProviderAuthProfiles(params: {
   cfg?: OpenClawConfig;
   agentDir?: string;
   allowKeychainPrompt?: boolean;
+  includeExternalCliAuth?: boolean;
 }): { agentDir: string; profileIds: string[]; store: AuthProfileStore } {
   const agentDir = params.agentDir?.trim() || resolveDefaultAgentDir(params.cfg ?? {});
-  const store = loadAuthProfileStoreForSecretsRuntime(agentDir);
+  const externalCli = params.includeExternalCliAuth
+    ? externalCliDiscoveryForProviderAuth({
+        cfg: params.cfg,
+        provider: params.provider,
+        allowKeychainPrompt: params.allowKeychainPrompt,
+      })
+    : undefined;
+  const store = externalCli
+    ? loadAuthProfileStoreForSecretsRuntime(agentDir, { externalCli })
+    : loadAuthProfileStoreForSecretsRuntime(agentDir);
   const profileIds = resolveAuthProfileOrder({
     cfg: params.cfg,
     store,

@@ -9,7 +9,7 @@ import {
   isManifestPluginAvailableForControlPlane,
   loadManifestMetadataSnapshot,
 } from "../plugins/manifest-contract-eligibility.js";
-import { loadPluginMetadataSnapshot } from "../plugins/plugin-metadata-snapshot.js";
+import { resolvePluginMetadataSnapshot } from "../plugins/plugin-metadata-snapshot.js";
 import type { PluginMetadataSnapshot } from "../plugins/plugin-metadata-snapshot.types.js";
 import { augmentModelCatalogWithProviderPlugins } from "../plugins/provider-runtime.runtime.js";
 import { createLazyImportLoader } from "../shared/lazy-promise.js";
@@ -21,6 +21,7 @@ import { resolveDefaultAgentDir } from "./agent-scope.js";
 import { modelSupportsInput as modelCatalogEntrySupportsInput } from "./model-catalog-lookup.js";
 import type { ModelCatalogEntry, ModelInputType } from "./model-catalog.types.js";
 import {
+  modelKey,
   normalizeConfiguredProviderCatalogModelId,
   type ProviderModelIdNormalizationOptions,
 } from "./model-ref-shared.js";
@@ -112,7 +113,8 @@ function instantiatePiModelRegistry(
 }
 
 function catalogEntryDedupeKey(provider: string, id: string): string {
-  return `${normalizeProviderId(provider)}::${normalizeLowercaseStringOrEmpty(id)}`;
+  const normalizedProvider = normalizeProviderId(provider);
+  return normalizeLowercaseStringOrEmpty(modelKey(normalizedProvider, id));
 }
 
 function appendCatalogEntriesIfAbsent(
@@ -130,6 +132,52 @@ function appendCatalogEntriesIfAbsent(
   }
 }
 
+function mergeCatalogCompat(
+  base: ModelCatalogEntry["compat"] | undefined,
+  override: ModelCatalogEntry["compat"] | undefined,
+): ModelCatalogEntry["compat"] | undefined {
+  if (!base) {
+    return override;
+  }
+  if (!override) {
+    return base;
+  }
+  return { ...base, ...override };
+}
+
+function overlayConfiguredCatalogMetadata(
+  base: ModelCatalogEntry,
+  configured: ModelCatalogEntry,
+): ModelCatalogEntry {
+  return {
+    ...base,
+    ...(configured.contextWindow !== undefined ? { contextWindow: configured.contextWindow } : {}),
+    ...(configured.contextTokens !== undefined ? { contextTokens: configured.contextTokens } : {}),
+    ...(configured.reasoning !== undefined ? { reasoning: configured.reasoning } : {}),
+    ...(configured.input !== undefined ? { input: configured.input } : {}),
+    compat: mergeCatalogCompat(base.compat, configured.compat),
+  };
+}
+
+function mergeConfiguredCatalogEntries(
+  models: ModelCatalogEntry[],
+  entries: ModelCatalogEntry[],
+): void {
+  const indexByKey = new Map(
+    models.map((entry, index) => [catalogEntryDedupeKey(entry.provider, entry.id), index]),
+  );
+  for (const entry of entries) {
+    const key = catalogEntryDedupeKey(entry.provider, entry.id);
+    const existingIndex = indexByKey.get(key);
+    if (existingIndex === undefined) {
+      models.push(entry);
+      indexByKey.set(key, models.length - 1);
+      continue;
+    }
+    models[existingIndex] = overlayConfiguredCatalogMetadata(models[existingIndex], entry);
+  }
+}
+
 export function loadManifestModelCatalog(params: {
   config: OpenClawConfig;
   workspaceDir?: string;
@@ -137,22 +185,20 @@ export function loadManifestModelCatalog(params: {
   fallbackToMetadataScan?: boolean;
   metadataSnapshot?: PluginMetadataSnapshot;
 }): ModelCatalogEntry[] {
-  const snapshot =
-    params.metadataSnapshot ??
-    getCurrentPluginMetadataSnapshot({
-      config: params.config,
-      env: params.env,
-      ...(params.workspaceDir !== undefined ? { workspaceDir: params.workspaceDir } : {}),
-      ...(params.workspaceDir === undefined ? { allowWorkspaceScopedSnapshot: true } : {}),
-    });
   const resolvedSnapshot =
-    snapshot ??
+    params.metadataSnapshot ??
     (params.fallbackToMetadataScan === false
-      ? undefined
-      : loadPluginMetadataSnapshot({
+      ? getCurrentPluginMetadataSnapshot({
+          config: params.config,
+          env: params.env,
+          ...(params.workspaceDir !== undefined ? { workspaceDir: params.workspaceDir } : {}),
+          ...(params.workspaceDir === undefined ? { allowWorkspaceScopedSnapshot: true } : {}),
+        })
+      : resolvePluginMetadataSnapshot({
           config: params.config,
           ...(params.workspaceDir !== undefined ? { workspaceDir: params.workspaceDir } : {}),
           env: params.env ?? process.env,
+          allowWorkspaceScopedCurrent: params.workspaceDir === undefined,
         }));
   if (!resolvedSnapshot) {
     return [];
@@ -321,7 +367,7 @@ async function loadReadOnlyPersistedModelCatalog(params?: {
     manifestPlugins: hasConfiguredProviderModelRows(cfg) ? getManifestPlugins() : undefined,
   });
   if (configuredModels.length > 0) {
-    appendCatalogEntriesIfAbsent(models, configuredModels);
+    mergeConfiguredCatalogEntries(models, configuredModels);
   }
   return sortModelCatalogEntries(models);
 }
@@ -362,9 +408,10 @@ function loadReadOnlyStaticModelCatalog(params?: {
 
   const configuredManifestPlugins = hasConfiguredProviderRowsNeedingManifestLookup(cfg)
     ? (params?.metadataSnapshot?.plugins ??
-      loadPluginMetadataSnapshot({
+      resolvePluginMetadataSnapshot({
         config: cfg,
         env: process.env,
+        allowWorkspaceScopedCurrent: true,
       }).plugins)
     : [];
   const configuredModels = buildConfiguredModelCatalog({
@@ -372,7 +419,7 @@ function loadReadOnlyStaticModelCatalog(params?: {
     manifestPlugins: configuredManifestPlugins,
   });
   if (configuredModels.length > 0) {
-    appendCatalogEntriesIfAbsent(models, configuredModels);
+    mergeConfiguredCatalogEntries(models, configuredModels);
   }
   return sortModelCatalogEntries(models);
 }
@@ -415,14 +462,19 @@ export async function loadModelCatalog(params?: {
     const sortModels = sortModelCatalogEntries;
     try {
       const cfg = params?.config ?? getRuntimeConfig();
+      let manifestMetadataSnapshot: PluginMetadataSnapshot | undefined;
       let manifestPlugins: ProviderModelIdNormalizationOptions["manifestPlugins"];
-      const getManifestPlugins = () => {
-        manifestPlugins ??=
-          params?.metadataSnapshot?.plugins ??
+      const getManifestMetadataSnapshot = () => {
+        manifestMetadataSnapshot ??=
+          params?.metadataSnapshot ??
           loadManifestMetadataSnapshot({
             config: cfg,
             env: process.env,
-          }).plugins;
+          });
+        return manifestMetadataSnapshot;
+      };
+      const getManifestPlugins = () => {
+        manifestPlugins ??= getManifestMetadataSnapshot().plugins;
         return manifestPlugins;
       };
       if (!readOnly) {
@@ -493,6 +545,15 @@ export async function loadModelCatalog(params?: {
           compat,
         });
       }
+      appendCatalogEntriesIfAbsent(
+        models,
+        loadManifestModelCatalog({
+          config: cfg,
+          env: process.env,
+          metadataSnapshot: getManifestMetadataSnapshot(),
+        }),
+      );
+      logStage("manifest-models-merged", `entries=${models.length}`);
       if (!readOnly) {
         const supplemental = await augmentModelCatalogWithProviderPlugins({
           config: cfg,
@@ -524,7 +585,7 @@ export async function loadModelCatalog(params?: {
         manifestPlugins: hasConfiguredProviderModelRows(cfg) ? getManifestPlugins() : undefined,
       });
       if (configuredModels.length > 0) {
-        appendCatalogEntriesIfAbsent(models, configuredModels);
+        mergeConfiguredCatalogEntries(models, configuredModels);
       }
       logStage("configured-models-merged", `entries=${models.length}`);
 

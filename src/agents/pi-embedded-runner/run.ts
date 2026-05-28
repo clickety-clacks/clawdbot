@@ -36,6 +36,7 @@ import {
   markAuthProfileSuccess,
   resolveAuthProfileEligibility,
 } from "../auth-profiles.js";
+import { resolveExternalCliAuthOverlayScopeFromSelection } from "../auth-profiles/external-cli-auth-selection.js";
 import { listActiveProcessSessionReferences } from "../bash-process-references.js";
 import {
   resolveSessionKeyForRequest,
@@ -140,6 +141,7 @@ import {
   buildErrorAgentMeta,
   buildUsageAgentMetaFields,
   createCompactionDiagId,
+  isAssistantForModelRef,
   resolveActiveErrorContext,
   resolveFinalAssistantRawText,
   resolveFinalAssistantVisibleText,
@@ -325,7 +327,7 @@ function createScopedAuthProfileStore(
 }
 
 function buildTraceToolSummary(params: {
-  toolMetas?: Array<{ toolName: string; meta?: string }>;
+  toolMetas?: Array<{ toolName: string; meta?: string; asyncStarted?: boolean }>;
   hadFailure: boolean;
 }): ToolSummaryTrace | undefined {
   if (!params.toolMetas?.length) {
@@ -378,6 +380,7 @@ function backfillSessionKey(params: {
       : resolveSessionKeyForRequest({
           cfg: params.config,
           sessionId: params.sessionId,
+          clone: false,
         });
     return normalizeOptionalString(resolved.sessionKey);
   } catch (err) {
@@ -433,10 +436,15 @@ export async function runEmbeddedPiAgent(
       },
       laneTaskTimeoutMs,
     );
-  const enqueueGlobal = <T>(task: () => Promise<T>, opts?: CommandQueueEnqueueOptions) =>
-    params.enqueue
-      ? params.enqueue(task, withLaneTimeout(opts))
-      : enqueueCommandInLane(globalLane, task, withLaneTimeout(opts));
+  const enqueueGlobal = <T>(task: () => Promise<T>, opts?: CommandQueueEnqueueOptions) => {
+    const globalOpts: CommandQueueEnqueueOptions = {
+      ...opts,
+      priority: sessionQueuePriority,
+    };
+    return params.enqueue
+      ? params.enqueue(task, withLaneTimeout(globalOpts))
+      : enqueueCommandInLane(globalLane, task, withLaneTimeout(globalOpts));
+  };
   const enqueueSession = <T>(task: () => Promise<T>, opts?: CommandQueueEnqueueOptions) => {
     const sessionOpts: CommandQueueEnqueueOptions = { ...opts, priority: sessionQueuePriority };
     return params.enqueue
@@ -631,46 +639,68 @@ export async function runEmbeddedPiAgent(
         config: params.config,
         workspaceDir: resolvedWorkspace,
       });
-      const dynamicModelResolution = await resolveModelAsync(
-        provider,
-        modelId,
-        agentDir,
-        params.config,
-        {
-          // Plugin dynamic model hooks can resolve explicit model refs without
-          // first generating PI models.json. This keeps one-shot model runs from
-          // blocking on unrelated provider discovery.
-          skipPiDiscovery: true,
-          workspaceDir: resolvedWorkspace,
-        },
-      );
-      let modelResolution =
-        dynamicModelResolution.model || pluginHarnessOwnsTransport
-          ? dynamicModelResolution
-          : await (async () => {
-              await ensureOpenClawModelsJson(params.config, agentDir, {
-                workspaceDir: resolvedWorkspace,
-              });
-              return await resolveModelAsync(provider, modelId, agentDir, params.config, {
-                workspaceDir: resolvedWorkspace,
-              });
-            })();
-      if (selectedPiRuntimeProvider !== provider && modelResolution.model) {
-        const runtimeModelResolution = await resolveModelAsync(
-          selectedPiRuntimeProvider,
+      const modelResolutionProviders =
+        selectedPiRuntimeProvider !== provider ? [selectedPiRuntimeProvider, provider] : [provider];
+      let resolvedModelProvider = provider;
+      let firstModelResolution: Awaited<ReturnType<typeof resolveModelAsync>> | undefined;
+      let modelResolution: Awaited<ReturnType<typeof resolveModelAsync>> | undefined;
+      for (const candidateProvider of modelResolutionProviders) {
+        const candidateResolution = await resolveModelAsync(
+          candidateProvider,
           modelId,
           agentDir,
           params.config,
           {
+            // Plugin dynamic model hooks can resolve explicit model refs without
+            // first generating PI models.json. This keeps one-shot model runs from
+            // blocking on unrelated provider discovery.
             skipPiDiscovery: true,
             workspaceDir: resolvedWorkspace,
           },
         );
-        if (runtimeModelResolution.model) {
-          provider = selectedPiRuntimeProvider;
-          modelResolution = runtimeModelResolution;
+        firstModelResolution ??= candidateResolution;
+        if (candidateResolution.model) {
+          resolvedModelProvider = candidateProvider;
+          modelResolution = candidateResolution;
+          break;
         }
       }
+      if (!modelResolution && pluginHarnessOwnsTransport) {
+        modelResolution = firstModelResolution;
+      }
+      if (!modelResolution) {
+        await ensureOpenClawModelsJson(params.config, agentDir, {
+          workspaceDir: resolvedWorkspace,
+        });
+        for (const candidateProvider of modelResolutionProviders) {
+          const candidateResolution = await resolveModelAsync(
+            candidateProvider,
+            modelId,
+            agentDir,
+            params.config,
+            {
+              workspaceDir: resolvedWorkspace,
+            },
+          );
+          firstModelResolution ??= candidateResolution;
+          if (candidateResolution.model) {
+            resolvedModelProvider = candidateProvider;
+            modelResolution = candidateResolution;
+            break;
+          }
+        }
+      }
+      modelResolution ??= firstModelResolution;
+      if (!modelResolution) {
+        throw new FailoverError(`Unknown model: ${provider}/${modelId}`, {
+          reason: "model_not_found",
+          provider,
+          model: modelId,
+          sessionId: params.sessionId,
+          lane: globalLane,
+        });
+      }
+      provider = resolvedModelProvider;
       const { model, error, authStorage, modelRegistry } = modelResolution;
       if (!model) {
         throw new FailoverError(error ?? `Unknown model: ${provider}/${modelId}`, {
@@ -702,6 +732,37 @@ export async function runEmbeddedPiAgent(
         pluginHarnessOwnsTransport &&
         provider === OPENAI_CODEX_PROVIDER_ID &&
         effectiveModel.api === "openai-codex-responses";
+      let piExternalCliAuthScope = pluginHarnessOwnsTransport
+        ? { ignoreAutoPreferredProfile: false }
+        : resolveExternalCliAuthOverlayScopeFromSelection({
+            provider,
+            cfg: params.config,
+            agentId: params.agentId,
+            modelId,
+            workspaceDir: resolvedWorkspace,
+            userLockedAuthProfileId:
+              params.authProfileIdSource === "user" ? params.authProfileId : undefined,
+          });
+      let noExternalAuthStore: AuthProfileStore | undefined;
+      if (
+        !pluginHarnessOwnsTransport &&
+        !pluginHarnessNeedsOpenClawAuthBootstrap &&
+        !piExternalCliAuthScope.providerIds
+      ) {
+        noExternalAuthStore = ensureAuthProfileStoreWithoutExternalProfiles(agentDir, {
+          allowKeychainPrompt: false,
+        });
+        piExternalCliAuthScope = resolveExternalCliAuthOverlayScopeFromSelection({
+          provider,
+          cfg: params.config,
+          agentId: params.agentId,
+          modelId,
+          workspaceDir: resolvedWorkspace,
+          store: noExternalAuthStore,
+          userLockedAuthProfileId:
+            params.authProfileIdSource === "user" ? params.authProfileId : undefined,
+        });
+      }
       const authStore =
         pluginHarnessOwnsTransport && !pluginHarnessNeedsOpenClawAuthBootstrap
           ? createEmptyAuthProfileStore()
@@ -710,9 +771,15 @@ export async function runEmbeddedPiAgent(
                 externalCliProviderIds: [OPENAI_CODEX_PROVIDER_ID],
                 allowKeychainPrompt: false,
               })
-            : ensureAuthProfileStoreWithoutExternalProfiles(agentDir, {
-                allowKeychainPrompt: false,
-              });
+            : piExternalCliAuthScope.providerIds
+              ? ensureAuthProfileStore(agentDir, {
+                  externalCliProviderIds: piExternalCliAuthScope.providerIds,
+                  allowKeychainPrompt: false,
+                })
+              : (noExternalAuthStore ??
+                ensureAuthProfileStoreWithoutExternalProfiles(agentDir, {
+                  allowKeychainPrompt: false,
+                }));
       const attemptAuthProfileStore =
         pluginHarnessOwnsTransport && !pluginHarnessNeedsOpenClawAuthBootstrap
           ? ensureAuthProfileStoreWithoutExternalProfiles(agentDir, {
@@ -782,7 +849,9 @@ export async function runEmbeddedPiAgent(
         pluginHarnessProfileOrder[0];
       const preferredProfileId = pluginHarnessOwnsTransport
         ? resolvePluginHarnessPreferredProfileId()
-        : requestedProfileId;
+        : piExternalCliAuthScope.ignoreAutoPreferredProfile && !requestedProfileIsUserLocked
+          ? undefined
+          : requestedProfileId;
       let lockedProfileId = requestedProfileIsUserLocked ? preferredProfileId : undefined;
       if (lockedProfileId) {
         if (pluginHarnessOwnsTransport) {
@@ -1030,6 +1099,7 @@ export async function runEmbeddedPiAgent(
       let lastRunPromptUsage: ReturnType<typeof normalizeUsage> | undefined;
       let autoCompactionCount = 0;
       let lastCompactionTokensAfter: number | undefined;
+      let lastContextBudgetStatus: EmbeddedPiAgentMeta["contextBudgetStatus"];
       let runLoopIterations = 0;
       let overloadProfileRotations = 0;
       let planningOnlyRetryAttempts = 0;
@@ -1102,6 +1172,7 @@ export async function runEmbeddedPiAgent(
         if (params.currentMessageId !== undefined) {
           lastPersistedCurrentMessageId = params.currentMessageId;
         }
+        params.userTurnTranscriptRecorder?.markRuntimePersisted(message);
         params.onUserMessagePersisted?.(message);
       };
       const continueFromCurrentTranscript = () => {
@@ -1144,6 +1215,11 @@ export async function runEmbeddedPiAgent(
       }) => {
         const { profileId, reason } = failure;
         if (!profileId || !reason) {
+          return;
+        }
+        if (pluginHarnessOwnsTransport && reason === "timeout") {
+          // Harness-owned transport timeouts are lifecycle failures, not
+          // credential evidence. Do not poison OpenClaw auth cooldowns.
           return;
         }
         await markAuthProfileFailure({
@@ -1397,6 +1473,7 @@ export async function runEmbeddedPiAgent(
           const rawAttempt = await runEmbeddedAttemptWithBackend({
             sessionId: activeSessionId,
             sessionKey: resolvedSessionKey,
+            promptCacheKey: params.promptCacheKey,
             sandboxSessionKey: params.sandboxSessionKey,
             trigger: params.trigger,
             memoryFlushWritePath: params.memoryFlushWritePath,
@@ -1431,6 +1508,7 @@ export async function runEmbeddedPiAgent(
             skillsSnapshot: params.skillsSnapshot,
             prompt,
             transcriptPrompt: params.transcriptPrompt,
+            userTurnTranscriptRecorder: params.userTurnTranscriptRecorder,
             currentInboundEventKind: params.currentInboundEventKind,
             currentInboundContext: params.currentInboundContext,
             images: params.images,
@@ -1640,10 +1718,21 @@ export async function runEmbeddedPiAgent(
           ) {
             lastCompactionTokensAfter = Math.floor(attempt.compactionTokensAfter);
           }
+          if (attempt.contextBudgetStatus) {
+            lastContextBudgetStatus = attempt.contextBudgetStatus;
+          }
+          const sessionAssistantForCandidate =
+            !currentAttemptAssistant &&
+            !isAssistantForModelRef(sessionLastAssistant, {
+              provider,
+              model: modelId,
+            })
+              ? undefined
+              : sessionLastAssistant;
           const activeErrorContext = resolveActiveErrorContext({
             provider,
             model: modelId,
-            assistant: currentAttemptAssistant ?? sessionLastAssistant,
+            assistant: currentAttemptAssistant ?? sessionAssistantForCandidate,
           });
           const resolveReplayInvalidForAttempt = (incompleteTurnText?: string | null) =>
             accumulatedReplayState.replayInvalid ||
@@ -1658,8 +1747,8 @@ export async function runEmbeddedPiAgent(
             accumulatedReplayState,
             attempt.replayMetadata,
           );
-          const formattedAssistantErrorText = sessionLastAssistant
-            ? formatAssistantErrorText(sessionLastAssistant, {
+          const formattedAssistantErrorText = sessionAssistantForCandidate
+            ? formatAssistantErrorText(sessionAssistantForCandidate, {
                 cfg: params.config,
                 sessionKey: resolvedSessionKey ?? params.sessionId,
                 provider: activeErrorContext.provider,
@@ -1667,8 +1756,8 @@ export async function runEmbeddedPiAgent(
               })
             : undefined;
           const assistantErrorText =
-            sessionLastAssistant?.stopReason === "error"
-              ? sessionLastAssistant.errorMessage?.trim() || formattedAssistantErrorText
+            sessionAssistantForCandidate?.stopReason === "error"
+              ? sessionAssistantForCandidate.errorMessage?.trim() || formattedAssistantErrorText
               : undefined;
           const canRestartForLiveSwitch =
             !hasOutboundDeliveryEvidence(attempt) &&
@@ -1871,12 +1960,20 @@ export async function runEmbeddedPiAgent(
             const errorText = contextOverflowError.text;
             const msgCount = attempt.messagesSnapshot?.length ?? 0;
             const observedOverflowTokens = extractObservedOverflowTokenCount(errorText);
+            const overflowTokenCountForCompaction =
+              observedOverflowTokens ??
+              (ctxInfo.tokens > 0
+                ? // Confirmed overflow with an unparseable provider message still carries a
+                  // minimally over-budget count for compaction engines and diagnostics.
+                  ctxInfo.tokens + 1
+                : undefined);
             log.warn(
               `[context-overflow-diag] sessionKey=${params.sessionKey ?? params.sessionId} ` +
                 `provider=${provider}/${modelId} source=${contextOverflowError.source} ` +
                 `messages=${msgCount} sessionFile=${activeSessionFile} ` +
                 `diagId=${overflowDiagId} compactionAttempts=${overflowCompactionAttempts} ` +
                 `observedTokens=${observedOverflowTokens ?? "unknown"} ` +
+                `compactionTokens=${overflowTokenCountForCompaction ?? "unknown"} ` +
                 `error=${errorText.slice(0, 200)}`,
             );
             const isCompactionFailure = isCompactionFailureError(errorText);
@@ -1960,8 +2057,8 @@ export async function runEmbeddedPiAgent(
                   ...(attempt.promptCache ? { promptCache: attempt.promptCache } : {}),
                   runId: params.runId,
                   trigger: "overflow",
-                  ...(observedOverflowTokens !== undefined
-                    ? { currentTokenCount: observedOverflowTokens }
+                  ...(overflowTokenCountForCompaction !== undefined
+                    ? { currentTokenCount: overflowTokenCountForCompaction }
                     : {}),
                   diagId: overflowDiagId,
                   attempt: overflowCompactionAttempts,
@@ -1979,8 +2076,8 @@ export async function runEmbeddedPiAgent(
                     sessionKey: params.sessionKey,
                     sessionFile: activeSessionFile,
                     tokenBudget: ctxInfo.tokens,
-                    ...(observedOverflowTokens !== undefined
-                      ? { currentTokenCount: observedOverflowTokens }
+                    ...(overflowTokenCountForCompaction !== undefined
+                      ? { currentTokenCount: overflowTokenCountForCompaction }
                       : {}),
                     force: true,
                     compactionTarget: "budget",
@@ -2123,6 +2220,13 @@ export async function runEmbeddedPiAgent(
               );
             }
             const kind = isCompactionFailure ? "compaction_failure" : "context_overflow";
+            const overflowRecoveryText =
+              "Context overflow: prompt too large for the model. " +
+              "Try /reset (or /new) to start a fresh session, or use a larger-context model.";
+            log.warn(
+              `[context-overflow-recovery] exhausted provider overflow recovery for ${provider}/${modelId}; ` +
+                `livenessState=blocked suggestedAction=reset_or_new kind=${kind}`,
+            );
             attempt.setTerminalLifecycleMeta?.({
               replayInvalid: resolveReplayInvalidForAttempt(),
               livenessState: "blocked",
@@ -2130,9 +2234,7 @@ export async function runEmbeddedPiAgent(
             return {
               payloads: [
                 {
-                  text:
-                    "Context overflow: prompt too large for the model. " +
-                    "Try /reset (or /new) to start a fresh session, or use a larger-context model.",
+                  text: overflowRecoveryText,
                   isError: true,
                 },
               ],
@@ -2150,6 +2252,8 @@ export async function runEmbeddedPiAgent(
                   lastTurnTotal,
                 }),
                 systemPromptReport: attempt.systemPromptReport,
+                finalAssistantVisibleText: overflowRecoveryText,
+                finalAssistantRawText: overflowRecoveryText,
                 finalPromptText: attempt.finalPromptText,
                 replayInvalid: resolveReplayInvalidForAttempt(),
                 livenessState: "blocked",
@@ -2360,6 +2464,7 @@ export async function runEmbeddedPiAgent(
               fallbackConfigured,
               failoverFailure: promptFailoverFailure,
               failoverReason: promptFailoverReason,
+              harnessOwnsTransport: pluginHarnessOwnsTransport,
               profileRotated: false,
             });
             if (
@@ -2398,6 +2503,7 @@ export async function runEmbeddedPiAgent(
                 fallbackConfigured,
                 failoverFailure: promptFailoverFailure,
                 failoverReason: promptFailoverReason,
+                harnessOwnsTransport: pluginHarnessOwnsTransport,
                 profileRotated: true,
               });
             }
@@ -2465,7 +2571,7 @@ export async function runEmbeddedPiAgent(
             throw promptError;
           }
 
-          const assistantForFailover = currentAttemptAssistant ?? sessionLastAssistant;
+          const assistantForFailover = currentAttemptAssistant ?? sessionAssistantForCandidate;
           const fallbackThinking = pickFallbackThinkingLevel({
             message: assistantForFailover?.errorMessage,
             attempted: attemptedThinking,
@@ -2564,6 +2670,7 @@ export async function runEmbeddedPiAgent(
             idleTimedOut,
             timedOutDuringCompaction,
             timedOutDuringToolExecution,
+            harnessOwnsTransport: pluginHarnessOwnsTransport,
             profileRotated: false,
           });
           const assistantFailoverOutcome = await handleAssistantFailover({
@@ -2676,6 +2783,7 @@ export async function runEmbeddedPiAgent(
             usage: usageMeta.usage,
             lastCallUsage: usageMeta.lastCallUsage,
             promptTokens: usageMeta.promptTokens,
+            ...(lastContextBudgetStatus ? { contextBudgetStatus: lastContextBudgetStatus } : {}),
             compactionCount: autoCompactionCount > 0 ? autoCompactionCount : undefined,
             compactionTokensAfter: lastCompactionTokensAfter,
           };

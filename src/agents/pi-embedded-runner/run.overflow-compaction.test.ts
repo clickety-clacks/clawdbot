@@ -20,8 +20,10 @@ import {
   mockedEvaluateContextWindowGuard,
   mockedEnsureAuthProfileStore,
   mockedEnsureAuthProfileStoreWithoutExternalProfiles,
+  mockedExtractObservedOverflowTokenCount,
   mockedGlobalHookRunner,
   mockedGetApiKeyForModel,
+  mockedIsLikelyContextOverflowError,
   mockedMarkAuthProfileSuccess,
   mockedPickFallbackThinkingLevel,
   mockedResolveAuthProfileOrder,
@@ -68,6 +70,14 @@ function makeForwardingCase(internalEvents: AgentInternalEvent[]) {
     params: Partial<RunEmbeddedPiAgentParams>;
     expected: Record<string, unknown>;
   };
+}
+
+function codexHarnessSupportsKnownProviders(
+  ctx: Parameters<AgentHarness["supports"]>[0],
+): ReturnType<AgentHarness["supports"]> {
+  return ctx.provider === "codex" || ctx.provider === "openai" || ctx.provider === "openai-codex"
+    ? { supported: true, priority: 100 }
+    : { supported: false };
 }
 
 function makeForwardedRuntimePlan(overrides: RuntimePlanOverrides = {}): AgentRuntimePlan {
@@ -271,6 +281,345 @@ describe("runEmbeddedPiAgent overflow compaction trigger routing", () => {
     expect(authStoreOptions).toEqual({ allowKeychainPrompt: false });
   });
 
+  it("loads the external Claude CLI auth overlay for PI runs routed by Claude CLI OAuth", async () => {
+    const claudeAuthStore = {
+      version: 1 as const,
+      profiles: {
+        "anthropic:claude-cli": {
+          type: "oauth" as const,
+          provider: "claude-cli",
+          access: "access-token",
+          refresh: "refresh-token",
+          expires: Date.now() + 60_000,
+        },
+      },
+    };
+    mockedEnsureAuthProfileStore.mockReturnValueOnce(claudeAuthStore);
+    mockedResolveAuthProfileOrder.mockReturnValueOnce(["anthropic:claude-cli"]);
+    mockedRunEmbeddedAttempt.mockResolvedValueOnce(makeAttemptResult({ promptError: null }));
+
+    await runEmbeddedPiAgent({
+      ...overflowBaseRunParams,
+      provider: "anthropic",
+      model: "test-model",
+      config: {
+        auth: {
+          order: { anthropic: ["anthropic:claude-cli"] },
+          profiles: {
+            "anthropic:claude-cli": { provider: "claude-cli", mode: "oauth" },
+          },
+        },
+      },
+      runId: "pi-claude-cli-oauth-auth-overlay",
+    });
+
+    expect(mockedEnsureAuthProfileStore).toHaveBeenCalledTimes(1);
+    expectRecordFields(mockCallArg(mockedEnsureAuthProfileStore, 0, 1), {
+      externalCliProviderIds: ["claude-cli"],
+      allowKeychainPrompt: false,
+    });
+    expect(mockedEnsureAuthProfileStoreWithoutExternalProfiles).not.toHaveBeenCalled();
+    expectMockCallFields(mockedResolveAuthProfileOrder, {
+      provider: "anthropic",
+      store: claudeAuthStore,
+    });
+    expectMockCallFields(mockedGetApiKeyForModel, {
+      profileId: "anthropic:claude-cli",
+    });
+    expectMockCallFields(mockedRunEmbeddedAttempt, {
+      authProfileId: "anthropic:claude-cli",
+      authProfileIdSource: "auto",
+    });
+  });
+
+  it("loads the Claude CLI auth overlay when explicit PI runtime uses Claude CLI OAuth", async () => {
+    const claudeAuthStore = {
+      version: 1 as const,
+      profiles: {
+        "anthropic:claude-cli": {
+          type: "oauth" as const,
+          provider: "claude-cli",
+          access: "access-token",
+          refresh: "refresh-token",
+          expires: Date.now() + 60_000,
+        },
+      },
+    };
+    mockedEnsureAuthProfileStore.mockReturnValueOnce(claudeAuthStore);
+    mockedResolveAuthProfileOrder.mockReturnValueOnce(["anthropic:claude-cli"]);
+    mockedRunEmbeddedAttempt.mockResolvedValueOnce(makeAttemptResult({ promptError: null }));
+
+    await runEmbeddedPiAgent({
+      ...overflowBaseRunParams,
+      provider: "anthropic",
+      model: "test-model",
+      config: {
+        auth: {
+          order: { anthropic: ["anthropic:claude-cli"] },
+          profiles: {
+            "anthropic:claude-cli": { provider: "claude-cli", mode: "oauth" },
+          },
+        },
+        agents: {
+          defaults: {
+            models: {
+              "anthropic/test-model": { agentRuntime: { id: "pi" } },
+            },
+          },
+        },
+      },
+      runId: "pi-explicit-runtime-claude-cli-oauth-overlay",
+    });
+
+    expect(mockedEnsureAuthProfileStore).toHaveBeenCalledTimes(1);
+    expectRecordFields(mockCallArg(mockedEnsureAuthProfileStore, 0, 1), {
+      externalCliProviderIds: ["claude-cli"],
+      allowKeychainPrompt: false,
+    });
+    expect(mockedEnsureAuthProfileStoreWithoutExternalProfiles).not.toHaveBeenCalled();
+    expectMockCallFields(mockedGetApiKeyForModel, {
+      profileId: "anthropic:claude-cli",
+    });
+  });
+
+  it("does not let an auto-selected stale Anthropic profile suppress Claude CLI auth overlay", async () => {
+    const claudeAuthStore = {
+      version: 1 as const,
+      profiles: {
+        "anthropic:api": {
+          type: "api_key" as const,
+          provider: "anthropic",
+          key: "static-key",
+        },
+        "anthropic:claude-cli": {
+          type: "oauth" as const,
+          provider: "claude-cli",
+          access: "access-token",
+          refresh: "refresh-token",
+          expires: Date.now() + 60_000,
+        },
+      },
+    };
+    mockedEnsureAuthProfileStore.mockReturnValueOnce(claudeAuthStore);
+    mockedResolveAuthProfileOrder.mockReturnValueOnce(["anthropic:claude-cli", "anthropic:api"]);
+    mockedRunEmbeddedAttempt.mockResolvedValueOnce(makeAttemptResult({ promptError: null }));
+
+    await runEmbeddedPiAgent({
+      ...overflowBaseRunParams,
+      provider: "anthropic",
+      model: "test-model",
+      config: {
+        auth: {
+          order: { anthropic: ["anthropic:claude-cli"] },
+          profiles: {
+            "anthropic:api": { provider: "anthropic", mode: "api_key" },
+            "anthropic:claude-cli": { provider: "claude-cli", mode: "oauth" },
+          },
+        },
+      },
+      authProfileId: "anthropic:api",
+      authProfileIdSource: "auto",
+      runId: "pi-auto-profile-does-not-suppress-claude-cli-overlay",
+    });
+
+    expect(mockedEnsureAuthProfileStore).toHaveBeenCalledTimes(1);
+    expectRecordFields(mockCallArg(mockedEnsureAuthProfileStore, 0, 1), {
+      externalCliProviderIds: ["claude-cli"],
+      allowKeychainPrompt: false,
+    });
+    expect(mockedEnsureAuthProfileStoreWithoutExternalProfiles).not.toHaveBeenCalled();
+    expectMockCallFields(mockedResolveAuthProfileOrder, {
+      preferredProfile: undefined,
+    });
+    expectMockCallFields(mockedGetApiKeyForModel, {
+      profileId: "anthropic:claude-cli",
+    });
+    expectMockCallFields(mockedRunEmbeddedAttempt, {
+      authProfileId: "anthropic:claude-cli",
+      authProfileIdSource: "auto",
+    });
+  });
+
+  it("does not let an auto-selected stale profile suppress runtime-selected Claude CLI auth overlay", async () => {
+    const claudeAuthStore = {
+      version: 1 as const,
+      profiles: {
+        "anthropic:api": {
+          type: "api_key" as const,
+          provider: "anthropic",
+          key: "static-key",
+        },
+        "anthropic:claude-cli": {
+          type: "oauth" as const,
+          provider: "claude-cli",
+          access: "access-token",
+          refresh: "refresh-token",
+          expires: Date.now() + 60_000,
+        },
+      },
+    };
+    mockedEnsureAuthProfileStore.mockReturnValueOnce(claudeAuthStore);
+    mockedResolveAuthProfileOrder.mockReturnValueOnce(["anthropic:claude-cli", "anthropic:api"]);
+    mockedRunEmbeddedAttempt.mockResolvedValueOnce(makeAttemptResult({ promptError: null }));
+
+    await runEmbeddedPiAgent({
+      ...overflowBaseRunParams,
+      provider: "anthropic",
+      model: "test-model",
+      config: {
+        auth: {
+          profiles: {
+            "anthropic:api": { provider: "anthropic", mode: "api_key" },
+            "anthropic:claude-cli": { provider: "claude-cli", mode: "oauth" },
+          },
+        },
+        agents: {
+          defaults: {
+            models: {
+              "anthropic/test-model": { agentRuntime: { id: "claude-cli" } },
+            },
+          },
+        },
+      },
+      authProfileId: "anthropic:api",
+      authProfileIdSource: "auto",
+      runId: "pi-auto-profile-does-not-suppress-runtime-claude-cli-overlay",
+    });
+
+    expect(mockedEnsureAuthProfileStore).toHaveBeenCalledTimes(1);
+    expectRecordFields(mockCallArg(mockedEnsureAuthProfileStore, 0, 1), {
+      externalCliProviderIds: ["claude-cli"],
+      allowKeychainPrompt: false,
+    });
+    expect(mockedEnsureAuthProfileStoreWithoutExternalProfiles).not.toHaveBeenCalled();
+    expectMockCallFields(mockedResolveAuthProfileOrder, {
+      preferredProfile: undefined,
+    });
+    expectMockCallFields(mockedGetApiKeyForModel, {
+      profileId: "anthropic:claude-cli",
+    });
+    expectMockCallFields(mockedRunEmbeddedAttempt, {
+      authProfileId: "anthropic:claude-cli",
+      authProfileIdSource: "auto",
+    });
+  });
+
+  it("loads the Claude CLI auth overlay for ordered fallback profiles after direct Anthropic auth", async () => {
+    const authStore = {
+      version: 1 as const,
+      profiles: {
+        "anthropic:api": {
+          type: "api_key" as const,
+          provider: "anthropic",
+          key: "static-key",
+        },
+        "anthropic:claude-cli": {
+          type: "oauth" as const,
+          provider: "claude-cli",
+          access: "access-token",
+          refresh: "refresh-token",
+          expires: Date.now() + 60_000,
+        },
+      },
+    };
+    mockedEnsureAuthProfileStore.mockReturnValueOnce(authStore);
+    mockedResolveAuthProfileOrder.mockReturnValueOnce(["anthropic:api", "anthropic:claude-cli"]);
+    mockedRunEmbeddedAttempt.mockResolvedValueOnce(makeAttemptResult({ promptError: null }));
+
+    await runEmbeddedPiAgent({
+      ...overflowBaseRunParams,
+      provider: "anthropic",
+      model: "test-model",
+      config: {
+        auth: {
+          order: { anthropic: ["anthropic:api", "anthropic:claude-cli"] },
+          profiles: {
+            "anthropic:api": { provider: "anthropic", mode: "api_key" },
+            "anthropic:claude-cli": { provider: "claude-cli", mode: "oauth" },
+          },
+        },
+      },
+      runId: "pi-direct-anthropic-with-claude-cli-fallback-overlay",
+    });
+
+    expect(mockedEnsureAuthProfileStore).toHaveBeenCalledTimes(1);
+    expectRecordFields(mockCallArg(mockedEnsureAuthProfileStore, 0, 1), {
+      externalCliProviderIds: ["claude-cli"],
+      allowKeychainPrompt: false,
+    });
+    expect(mockedEnsureAuthProfileStoreWithoutExternalProfiles).not.toHaveBeenCalled();
+    expectMockCallFields(mockedGetApiKeyForModel, {
+      profileId: "anthropic:api",
+    });
+  });
+
+  it("loads the Claude CLI auth overlay from persisted auth-store order", async () => {
+    const staticAuthStore = {
+      version: 1 as const,
+      profiles: {},
+      order: { anthropic: ["anthropic:claude-cli"] },
+    };
+    const claudeAuthStore = {
+      version: 1 as const,
+      profiles: {
+        "anthropic:claude-cli": {
+          type: "oauth" as const,
+          provider: "claude-cli",
+          access: "access-token",
+          refresh: "refresh-token",
+          expires: Date.now() + 60_000,
+        },
+      },
+    };
+    mockedEnsureAuthProfileStoreWithoutExternalProfiles.mockReturnValueOnce(staticAuthStore);
+    mockedEnsureAuthProfileStore.mockReturnValueOnce(claudeAuthStore);
+    mockedResolveAuthProfileOrder.mockReturnValueOnce(["anthropic:claude-cli"]);
+    mockedRunEmbeddedAttempt.mockResolvedValueOnce(makeAttemptResult({ promptError: null }));
+
+    await runEmbeddedPiAgent({
+      ...overflowBaseRunParams,
+      provider: "anthropic",
+      model: "test-model",
+      runId: "pi-store-order-claude-cli-oauth-overlay",
+    });
+
+    expect(mockedEnsureAuthProfileStoreWithoutExternalProfiles).toHaveBeenCalledTimes(1);
+    expect(mockedEnsureAuthProfileStore).toHaveBeenCalledTimes(1);
+    expectRecordFields(mockCallArg(mockedEnsureAuthProfileStore, 0, 1), {
+      externalCliProviderIds: ["claude-cli"],
+      allowKeychainPrompt: false,
+    });
+    expectMockCallFields(mockedGetApiKeyForModel, {
+      profileId: "anthropic:claude-cli",
+    });
+  });
+
+  it("keeps static Anthropic PI auth on the no-external auth profile store", async () => {
+    mockedRunEmbeddedAttempt.mockResolvedValueOnce(makeAttemptResult({ promptError: null }));
+
+    await runEmbeddedPiAgent({
+      ...overflowBaseRunParams,
+      provider: "anthropic",
+      model: "test-model",
+      config: {
+        auth: {
+          order: { anthropic: ["anthropic:api"] },
+          profiles: {
+            "anthropic:api": { provider: "anthropic", mode: "api_key" },
+            "anthropic:claude-cli": { provider: "claude-cli", mode: "oauth" },
+          },
+        },
+      },
+      runId: "pi-static-anthropic-auth-no-external-overlay",
+    });
+
+    expect(mockedEnsureAuthProfileStore).not.toHaveBeenCalled();
+    expect(mockedEnsureAuthProfileStoreWithoutExternalProfiles).toHaveBeenCalledTimes(1);
+    expectRecordFields(mockCallArg(mockedEnsureAuthProfileStoreWithoutExternalProfiles, 0, 1), {
+      allowKeychainPrompt: false,
+    });
+  });
+
   it("keeps non-Codex plugin harnesses on the lightweight auth profile store", async () => {
     const { clearAgentHarnesses, registerAgentHarness } = await import("../harness/registry.js");
     const pluginRunAttempt = vi.fn<AgentHarness["runAttempt"]>(async () =>
@@ -414,8 +763,7 @@ describe("runEmbeddedPiAgent overflow compaction trigger routing", () => {
     registerAgentHarness({
       id: "codex",
       label: "Codex",
-      supports: (ctx) =>
-        ctx.provider === "codex" ? { supported: true, priority: 100 } : { supported: false },
+      supports: codexHarnessSupportsKnownProviders,
       runAttempt: pluginRunAttempt,
     });
     mockedBuildAgentRuntimePlan.mockReturnValueOnce(runtimePlan);
@@ -528,7 +876,7 @@ describe("runEmbeddedPiAgent overflow compaction trigger routing", () => {
     registerAgentHarness({
       id: "codex",
       label: "Codex",
-      supports: () => ({ supported: false }),
+      supports: codexHarnessSupportsKnownProviders,
       runAttempt: pluginRunAttempt,
     });
     mockedBuildAgentRuntimePlan.mockReturnValueOnce(runtimePlan);
@@ -622,33 +970,21 @@ describe("runEmbeddedPiAgent overflow compaction trigger routing", () => {
     registerAgentHarness({
       id: "codex",
       label: "Codex",
-      supports: () => ({ supported: false }),
+      supports: codexHarnessSupportsKnownProviders,
       runAttempt: pluginRunAttempt,
     });
     mockedEnsureAuthProfileStoreWithoutExternalProfiles.mockReturnValueOnce(codexAuthStore);
-    mockedResolveModelAsync
-      .mockResolvedValueOnce({
-        model: {
-          id: "gpt-5.5",
-          provider: "openai",
-          contextWindow: 200000,
-          api: "openai-responses",
-        },
-        error: null,
-        authStorage: { setRuntimeApiKey: vi.fn() },
-        modelRegistry: {},
-      })
-      .mockResolvedValueOnce({
-        model: {
-          id: "gpt-5.5",
-          provider: "openai-codex",
-          contextWindow: 200000,
-          api: "openai-codex-responses",
-        },
-        error: null,
-        authStorage: codexAuthStorage,
-        modelRegistry: {},
-      });
+    mockedResolveModelAsync.mockResolvedValueOnce({
+      model: {
+        id: "gpt-5.5",
+        provider: "openai-codex",
+        contextWindow: 200000,
+        api: "openai-codex-responses",
+      },
+      error: null,
+      authStorage: codexAuthStorage,
+      modelRegistry: {},
+    });
     mockedBuildAgentRuntimePlan.mockReturnValueOnce(runtimePlan);
 
     try {
@@ -736,7 +1072,7 @@ describe("runEmbeddedPiAgent overflow compaction trigger routing", () => {
     registerAgentHarness({
       id: "codex",
       label: "Codex",
-      supports: () => ({ supported: false }),
+      supports: codexHarnessSupportsKnownProviders,
       runAttempt: pluginRunAttempt,
     });
     mockedEnsureAuthProfileStore.mockReturnValueOnce(codexAuthStore);
@@ -753,29 +1089,17 @@ describe("runEmbeddedPiAgent overflow compaction trigger routing", () => {
         ? ["openai-codex:default"]
         : [];
     });
-    mockedResolveModelAsync
-      .mockResolvedValueOnce({
-        model: {
-          id: "gpt-5.5",
-          provider: "openai",
-          contextWindow: 200000,
-          api: "openai-responses",
-        },
-        error: null,
-        authStorage: { setRuntimeApiKey: vi.fn() },
-        modelRegistry: {},
-      })
-      .mockResolvedValueOnce({
-        model: {
-          id: "gpt-5.5",
-          provider: "openai-codex",
-          contextWindow: 200000,
-          api: "openai-codex-responses",
-        },
-        error: null,
-        authStorage: codexAuthStorage,
-        modelRegistry: {},
-      });
+    mockedResolveModelAsync.mockResolvedValueOnce({
+      model: {
+        id: "gpt-5.5",
+        provider: "openai-codex",
+        contextWindow: 200000,
+        api: "openai-codex-responses",
+      },
+      error: null,
+      authStorage: codexAuthStorage,
+      modelRegistry: {},
+    });
     mockedBuildAgentRuntimePlan.mockReturnValueOnce(runtimePlan);
     mockedGetApiKeyForModel.mockImplementation(
       async ({ profileId }: { profileId?: string } = {}) => {
@@ -927,34 +1251,22 @@ describe("runEmbeddedPiAgent overflow compaction trigger routing", () => {
     registerAgentHarness({
       id: "codex",
       label: "Codex",
-      supports: () => ({ supported: false }),
+      supports: codexHarnessSupportsKnownProviders,
       runAttempt: pluginRunAttempt,
     });
     mockedEnsureAuthProfileStore.mockReturnValueOnce(codexAuthStore);
     mockedResolveAuthProfileOrder.mockReturnValueOnce(["openai-codex:sub", "openai-codex:backup"]);
-    mockedResolveModelAsync
-      .mockResolvedValueOnce({
-        model: {
-          id: "gpt-5.5",
-          provider: "openai",
-          contextWindow: 200000,
-          api: "openai-responses",
-        },
-        error: null,
-        authStorage: { setRuntimeApiKey: vi.fn() },
-        modelRegistry: {},
-      })
-      .mockResolvedValueOnce({
-        model: {
-          id: "gpt-5.5",
-          provider: "openai-codex",
-          contextWindow: 200000,
-          api: "openai-codex-responses",
-        },
-        error: null,
-        authStorage: codexAuthStorage,
-        modelRegistry: {},
-      });
+    mockedResolveModelAsync.mockResolvedValueOnce({
+      model: {
+        id: "gpt-5.5",
+        provider: "openai-codex",
+        contextWindow: 200000,
+        api: "openai-codex-responses",
+      },
+      error: null,
+      authStorage: codexAuthStorage,
+      modelRegistry: {},
+    });
     mockedBuildAgentRuntimePlan
       .mockReturnValueOnce(firstRuntimePlan)
       .mockReturnValueOnce(secondRuntimePlan);
@@ -1041,7 +1353,7 @@ describe("runEmbeddedPiAgent overflow compaction trigger routing", () => {
     registerAgentHarness({
       id: "codex",
       label: "Codex",
-      supports: () => ({ supported: false }),
+      supports: codexHarnessSupportsKnownProviders,
       runAttempt: pluginRunAttempt,
     });
     mockedBuildAgentRuntimePlan.mockReturnValueOnce(runtimePlan);
@@ -1112,7 +1424,7 @@ describe("runEmbeddedPiAgent overflow compaction trigger routing", () => {
     registerAgentHarness({
       id: "codex",
       label: "Codex",
-      supports: () => ({ supported: false }),
+      supports: codexHarnessSupportsKnownProviders,
       runAttempt: pluginRunAttempt,
     });
     mockedBuildAgentRuntimePlan.mockReturnValueOnce(runtimePlan);
@@ -1185,7 +1497,7 @@ describe("runEmbeddedPiAgent overflow compaction trigger routing", () => {
     registerAgentHarness({
       id: "codex",
       label: "Codex",
-      supports: () => ({ supported: false }),
+      supports: codexHarnessSupportsKnownProviders,
       runAttempt: pluginRunAttempt,
     });
     mockedBuildAgentRuntimePlan.mockReturnValueOnce(runtimePlan);
@@ -1305,7 +1617,7 @@ describe("runEmbeddedPiAgent overflow compaction trigger routing", () => {
     registerAgentHarness({
       id: "codex",
       label: "Codex",
-      supports: () => ({ supported: false }),
+      supports: codexHarnessSupportsKnownProviders,
       runAttempt: pluginRunAttempt,
     });
     mockedBuildAgentRuntimePlan
@@ -1509,6 +1821,70 @@ describe("runEmbeddedPiAgent overflow compaction trigger routing", () => {
       currentTokenCount: 277403,
     });
     expect(result.meta.error).toBeUndefined();
+  });
+
+  it("passes minimally over-budget count when overflow text is confirmed but unparseable", async () => {
+    mockedExtractObservedOverflowTokenCount.mockReturnValueOnce(undefined);
+    mockedRunEmbeddedAttempt
+      .mockResolvedValueOnce(
+        makeAttemptResult({
+          lastAssistant: {
+            role: "assistant",
+            content: [],
+            stopReason: "error",
+            errorMessage: "Context window exceeded for this request.",
+            usage: { totalTokens: 0 },
+          } as never,
+        }),
+      )
+      .mockResolvedValueOnce(makeAttemptResult({ promptError: null }));
+    mockedCompactDirect.mockResolvedValueOnce(
+      makeCompactionSuccess({
+        summary: "Compacted session",
+        firstKeptEntryId: "entry-9",
+        tokensBefore: 200001,
+      }),
+    );
+
+    const result = await runEmbeddedPiAgent(overflowBaseRunParams);
+
+    expectMockCallFields(mockedCompactDirect, {
+      currentTokenCount: 200001,
+    });
+    expect(result.meta.error).toBeUndefined();
+  });
+
+  it("surfaces a visible blocked payload for Codex promptError overflow without assistant text", async () => {
+    const promptError = new Error(
+      "Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying.",
+    );
+    const terminalLifecycleMeta: Array<Record<string, unknown>> = [];
+    mockedRunEmbeddedAttempt.mockResolvedValueOnce(
+      makeAttemptResult({
+        promptError,
+        promptErrorSource: "prompt",
+        assistantTexts: [],
+        attemptUsage: { input: 0, output: 0, total: 0 },
+        setTerminalLifecycleMeta: (meta) => {
+          terminalLifecycleMeta.push(meta);
+        },
+      }),
+    );
+
+    const result = await runEmbeddedPiAgent(overflowBaseRunParams);
+
+    expect(mockedIsLikelyContextOverflowError).toHaveBeenCalledWith(promptError.message);
+    expect(mockedCompactDirect).toHaveBeenCalledTimes(1);
+    expect(result.payloads?.[0]).toMatchObject({
+      isError: true,
+      text: expect.stringContaining("Context overflow"),
+    });
+    expect(result.payloads?.[0]?.text).toContain("/reset");
+    expect(result.payloads?.[0]?.text).toContain("/new");
+    expect(result.meta.error?.kind).toBe("context_overflow");
+    expect(result.meta.livenessState).toBe("blocked");
+    expect(result.meta.finalAssistantVisibleText).toBe(result.payloads?.[0]?.text);
+    expect(terminalLifecycleMeta.at(-1)).toMatchObject({ livenessState: "blocked" });
   });
 
   it("does not reset compaction attempt budget after successful tool-result truncation", async () => {

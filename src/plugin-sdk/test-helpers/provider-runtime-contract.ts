@@ -156,7 +156,7 @@ export function describeAnthropicProviderRuntimeContract(
         modelId: "claude-sonnet-4.6-20260219",
         modelRegistry: {
           find: (_provider: string, id: string) =>
-            id === "claude-sonnet-4.5-20260219"
+            id === "claude-sonnet-4-6-20260219"
               ? createModel({
                   id,
                   api: "anthropic-messages",
@@ -295,7 +295,7 @@ export function describeGithubCopilotProviderRuntimeContract(
         expectFields(model, {
           id: "gpt-5.4",
           provider: "github-copilot",
-          api: "openai-codex-responses",
+          api: "openai-responses",
         });
       });
     },
@@ -468,7 +468,7 @@ export function describeOpenAIProviderRuntimeContract(load: ProviderRuntimeContr
       });
     });
 
-    it("leaves openai gpt-5.5 forward-compat resolution to Pi", () => {
+    it("owns openai gpt-5.5 forward-compat resolution", () => {
       const provider = requireProviderContractProvider("openai");
       const model = provider.resolveDynamicModel?.({
         provider: "openai",
@@ -486,7 +486,18 @@ export function describeOpenAIProviderRuntimeContract(load: ProviderRuntimeContr
         } as never,
       });
 
-      expect(model).toBeUndefined();
+      expectFields(model, {
+        id: "gpt-5.5",
+        provider: "openai",
+        api: "openai-responses",
+        baseUrl: "https://api.openai.com/v1",
+        contextWindow: 1_000_000,
+        contextTokens: 272_000,
+        maxTokens: 128_000,
+        mediaInput: {
+          image: { maxSidePx: 6000, preferredSidePx: 2048, tokenMode: "detail" },
+        },
+      });
     });
 
     it("owns openai gpt-5.4 mini forward-compat resolution", () => {

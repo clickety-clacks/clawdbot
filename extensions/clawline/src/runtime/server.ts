@@ -8458,6 +8458,8 @@ button.deny { background: #9b1c31; color: white; }
           title: "Agent run failed",
         }),
       replyOptions: {
+        suppressDefaultToolProgressMessages: true,
+        allowProgressCallbacksWhenSourceDeliverySuppressed: true,
         onToolStart: async (payload: {
           name?: string;
           phase?: string;

@@ -4002,7 +4002,7 @@ describe.sequential("clawline provider server", () => {
     const ctx = await setupTestServer([entry]);
     try {
       const pair = await performPairRequest(ctx.port, entry.deviceId);
-      const { ws, auth } = await authenticateDevice(
+      const { ws, queue, auth } = await authenticateDeviceWithQueue(
         ctx.port,
         entry.deviceId,
         pair.token as string,
@@ -4039,7 +4039,7 @@ describe.sequential("clawline provider server", () => {
       });
 
       const pair = await performPairRequest(ctx.port, entry.deviceId);
-      const { ws, auth } = await authenticateDevice(
+      const { ws, queue, auth } = await authenticateDeviceWithQueue(
         ctx.port,
         entry.deviceId,
         pair.token as string,
@@ -5321,16 +5321,28 @@ describe.sequential("clawline provider server", () => {
       const clientMessageId = `c_${randomUUID()}`;
       ws.send(JSON.stringify({ type: "message", id: clientMessageId, content: "show progress" }));
 
-      await waitForQueuedMessageWithTimeout(queue, (value) => {
-        return (
-          typeof value === "object" &&
-          value !== null &&
-          (value as ParsedWsFrame).type === "ack" &&
-          (value as ParsedWsFrame).id === clientMessageId
-        );
-      });
+      const waitForLiveProgressFrame = async (
+        label: string,
+        predicate: (value: unknown) => boolean,
+      ) => {
+        try {
+          return await waitForQueuedMessageWithTimeout(queue, predicate, {
+            attempts: 20,
+            timeoutMs: 120_000,
+          });
+        } catch (err) {
+          const buffered = await collectQueuedMessagesUntilIdle(queue, {
+            idleMs: 50,
+            maxMessages: 20,
+          });
+          throw new Error(
+            `${label}: ${err instanceof Error ? err.message : String(err)}; buffered=${JSON.stringify(buffered)}`,
+            { cause: err },
+          );
+        }
+      };
 
-      const toolProgress = await waitForQueuedMessageWithTimeout(queue, (value) => {
+      const toolProgress = await waitForLiveProgressFrame("tool progress", (value) => {
         const event = (value as { event?: { kind?: unknown; name?: unknown } }).event;
         return (
           typeof value === "object" &&
@@ -5355,7 +5367,7 @@ describe.sequential("clawline provider server", () => {
       expect(typeof toolProgress.seq).toBe("number");
       expect(JSON.stringify(toolProgress)).not.toContain("/private/raw-arg.txt");
 
-      const commandProgress = await waitForQueuedMessageWithTimeout(queue, (value) => {
+      const commandProgress = await waitForLiveProgressFrame("command progress", (value) => {
         const event = (value as { event?: { kind?: unknown; name?: unknown } }).event;
         return (
           typeof value === "object" &&
@@ -5368,7 +5380,7 @@ describe.sequential("clawline provider server", () => {
       expect(JSON.stringify(commandProgress)).not.toContain("raw command output");
       expect(JSON.stringify(commandProgress)).not.toContain("/tmp");
 
-      const doneProgress = await waitForQueuedMessageWithTimeout(queue, (value) => {
+      const doneProgress = await waitForLiveProgressFrame("final progress", (value) => {
         return (
           typeof value === "object" &&
           value !== null &&

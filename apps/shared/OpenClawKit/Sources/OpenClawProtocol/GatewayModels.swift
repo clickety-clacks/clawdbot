@@ -755,7 +755,10 @@ public struct AgentParams: Codable, Sendable {
     public let internalruntimehandoffid: String?
     public let internalevents: [[String: AnyCodable]]?
     public let inputprovenance: [String: AnyCodable]?
+    public let suppresspromptpersistence: Bool?
+    public let sessioneffects: AnyCodable?
     public let sourcereplydeliverymode: AnyCodable?
+    public let disablemessagetool: Bool?
     public let voicewaketrigger: String?
     public let idempotencykey: String
     public let label: String?
@@ -793,7 +796,10 @@ public struct AgentParams: Codable, Sendable {
         internalruntimehandoffid: String?,
         internalevents: [[String: AnyCodable]]?,
         inputprovenance: [String: AnyCodable]?,
+        suppresspromptpersistence: Bool?,
+        sessioneffects: AnyCodable?,
         sourcereplydeliverymode: AnyCodable?,
+        disablemessagetool: Bool?,
         voicewaketrigger: String?,
         idempotencykey: String,
         label: String?)
@@ -830,7 +836,10 @@ public struct AgentParams: Codable, Sendable {
         self.internalruntimehandoffid = internalruntimehandoffid
         self.internalevents = internalevents
         self.inputprovenance = inputprovenance
+        self.suppresspromptpersistence = suppresspromptpersistence
+        self.sessioneffects = sessioneffects
         self.sourcereplydeliverymode = sourcereplydeliverymode
+        self.disablemessagetool = disablemessagetool
         self.voicewaketrigger = voicewaketrigger
         self.idempotencykey = idempotencykey
         self.label = label
@@ -869,7 +878,10 @@ public struct AgentParams: Codable, Sendable {
         case internalruntimehandoffid = "internalRuntimeHandoffId"
         case internalevents = "internalEvents"
         case inputprovenance = "inputProvenance"
+        case suppresspromptpersistence = "suppressPromptPersistence"
+        case sessioneffects = "sessionEffects"
         case sourcereplydeliverymode = "sourceReplyDeliveryMode"
+        case disablemessagetool = "disableMessageTool"
         case voicewaketrigger = "voiceWakeTrigger"
         case idempotencykey = "idempotencyKey"
         case label
@@ -3162,6 +3174,102 @@ public struct TalkClientCreateParams: Codable, Sendable {
     }
 }
 
+public struct TalkClientSteerParams: Codable, Sendable {
+    public let sessionkey: String
+    public let text: String
+    public let mode: AnyCodable?
+
+    public init(
+        sessionkey: String,
+        text: String,
+        mode: AnyCodable?)
+    {
+        self.sessionkey = sessionkey
+        self.text = text
+        self.mode = mode
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case sessionkey = "sessionKey"
+        case text
+        case mode
+    }
+}
+
+public struct TalkAgentControlResult: Codable, Sendable {
+    public let ok: Bool
+    public let mode: AnyCodable
+    public let sessionkey: String
+    public let sessionid: String?
+    public let active: Bool
+    public let queued: Bool?
+    public let aborted: Bool?
+    public let target: AnyCodable?
+    public let reason: String?
+    public let message: String
+    public let speak: Bool
+    public let show: Bool
+    public let suppress: Bool
+    public let providerresult: [String: AnyCodable]?
+    public let enqueuedatms: Double?
+    public let deliveredatms: Double?
+
+    public init(
+        ok: Bool,
+        mode: AnyCodable,
+        sessionkey: String,
+        sessionid: String?,
+        active: Bool,
+        queued: Bool?,
+        aborted: Bool?,
+        target: AnyCodable?,
+        reason: String?,
+        message: String,
+        speak: Bool,
+        show: Bool,
+        suppress: Bool,
+        providerresult: [String: AnyCodable]?,
+        enqueuedatms: Double?,
+        deliveredatms: Double?)
+    {
+        self.ok = ok
+        self.mode = mode
+        self.sessionkey = sessionkey
+        self.sessionid = sessionid
+        self.active = active
+        self.queued = queued
+        self.aborted = aborted
+        self.target = target
+        self.reason = reason
+        self.message = message
+        self.speak = speak
+        self.show = show
+        self.suppress = suppress
+        self.providerresult = providerresult
+        self.enqueuedatms = enqueuedatms
+        self.deliveredatms = deliveredatms
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case ok
+        case mode
+        case sessionkey = "sessionKey"
+        case sessionid = "sessionId"
+        case active
+        case queued
+        case aborted
+        case target
+        case reason
+        case message
+        case speak
+        case show
+        case suppress
+        case providerresult = "providerResult"
+        case enqueuedatms = "enqueuedAtMs"
+        case deliveredatms = "deliveredAtMs"
+    }
+}
+
 public struct TalkClientToolCallParams: Codable, Sendable {
     public let sessionkey: String
     public let callid: String
@@ -3565,6 +3673,32 @@ public struct TalkSessionTurnResult: Codable, Sendable {
         case ok
         case turnid = "turnId"
         case events
+    }
+}
+
+public struct TalkSessionSteerParams: Codable, Sendable {
+    public let sessionid: String
+    public let sessionkey: String?
+    public let text: String
+    public let mode: AnyCodable?
+
+    public init(
+        sessionid: String,
+        sessionkey: String?,
+        text: String,
+        mode: AnyCodable?)
+    {
+        self.sessionid = sessionid
+        self.sessionkey = sessionkey
+        self.text = text
+        self.mode = mode
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case sessionid = "sessionId"
+        case sessionkey = "sessionKey"
+        case text
+        case mode
     }
 }
 
@@ -5374,6 +5508,7 @@ public struct CronRunLogEntry: Codable, Sendable {
     public let action: String
     public let status: AnyCodable?
     public let error: String?
+    public let errorreason: AnyCodable?
     public let summary: String?
     public let diagnostics: [String: AnyCodable]?
     public let delivered: Bool?
@@ -5397,6 +5532,7 @@ public struct CronRunLogEntry: Codable, Sendable {
         action: String,
         status: AnyCodable?,
         error: String?,
+        errorreason: AnyCodable? = nil,
         summary: String?,
         diagnostics: [String: AnyCodable]?,
         delivered: Bool?,
@@ -5419,6 +5555,7 @@ public struct CronRunLogEntry: Codable, Sendable {
         self.action = action
         self.status = status
         self.error = error
+        self.errorreason = errorreason
         self.summary = summary
         self.diagnostics = diagnostics
         self.delivered = delivered
@@ -5443,6 +5580,7 @@ public struct CronRunLogEntry: Codable, Sendable {
         case action
         case status
         case error
+        case errorreason = "errorReason"
         case summary
         case diagnostics
         case delivered
@@ -5734,6 +5872,7 @@ public struct PluginApprovalRequestParams: Codable, Sendable {
     public let toolname: String?
     public let toolcallid: String?
     public let alloweddecisions: [String]?
+    public let actions: [[String: AnyCodable]]?
     public let agentid: String?
     public let sessionkey: String?
     public let turnsourcechannel: String?
@@ -5742,6 +5881,7 @@ public struct PluginApprovalRequestParams: Codable, Sendable {
     public let turnsourcethreadid: AnyCodable?
     public let timeoutms: Int?
     public let twophase: Bool?
+    public let keeppendingwithoutroute: Bool?
 
     public init(
         pluginid: String?,
@@ -5751,6 +5891,7 @@ public struct PluginApprovalRequestParams: Codable, Sendable {
         toolname: String?,
         toolcallid: String?,
         alloweddecisions: [String]?,
+        actions: [[String: AnyCodable]]?,
         agentid: String?,
         sessionkey: String?,
         turnsourcechannel: String?,
@@ -5758,7 +5899,8 @@ public struct PluginApprovalRequestParams: Codable, Sendable {
         turnsourceaccountid: String?,
         turnsourcethreadid: AnyCodable?,
         timeoutms: Int?,
-        twophase: Bool?)
+        twophase: Bool?,
+        keeppendingwithoutroute: Bool?)
     {
         self.pluginid = pluginid
         self.title = title
@@ -5767,6 +5909,7 @@ public struct PluginApprovalRequestParams: Codable, Sendable {
         self.toolname = toolname
         self.toolcallid = toolcallid
         self.alloweddecisions = alloweddecisions
+        self.actions = actions
         self.agentid = agentid
         self.sessionkey = sessionkey
         self.turnsourcechannel = turnsourcechannel
@@ -5775,6 +5918,7 @@ public struct PluginApprovalRequestParams: Codable, Sendable {
         self.turnsourcethreadid = turnsourcethreadid
         self.timeoutms = timeoutms
         self.twophase = twophase
+        self.keeppendingwithoutroute = keeppendingwithoutroute
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -5785,6 +5929,7 @@ public struct PluginApprovalRequestParams: Codable, Sendable {
         case toolname = "toolName"
         case toolcallid = "toolCallId"
         case alloweddecisions = "allowedDecisions"
+        case actions
         case agentid = "agentId"
         case sessionkey = "sessionKey"
         case turnsourcechannel = "turnSourceChannel"
@@ -5793,6 +5938,7 @@ public struct PluginApprovalRequestParams: Codable, Sendable {
         case turnsourcethreadid = "turnSourceThreadId"
         case timeoutms = "timeoutMs"
         case twophase = "twoPhase"
+        case keeppendingwithoutroute = "keepPendingWithoutRoute"
     }
 }
 
@@ -6243,6 +6389,7 @@ public struct ChatSendParams: Codable, Sendable {
     public let originatingto: String?
     public let originatingaccountid: String?
     public let originatingthreadid: String?
+    public let references: [[String: AnyCodable]]?
     public let attachments: [AnyCodable]?
     public let timeoutms: Int?
     public let systeminputprovenance: [String: AnyCodable]?
@@ -6260,6 +6407,7 @@ public struct ChatSendParams: Codable, Sendable {
         originatingto: String?,
         originatingaccountid: String?,
         originatingthreadid: String?,
+        references: [[String: AnyCodable]]?,
         attachments: [AnyCodable]?,
         timeoutms: Int?,
         systeminputprovenance: [String: AnyCodable]?,
@@ -6276,6 +6424,7 @@ public struct ChatSendParams: Codable, Sendable {
         self.originatingto = originatingto
         self.originatingaccountid = originatingaccountid
         self.originatingthreadid = originatingthreadid
+        self.references = references
         self.attachments = attachments
         self.timeoutms = timeoutms
         self.systeminputprovenance = systeminputprovenance
@@ -6294,6 +6443,7 @@ public struct ChatSendParams: Codable, Sendable {
         case originatingto = "originatingTo"
         case originatingaccountid = "originatingAccountId"
         case originatingthreadid = "originatingThreadId"
+        case references
         case attachments
         case timeoutms = "timeoutMs"
         case systeminputprovenance = "systemInputProvenance"

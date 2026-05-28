@@ -6,6 +6,7 @@ import type {
   PluginHookBeforePromptBuildResult,
 } from "../../plugins/types.js";
 import { joinPresentTextSegments } from "../../shared/text/join-segments.js";
+import { wrapPluginSystemContextSection } from "../hook-system-context-boundary.js";
 import { buildAgentHookContext, type AgentHarnessHookContext } from "./hook-context.js";
 
 const log = createSubsystemLogger("agents/harness");
@@ -61,11 +62,11 @@ export async function resolveAgentHarnessBeforePromptBuildResult(params: {
       ]) ?? params.prompt,
     developerInstructions:
       joinPresentTextSegments([
-        promptBuildResult?.prependSystemContext,
-        legacyResult?.prependSystemContext,
+        wrapPluginSystemContextSection(promptBuildResult?.prependSystemContext),
+        wrapPluginSystemContextSection(legacyResult?.prependSystemContext),
         systemPrompt,
-        promptBuildResult?.appendSystemContext,
-        legacyResult?.appendSystemContext,
+        wrapPluginSystemContextSection(promptBuildResult?.appendSystemContext),
+        wrapPluginSystemContextSection(legacyResult?.appendSystemContext),
       ]) ?? systemPrompt,
   };
 }
