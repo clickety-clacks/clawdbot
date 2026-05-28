@@ -182,6 +182,23 @@ describe("createReplyMediaPathNormalizer", () => {
     );
   });
 
+  it("preserves canonical media refs instead of treating them as MEDIA directives", async () => {
+    const normalize = createReplyMediaPathNormalizer({
+      cfg: {},
+      sessionKey: "session-key",
+      workspaceDir: "/tmp/agent-workspace",
+    });
+
+    const result = await normalize({
+      text: "caption",
+      mediaUrls: ["media://asset-123"],
+    });
+
+    expectMedia(result, "media://asset-123", ["media://asset-123"]);
+    expect(result.text).toBe("caption");
+    expect(resolveOutboundAttachmentFromUrl).not.toHaveBeenCalled();
+  });
+
   it("drops MEDIA:/workspace alias media that escapes the configured agent workspace", async () => {
     const normalize = createReplyMediaPathNormalizer({
       cfg: {},

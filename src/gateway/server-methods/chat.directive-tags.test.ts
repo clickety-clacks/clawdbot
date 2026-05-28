@@ -471,6 +471,14 @@ async function readActiveAssistantTranscriptMessages(): Promise<Array<Record<str
   );
 }
 
+async function readLatestActiveAssistantTranscriptEntry() {
+  const index = await readSessionTranscriptIndex(mockState.transcriptPath);
+  return index?.entries.toReversed().find((entry) => {
+    const message = entry.record.message as Record<string, unknown> | undefined;
+    return message?.role === "assistant";
+  });
+}
+
 function extractFirstTextBlock(payload: unknown): string | undefined {
   if (!payload || typeof payload !== "object") {
     return undefined;
@@ -2045,7 +2053,7 @@ describe("chat directive tag stripping for non-streaming final payloads", () => 
     if (!getMessage(broadcastPayload)) {
       throw new Error("Expected broadcast message");
     }
-    expect(getMessage(broadcastPayload)?.llmVisibleMessageId).toEqual(expect.any(String));
+    expect(getMessage(broadcastPayload)?.llmVisibleMessageId).toBe(payload?.messageId);
     expect(extractFirstTextBlock(broadcastPayload)).toBe("");
   });
 
@@ -2066,7 +2074,9 @@ describe("chat directive tag stripping for non-streaming final payloads", () => 
     if (!getMessage(payload)) {
       throw new Error("Expected directive-only final message");
     }
-    expect(getMessage(payload)?.llmVisibleMessageId).toEqual(expect.any(String));
+    const latestAssistantEntry = await readLatestActiveAssistantTranscriptEntry();
+    expect(latestAssistantEntry?.id).toEqual(expect.any(String));
+    expect(getMessage(payload)?.llmVisibleMessageId).toBe(latestAssistantEntry?.id);
     expect(extractFirstTextBlock(payload)).toBe("");
   });
 

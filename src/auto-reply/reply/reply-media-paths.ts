@@ -22,7 +22,8 @@ const FILE_URL_RE = /^file:\/\//i;
 const WINDOWS_DRIVE_RE = /^[a-zA-Z]:[\\/]/;
 const SCHEME_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
 const HAS_FILE_EXT_RE = /\.\w{1,10}$/;
-const MEDIA_DIRECTIVE_PREFIX_RE = /^MEDIA:/i;
+const MEDIA_URL_RE = /^media:\/\//i;
+const MEDIA_DIRECTIVE_PREFIX_RE = /^\s*MEDIA\s*:\s*/i;
 const WORKSPACE_ALIAS_RE = /^[/\\]workspace(?:[/\\]|$)/i;
 
 function isLikelyLocalMediaSource(media: string): boolean {
@@ -44,6 +45,9 @@ function getPayloadMediaList(payload: ReplyPayload): string[] {
 }
 
 function stripMediaDirective(media: string): string {
+  if (MEDIA_URL_RE.test(media)) {
+    return media;
+  }
   return media.replace(MEDIA_DIRECTIVE_PREFIX_RE, "").trim();
 }
 
