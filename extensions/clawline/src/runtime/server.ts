@@ -8758,6 +8758,105 @@ button.deny { background: #9b1c31; color: white; }
     };
   }
 
+  async function finalizeClawlinePromptTurn(params: {
+    socket: WebSocket;
+    promptTurnAdmission: PromptTurnAdmissionFacts;
+    activeRun: SessionStatusActiveRun;
+    agentProgress: ReturnType<typeof createAgentProgressEmitter>;
+    messageId: string;
+    sessionKey: string;
+    userId: string;
+    deviceId: string;
+    deliveredCount: number;
+    queuedFinal: boolean;
+    queueDepth: number;
+    dispatchFailed: boolean;
+    logContext?: Record<string, unknown>;
+    cleanup: () => void;
+  }): Promise<"delivered" | "queued" | "canceled" | "failed"> {
+    const wasDelivered = params.queuedFinal || params.deliveredCount > 0;
+    const wasQueued = !wasDelivered && params.queueDepth > 0;
+    const wasTerminalFailure = params.dispatchFailed || (!wasDelivered && !wasQueued);
+    if (wasTerminalFailure && !wasQueued) {
+      if (params.activeRun.cancelRequested) {
+        updateMessageStreamingStmt.run(
+          MessageStreamingState.Finalized,
+          params.deviceId,
+          params.messageId,
+        );
+        transitionPromptTurnAdmission(params.promptTurnAdmission, "canceled", {
+          ...params.logContext,
+          messageId: params.messageId,
+          sessionKey: params.sessionKey,
+          userId: params.userId,
+          deviceId: params.deviceId,
+        });
+        params.agentProgress.emitDone();
+        params.cleanup();
+        return "canceled";
+      }
+      logger.warn?.("[clawline] agent_run_no_delivery", {
+        ...params.logContext,
+        messageId: params.messageId,
+        correlationId: params.promptTurnAdmission.correlationId,
+        sessionKey: params.sessionKey,
+        userId: params.userId,
+        deviceId: params.deviceId,
+        deliveredCount: params.deliveredCount,
+        queuedFinal: params.queuedFinal,
+        queueDepth: params.queueDepth,
+        dispatchFailed: params.dispatchFailed,
+      });
+      updateMessageFailedStmt.run(
+        MessageStreamingState.Failed,
+        "clawline.promptTurn.noDelivery",
+        params.deviceId,
+        params.messageId,
+      );
+      const errorSent = await sendJson(params.socket, {
+        type: "error",
+        code: "server_error",
+        message: "Unable to deliver reply",
+        messageId: params.messageId,
+      }).catch(() => false);
+      logger.warn?.("[clawline] agent_run_no_delivery_error_emit", {
+        ...params.logContext,
+        messageId: params.messageId,
+        correlationId: params.promptTurnAdmission.correlationId,
+        sessionKey: params.sessionKey,
+        deviceId: params.deviceId,
+        errorSent,
+      });
+      transitionPromptTurnAdmission(params.promptTurnAdmission, "failed", {
+        ...params.logContext,
+        messageId: params.messageId,
+        sessionKey: params.sessionKey,
+        userId: params.userId,
+        deviceId: params.deviceId,
+        error: "clawline.promptTurn.noDelivery",
+      });
+      params.agentProgress.emitError();
+      params.cleanup();
+      return "failed";
+    }
+
+    updateMessageStreamingStmt.run(
+      wasQueued ? MessageStreamingState.Queued : MessageStreamingState.Finalized,
+      params.deviceId,
+      params.messageId,
+    );
+    transitionPromptTurnAdmission(params.promptTurnAdmission, wasQueued ? "queued" : "delivered", {
+      ...params.logContext,
+      messageId: params.messageId,
+      sessionKey: params.sessionKey,
+      userId: params.userId,
+      deviceId: params.deviceId,
+    });
+    params.agentProgress.emitDone();
+    params.cleanup();
+    return wasQueued ? "queued" : "delivered";
+  }
+
   async function appendEvent(
     event: ServerMessage,
     userId: string,
@@ -9848,15 +9947,10 @@ button.deny { background: #9b1c31; color: white; }
             return;
           }
 
-          // Check if message was successfully handled:
-          // 1. queuedFinal = true means a final reply was sent
-          // 2. deliveredCount > 0 means content was streamed (blocks/tools)
-          // 3. queueDepth > 0 means message was queued for later processing
           const queueKey = route.sessionKey;
           const queueDepth = getClawlineFollowupQueueDepth(queueKey);
           const wasDelivered = queuedFinal || deliveredCount > 0;
           const wasQueued = !wasDelivered && queueDepth > 0;
-          const wasTerminalFailure = dispatchFailed || (!wasDelivered && !wasQueued);
 
           logger.info?.("[clawline] agent_run_end", {
             messageId,
@@ -9872,83 +9966,25 @@ button.deny { background: #9b1c31; color: white; }
             wasQueued,
             dispatchFailed,
           });
-
-          if (wasTerminalFailure && !wasQueued) {
-            if (activeRun.cancelRequested) {
-              updateMessageStreamingStmt.run(
-                MessageStreamingState.Finalized,
-                session.deviceId,
-                messageId,
-              );
-              transitionPromptTurnAdmission(promptTurnAdmission, "canceled", {
-                messageId,
-                sessionKey: resolvedSessionKey,
-                userId: session.userId,
-                deviceId: session.deviceId,
-              });
-              agentProgress.emitDone();
-              activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
-              activeRunForProgress = null;
-              return;
-            }
-            logger.warn?.("[clawline] agent_run_no_delivery", {
-              messageId,
-              correlationId: promptTurnAdmission.correlationId,
-              sessionId: session.sessionId,
-              sessionKey: resolvedSessionKey,
-              userId: session.userId,
-              deviceId: session.deviceId,
-              deliveredCount,
-              queuedFinal,
-              queueDepth,
-              dispatchFailed,
-            });
-            updateMessageFailedStmt.run(
-              MessageStreamingState.Failed,
-              "clawline.promptTurn.noDelivery",
-              session.deviceId,
-              messageId,
-            );
-            const errorSent = await sendJson(session.socket, {
-              type: "error",
-              code: "server_error",
-              message: "Unable to deliver reply",
-              messageId,
-            }).catch(() => false);
-            logger.warn?.("[clawline] agent_run_no_delivery_error_emit", {
-              messageId,
-              correlationId: promptTurnAdmission.correlationId,
-              sessionKey: resolvedSessionKey,
-              deviceId: session.deviceId,
-              errorSent,
-            });
-            transitionPromptTurnAdmission(promptTurnAdmission, "failed", {
-              messageId,
-              sessionKey: resolvedSessionKey,
-              userId: session.userId,
-              deviceId: session.deviceId,
-            });
-            agentProgress.emitError();
-            activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
-            activeRunForProgress = null;
-            return;
-          }
-
-          // Message was either delivered or queued successfully
-          updateMessageStreamingStmt.run(
-            wasQueued ? MessageStreamingState.Queued : MessageStreamingState.Finalized,
-            session.deviceId,
-            messageId,
-          );
-          transitionPromptTurnAdmission(promptTurnAdmission, wasQueued ? "queued" : "delivered", {
+          await finalizeClawlinePromptTurn({
+            socket: session.socket,
+            promptTurnAdmission,
+            activeRun,
+            agentProgress,
             messageId,
             sessionKey: resolvedSessionKey,
             userId: session.userId,
             deviceId: session.deviceId,
+            deliveredCount,
+            queuedFinal,
+            queueDepth,
+            dispatchFailed,
+            logContext: { sessionId: session.sessionId },
+            cleanup: () => {
+              activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
+              activeRunForProgress = null;
+            },
           });
-          agentProgress.emitDone();
-          activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
-          activeRunForProgress = null;
         };
         transitionPromptTurnAdmission(promptTurnAdmission, "queued", {
           messageId,
@@ -10182,6 +10218,7 @@ button.deny { background: #9b1c31; color: white; }
           // Track activity state for typing indicator
           let activitySignaled = false;
           let activeRunForProgress: SessionStatusActiveRun | null = null;
+          let persistedAssistantDeliveryCount = 0;
           const sendActivitySignal = async (isActive: boolean) => {
             logger.info?.("[clawline] activity_signal", {
               isActive,
@@ -10269,6 +10306,7 @@ button.deny { background: #9b1c31; color: white; }
                   replyToClientMessageId: clientId,
                 },
               );
+              persistedAssistantDeliveryCount += 1;
               broadcastToSessionKey(resolvedSessionKey, assistantEvent);
               await broadcastStreamTailStateForUser(targetUserId, assistantEvent);
               logger.info?.("[clawline] agent_run_phase", {
@@ -10435,6 +10473,7 @@ button.deny { background: #9b1c31; color: white; }
             });
             let queuedFinal = false;
             let deliveredCount = 0;
+            let dispatchFailed = false;
             const dispatchStartedAt = Date.now();
             try {
               logger.info?.("[clawline] agent_run_phase", {
@@ -10515,10 +10554,12 @@ button.deny { background: #9b1c31; color: white; }
               });
               queuedFinal = result.dispatchResult.queuedFinal;
               // Count all delivered content (streaming blocks, tool results, and final replies)
-              deliveredCount =
+              deliveredCount = Math.max(
                 result.dispatchResult.counts.block +
-                result.dispatchResult.counts.tool +
-                result.dispatchResult.counts.final;
+                  result.dispatchResult.counts.tool +
+                  result.dispatchResult.counts.final,
+                persistedAssistantDeliveryCount,
+              );
               logger.info?.("[clawline] agent_run_phase", {
                 phase: "dispatch_return",
                 messageId: clientId,
@@ -10533,7 +10574,15 @@ button.deny { background: #9b1c31; color: white; }
                 interactiveAction: action,
               });
             } catch (err) {
-              logger.error?.(`[clawline] dispatch_failed: ${formatError(err)}`);
+              dispatchFailed = true;
+              deliveredCount = persistedAssistantDeliveryCount;
+              logger.error?.(`[clawline] dispatch_failed: ${formatError(err)}`, {
+                messageId: clientId,
+                correlationId: promptTurnAdmission.correlationId,
+                sessionKey: resolvedSessionKey,
+                sourceMessageId,
+                interactiveAction: action,
+              });
               queuedFinal = false;
             }
             const waitForIdleStartedAt = Date.now();
@@ -10585,67 +10634,33 @@ button.deny { background: #9b1c31; color: white; }
               queueDepth,
               wasDelivered,
               wasQueued,
+              dispatchFailed,
               sourceMessageId,
               interactiveAction: action,
             });
-
-            if (!wasDelivered && !wasQueued) {
-              if (activeRun.cancelRequested) {
-                updateMessageStreamingStmt.run(
-                  MessageStreamingState.Finalized,
-                  session.deviceId,
-                  clientId,
-                );
-                transitionPromptTurnAdmission(promptTurnAdmission, "canceled", {
-                  messageId: clientId,
-                  sessionKey: resolvedSessionKey,
-                  userId: session.userId,
-                  deviceId: session.deviceId,
-                });
-                agentProgress.emitDone();
-                activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
-                activeRunForProgress = null;
-                return;
-              }
-              updateMessageFailedStmt.run(
-                MessageStreamingState.Failed,
-                "clawline.promptTurn.noDelivery",
-                session.deviceId,
-                clientId,
-              );
-              transitionPromptTurnAdmission(promptTurnAdmission, "failed", {
-                messageId: clientId,
-                sessionKey: resolvedSessionKey,
-                userId: session.userId,
-                deviceId: session.deviceId,
-                error: "clawline.promptTurn.noDelivery",
-              });
-              await sendJson(session.socket, {
-                type: "error",
-                code: "server_error",
-                message: "Unable to deliver reply",
-                messageId: clientId,
-              }).catch(() => {});
-              agentProgress.emitError();
-              activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
-              activeRunForProgress = null;
-              return;
-            }
-
-            updateMessageStreamingStmt.run(
-              wasQueued ? MessageStreamingState.Queued : MessageStreamingState.Finalized,
-              session.deviceId,
-              clientId,
-            );
-            transitionPromptTurnAdmission(promptTurnAdmission, wasQueued ? "queued" : "delivered", {
+            await finalizeClawlinePromptTurn({
+              socket: session.socket,
+              promptTurnAdmission,
+              activeRun,
+              agentProgress,
               messageId: clientId,
               sessionKey: resolvedSessionKey,
               userId: session.userId,
               deviceId: session.deviceId,
+              deliveredCount,
+              queuedFinal,
+              queueDepth,
+              dispatchFailed,
+              logContext: {
+                sessionId: session.sessionId,
+                sourceMessageId,
+                interactiveAction: action,
+              },
+              cleanup: () => {
+                activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
+                activeRunForProgress = null;
+              },
             });
-            agentProgress.emitDone();
-            activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
-            activeRunForProgress = null;
           };
           transitionPromptTurnAdmission(promptTurnAdmission, "queued", {
             messageId: clientId,
