@@ -5204,6 +5204,16 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           rawText: raw.rawText,
           textForAgent: raw.ctxPayload.Body,
         }),
+        classify: () => ({
+          kind: "message",
+          canStartAgentTurn: true,
+          requiresImmediateAck: false,
+        }),
+        preflight: () => ({
+          admission: { kind: "dispatch", reason: "clawline-admitted" },
+        }),
+        // Clawline keeps its socket, SQLite, and buffered reply delivery in its
+        // existing dispatcher; the channel kernel now owns the turn lifecycle.
         resolveTurn: () => ({
           channel: params.channel,
           accountId: params.accountId,
@@ -5212,11 +5222,20 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           ctxPayload: params.ctxPayload,
           recordInboundSession,
           record: params.record,
-          admission: { kind: "dispatch" },
+          admission: { kind: "dispatch", reason: "clawline-prepared-dispatch" },
           messageId: params.messageId,
           onPreDispatchFailure: params.onPreDispatchFailure,
           runDispatch: params.runDispatch,
         }),
+        onFinalize: (turnResult) => {
+          logger.info?.("[clawline] channel_turn_finalize", {
+            ...params.logContext,
+            messageId: params.messageId,
+            routeSessionKey: turnResult.routeSessionKey,
+            admission: turnResult.admission.kind,
+            dispatched: turnResult.dispatched,
+          });
+        },
       },
     });
     if (!result.dispatched) {
