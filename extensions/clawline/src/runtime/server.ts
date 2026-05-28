@@ -9931,6 +9931,7 @@ button.deny { background: #9b1c31; color: white; }
   }
 
   async function processInteractiveCallback(session: Session, payload: ClientPayload) {
+    const promptTurnFailureRef: { current: PromptTurnAdmissionFacts | null } = { current: null };
     try {
       const sourceMessageId = typeof payload.messageId === "string" ? payload.messageId.trim() : "";
       if (!sourceMessageId) {
@@ -10066,22 +10067,9 @@ button.deny { background: #9b1c31; color: white; }
             contentHash: sha256(rawContent),
             attachmentsHash,
           });
+          promptTurnFailureRef.current = promptTurnAdmission;
           persistPromptTurnAdmission(promptTurnAdmission);
           broadcastToSessionKey(resolvedSessionKey, event);
-
-          const attachmentSummary = describeClawlineAttachments(attachments);
-          let inboundBody = attachmentSummary
-            ? `${rawContent}\n\n${attachmentSummary}`
-            : rawContent;
-          const { images: inboundImages, failureMarkers: inboundImageFailureMarkers } =
-            await materializeInboundAttachmentImages(attachments, {
-              messageId: clientId,
-              sessionKey: resolvedSessionKey,
-              deviceId: session.deviceId,
-            });
-          if (inboundImageFailureMarkers.length > 0) {
-            inboundBody = [inboundBody, ...inboundImageFailureMarkers].filter(Boolean).join("\n\n");
-          }
 
           const channelLabel = "clawline";
           const routeSessionKey = resolvedSessionKey;
@@ -10096,28 +10084,6 @@ button.deny { background: #9b1c31; color: white; }
 
           const deliveryTarget = ClawlineDeliveryTarget.fromParts(session.userId, streamSuffix);
           const groupSystemPrompt = adapterOverrides.systemPrompt?.trim() || undefined;
-          const ctxPayload = buildClawlineInboundContext({
-            channel: channelLabel,
-            accountId: route.accountId,
-            agentId: route.agentId,
-            sessionKey: route.sessionKey,
-            mainSessionKey: route.mainSessionKey,
-            messageId: clientId,
-            rawBody: rawContent,
-            body: inboundBody,
-            commandBody: rawContent,
-            fromPeerId: peerId,
-            to: `device:${session.deviceId}`,
-            senderId: session.userId,
-            senderName: session.claimedName ?? session.deviceInfo?.model ?? peerId,
-            provider: "clawline",
-            surface: channelLabel,
-            nativeChannelId: deliveryTarget.toString(),
-            originatingChannel: channelLabel,
-            originatingTo: deliveryTarget.toString(),
-            groupSystemPrompt,
-            media: buildInboundMediaFactsFromAttachments(attachments, clientId),
-          });
           const updateLastRoute =
             streamSuffix === "dm" && session.dmScope !== "main"
               ? {
@@ -10252,14 +10218,97 @@ button.deny { background: #9b1c31; color: white; }
           });
 
           runAgentDispatch = async () => {
+            const latestPromptRow = selectMessageStmt.get(session.deviceId, clientId) as
+              | {
+                  promptTurnCancelRequested?: number | null;
+                  promptTurnState?: string | null;
+                }
+              | undefined;
+            if (
+              promptTurnAdmission.state === "canceled" ||
+              latestPromptRow?.promptTurnState === "canceled" ||
+              latestPromptRow?.promptTurnCancelRequested === 1
+            ) {
+              updatePromptCancelRequestedStmt.run(1, session.deviceId, clientId);
+              if (promptTurnAdmission.state === "queued") {
+                transitionPromptTurnAdmission(promptTurnAdmission, "canceled", {
+                  messageId: clientId,
+                  sessionKey: resolvedSessionKey,
+                  userId: session.userId,
+                  deviceId: session.deviceId,
+                });
+              }
+              logger.info?.("[clawline] prompt_turn_start_skipped_canceled", {
+                messageId: clientId,
+                correlationId: promptTurnAdmission.correlationId,
+                sessionKey: resolvedSessionKey,
+                deviceId: session.deviceId,
+                sourceMessageId,
+                interactiveAction: action,
+              });
+              return;
+            }
             if (promptTurnAdmission.state === "queued") {
-              transitionPromptTurnAdmission(promptTurnAdmission, "running", {
+              const startOwner = resolveQueuedPromptTurnStart({
+                state: promptTurnAdmission.state,
+                cancelRequested: latestPromptRow?.promptTurnCancelRequested === 1,
+              });
+              transitionPromptTurnAdmission(promptTurnAdmission, startOwner.state, {
                 messageId: clientId,
                 sessionKey: resolvedSessionKey,
                 userId: session.userId,
                 deviceId: session.deviceId,
               });
+              if (startOwner.owner === "control") {
+                logger.info?.("[clawline] prompt_turn_start_owned_by_cancel", {
+                  messageId: clientId,
+                  correlationId: promptTurnAdmission.correlationId,
+                  sessionKey: resolvedSessionKey,
+                  deviceId: session.deviceId,
+                  sourceMessageId,
+                  interactiveAction: action,
+                });
+                return;
+              }
             }
+            const attachmentSummary = describeClawlineAttachments(attachments);
+            let inboundBody = attachmentSummary
+              ? `${rawContent}\n\n${attachmentSummary}`
+              : rawContent;
+            const { images: inboundImages, failureMarkers: inboundImageFailureMarkers } =
+              await materializeInboundAttachmentImages(attachments, {
+                messageId: clientId,
+                sessionKey: resolvedSessionKey,
+                deviceId: session.deviceId,
+                correlationId: promptTurnAdmission.correlationId,
+              });
+            if (inboundImageFailureMarkers.length > 0) {
+              inboundBody = [inboundBody, ...inboundImageFailureMarkers]
+                .filter(Boolean)
+                .join("\n\n");
+            }
+            const ctxPayload = buildClawlineInboundContext({
+              channel: channelLabel,
+              accountId: route.accountId,
+              agentId: route.agentId,
+              sessionKey: route.sessionKey,
+              mainSessionKey: route.mainSessionKey,
+              messageId: clientId,
+              rawBody: rawContent,
+              body: inboundBody,
+              commandBody: rawContent,
+              fromPeerId: peerId,
+              to: `device:${session.deviceId}`,
+              senderId: session.userId,
+              senderName: session.claimedName ?? session.deviceInfo?.model ?? peerId,
+              provider: "clawline",
+              surface: channelLabel,
+              nativeChannelId: deliveryTarget.toString(),
+              originatingChannel: channelLabel,
+              originatingTo: deliveryTarget.toString(),
+              groupSystemPrompt,
+              media: buildInboundMediaFactsFromAttachments(attachments, clientId),
+            });
             logger.info?.("[clawline] agent_run_start", {
               messageId: clientId,
               correlationId: promptTurnAdmission.correlationId,
@@ -10516,6 +10565,16 @@ button.deny { background: #9b1c31; color: white; }
       }
       await runPromptTurnTask(session.userId, resolvedSessionKey, dispatchAgentRun);
     } catch (err) {
+      const promptTurnForFailure = promptTurnFailureRef.current;
+      if (promptTurnForFailure && !isPromptTurnTerminalState(promptTurnForFailure.state)) {
+        transitionPromptTurnAdmission(promptTurnForFailure, "failed", {
+          messageId: promptTurnForFailure.clientMessageId,
+          sessionKey: promptTurnForFailure.streamKey,
+          userId: session.userId,
+          deviceId: promptTurnForFailure.deviceId,
+          error: formatError(err),
+        });
+      }
       if (err instanceof ClientMessageError) {
         await sendJson(session.socket, {
           type: "error",
