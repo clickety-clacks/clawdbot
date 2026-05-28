@@ -34,6 +34,72 @@ describe("resolveClawlineMessageReferenceContexts", () => {
     ]);
   });
 
+  it("enriches references when visible-message lookup succeeds", async () => {
+    const result = await resolveClawlineMessageReferenceContexts({
+      references: [
+        {
+          kind: "reply",
+          llmVisibleMessageId: "s_1",
+          role: "user",
+          preview: "Client preview",
+        },
+      ],
+      resolveVisibleMessage: async () => ({
+        llmVisibleMessageId: "s_1",
+        role: "assistant",
+        preview: "Server preview",
+      }),
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      contexts: [
+        {
+          label: "Reply reference: user is replying to message s_1",
+          source: "clawline",
+          type: "reply_reference",
+          payload: {
+            kind: "reply",
+            llm_visible_message_id: "s_1",
+            role: "assistant",
+            preview: "Server preview",
+          },
+        },
+      ],
+    });
+  });
+
+  it("falls back to client-provided reply context when visible-message lookup misses", async () => {
+    const result = await resolveClawlineMessageReferenceContexts({
+      references: [
+        {
+          kind: "reply",
+          llmVisibleMessageId: "s_missing",
+          role: "assistant",
+          preview: "Client preview",
+        },
+      ],
+      resolveVisibleMessage: async () => null,
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      contexts: [
+        {
+          label: "Reply reference: user is replying to message s_missing",
+          source: "clawline",
+          type: "reply_reference",
+          payload: {
+            kind: "reply",
+            llm_visible_message_id: "s_missing",
+            role: "assistant",
+            preview: "Client preview",
+          },
+        },
+      ],
+    });
+  });
+
   it("fails when the references field is not an array", async () => {
     const result = await resolveClawlineMessageReferenceContexts({
       references: "bad",

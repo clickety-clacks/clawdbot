@@ -2191,6 +2191,107 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("latches cancel when an active run is not registered with the abort seam yet", async () => {
+    const entry = createAllowlistEntry();
+    const sessionKey = "agent:main:clawline:flynn:main";
+    let releaseReply: (() => void) | undefined;
+    const replyResolver: typeof testReplyResolver = async () => {
+      await new Promise<void>((resolve) => {
+        releaseReply = resolve;
+      });
+      return { text: "" };
+    };
+    const ctx = await setupTestServer([entry], { replyResolver });
+    try {
+      await fs.writeFile(
+        ctx.sessionStorePath,
+        JSON.stringify(
+          {
+            [sessionKey]: {
+              sessionId: "session-cancel-test",
+              updatedAt: Date.now(),
+              channel: "clawline",
+              lastChannel: "clawline",
+              lastTo: "device:test",
+            },
+          },
+          null,
+          2,
+        ),
+      );
+      abortAgentHarnessRunMock.mockReturnValue(false);
+      resolveActiveAgentHarnessRunSessionIdMock.mockReturnValue("session-cancel-live");
+      const pairResult = await performPairRequest(ctx.port, entry.deviceId, {
+        claimedName: entry.claimedName,
+      });
+      const authToken = pairResult.token as string;
+      const { ws, queue } = await authenticateDeviceWithQueue(ctx.port, entry.deviceId, authToken);
+      const messageId = `c_${randomUUID()}`;
+      try {
+        ws.send(
+          JSON.stringify({
+            type: "message",
+            id: messageId,
+            sessionKey,
+            content: "cancel before abort is registered",
+          }),
+        );
+        await waitForQueuedMessage(queue, (value) => {
+          const typed = value as { type?: string; id?: string };
+          return typed?.type === "ack" && typed.id === messageId;
+        });
+
+        let runningStatus: Record<string, unknown> | undefined;
+        for (let attempt = 0; attempt < 400; attempt += 1) {
+          const response = await fetch(
+            `http://127.0.0.1:${ctx.port}/api/session-status?sessionKey=${encodeURIComponent(
+              sessionKey,
+            )}`,
+            { headers: { Authorization: `Bearer ${authToken}` } },
+          );
+          const status = (await response.json()) as Record<string, unknown>;
+          if ((status.run as { state?: string } | undefined)?.state === "running") {
+            runningStatus = status;
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        expect(runningStatus).toMatchObject({
+          run: {
+            state: "running",
+            messageId,
+          },
+        });
+
+        const controlResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/session-control`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${authToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ sessionKey, action: "cancel_current_run" }),
+        });
+        expect(controlResponse.status).toBe(200);
+        expect(await controlResponse.json()).toMatchObject({
+          ok: true,
+          sessionKey,
+          action: "cancel_current_run",
+        });
+        expect(resolveActiveAgentHarnessRunSessionIdMock).toHaveBeenCalledWith(sessionKey);
+        expect(abortAgentHarnessRunMock).toHaveBeenCalledWith("session-cancel-live");
+
+        releaseReply?.();
+        releaseReply = undefined;
+      } finally {
+        releaseReply?.();
+        queue.dispose();
+        ws.terminate();
+      }
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("includes exact device ids in pending approval alerts", async () => {
     const ctx = await setupTestServer([], {
       alertInstructionsText: "",

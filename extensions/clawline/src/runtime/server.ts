@@ -6821,14 +6821,22 @@ button.deny { background: #9b1c31; color: white; }
     }
     const aborted = abortAgentHarnessRun(agentSessionId);
     if (!aborted) {
-      rejectUnsupportedSessionControl(
-        res,
+      activeRun.cancelRequested = true;
+      if (activeRun.deviceId) {
+        updatePromptCancelRequestedStmt.run(1, activeRun.deviceId, activeRun.messageId);
+      }
+      logger.info?.("[clawline] active_run_cancel_latched_without_abort", {
         sessionKey,
-        "cancel_current_run",
-        "unsupported",
-        "The active run is not registered with the provider abort seam.",
-        capabilities,
-      );
+        runId: activeRun.runId,
+        correlationId: activeRun.correlationId,
+        messageId: activeRun.messageId,
+      });
+      sendSessionControlJson(res, 200, {
+        ok: true,
+        sessionKey,
+        action: "cancel_current_run",
+        status: await buildSessionStatusPayload(userId, sessionKey),
+      });
       return;
     }
     activeRun.cancelRequested = true;
@@ -9871,14 +9879,17 @@ button.deny { background: #9b1c31; color: white; }
                   error: formatError(err),
                 });
               },
-              runDispatch: () =>
+              runDispatch: async () =>
                 runWithClawlineOutboundCorrelation(
                   {
                     replyToMessageId: event.id,
                     replyToClientMessageId: messageId,
                   },
-                  () =>
-                    dispatchInboundMessage({
+                  async () => {
+                    if (activeRun.cancelRequested) {
+                      throw new Error("Clawline prompt turn canceled before dispatch");
+                    }
+                    return dispatchInboundMessage({
                       ctx: ctxPayload,
                       cfg: openClawCfg,
                       dispatcher,
@@ -9905,7 +9916,8 @@ button.deny { background: #9b1c31; color: white; }
                         },
                       },
                       replyResolver: options.replyResolver,
-                    }),
+                    });
+                  },
                 ),
             });
             queuedFinal = result.dispatchResult.queuedFinal;
@@ -10534,14 +10546,17 @@ button.deny { background: #9b1c31; color: white; }
                     error: formatError(err),
                   });
                 },
-                runDispatch: () =>
+                runDispatch: async () =>
                   runWithClawlineOutboundCorrelation(
                     {
                       replyToMessageId: event.id,
                       replyToClientMessageId: clientId,
                     },
-                    () =>
-                      dispatchInboundMessage({
+                    async () => {
+                      if (activeRun.cancelRequested) {
+                        throw new Error("Clawline prompt turn canceled before dispatch");
+                      }
+                      return dispatchInboundMessage({
                         ctx: ctxPayload,
                         cfg: openClawCfg,
                         dispatcher,
@@ -10568,7 +10583,8 @@ button.deny { background: #9b1c31; color: white; }
                           },
                         },
                         replyResolver: options.replyResolver,
-                      }),
+                      });
+                    },
                   ),
               });
               queuedFinal = result.dispatchResult.queuedFinal;

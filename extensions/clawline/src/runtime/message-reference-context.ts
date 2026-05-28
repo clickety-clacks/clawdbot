@@ -134,13 +134,6 @@ export async function resolveClawlineMessageReferenceContexts(params: {
     const resolved = params.resolveVisibleMessage
       ? await params.resolveVisibleMessage(reference.llmVisibleMessageId)
       : null;
-    if (params.resolveVisibleMessage && !resolved) {
-      return {
-        ok: false,
-        code: "unresolved_reference",
-        message: "Referenced message not found",
-      };
-    }
     contexts.push(
       buildReferenceContext({
         ...reference,
