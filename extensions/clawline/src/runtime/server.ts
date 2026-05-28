@@ -1305,6 +1305,9 @@ type ServerMessage = {
   clientMessageId?: string;
   replyToMessageId?: string;
   replyToClientMessageId?: string;
+  promptTurnState?: PromptTurnState;
+  promptTurnCorrelationId?: string;
+  promptTurnError?: string;
 };
 
 type AgentProgressItem = {
@@ -1355,6 +1358,7 @@ type SessionStatusActiveRun = {
   runId: string;
   correlationId?: string;
   messageId: string;
+  deviceId?: string;
   sessionKey: string;
   agentSessionId: string | null;
   startedAt: number;
@@ -3358,22 +3362,37 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     );
 
     selectEventsTailStmt = newDb.prepare(
-      `SELECT id, payloadJson
+      `SELECT events.id, events.payloadJson,
+              messages.streaming AS messageStreaming,
+              messages.promptTurnState AS promptTurnState,
+              messages.promptTurnCorrelationId AS promptTurnCorrelationId,
+              messages.promptTurnError AS promptTurnError
        FROM events
-       WHERE userId = ? AND eventType = 'message'
-       ORDER BY sequence DESC LIMIT ?`,
+       LEFT JOIN messages ON messages.serverEventId = events.id
+       WHERE events.userId = ? AND events.eventType = 'message'
+       ORDER BY events.sequence DESC LIMIT ?`,
     );
     selectEventsTailBySessionStmt = newDb.prepare(
-      `SELECT id, payloadJson, sequence, timestamp
+      `SELECT events.id, events.payloadJson, events.sequence, events.timestamp,
+              messages.streaming AS messageStreaming,
+              messages.promptTurnState AS promptTurnState,
+              messages.promptTurnCorrelationId AS promptTurnCorrelationId,
+              messages.promptTurnError AS promptTurnError
        FROM events
-       WHERE userId = ? AND eventType = 'message' AND sessionKey = ?
-       ORDER BY sequence DESC LIMIT ?`,
+       LEFT JOIN messages ON messages.serverEventId = events.id
+       WHERE events.userId = ? AND events.eventType = 'message' AND events.sessionKey = ?
+       ORDER BY events.sequence DESC LIMIT ?`,
     );
     selectEventsAfterBySessionStmt = newDb.prepare(
-      `SELECT id, payloadJson, sequence, timestamp
+      `SELECT events.id, events.payloadJson, events.sequence, events.timestamp,
+              messages.streaming AS messageStreaming,
+              messages.promptTurnState AS promptTurnState,
+              messages.promptTurnCorrelationId AS promptTurnCorrelationId,
+              messages.promptTurnError AS promptTurnError
        FROM events
-       WHERE userId = ? AND eventType = 'message' AND sessionKey = ? AND sequence > ?
-       ORDER BY sequence DESC LIMIT ?`,
+       LEFT JOIN messages ON messages.serverEventId = events.id
+       WHERE events.userId = ? AND events.eventType = 'message' AND events.sessionKey = ? AND events.sequence > ?
+       ORDER BY events.sequence DESC LIMIT ?`,
     );
     selectEventByIdStmt = newDb.prepare(
       `SELECT id, userId, sessionKey, sequence, timestamp
@@ -3857,7 +3876,16 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     return media;
   }
 
-  type EventRow = { id: string; payloadJson: string; sequence?: number; timestamp?: number };
+  type EventRow = {
+    id: string;
+    payloadJson: string;
+    sequence?: number;
+    timestamp?: number;
+    messageStreaming?: number | null;
+    promptTurnState?: string | null;
+    promptTurnCorrelationId?: string | null;
+    promptTurnError?: string | null;
+  };
 
   const logHttpRequest = (event: string, info?: Record<string, unknown>) => {
     if (info) {
@@ -5226,6 +5254,35 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       default:
         return "running";
     }
+  }
+
+  function projectPromptTurnStateOntoReplayEvent(
+    event: ServerMessage,
+    row: EventRow,
+  ): ServerMessage {
+    if (event.role !== "user" || typeof event.clientMessageId !== "string") {
+      return event;
+    }
+    if (typeof row.messageStreaming !== "number" && typeof row.promptTurnState !== "string") {
+      return event;
+    }
+    const state = promptTurnStateFromMessageRow({
+      streaming:
+        typeof row.messageStreaming === "number"
+          ? row.messageStreaming
+          : event.streaming
+            ? MessageStreamingState.Active
+            : MessageStreamingState.Finalized,
+      promptTurnState: row.promptTurnState,
+    });
+    return {
+      ...event,
+      streaming: state === "accepted" || state === "queued" || state === "running",
+      promptTurnState: state,
+      promptTurnCorrelationId: row.promptTurnCorrelationId ?? undefined,
+      promptTurnError:
+        state === "failed" ? (row.promptTurnError ?? "clawline.promptTurn.failed") : undefined,
+    };
   }
 
   function rememberPromptTurnAdmission(facts: PromptTurnAdmissionFacts) {
@@ -6731,14 +6788,16 @@ button.deny { background: #9b1c31; color: white; }
     }
     const agentSessionId = resolveActiveRunAgentSessionId(sessionKey, activeRun);
     if (!agentSessionId) {
-      rejectUnsupportedSessionControl(
-        res,
+      activeRun.cancelRequested = true;
+      if (activeRun.deviceId) {
+        updatePromptCancelRequestedStmt.run(1, activeRun.deviceId, activeRun.messageId);
+      }
+      sendSessionControlJson(res, 200, {
+        ok: true,
         sessionKey,
-        "cancel_current_run",
-        "unsupported",
-        "The current Clawline provider dispatch path does not expose a per-session abort seam.",
-        capabilities,
-      );
+        action: "cancel_current_run",
+        status: await buildSessionStatusPayload(userId, sessionKey),
+      });
       return;
     }
     const aborted = abortAgentHarnessRun(agentSessionId);
@@ -8143,9 +8202,14 @@ button.deny { background: #9b1c31; color: white; }
             Boolean(entry.event) && Boolean(entry.row),
         )
         .map(({ event, row }) => {
-          event.attachments = canonicalizeReplayAttachments(event.attachments, logger, event.id);
-          normalizeEventRouting(event);
-          return { event, sequence: row.sequence ?? 0 };
+          const replayEvent = projectPromptTurnStateOntoReplayEvent(event, row);
+          replayEvent.attachments = canonicalizeReplayAttachments(
+            replayEvent.attachments,
+            logger,
+            replayEvent.id,
+          );
+          normalizeEventRouting(replayEvent);
+          return { event: replayEvent, sequence: row.sequence ?? 0 };
         });
       selected.push(...parsed);
     }
@@ -9573,6 +9637,24 @@ button.deny { background: #9b1c31; color: white; }
               return;
             }
           }
+          const activeRun: SessionStatusActiveRun = {
+            runId: event.id,
+            correlationId: promptTurnAdmission.correlationId,
+            messageId,
+            deviceId: session.deviceId,
+            sessionKey: resolvedSessionKey,
+            agentSessionId: normalizeStatusString(
+              loadSessionStoreEntryForKey(resolvedSessionKey).entry?.sessionId,
+            ),
+            startedAt: Date.now(),
+            provider: null,
+            model: null,
+            thinkingLevel: null,
+            fastMode: null,
+            cancelRequested: false,
+          };
+          activeRunForProgress = activeRun;
+          activeSessionRuns.set(normalizeSessionKey(resolvedSessionKey), activeRun);
           markProcessStage("prompt_turn_context_finalize");
           const attachmentSummary = describeClawlineAttachments(ownership.attachments);
           let inboundBody = attachmentSummary
@@ -9587,6 +9669,22 @@ button.deny { background: #9b1c31; color: white; }
             });
           if (inboundImageFailureMarkers.length > 0) {
             inboundBody = [inboundBody, ...inboundImageFailureMarkers].filter(Boolean).join("\n\n");
+          }
+          if (activeRun.cancelRequested) {
+            updateMessageStreamingStmt.run(
+              MessageStreamingState.Finalized,
+              session.deviceId,
+              messageId,
+            );
+            transitionPromptTurnAdmission(promptTurnAdmission, "canceled", {
+              messageId,
+              sessionKey: resolvedSessionKey,
+              userId: session.userId,
+              deviceId: session.deviceId,
+            });
+            activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
+            activeRunForProgress = null;
+            return;
           }
           const ctxPayload = buildClawlineInboundContext({
             channel: inboundTarget.channelLabel,
@@ -9620,24 +9718,6 @@ button.deny { background: #9b1c31; color: white; }
             userId: session.userId,
             deviceId: session.deviceId,
           });
-          const activeRun: SessionStatusActiveRun = {
-            runId: event.id,
-            correlationId: promptTurnAdmission.correlationId,
-            messageId,
-            sessionKey: resolvedSessionKey,
-            agentSessionId: normalizeStatusString(
-              loadSessionStoreEntryForKey(resolvedSessionKey).entry?.sessionId,
-            ),
-            startedAt: Date.now(),
-            provider: null,
-            model: null,
-            thinkingLevel: null,
-            fastMode: null,
-            cancelRequested: false,
-          };
-          activeRunForProgress = activeRun;
-          activeSessionRuns.set(normalizeSessionKey(resolvedSessionKey), activeRun);
-
           let queuedFinal = false;
           let deliveredCount = 0;
           let dispatchFailed = false;
@@ -10271,6 +10351,24 @@ button.deny { background: #9b1c31; color: white; }
                 return;
               }
             }
+            const activeRun: SessionStatusActiveRun = {
+              runId: event.id,
+              correlationId: promptTurnAdmission.correlationId,
+              messageId: clientId,
+              deviceId: session.deviceId,
+              sessionKey: resolvedSessionKey,
+              agentSessionId: normalizeStatusString(
+                loadSessionStoreEntryForKey(resolvedSessionKey).entry?.sessionId,
+              ),
+              startedAt: Date.now(),
+              provider: null,
+              model: null,
+              thinkingLevel: null,
+              fastMode: null,
+              cancelRequested: false,
+            };
+            activeRunForProgress = activeRun;
+            activeSessionRuns.set(normalizeSessionKey(resolvedSessionKey), activeRun);
             const attachmentSummary = describeClawlineAttachments(attachments);
             let inboundBody = attachmentSummary
               ? `${rawContent}\n\n${attachmentSummary}`
@@ -10286,6 +10384,22 @@ button.deny { background: #9b1c31; color: white; }
               inboundBody = [inboundBody, ...inboundImageFailureMarkers]
                 .filter(Boolean)
                 .join("\n\n");
+            }
+            if (activeRun.cancelRequested) {
+              updateMessageStreamingStmt.run(
+                MessageStreamingState.Finalized,
+                session.deviceId,
+                clientId,
+              );
+              transitionPromptTurnAdmission(promptTurnAdmission, "canceled", {
+                messageId: clientId,
+                sessionKey: resolvedSessionKey,
+                userId: session.userId,
+                deviceId: session.deviceId,
+              });
+              activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
+              activeRunForProgress = null;
+              return;
             }
             const ctxPayload = buildClawlineInboundContext({
               channel: channelLabel,
@@ -10319,24 +10433,6 @@ button.deny { background: #9b1c31; color: white; }
               sourceMessageId,
               interactiveAction: action,
             });
-            const activeRun: SessionStatusActiveRun = {
-              runId: event.id,
-              correlationId: promptTurnAdmission.correlationId,
-              messageId: clientId,
-              sessionKey: resolvedSessionKey,
-              agentSessionId: normalizeStatusString(
-                loadSessionStoreEntryForKey(resolvedSessionKey).entry?.sessionId,
-              ),
-              startedAt: Date.now(),
-              provider: null,
-              model: null,
-              thinkingLevel: null,
-              fastMode: null,
-              cancelRequested: false,
-            };
-            activeRunForProgress = activeRun;
-            activeSessionRuns.set(normalizeSessionKey(resolvedSessionKey), activeRun);
-
             let queuedFinal = false;
             let deliveredCount = 0;
             const dispatchStartedAt = Date.now();
