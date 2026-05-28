@@ -7451,22 +7451,15 @@ describe.sequential("clawline provider server", () => {
       })) as { content?: string };
       expect(secondAssistant.content).toBe("second reply");
 
-      expect(capturedCtx).toMatchObject({
+      expect(capturedCtx).not.toBeNull();
+      const modelContext = capturedCtx as unknown as Record<string, unknown>;
+      expect(modelContext).toMatchObject({
         SessionKey: sessionKey,
-        UntrustedStructuredContext: [
-          expect.objectContaining({
-            label: `Reply reference: user is replying to message ${firstMessageId}`,
-            source: "clawline",
-            type: "reply_reference",
-            payload: expect.objectContaining({
-              kind: "reply",
-              llm_visible_message_id: firstMessageId,
-              role: "user",
-              preview: "referenced body",
-            }),
-          }),
-        ],
+        ReplyToId: firstMessageId,
+        ReplyToBody: "referenced body",
+        ReplyToSender: "user",
       });
+      expect(modelContext.UntrustedStructuredContext).toBeUndefined();
 
       queue.dispose();
       ws.terminate();
