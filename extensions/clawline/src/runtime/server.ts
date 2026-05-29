@@ -10439,7 +10439,7 @@ button.deny { background: #9b1c31; color: white; }
       const assetIds: string[] = [];
 
       let runAgentDispatch: (() => Promise<unknown>) | null = null;
-      await providerLaneQueue.runInteractiveCallback(
+      await providerLaneQueue.runPromptAdmission(
         { userId: session.userId, streamKey: resolvedSessionKey },
         async () => {
           if (isDenylisted(session.deviceId)) {
