@@ -5348,6 +5348,45 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
   }
 
+  function broadcastPromptTurnState(params: {
+    userId: string;
+    sessionKey: string;
+    facts: PromptTurnAdmissionFacts;
+    error?: string;
+  }) {
+    const normalizedKey = normalizeSessionKey(params.sessionKey);
+    const sessions = userSessions.get(params.userId);
+    if (!sessions || sessions.size === 0) {
+      return;
+    }
+    const terminalState = isPromptTurnTerminalState(params.facts.state)
+      ? params.facts.state
+      : undefined;
+    for (const target of sessions) {
+      if (target.revoked || isDenylisted(target.deviceId)) {
+        continue;
+      }
+      const keys = resolveSubscribedSessionKeys(target);
+      if (!keys.some((key) => normalizeSessionKey(key) === normalizedKey)) {
+        continue;
+      }
+      void sendJson(target.socket, {
+        type: "event",
+        event: "prompt_turn_state",
+        payload: {
+          messageId: params.facts.clientMessageId,
+          sessionKey: params.sessionKey,
+          state: params.facts.state,
+          terminalState,
+          correlationId: params.facts.correlationId,
+          clawlineMessageRowId: params.facts.clawlineMessageRowId,
+          error:
+            terminalState === "failed" ? (params.error ?? "clawline.promptTurn.failed") : undefined,
+        },
+      });
+    }
+  }
+
   function transitionPromptTurnAdmission(
     facts: PromptTurnAdmissionFacts,
     next: PromptTurnState,
@@ -5374,6 +5413,14 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           : "clawline.promptTurn.failed"
         : undefined,
     );
+    if (typeof logContext.userId === "string" && typeof logContext.sessionKey === "string") {
+      broadcastPromptTurnState({
+        userId: logContext.userId,
+        sessionKey: logContext.sessionKey,
+        facts,
+        error: typeof logContext.error === "string" ? logContext.error : undefined,
+      });
+    }
     logger.info?.("[clawline] prompt_turn_transition", {
       ...logContext,
       correlationId: facts.correlationId,
@@ -6540,7 +6587,12 @@ button.deny { background: #9b1c31; color: white; }
     const activeRun = activeSessionRuns.get(normalizedSessionKey) ?? null;
     const snapshot = sessionRuntimeStatusSnapshots.get(normalizedSessionKey) ?? null;
     const { entry } = loadSessionStoreEntryForKey(sessionKey);
-    const queueDepth = getClawlineFollowupQueueDepth(sessionKey);
+    const promptTurnQueue =
+      queuedPromptTurnsBySession
+        .get(normalizedSessionKey)
+        ?.filter((turn) => turn.state === "queued") ?? [];
+    const queueDepth = getClawlineFollowupQueueDepth(sessionKey) + promptTurnQueue.length;
+    const queuedPromptTurn = promptTurnQueue[0] ?? null;
     const modelStatus = resolveStatusModel(entry, activeRun ?? snapshot, sessionKey);
     const thinkingLevel =
       normalizeStatusString(entry?.thinkingLevel) ??
@@ -6593,7 +6645,8 @@ button.deny { background: #9b1c31; color: white; }
         : {
             state: queueDepth > 0 ? "queued" : "idle",
             runId: null,
-            messageId: null,
+            correlationId: queuedPromptTurn?.correlationId ?? null,
+            messageId: queuedPromptTurn?.clientMessageId ?? null,
             startedAt: null,
             queueDepth,
           },
@@ -6806,11 +6859,11 @@ button.deny { background: #9b1c31; color: white; }
       return;
     }
     const agentSessionId = resolveActiveRunAgentSessionId(sessionKey, activeRun);
+    activeRun.cancelRequested = true;
+    if (activeRun.deviceId) {
+      updatePromptCancelRequestedStmt.run(1, activeRun.deviceId, activeRun.messageId);
+    }
     if (!agentSessionId) {
-      activeRun.cancelRequested = true;
-      if (activeRun.deviceId) {
-        updatePromptCancelRequestedStmt.run(1, activeRun.deviceId, activeRun.messageId);
-      }
       sendSessionControlJson(res, 200, {
         ok: true,
         sessionKey,
@@ -6821,10 +6874,6 @@ button.deny { background: #9b1c31; color: white; }
     }
     const aborted = abortAgentHarnessRun(agentSessionId);
     if (!aborted) {
-      activeRun.cancelRequested = true;
-      if (activeRun.deviceId) {
-        updatePromptCancelRequestedStmt.run(1, activeRun.deviceId, activeRun.messageId);
-      }
       logger.info?.("[clawline] active_run_cancel_latched_without_abort", {
         sessionKey,
         runId: activeRun.runId,
@@ -6839,8 +6888,6 @@ button.deny { background: #9b1c31; color: white; }
       });
       return;
     }
-    activeRun.cancelRequested = true;
-    activeSessionRuns.delete(normalizeSessionKey(sessionKey));
     sendSessionControlJson(res, 200, {
       ok: true,
       sessionKey,
@@ -9779,8 +9826,6 @@ button.deny { background: #9b1c31; color: white; }
             fastMode: null,
             cancelRequested: false,
           };
-          activeRunForProgress = activeRun;
-          activeSessionRuns.set(normalizeSessionKey(resolvedSessionKey), activeRun);
           markProcessStage("prompt_turn_context_finalize");
           const attachmentSummary = describeClawlineAttachments(ownership.attachments);
           let inboundBody = attachmentSummary
@@ -9795,22 +9840,6 @@ button.deny { background: #9b1c31; color: white; }
             });
           if (inboundImageFailureMarkers.length > 0) {
             inboundBody = [inboundBody, ...inboundImageFailureMarkers].filter(Boolean).join("\n\n");
-          }
-          if (activeRun.cancelRequested) {
-            updateMessageStreamingStmt.run(
-              MessageStreamingState.Finalized,
-              session.deviceId,
-              messageId,
-            );
-            transitionPromptTurnAdmission(promptTurnAdmission, "canceled", {
-              messageId,
-              sessionKey: resolvedSessionKey,
-              userId: session.userId,
-              deviceId: session.deviceId,
-            });
-            activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
-            activeRunForProgress = null;
-            return;
           }
           const ctxPayload = buildClawlineInboundContext({
             channel: inboundTarget.channelLabel,
@@ -9835,6 +9864,24 @@ button.deny { background: #9b1c31; color: white; }
             media: buildInboundMediaFactsFromAttachments(ownership.attachments, messageId),
             referenceContexts: referenceResolution.contexts,
           });
+          activeRunForProgress = activeRun;
+          activeSessionRuns.set(normalizeSessionKey(resolvedSessionKey), activeRun);
+          if (activeRun.cancelRequested) {
+            updateMessageStreamingStmt.run(
+              MessageStreamingState.Finalized,
+              session.deviceId,
+              messageId,
+            );
+            transitionPromptTurnAdmission(promptTurnAdmission, "canceled", {
+              messageId,
+              sessionKey: resolvedSessionKey,
+              userId: session.userId,
+              deviceId: session.deviceId,
+            });
+            activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
+            activeRunForProgress = null;
+            return;
+          }
           markProcessStage("agent_run_start");
           logger.info?.("[clawline] agent_run_start", {
             messageId,
@@ -10436,8 +10483,6 @@ button.deny { background: #9b1c31; color: white; }
               fastMode: null,
               cancelRequested: false,
             };
-            activeRunForProgress = activeRun;
-            activeSessionRuns.set(normalizeSessionKey(resolvedSessionKey), activeRun);
             const attachmentSummary = describeClawlineAttachments(attachments);
             let inboundBody = attachmentSummary
               ? `${rawContent}\n\n${attachmentSummary}`
@@ -10453,22 +10498,6 @@ button.deny { background: #9b1c31; color: white; }
               inboundBody = [inboundBody, ...inboundImageFailureMarkers]
                 .filter(Boolean)
                 .join("\n\n");
-            }
-            if (activeRun.cancelRequested) {
-              updateMessageStreamingStmt.run(
-                MessageStreamingState.Finalized,
-                session.deviceId,
-                clientId,
-              );
-              transitionPromptTurnAdmission(promptTurnAdmission, "canceled", {
-                messageId: clientId,
-                sessionKey: resolvedSessionKey,
-                userId: session.userId,
-                deviceId: session.deviceId,
-              });
-              activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
-              activeRunForProgress = null;
-              return;
             }
             const ctxPayload = buildClawlineInboundContext({
               channel: channelLabel,
@@ -10492,6 +10521,24 @@ button.deny { background: #9b1c31; color: white; }
               groupSystemPrompt,
               media: buildInboundMediaFactsFromAttachments(attachments, clientId),
             });
+            activeRunForProgress = activeRun;
+            activeSessionRuns.set(normalizeSessionKey(resolvedSessionKey), activeRun);
+            if (activeRun.cancelRequested) {
+              updateMessageStreamingStmt.run(
+                MessageStreamingState.Finalized,
+                session.deviceId,
+                clientId,
+              );
+              transitionPromptTurnAdmission(promptTurnAdmission, "canceled", {
+                messageId: clientId,
+                sessionKey: resolvedSessionKey,
+                userId: session.userId,
+                deviceId: session.deviceId,
+              });
+              activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
+              activeRunForProgress = null;
+              return;
+            }
             logger.info?.("[clawline] agent_run_start", {
               messageId: clientId,
               correlationId: promptTurnAdmission.correlationId,
