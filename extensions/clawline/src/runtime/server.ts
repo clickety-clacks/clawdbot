@@ -1944,6 +1944,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const sessionRuntimeStatusSnapshots = new Map<string, SessionStatusRuntimeSnapshot>();
   const queuedPromptTurnsBySession = new Map<string, PromptTurnAdmissionFacts[]>();
   const startingPromptTurnsBySession = new Map<string, PromptTurnAdmissionFacts>();
+  const scheduledPromptTurnCountsBySession = new Map<string, number>();
 
   type SessionInfo = {
     dmScope: string;
@@ -5191,7 +5192,19 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     streamKey: string,
     task: () => Promise<T>,
   ): Promise<T> {
-    return providerLaneQueue.runPromptTurn({ userId, streamKey }, task);
+    const normalizedSessionKey = normalizeSessionKey(streamKey);
+    scheduledPromptTurnCountsBySession.set(
+      normalizedSessionKey,
+      (scheduledPromptTurnCountsBySession.get(normalizedSessionKey) ?? 0) + 1,
+    );
+    return providerLaneQueue.runPromptTurn({ userId, streamKey }, task).finally(() => {
+      const nextCount = (scheduledPromptTurnCountsBySession.get(normalizedSessionKey) ?? 1) - 1;
+      if (nextCount > 0) {
+        scheduledPromptTurnCountsBySession.set(normalizedSessionKey, nextCount);
+      } else {
+        scheduledPromptTurnCountsBySession.delete(normalizedSessionKey);
+      }
+    });
   }
 
   type ClawlineDispatchResult = Awaited<ReturnType<typeof dispatchInboundMessage>>;
@@ -5347,6 +5360,16 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         recoveredCount: recovered.changes,
       });
     }
+  }
+
+  function hasPromptTurnRuntimeBlocker(sessionKey: string): boolean {
+    const normalizedSessionKey = normalizeSessionKey(sessionKey);
+    return (
+      activeSessionRuns.has(normalizedSessionKey) ||
+      startingPromptTurnsBySession.has(normalizedSessionKey) ||
+      (queuedPromptTurnsBySession.get(normalizedSessionKey)?.length ?? 0) > 0 ||
+      (scheduledPromptTurnCountsBySession.get(normalizedSessionKey) ?? 0) > 0
+    );
   }
 
   function rememberPromptTurnAdmission(facts: PromptTurnAdmissionFacts) {
@@ -8998,6 +9021,349 @@ button.deny { background: #9b1c31; color: white; }
     return wasQueued ? "queued" : "delivered";
   }
 
+  type ClawlinePromptTurnRoute = {
+    agentId: string;
+    channel: string;
+    accountId?: string;
+    sessionKey: string;
+  };
+
+  type PreparedClawlinePromptTurnContext = {
+    ctxPayload: ReturnType<typeof buildClawlineInboundContext>;
+    inboundImages: ImageContent[];
+  };
+
+  async function runAdmittedClawlinePromptTurn(params: {
+    socket: WebSocket;
+    promptTurnAdmission: PromptTurnAdmissionFacts;
+    eventId: string;
+    messageId: string;
+    sessionId: string;
+    sessionKey: string;
+    userId: string;
+    deviceId: string;
+    rawContent: string;
+    route: ClawlinePromptTurnRoute;
+    dispatcher: ReturnType<typeof createReplyDispatcherWithTyping>["dispatcher"];
+    replyOptions: ReturnType<typeof createReplyDispatcherWithTyping>["replyOptions"];
+    markDispatchIdle: ReturnType<typeof createReplyDispatcherWithTyping>["markDispatchIdle"];
+    agentProgress: ReturnType<typeof createAgentProgressEmitter>;
+    prefixContext: ClawlineResponsePrefixContext;
+    setActiveRunForProgress: (activeRun: SessionStatusActiveRun | null) => void;
+    getPersistedAssistantDeliveryCount: () => number;
+    buildContext: () => Promise<PreparedClawlinePromptTurnContext>;
+    record?: ClawlinePreparedRecordOptions;
+    replyResolver: typeof options.replyResolver;
+    logContext?: Record<string, unknown>;
+    markProcessStage?: (stage: string) => void;
+    onAfterDispatchIdle?: () => void;
+  }): Promise<"delivered" | "queued" | "canceled" | "failed" | "skipped-canceled"> {
+    const logContext = params.logContext ?? {};
+    const latestPromptRow = selectMessageStmt.get(params.deviceId, params.messageId) as
+      | {
+          promptTurnCancelRequested?: number | null;
+          promptTurnState?: string | null;
+        }
+      | undefined;
+    if (
+      params.promptTurnAdmission.state === "canceled" ||
+      latestPromptRow?.promptTurnState === "canceled" ||
+      latestPromptRow?.promptTurnCancelRequested === 1
+    ) {
+      updatePromptCancelRequestedStmt.run(1, params.deviceId, params.messageId);
+      if (params.promptTurnAdmission.state === "queued") {
+        transitionPromptTurnAdmission(params.promptTurnAdmission, "canceled", {
+          ...logContext,
+          messageId: params.messageId,
+          sessionKey: params.sessionKey,
+          userId: params.userId,
+          deviceId: params.deviceId,
+        });
+      }
+      logger.info?.("[clawline] prompt_turn_start_skipped_canceled", {
+        ...logContext,
+        messageId: params.messageId,
+        correlationId: params.promptTurnAdmission.correlationId,
+        sessionKey: params.sessionKey,
+        deviceId: params.deviceId,
+      });
+      return "skipped-canceled";
+    }
+    if (params.promptTurnAdmission.state === "queued") {
+      const startOwner = resolveQueuedPromptTurnStart({
+        state: params.promptTurnAdmission.state,
+        cancelRequested: latestPromptRow?.promptTurnCancelRequested === 1,
+      });
+      transitionPromptTurnAdmission(params.promptTurnAdmission, startOwner.state, {
+        ...logContext,
+        messageId: params.messageId,
+        sessionKey: params.sessionKey,
+        userId: params.userId,
+        deviceId: params.deviceId,
+      });
+      if (startOwner.owner === "control") {
+        logger.info?.("[clawline] prompt_turn_start_owned_by_cancel", {
+          ...logContext,
+          messageId: params.messageId,
+          correlationId: params.promptTurnAdmission.correlationId,
+          sessionKey: params.sessionKey,
+          deviceId: params.deviceId,
+        });
+        return "skipped-canceled";
+      }
+      startingPromptTurnsBySession.set(
+        normalizeSessionKey(params.sessionKey),
+        params.promptTurnAdmission,
+      );
+    } else if (params.promptTurnAdmission.state === "accepted") {
+      transitionPromptTurnAdmission(params.promptTurnAdmission, "running", {
+        ...logContext,
+        messageId: params.messageId,
+        sessionKey: params.sessionKey,
+        userId: params.userId,
+        deviceId: params.deviceId,
+      });
+      startingPromptTurnsBySession.set(
+        normalizeSessionKey(params.sessionKey),
+        params.promptTurnAdmission,
+      );
+    }
+    const activeRun: SessionStatusActiveRun = {
+      runId: params.eventId,
+      correlationId: params.promptTurnAdmission.correlationId,
+      messageId: params.messageId,
+      deviceId: params.deviceId,
+      sessionKey: params.sessionKey,
+      agentSessionId: normalizeStatusString(
+        loadSessionStoreEntryForKey(params.sessionKey).entry?.sessionId,
+      ),
+      startedAt: Date.now(),
+      provider: null,
+      model: null,
+      thinkingLevel: null,
+      fastMode: null,
+      cancelRequested: false,
+    };
+    let prepared: PreparedClawlinePromptTurnContext;
+    try {
+      params.markProcessStage?.("prompt_turn_context_finalize");
+      prepared = await params.buildContext();
+    } catch (err) {
+      startingPromptTurnsBySession.delete(normalizeSessionKey(params.sessionKey));
+      throw err;
+    }
+    startingPromptTurnsBySession.delete(normalizeSessionKey(params.sessionKey));
+    params.setActiveRunForProgress(activeRun);
+    activeSessionRuns.set(normalizeSessionKey(params.sessionKey), activeRun);
+    const promptRowAfterContext = selectMessageStmt.get(params.deviceId, params.messageId) as
+      | { promptTurnCancelRequested?: number | null; promptTurnState?: string | null }
+      | undefined;
+    const promptTurnStateAfterContext = params.promptTurnAdmission.state as PromptTurnState;
+    if (
+      activeRun.cancelRequested ||
+      promptTurnStateAfterContext === "canceled" ||
+      promptRowAfterContext?.promptTurnState === "canceled" ||
+      promptRowAfterContext?.promptTurnCancelRequested === 1
+    ) {
+      updateMessageStreamingStmt.run(
+        MessageStreamingState.Finalized,
+        params.deviceId,
+        params.messageId,
+      );
+      if (promptTurnStateAfterContext !== "canceled") {
+        transitionPromptTurnAdmission(params.promptTurnAdmission, "canceled", {
+          ...logContext,
+          messageId: params.messageId,
+          sessionKey: params.sessionKey,
+          userId: params.userId,
+          deviceId: params.deviceId,
+        });
+      }
+      activeSessionRuns.delete(normalizeSessionKey(params.sessionKey));
+      params.setActiveRunForProgress(null);
+      return "canceled";
+    }
+    params.markProcessStage?.("agent_run_start");
+    logger.info?.("[clawline] agent_run_start", {
+      ...logContext,
+      messageId: params.messageId,
+      correlationId: params.promptTurnAdmission.correlationId,
+      sessionId: params.sessionId,
+      sessionKey: params.sessionKey,
+      userId: params.userId,
+      deviceId: params.deviceId,
+    });
+    let queuedFinal = false;
+    let deliveredCount = 0;
+    let dispatchFailed = false;
+    let dispatchError: string | undefined;
+    const dispatchStartedAt = Date.now();
+    try {
+      logger.info?.("[clawline] agent_run_phase", {
+        ...logContext,
+        phase: "dispatch_start",
+        messageId: params.messageId,
+        correlationId: params.promptTurnAdmission.correlationId,
+        sessionKey: params.sessionKey,
+        imageCount: prepared.inboundImages.length,
+      });
+      params.markProcessStage?.("run_prepared_inbound_reply");
+      const result = await runClawlineChannelTurn({
+        channel: params.route.channel,
+        accountId: params.route.accountId,
+        routeSessionKey: params.route.sessionKey,
+        ctxPayload: prepared.ctxPayload,
+        messageId: params.messageId,
+        rawText: params.rawContent,
+        record: params.record,
+        logContext: { ...logContext, correlationId: params.promptTurnAdmission.correlationId },
+        onPreDispatchFailure: (err) => {
+          logger.warn?.("[clawline] channel_turn_pre_dispatch_failed", {
+            ...logContext,
+            messageId: params.messageId,
+            correlationId: params.promptTurnAdmission.correlationId,
+            sessionKey: params.sessionKey,
+            error: formatError(err),
+          });
+        },
+        runDispatch: async () =>
+          runWithClawlineOutboundCorrelation(
+            {
+              replyToMessageId: params.eventId,
+              replyToClientMessageId: params.messageId,
+            },
+            async () => {
+              if (activeRun.cancelRequested) {
+                throw new Error("Clawline prompt turn canceled before dispatch");
+              }
+              return dispatchInboundMessage({
+                ctx: prepared.ctxPayload,
+                cfg: openClawCfg,
+                dispatcher: params.dispatcher,
+                replyOptions: {
+                  ...params.replyOptions,
+                  ...params.agentProgress.replyOptions,
+                  images: prepared.inboundImages.length > 0 ? prepared.inboundImages : undefined,
+                  onModelSelected: (ctx) => {
+                    params.prefixContext.provider = ctx.provider;
+                    params.prefixContext.model = extractClawlineShortModelName(ctx.model);
+                    params.prefixContext.modelFull = `${ctx.provider}/${ctx.model}`;
+                    params.prefixContext.thinkingLevel = ctx.thinkLevel ?? "off";
+                    params.prefixContext.fastMode = ctx.fastMode;
+                    activeRun.provider = ctx.provider;
+                    activeRun.model = ctx.model;
+                    activeRun.thinkingLevel = ctx.thinkLevel ?? "off";
+                    activeRun.fastMode = ctx.fastMode ?? null;
+                    rememberSessionRuntimeStatus(params.sessionKey, {
+                      provider: ctx.provider,
+                      model: ctx.model,
+                      thinkingLevel: ctx.thinkLevel ?? "off",
+                      fastMode: ctx.fastMode ?? null,
+                    });
+                  },
+                },
+                replyResolver: params.replyResolver,
+              });
+            },
+          ),
+      });
+      queuedFinal = result.dispatchResult.queuedFinal;
+      deliveredCount = Math.max(
+        result.dispatchResult.counts.block +
+          result.dispatchResult.counts.tool +
+          result.dispatchResult.counts.final,
+        params.getPersistedAssistantDeliveryCount(),
+      );
+      logger.info?.("[clawline] agent_run_phase", {
+        ...logContext,
+        phase: "dispatch_return",
+        messageId: params.messageId,
+        correlationId: params.promptTurnAdmission.correlationId,
+        sessionKey: params.sessionKey,
+        queuedFinal,
+        deliveredCount,
+        blockCount: result.dispatchResult.counts.block,
+        toolCount: result.dispatchResult.counts.tool,
+        finalCount: result.dispatchResult.counts.final,
+        elapsedMs: Date.now() - dispatchStartedAt,
+      });
+    } catch (err) {
+      dispatchFailed = true;
+      dispatchError = formatError(err);
+      deliveredCount = params.getPersistedAssistantDeliveryCount();
+      logger.error?.(`[clawline] dispatch_failed: ${dispatchError}`, {
+        ...logContext,
+        messageId: params.messageId,
+        correlationId: params.promptTurnAdmission.correlationId,
+        sessionKey: params.sessionKey,
+      });
+      queuedFinal = false;
+    }
+    const waitForIdleStartedAt = Date.now();
+    logger.info?.("[clawline] agent_run_phase", {
+      ...logContext,
+      phase: "wait_for_idle_start",
+      messageId: params.messageId,
+      correlationId: params.promptTurnAdmission.correlationId,
+      sessionKey: params.sessionKey,
+    });
+    params.markDispatchIdle();
+    await params.dispatcher.waitForIdle();
+    logger.info?.("[clawline] agent_run_phase", {
+      ...logContext,
+      phase: "wait_for_idle_done",
+      messageId: params.messageId,
+      correlationId: params.promptTurnAdmission.correlationId,
+      sessionKey: params.sessionKey,
+      elapsedMs: Date.now() - waitForIdleStartedAt,
+    });
+    params.onAfterDispatchIdle?.();
+    if (markMessageFailedIfDeviceRevoked(params.deviceId, params.messageId)) {
+      activeSessionRuns.delete(normalizeSessionKey(params.sessionKey));
+      params.setActiveRunForProgress(null);
+      return "failed";
+    }
+
+    const queueDepth = getClawlineFollowupQueueDepth(params.route.sessionKey);
+    const wasDelivered = queuedFinal || deliveredCount > 0;
+    const wasQueued = !wasDelivered && queueDepth > 0;
+    logger.info?.("[clawline] agent_run_end", {
+      ...logContext,
+      messageId: params.messageId,
+      correlationId: params.promptTurnAdmission.correlationId,
+      sessionId: params.sessionId,
+      sessionKey: params.sessionKey,
+      userId: params.userId,
+      deviceId: params.deviceId,
+      deliveredCount,
+      queuedFinal,
+      queueDepth,
+      wasDelivered,
+      wasQueued,
+      dispatchFailed,
+    });
+    return finalizeClawlinePromptTurn({
+      socket: params.socket,
+      promptTurnAdmission: params.promptTurnAdmission,
+      activeRun,
+      agentProgress: params.agentProgress,
+      messageId: params.messageId,
+      sessionKey: params.sessionKey,
+      userId: params.userId,
+      deviceId: params.deviceId,
+      deliveredCount,
+      queuedFinal,
+      queueDepth,
+      dispatchFailed,
+      dispatchError,
+      logContext: { ...logContext, sessionId: params.sessionId },
+      cleanup: () => {
+        activeSessionRuns.delete(normalizeSessionKey(params.sessionKey));
+        params.setActiveRunForProgress(null);
+      },
+    });
+  }
+
   async function appendEvent(
     event: ServerMessage,
     userId: string,
@@ -9512,7 +9878,7 @@ button.deny { background: #9b1c31; color: white; }
       }
       const targetUserId = session.userId;
 
-      let runAgentDispatch: (() => Promise<void>) | null = null;
+      let runAgentDispatch: (() => Promise<unknown>) | null = null;
       markProcessStage("run_prompt_admission");
       await runPromptAdmissionTask(session.userId, resolvedSessionKey, async () => {
         if (isDenylisted(session.deviceId)) {
@@ -9828,349 +10194,98 @@ button.deny { background: #9b1c31; color: white; }
         });
 
         markProcessStage("prepare_agent_run");
-        runAgentDispatch = async () => {
-          const latestPromptRow = selectMessageStmt.get(session.deviceId, messageId) as
-            | {
-                promptTurnCancelRequested?: number | null;
-                promptTurnState?: string | null;
-              }
-            | undefined;
-          if (
-            promptTurnAdmission.state === "canceled" ||
-            latestPromptRow?.promptTurnState === "canceled" ||
-            latestPromptRow?.promptTurnCancelRequested === 1
-          ) {
-            updatePromptCancelRequestedStmt.run(1, session.deviceId, messageId);
-            if (promptTurnAdmission.state === "queued") {
-              transitionPromptTurnAdmission(promptTurnAdmission, "canceled", {
-                messageId,
-                sessionKey: resolvedSessionKey,
-                userId: session.userId,
-                deviceId: session.deviceId,
-              });
-            }
-            logger.info?.("[clawline] prompt_turn_start_skipped_canceled", {
-              messageId,
-              correlationId: promptTurnAdmission.correlationId,
-              sessionKey: resolvedSessionKey,
-              deviceId: session.deviceId,
-            });
-            return;
-          }
-          if (promptTurnAdmission.state === "queued") {
-            const startOwner = resolveQueuedPromptTurnStart({
-              state: promptTurnAdmission.state,
-              cancelRequested: latestPromptRow?.promptTurnCancelRequested === 1,
-            });
-            transitionPromptTurnAdmission(promptTurnAdmission, startOwner.state, {
-              messageId,
-              sessionKey: resolvedSessionKey,
-              userId: session.userId,
-              deviceId: session.deviceId,
-            });
-            if (startOwner.owner === "control") {
-              logger.info?.("[clawline] prompt_turn_start_owned_by_cancel", {
-                messageId,
-                correlationId: promptTurnAdmission.correlationId,
-                sessionKey: resolvedSessionKey,
-                deviceId: session.deviceId,
-              });
-              return;
-            }
-            startingPromptTurnsBySession.set(
-              normalizeSessionKey(resolvedSessionKey),
-              promptTurnAdmission,
-            );
-          }
-          const activeRun: SessionStatusActiveRun = {
-            runId: event.id,
-            correlationId: promptTurnAdmission.correlationId,
-            messageId,
-            deviceId: session.deviceId,
-            sessionKey: resolvedSessionKey,
-            agentSessionId: normalizeStatusString(
-              loadSessionStoreEntryForKey(resolvedSessionKey).entry?.sessionId,
-            ),
-            startedAt: Date.now(),
-            provider: null,
-            model: null,
-            thinkingLevel: null,
-            fastMode: null,
-            cancelRequested: false,
-          };
-          let inboundImages: ImageContent[] = [];
-          let ctxPayload: ReturnType<typeof buildClawlineInboundContext>;
-          try {
-            markProcessStage("prompt_turn_context_finalize");
-            const attachmentSummary = describeClawlineAttachments(ownership.attachments);
-            let inboundBody = attachmentSummary
-              ? `${rawContent}\n\n${attachmentSummary}`
-              : rawContent;
-            const materializedInboundImages = await materializeInboundAttachmentImages(
-              ownership.attachments,
-              {
-                messageId,
-                sessionKey: resolvedSessionKey,
-                deviceId: session.deviceId,
-                correlationId: promptTurnAdmission.correlationId,
-              },
-            );
-            inboundImages = materializedInboundImages.images;
-            if (materializedInboundImages.failureMarkers.length > 0) {
-              inboundBody = [inboundBody, ...materializedInboundImages.failureMarkers]
-                .filter(Boolean)
-                .join("\n\n");
-            }
-            ctxPayload = buildClawlineInboundContext({
-              channel: inboundTarget.channelLabel,
-              accountId: route.accountId,
-              agentId: route.agentId,
-              sessionKey: route.sessionKey,
-              mainSessionKey: route.mainSessionKey,
-              messageId,
-              rawBody: rawContent,
-              body: inboundBody,
-              commandBody: rawContent,
-              fromPeerId: peerId,
-              to: inboundTarget.contextTo,
-              senderId: session.userId,
-              senderName: session.claimedName ?? session.deviceInfo?.model ?? peerId,
-              provider: inboundTarget.channelLabel,
-              surface: inboundTarget.channelLabel,
-              nativeChannelId: inboundTarget.originatingTo,
-              originatingChannel: inboundTarget.originatingChannel,
-              originatingTo: inboundTarget.originatingTo,
-              groupSystemPrompt,
-              media: buildInboundMediaFactsFromAttachments(ownership.attachments, messageId),
-              referenceContexts: referenceResolution.contexts,
-            });
-          } catch (err) {
-            startingPromptTurnsBySession.delete(normalizeSessionKey(resolvedSessionKey));
-            throw err;
-          }
-          startingPromptTurnsBySession.delete(normalizeSessionKey(resolvedSessionKey));
-          activeRunForProgress = activeRun;
-          activeSessionRuns.set(normalizeSessionKey(resolvedSessionKey), activeRun);
-          const promptRowAfterContext = selectMessageStmt.get(session.deviceId, messageId) as
-            | { promptTurnCancelRequested?: number | null; promptTurnState?: string | null }
-            | undefined;
-          const promptTurnStateAfterContext = promptTurnAdmission.state as PromptTurnState;
-          if (
-            activeRun.cancelRequested ||
-            promptTurnStateAfterContext === "canceled" ||
-            promptRowAfterContext?.promptTurnState === "canceled" ||
-            promptRowAfterContext?.promptTurnCancelRequested === 1
-          ) {
-            updateMessageStreamingStmt.run(
-              MessageStreamingState.Finalized,
-              session.deviceId,
-              messageId,
-            );
-            if (promptTurnStateAfterContext !== "canceled") {
-              transitionPromptTurnAdmission(promptTurnAdmission, "canceled", {
-                messageId,
-                sessionKey: resolvedSessionKey,
-                userId: session.userId,
-                deviceId: session.deviceId,
-              });
-            }
-            activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
-            activeRunForProgress = null;
-            return;
-          }
-          markProcessStage("agent_run_start");
-          logger.info?.("[clawline] agent_run_start", {
-            messageId,
-            correlationId: promptTurnAdmission.correlationId,
-            sessionId: session.sessionId,
-            sessionKey: resolvedSessionKey,
-            userId: session.userId,
-            deviceId: session.deviceId,
-          });
-          let queuedFinal = false;
-          let deliveredCount = 0;
-          let dispatchFailed = false;
-          let dispatchError: string | undefined;
-          const dispatchStartedAt = Date.now();
-          try {
-            logger.info?.("[clawline] agent_run_phase", {
-              phase: "dispatch_start",
-              messageId,
-              correlationId: promptTurnAdmission.correlationId,
-              sessionKey: resolvedSessionKey,
-              imageCount: inboundImages.length,
-            });
-            markProcessStage("run_prepared_inbound_reply");
-            const result = await runClawlineChannelTurn({
-              channel: inboundTarget.channelLabel,
-              accountId: route.accountId,
-              routeSessionKey: route.sessionKey,
-              ctxPayload,
-              messageId,
-              rawText: rawContent,
-              record: {
-                updateLastRoute: inboundTarget.updateLastRoute,
-                onRecordError: (err) => {
-                  logger.warn?.(`[clawline] failed recording inbound session: ${formatError(err)}`);
-                },
-              },
-              logContext: { correlationId: promptTurnAdmission.correlationId },
-              onPreDispatchFailure: (err) => {
-                logger.warn?.("[clawline] channel_turn_pre_dispatch_failed", {
-                  messageId,
-                  correlationId: promptTurnAdmission.correlationId,
-                  sessionKey: resolvedSessionKey,
-                  error: formatError(err),
-                });
-              },
-              runDispatch: async () =>
-                runWithClawlineOutboundCorrelation(
-                  {
-                    replyToMessageId: event.id,
-                    replyToClientMessageId: messageId,
-                  },
-                  async () => {
-                    if (activeRun.cancelRequested) {
-                      throw new Error("Clawline prompt turn canceled before dispatch");
-                    }
-                    return dispatchInboundMessage({
-                      ctx: ctxPayload,
-                      cfg: openClawCfg,
-                      dispatcher,
-                      replyOptions: {
-                        ...replyOptions,
-                        ...agentProgress.replyOptions,
-                        images: inboundImages.length > 0 ? inboundImages : undefined,
-                        onModelSelected: (ctx) => {
-                          prefixContext.provider = ctx.provider;
-                          prefixContext.model = extractClawlineShortModelName(ctx.model);
-                          prefixContext.modelFull = `${ctx.provider}/${ctx.model}`;
-                          prefixContext.thinkingLevel = ctx.thinkLevel ?? "off";
-                          prefixContext.fastMode = ctx.fastMode;
-                          activeRun.provider = ctx.provider;
-                          activeRun.model = ctx.model;
-                          activeRun.thinkingLevel = ctx.thinkLevel ?? "off";
-                          activeRun.fastMode = ctx.fastMode ?? null;
-                          rememberSessionRuntimeStatus(resolvedSessionKey, {
-                            provider: ctx.provider,
-                            model: ctx.model,
-                            thinkingLevel: ctx.thinkLevel ?? "off",
-                            fastMode: ctx.fastMode ?? null,
-                          });
-                        },
-                      },
-                      replyResolver: options.replyResolver,
-                    });
-                  },
-                ),
-            });
-            queuedFinal = result.dispatchResult.queuedFinal;
-            // Count all delivered content (streaming blocks, tool results, and final replies)
-            deliveredCount = Math.max(
-              result.dispatchResult.counts.block +
-                result.dispatchResult.counts.tool +
-                result.dispatchResult.counts.final,
-              persistedAssistantDeliveryCount,
-            );
-            logger.info?.("[clawline] agent_run_phase", {
-              phase: "dispatch_return",
-              messageId,
-              correlationId: promptTurnAdmission.correlationId,
-              sessionKey: resolvedSessionKey,
-              queuedFinal,
-              deliveredCount,
-              blockCount: result.dispatchResult.counts.block,
-              toolCount: result.dispatchResult.counts.tool,
-              finalCount: result.dispatchResult.counts.final,
-              elapsedMs: Date.now() - dispatchStartedAt,
-            });
-          } catch (err) {
-            dispatchFailed = true;
-            dispatchError = formatError(err);
-            deliveredCount = persistedAssistantDeliveryCount;
-            logger.error?.(`[clawline] dispatch_failed: ${dispatchError}`, {
-              messageId,
-              correlationId: promptTurnAdmission.correlationId,
-              sessionKey: resolvedSessionKey,
-            });
-            queuedFinal = false;
-          }
-          const waitForIdleStartedAt = Date.now();
-          logger.info?.("[clawline] agent_run_phase", {
-            phase: "wait_for_idle_start",
-            messageId,
-            correlationId: promptTurnAdmission.correlationId,
-            sessionKey: resolvedSessionKey,
-          });
-          markDispatchIdle();
-          await dispatcher.waitForIdle();
-          logger.info?.("[clawline] agent_run_phase", {
-            phase: "wait_for_idle_done",
-            messageId,
-            correlationId: promptTurnAdmission.correlationId,
-            sessionKey: resolvedSessionKey,
-            elapsedMs: Date.now() - waitForIdleStartedAt,
-          });
-
-          // Always send activity=false when done
-          if (activitySignaled) {
-            activitySignaled = false;
-            void sendActivitySignal(false);
-          }
-          if (markMessageFailedIfDeviceRevoked(session.deviceId, messageId)) {
-            activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
-            activeRunForProgress = null;
-            return;
-          }
-
-          const queueKey = route.sessionKey;
-          const queueDepth = getClawlineFollowupQueueDepth(queueKey);
-          const wasDelivered = queuedFinal || deliveredCount > 0;
-          const wasQueued = !wasDelivered && queueDepth > 0;
-
-          logger.info?.("[clawline] agent_run_end", {
-            messageId,
-            correlationId: promptTurnAdmission.correlationId,
-            sessionId: session.sessionId,
-            sessionKey: resolvedSessionKey,
-            userId: session.userId,
-            deviceId: session.deviceId,
-            deliveredCount,
-            queuedFinal,
-            queueDepth,
-            wasDelivered,
-            wasQueued,
-            dispatchFailed,
-          });
-          await finalizeClawlinePromptTurn({
+        runAgentDispatch = () =>
+          runAdmittedClawlinePromptTurn({
             socket: session.socket,
             promptTurnAdmission,
-            activeRun,
+            eventId: event.id,
+            messageId,
+            sessionId: session.sessionId,
+            sessionKey: resolvedSessionKey,
+            userId: session.userId,
+            deviceId: session.deviceId,
+            rawContent,
+            route,
+            dispatcher,
+            replyOptions,
+            markDispatchIdle,
             agentProgress,
+            prefixContext,
+            setActiveRunForProgress: (activeRun) => {
+              activeRunForProgress = activeRun;
+            },
+            getPersistedAssistantDeliveryCount: () => persistedAssistantDeliveryCount,
+            buildContext: async () => {
+              const attachmentSummary = describeClawlineAttachments(ownership.attachments);
+              let inboundBody = attachmentSummary
+                ? `${rawContent}\n\n${attachmentSummary}`
+                : rawContent;
+              const materializedInboundImages = await materializeInboundAttachmentImages(
+                ownership.attachments,
+                {
+                  messageId,
+                  sessionKey: resolvedSessionKey,
+                  deviceId: session.deviceId,
+                  correlationId: promptTurnAdmission.correlationId,
+                },
+              );
+              if (materializedInboundImages.failureMarkers.length > 0) {
+                inboundBody = [inboundBody, ...materializedInboundImages.failureMarkers]
+                  .filter(Boolean)
+                  .join("\n\n");
+              }
+              return {
+                inboundImages: materializedInboundImages.images,
+                ctxPayload: buildClawlineInboundContext({
+                  channel: inboundTarget.channelLabel,
+                  accountId: route.accountId,
+                  agentId: route.agentId,
+                  sessionKey: route.sessionKey,
+                  mainSessionKey: route.mainSessionKey,
+                  messageId,
+                  rawBody: rawContent,
+                  body: inboundBody,
+                  commandBody: rawContent,
+                  fromPeerId: peerId,
+                  to: inboundTarget.contextTo,
+                  senderId: session.userId,
+                  senderName: session.claimedName ?? session.deviceInfo?.model ?? peerId,
+                  provider: inboundTarget.channelLabel,
+                  surface: inboundTarget.channelLabel,
+                  nativeChannelId: inboundTarget.originatingTo,
+                  originatingChannel: inboundTarget.originatingChannel,
+                  originatingTo: inboundTarget.originatingTo,
+                  groupSystemPrompt,
+                  media: buildInboundMediaFactsFromAttachments(ownership.attachments, messageId),
+                  referenceContexts: referenceResolution.contexts,
+                }),
+              };
+            },
+            record: {
+              updateLastRoute: inboundTarget.updateLastRoute,
+              onRecordError: (err) => {
+                logger.warn?.(`[clawline] failed recording inbound session: ${formatError(err)}`);
+              },
+            },
+            replyResolver: options.replyResolver,
+            markProcessStage,
+            onAfterDispatchIdle: () => {
+              if (activitySignaled) {
+                activitySignaled = false;
+                void sendActivitySignal(false);
+              }
+            },
+          });
+        if (hasPromptTurnRuntimeBlocker(resolvedSessionKey)) {
+          transitionPromptTurnAdmission(promptTurnAdmission, "queued", {
             messageId,
             sessionKey: resolvedSessionKey,
             userId: session.userId,
             deviceId: session.deviceId,
-            deliveredCount,
-            queuedFinal,
-            queueDepth,
-            dispatchFailed,
-            dispatchError,
-            logContext: { sessionId: session.sessionId },
-            cleanup: () => {
-              activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
-              activeRunForProgress = null;
-            },
           });
-        };
-        transitionPromptTurnAdmission(promptTurnAdmission, "queued", {
-          messageId,
-          sessionKey: resolvedSessionKey,
-          userId: session.userId,
-          deviceId: session.deviceId,
-        });
+        }
       });
-      const dispatchAgentRun = runAgentDispatch as (() => Promise<void>) | null;
+      const dispatchAgentRun = runAgentDispatch as (() => Promise<unknown>) | null;
       if (!dispatchAgentRun) {
         return;
       }
@@ -10323,7 +10438,7 @@ button.deny { background: #9b1c31; color: white; }
       const attachmentsHash = hashAttachments(attachments);
       const assetIds: string[] = [];
 
-      let runAgentDispatch: (() => Promise<void>) | null = null;
+      let runAgentDispatch: (() => Promise<unknown>) | null = null;
       await providerLaneQueue.runInteractiveCallback(
         { userId: session.userId, streamKey: resolvedSessionKey },
         async () => {
@@ -10512,375 +10627,101 @@ button.deny { background: #9b1c31; color: white; }
             },
           });
 
-          runAgentDispatch = async () => {
-            const latestPromptRow = selectMessageStmt.get(session.deviceId, clientId) as
-              | {
-                  promptTurnCancelRequested?: number | null;
-                  promptTurnState?: string | null;
-                }
-              | undefined;
-            if (
-              promptTurnAdmission.state === "canceled" ||
-              latestPromptRow?.promptTurnState === "canceled" ||
-              latestPromptRow?.promptTurnCancelRequested === 1
-            ) {
-              updatePromptCancelRequestedStmt.run(1, session.deviceId, clientId);
-              if (promptTurnAdmission.state === "queued") {
-                transitionPromptTurnAdmission(promptTurnAdmission, "canceled", {
-                  messageId: clientId,
-                  sessionKey: resolvedSessionKey,
-                  userId: session.userId,
-                  deviceId: session.deviceId,
-                });
-              }
-              logger.info?.("[clawline] prompt_turn_start_skipped_canceled", {
-                messageId: clientId,
-                correlationId: promptTurnAdmission.correlationId,
-                sessionKey: resolvedSessionKey,
-                deviceId: session.deviceId,
-                sourceMessageId,
-                interactiveAction: action,
-              });
-              return;
-            }
-            if (promptTurnAdmission.state === "queued") {
-              const startOwner = resolveQueuedPromptTurnStart({
-                state: promptTurnAdmission.state,
-                cancelRequested: latestPromptRow?.promptTurnCancelRequested === 1,
-              });
-              transitionPromptTurnAdmission(promptTurnAdmission, startOwner.state, {
-                messageId: clientId,
-                sessionKey: resolvedSessionKey,
-                userId: session.userId,
-                deviceId: session.deviceId,
-              });
-              if (startOwner.owner === "control") {
-                logger.info?.("[clawline] prompt_turn_start_owned_by_cancel", {
-                  messageId: clientId,
-                  correlationId: promptTurnAdmission.correlationId,
-                  sessionKey: resolvedSessionKey,
-                  deviceId: session.deviceId,
-                  sourceMessageId,
-                  interactiveAction: action,
-                });
-                return;
-              }
-              startingPromptTurnsBySession.set(
-                normalizeSessionKey(resolvedSessionKey),
-                promptTurnAdmission,
-              );
-            }
-            const activeRun: SessionStatusActiveRun = {
-              runId: event.id,
-              correlationId: promptTurnAdmission.correlationId,
-              messageId: clientId,
-              deviceId: session.deviceId,
-              sessionKey: resolvedSessionKey,
-              agentSessionId: normalizeStatusString(
-                loadSessionStoreEntryForKey(resolvedSessionKey).entry?.sessionId,
-              ),
-              startedAt: Date.now(),
-              provider: null,
-              model: null,
-              thinkingLevel: null,
-              fastMode: null,
-              cancelRequested: false,
-            };
-            let inboundImages: ImageContent[] = [];
-            let ctxPayload: ReturnType<typeof buildClawlineInboundContext>;
-            try {
-              const attachmentSummary = describeClawlineAttachments(attachments);
-              let inboundBody = attachmentSummary
-                ? `${rawContent}\n\n${attachmentSummary}`
-                : rawContent;
-              const materializedInboundImages = await materializeInboundAttachmentImages(
-                attachments,
-                {
-                  messageId: clientId,
-                  sessionKey: resolvedSessionKey,
-                  deviceId: session.deviceId,
-                  correlationId: promptTurnAdmission.correlationId,
-                },
-              );
-              inboundImages = materializedInboundImages.images;
-              if (materializedInboundImages.failureMarkers.length > 0) {
-                inboundBody = [inboundBody, ...materializedInboundImages.failureMarkers]
-                  .filter(Boolean)
-                  .join("\n\n");
-              }
-              ctxPayload = buildClawlineInboundContext({
-                channel: channelLabel,
-                accountId: route.accountId,
-                agentId: route.agentId,
-                sessionKey: route.sessionKey,
-                mainSessionKey: route.mainSessionKey,
-                messageId: clientId,
-                rawBody: rawContent,
-                body: inboundBody,
-                commandBody: rawContent,
-                fromPeerId: peerId,
-                to: `device:${session.deviceId}`,
-                senderId: session.userId,
-                senderName: session.claimedName ?? session.deviceInfo?.model ?? peerId,
-                provider: "clawline",
-                surface: channelLabel,
-                nativeChannelId: deliveryTarget.toString(),
-                originatingChannel: channelLabel,
-                originatingTo: deliveryTarget.toString(),
-                groupSystemPrompt,
-                media: buildInboundMediaFactsFromAttachments(attachments, clientId),
-              });
-            } catch (err) {
-              startingPromptTurnsBySession.delete(normalizeSessionKey(resolvedSessionKey));
-              throw err;
-            }
-            startingPromptTurnsBySession.delete(normalizeSessionKey(resolvedSessionKey));
-            activeRunForProgress = activeRun;
-            activeSessionRuns.set(normalizeSessionKey(resolvedSessionKey), activeRun);
-            const promptRowAfterContext = selectMessageStmt.get(session.deviceId, clientId) as
-              | { promptTurnCancelRequested?: number | null; promptTurnState?: string | null }
-              | undefined;
-            const promptTurnStateAfterContext = promptTurnAdmission.state as PromptTurnState;
-            if (
-              activeRun.cancelRequested ||
-              promptTurnStateAfterContext === "canceled" ||
-              promptRowAfterContext?.promptTurnState === "canceled" ||
-              promptRowAfterContext?.promptTurnCancelRequested === 1
-            ) {
-              updateMessageStreamingStmt.run(
-                MessageStreamingState.Finalized,
-                session.deviceId,
-                clientId,
-              );
-              if (promptTurnStateAfterContext !== "canceled") {
-                transitionPromptTurnAdmission(promptTurnAdmission, "canceled", {
-                  messageId: clientId,
-                  sessionKey: resolvedSessionKey,
-                  userId: session.userId,
-                  deviceId: session.deviceId,
-                });
-              }
-              activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
-              activeRunForProgress = null;
-              return;
-            }
-            logger.info?.("[clawline] agent_run_start", {
-              messageId: clientId,
-              correlationId: promptTurnAdmission.correlationId,
-              sessionId: session.sessionId,
-              sessionKey: resolvedSessionKey,
-              userId: session.userId,
-              deviceId: session.deviceId,
-              sourceMessageId,
-              interactiveAction: action,
-            });
-            let queuedFinal = false;
-            let deliveredCount = 0;
-            let dispatchFailed = false;
-            let dispatchError: string | undefined;
-            const dispatchStartedAt = Date.now();
-            try {
-              logger.info?.("[clawline] agent_run_phase", {
-                phase: "dispatch_start",
-                messageId: clientId,
-                correlationId: promptTurnAdmission.correlationId,
-                sessionKey: resolvedSessionKey,
-                imageCount: inboundImages.length,
-                sourceMessageId,
-                interactiveAction: action,
-              });
-              const result = await runClawlineChannelTurn({
-                channel: route.channel,
-                accountId: route.accountId,
-                routeSessionKey: route.sessionKey,
-                ctxPayload,
-                messageId: clientId,
-                rawText: rawContent,
-                record: {
-                  updateLastRoute,
-                  onRecordError: (err) => {
-                    logger.warn?.(
-                      `[clawline] failed recording inbound session: ${formatError(err)}`,
-                    );
-                  },
-                },
-                logContext: {
-                  correlationId: promptTurnAdmission.correlationId,
-                  sourceMessageId,
-                  interactiveAction: action,
-                },
-                onPreDispatchFailure: (err) => {
-                  logger.warn?.("[clawline] channel_turn_pre_dispatch_failed", {
-                    messageId: clientId,
-                    correlationId: promptTurnAdmission.correlationId,
-                    sessionKey: resolvedSessionKey,
-                    sourceMessageId,
-                    interactiveAction: action,
-                    error: formatError(err),
-                  });
-                },
-                runDispatch: async () =>
-                  runWithClawlineOutboundCorrelation(
-                    {
-                      replyToMessageId: event.id,
-                      replyToClientMessageId: clientId,
-                    },
-                    async () => {
-                      if (activeRun.cancelRequested) {
-                        throw new Error("Clawline prompt turn canceled before dispatch");
-                      }
-                      return dispatchInboundMessage({
-                        ctx: ctxPayload,
-                        cfg: openClawCfg,
-                        dispatcher,
-                        replyOptions: {
-                          ...replyOptions,
-                          ...agentProgress.replyOptions,
-                          images: inboundImages.length > 0 ? inboundImages : undefined,
-                          onModelSelected: (ctx) => {
-                            prefixContext.provider = ctx.provider;
-                            prefixContext.model = extractClawlineShortModelName(ctx.model);
-                            prefixContext.modelFull = `${ctx.provider}/${ctx.model}`;
-                            prefixContext.thinkingLevel = ctx.thinkLevel ?? "off";
-                            prefixContext.fastMode = ctx.fastMode;
-                            activeRun.provider = ctx.provider;
-                            activeRun.model = ctx.model;
-                            activeRun.thinkingLevel = ctx.thinkLevel ?? "off";
-                            activeRun.fastMode = ctx.fastMode ?? null;
-                            rememberSessionRuntimeStatus(resolvedSessionKey, {
-                              provider: ctx.provider,
-                              model: ctx.model,
-                              thinkingLevel: ctx.thinkLevel ?? "off",
-                              fastMode: ctx.fastMode ?? null,
-                            });
-                          },
-                        },
-                        replyResolver: options.replyResolver,
-                      });
-                    },
-                  ),
-              });
-              queuedFinal = result.dispatchResult.queuedFinal;
-              // Count all delivered content (streaming blocks, tool results, and final replies)
-              deliveredCount = Math.max(
-                result.dispatchResult.counts.block +
-                  result.dispatchResult.counts.tool +
-                  result.dispatchResult.counts.final,
-                persistedAssistantDeliveryCount,
-              );
-              logger.info?.("[clawline] agent_run_phase", {
-                phase: "dispatch_return",
-                messageId: clientId,
-                sessionKey: resolvedSessionKey,
-                queuedFinal,
-                deliveredCount,
-                blockCount: result.dispatchResult.counts.block,
-                toolCount: result.dispatchResult.counts.tool,
-                finalCount: result.dispatchResult.counts.final,
-                elapsedMs: Date.now() - dispatchStartedAt,
-                sourceMessageId,
-                interactiveAction: action,
-              });
-            } catch (err) {
-              dispatchFailed = true;
-              dispatchError = formatError(err);
-              deliveredCount = persistedAssistantDeliveryCount;
-              logger.error?.(`[clawline] dispatch_failed: ${dispatchError}`, {
-                messageId: clientId,
-                correlationId: promptTurnAdmission.correlationId,
-                sessionKey: resolvedSessionKey,
-                sourceMessageId,
-                interactiveAction: action,
-              });
-              queuedFinal = false;
-            }
-            const waitForIdleStartedAt = Date.now();
-            logger.info?.("[clawline] agent_run_phase", {
-              phase: "wait_for_idle_start",
-              messageId: clientId,
-              correlationId: promptTurnAdmission.correlationId,
-              sessionKey: resolvedSessionKey,
-              sourceMessageId,
-              interactiveAction: action,
-            });
-            markDispatchIdle();
-            await dispatcher.waitForIdle();
-            logger.info?.("[clawline] agent_run_phase", {
-              phase: "wait_for_idle_done",
-              messageId: clientId,
-              correlationId: promptTurnAdmission.correlationId,
-              sessionKey: resolvedSessionKey,
-              elapsedMs: Date.now() - waitForIdleStartedAt,
-              sourceMessageId,
-              interactiveAction: action,
-            });
-
-            // Always send activity=false when done
-            if (activitySignaled) {
-              activitySignaled = false;
-              void sendActivitySignal(false);
-            }
-            if (markMessageFailedIfDeviceRevoked(session.deviceId, clientId)) {
-              activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
-              activeRunForProgress = null;
-              return;
-            }
-
-            const queueKey = route.sessionKey;
-            const queueDepth = getClawlineFollowupQueueDepth(queueKey);
-            const wasDelivered = queuedFinal || deliveredCount > 0;
-            const wasQueued = !wasDelivered && queueDepth > 0;
-
-            logger.info?.("[clawline] agent_run_end", {
-              messageId: clientId,
-              correlationId: promptTurnAdmission.correlationId,
-              sessionId: session.sessionId,
-              sessionKey: resolvedSessionKey,
-              userId: session.userId,
-              deviceId: session.deviceId,
-              deliveredCount,
-              queuedFinal,
-              queueDepth,
-              wasDelivered,
-              wasQueued,
-              dispatchFailed,
-              sourceMessageId,
-              interactiveAction: action,
-            });
-            await finalizeClawlinePromptTurn({
+          runAgentDispatch = () =>
+            runAdmittedClawlinePromptTurn({
               socket: session.socket,
               promptTurnAdmission,
-              activeRun,
+              eventId: event.id,
+              messageId: clientId,
+              sessionId: session.sessionId,
+              sessionKey: resolvedSessionKey,
+              userId: session.userId,
+              deviceId: session.deviceId,
+              rawContent,
+              route,
+              dispatcher,
+              replyOptions,
+              markDispatchIdle,
               agentProgress,
+              prefixContext,
+              setActiveRunForProgress: (activeRun) => {
+                activeRunForProgress = activeRun;
+              },
+              getPersistedAssistantDeliveryCount: () => persistedAssistantDeliveryCount,
+              buildContext: async () => {
+                const attachmentSummary = describeClawlineAttachments(attachments);
+                let inboundBody = attachmentSummary
+                  ? `${rawContent}\n\n${attachmentSummary}`
+                  : rawContent;
+                const materializedInboundImages = await materializeInboundAttachmentImages(
+                  attachments,
+                  {
+                    messageId: clientId,
+                    sessionKey: resolvedSessionKey,
+                    deviceId: session.deviceId,
+                    correlationId: promptTurnAdmission.correlationId,
+                  },
+                );
+                if (materializedInboundImages.failureMarkers.length > 0) {
+                  inboundBody = [inboundBody, ...materializedInboundImages.failureMarkers]
+                    .filter(Boolean)
+                    .join("\n\n");
+                }
+                return {
+                  inboundImages: materializedInboundImages.images,
+                  ctxPayload: buildClawlineInboundContext({
+                    channel: channelLabel,
+                    accountId: route.accountId,
+                    agentId: route.agentId,
+                    sessionKey: route.sessionKey,
+                    mainSessionKey: route.mainSessionKey,
+                    messageId: clientId,
+                    rawBody: rawContent,
+                    body: inboundBody,
+                    commandBody: rawContent,
+                    fromPeerId: peerId,
+                    to: `device:${session.deviceId}`,
+                    senderId: session.userId,
+                    senderName: session.claimedName ?? session.deviceInfo?.model ?? peerId,
+                    provider: "clawline",
+                    surface: channelLabel,
+                    nativeChannelId: deliveryTarget.toString(),
+                    originatingChannel: channelLabel,
+                    originatingTo: deliveryTarget.toString(),
+                    groupSystemPrompt,
+                    media: buildInboundMediaFactsFromAttachments(attachments, clientId),
+                  }),
+                };
+              },
+              record: {
+                updateLastRoute,
+                onRecordError: (err) => {
+                  logger.warn?.(`[clawline] failed recording inbound session: ${formatError(err)}`);
+                },
+              },
+              logContext: {
+                sourceMessageId,
+                interactiveAction: action,
+              },
+              replyResolver: options.replyResolver,
+              onAfterDispatchIdle: () => {
+                if (activitySignaled) {
+                  activitySignaled = false;
+                  void sendActivitySignal(false);
+                }
+              },
+            });
+          if (hasPromptTurnRuntimeBlocker(resolvedSessionKey)) {
+            transitionPromptTurnAdmission(promptTurnAdmission, "queued", {
               messageId: clientId,
               sessionKey: resolvedSessionKey,
               userId: session.userId,
               deviceId: session.deviceId,
-              deliveredCount,
-              queuedFinal,
-              queueDepth,
-              dispatchFailed,
-              dispatchError,
-              logContext: {
-                sessionId: session.sessionId,
-                sourceMessageId,
-                interactiveAction: action,
-              },
-              cleanup: () => {
-                activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
-                activeRunForProgress = null;
-              },
             });
-          };
-          transitionPromptTurnAdmission(promptTurnAdmission, "queued", {
-            messageId: clientId,
-            sessionKey: resolvedSessionKey,
-            userId: session.userId,
-            deviceId: session.deviceId,
-          });
+          }
         },
       );
-      const dispatchAgentRun = runAgentDispatch as (() => Promise<void>) | null;
+      const dispatchAgentRun = runAgentDispatch as (() => Promise<unknown>) | null;
       if (!dispatchAgentRun) {
         return;
       }

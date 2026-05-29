@@ -7323,6 +7323,20 @@ describe.sequential("clawline provider server", () => {
       expect(firstEcho.clientMessageId).toBe(firstMessageId);
       expect(firstEcho.sessionKey).toBe("agent:main:clawline:flynn:main");
       await firstStarted;
+      const firstRunningState = (await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const typed = value as {
+          type?: string;
+          event?: string;
+          payload?: { messageId?: string; state?: string };
+        };
+        return (
+          typed.type === "event" &&
+          typed.event === "prompt_turn_state" &&
+          typed.payload?.messageId === firstMessageId &&
+          typed.payload?.state === "running"
+        );
+      })) as { payload?: { state?: string } };
+      expect(firstRunningState.payload?.state).toBe("running");
 
       ws.send(
         JSON.stringify({
@@ -7343,6 +7357,20 @@ describe.sequential("clawline provider server", () => {
       })) as { clientMessageId?: string };
       expect(secondEcho.clientMessageId).toBe(secondMessageId);
       expect(secondStarted).toBe(false);
+      const secondQueuedState = (await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const typed = value as {
+          type?: string;
+          event?: string;
+          payload?: { messageId?: string; state?: string };
+        };
+        return (
+          typed.type === "event" &&
+          typed.event === "prompt_turn_state" &&
+          typed.payload?.messageId === secondMessageId &&
+          typed.payload?.state === "queued"
+        );
+      })) as { payload?: { state?: string } };
+      expect(secondQueuedState.payload?.state).toBe("queued");
 
       releaseBlockedFirst();
 
