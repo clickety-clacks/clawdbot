@@ -7400,6 +7400,129 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("orders generic interactive callback agent turns behind active same-stream prompts", async () => {
+    const deviceId = randomUUID();
+    const firstMessageId = `c_${randomUUID()}`;
+    let callbackStarted = false;
+    let resolveFirstEntered!: () => void;
+    const firstStarted = new Promise<void>((resolve) => {
+      resolveFirstEntered = resolve;
+    });
+    let releaseBlockedFirst!: () => void;
+    const blockedFirst = new Promise<void>((resolve) => {
+      releaseBlockedFirst = resolve;
+    });
+    const replyResolver: typeof testReplyResolver = async (ctx) => {
+      const messageSid = (ctx as { MessageSid?: unknown }).MessageSid;
+      const body = String((ctx as { Body?: unknown }).Body ?? "");
+      if (messageSid === firstMessageId) {
+        resolveFirstEntered();
+        await blockedFirst;
+        return { text: "first reply" };
+      }
+      if (body.startsWith("[Interactive] action=generic-action")) {
+        callbackStarted = true;
+        return { text: "callback reply" };
+      }
+      return { text: "unexpected reply" };
+    };
+    const entry = createAllowlistEntry({
+      deviceId,
+      userId: "flynn",
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry], { replyResolver });
+    try {
+      const pair = await performPairRequest(ctx.port, deviceId);
+      const token = pair.token as string;
+      const { ws } = await authenticateDevice(ctx.port, deviceId, token);
+      const queue = createMessageQueue(ws);
+
+      ws.send(
+        JSON.stringify({
+          type: "message",
+          id: firstMessageId,
+          content: "first prompt",
+        }),
+      );
+      await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const typed = value as { type?: string; id?: string };
+        return typed.type === "ack" && typed.id === firstMessageId;
+      });
+      const firstEcho = (await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const typed = value as {
+          type?: string;
+          role?: string;
+          content?: string;
+          clientMessageId?: string;
+          id?: string;
+        };
+        return (
+          typed.type === "message" && typed.role === "user" && typed.content === "first prompt"
+        );
+      })) as { id?: string; clientMessageId?: string };
+      expect(firstEcho.id?.startsWith("s_")).toBe(true);
+      expect(firstEcho.clientMessageId).toBe(firstMessageId);
+      await firstStarted;
+
+      ws.send(
+        JSON.stringify({
+          type: "interactive-callback",
+          messageId: firstEcho.id,
+          payload: {
+            action: "generic-action",
+            data: { value: "callback data" },
+          },
+        }),
+      );
+      const callbackEcho = (await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const typed = value as { type?: string; role?: string; content?: string };
+        return (
+          typed.type === "message" &&
+          typed.role === "user" &&
+          typeof typed.content === "string" &&
+          typed.content.startsWith("[Interactive] action=generic-action")
+        );
+      })) as { clientMessageId?: string };
+      expect(callbackEcho.clientMessageId?.startsWith("c_")).toBe(true);
+      expect(callbackStarted).toBe(false);
+      const callbackQueuedState = (await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const typed = value as {
+          type?: string;
+          event?: string;
+          payload?: { messageId?: string; state?: string };
+        };
+        return (
+          typed.type === "event" &&
+          typed.event === "prompt_turn_state" &&
+          typed.payload?.messageId === callbackEcho.clientMessageId &&
+          typed.payload?.state === "queued"
+        );
+      })) as { payload?: { state?: string } };
+      expect(callbackQueuedState.payload?.state).toBe("queued");
+
+      releaseBlockedFirst();
+
+      const firstAssistant = (await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const typed = value as { type?: string; role?: string; content?: string };
+        return typed.type === "message" && typed.role === "assistant";
+      })) as { content?: string };
+      expect(firstAssistant.content).toBe("first reply");
+
+      const callbackAssistant = (await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const typed = value as { type?: string; role?: string; content?: string };
+        return typed.type === "message" && typed.role === "assistant";
+      })) as { content?: string };
+      expect(callbackAssistant.content).toBe("callback reply");
+
+      queue.dispose();
+      ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("replays duplicate retry state without rerunning an active prompt turn", async () => {
     const deviceId = randomUUID();
     const messageId = `c_${randomUUID()}`;
