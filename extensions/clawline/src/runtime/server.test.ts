@@ -1,5 +1,5 @@
 import { Blob } from "node:buffer";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
@@ -77,6 +77,7 @@ const silentLogger: Logger = {
 const testReplyResolver: typeof getReplyFromConfig = async () => ({ text: "ok" });
 const withMainAlertReplyRequirement = (text: string) =>
   `${text}\n\n${MAIN_SESSION_ALERT_REPLY_TEXT}`;
+const sha256Hex = (value: string) => createHash("sha256").update(value).digest("hex");
 const tinyPngBytes = () =>
   Buffer.from(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAwUBAQGzL2zQAAAAAElFTkSuQmCC",
@@ -7729,6 +7730,106 @@ describe.sequential("clawline provider server", () => {
         } finally {
           db.close();
         }
+      } finally {
+        queue.dispose();
+        ws.terminate();
+      }
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("marks stale accepted prompt turns failed during reconnect replay", async () => {
+    const entry = createAllowlistEntry({
+      userId: "flynn",
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const sessionKey = "agent:main:clawline:flynn:main";
+    const ctx = await setupTestServer([entry]);
+    try {
+      const pairResult = await performPairRequest(ctx.port, entry.deviceId, {
+        claimedName: entry.claimedName,
+      });
+      const authToken = pairResult.token as string;
+      const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
+      const messageId = `c_${randomUUID()}`;
+      const eventId = randomUUID();
+      const timestamp = Date.now();
+      const content = "stale accepted prompt";
+      const payload = {
+        type: "message",
+        id: eventId,
+        role: "user",
+        content,
+        timestamp,
+        sessionKey,
+        clientMessageId: messageId,
+        streaming: true,
+      };
+      const db = new BetterSqlite3(dbPath);
+      try {
+        db.prepare(`INSERT OR IGNORE INTO user_sequences (userId, nextSequence) VALUES (?, ?)`).run(
+          entry.userId,
+          2,
+        );
+        db.prepare(
+          `INSERT INTO events
+             (id, userId, sequence, originatingDeviceId, payloadJson, payloadBytes, timestamp, eventType, sessionKey)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'message', ?)`,
+        ).run(
+          eventId,
+          entry.userId,
+          1,
+          entry.deviceId,
+          JSON.stringify(payload),
+          Buffer.byteLength(JSON.stringify(payload)),
+          timestamp,
+          sessionKey,
+        );
+        db.prepare(
+          `INSERT INTO messages
+             (deviceId, userId, clientId, serverEventId, serverSequence, content, contentHash, attachmentsHash, timestamp, streaming, ackSent, promptTurnState, promptTurnCorrelationId)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'accepted', ?)`,
+        ).run(
+          entry.deviceId,
+          entry.userId,
+          messageId,
+          eventId,
+          1,
+          content,
+          sha256Hex(content),
+          sha256Hex("[]"),
+          timestamp,
+          1,
+          1,
+          `clawline-turn:${entry.deviceId}:${messageId}:${eventId}:${sessionKey}`,
+        );
+      } finally {
+        db.close();
+      }
+
+      const { ws, queue, auth } = await authenticateDeviceWithQueue(
+        ctx.port,
+        entry.deviceId,
+        authToken,
+      );
+      try {
+        expect(auth.replayCount).toBeGreaterThan(0);
+        const replayed = (await waitForQueuedMessageWithTimeout(queue, (value) => {
+          const typed = value as {
+            type?: string;
+            id?: string;
+            promptTurnState?: string;
+            promptTurnError?: string;
+          };
+          return typed.type === "message" && typed.id === eventId;
+        })) as { promptTurnState?: string; promptTurnError?: string; streaming?: boolean };
+        expect(replayed).toMatchObject({
+          promptTurnState: "failed",
+          promptTurnError: "clawline.promptTurn.recoveredAfterReconnect",
+          streaming: false,
+        });
       } finally {
         queue.dispose();
         ws.terminate();

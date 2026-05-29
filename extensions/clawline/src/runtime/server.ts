@@ -2118,6 +2118,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   let updateMessagePromptTurnStmt!: SqliteStatement;
   let updatePromptCancelRequestedStmt!: SqliteStatement;
   let updateActiveMessagesStreamingByDeviceStmt!: SqliteStatement;
+  let recoverIncompletePromptTurnsBySessionStmt!: SqliteStatement;
   let insertMessageAssetStmt!: SqliteStatement;
   let insertAssetStmt!: SqliteStatement;
   let selectAssetStmt!: SqliteStatement;
@@ -3111,6 +3112,18 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       `UPDATE messages
        SET streaming = ?
        WHERE deviceId = ? AND streaming IN (${MessageStreamingState.Active}, ${MessageStreamingState.Queued})`,
+    );
+    recoverIncompletePromptTurnsBySessionStmt = newDb.prepare(
+      `UPDATE messages
+       SET streaming = ?, promptTurnState = 'failed', promptTurnError = 'clawline.promptTurn.recoveredAfterReconnect'
+       WHERE userId = ?
+         AND serverEventId IN (
+           SELECT id FROM events WHERE userId = ? AND sessionKey = ? AND eventType = 'message'
+         )
+         AND (
+           promptTurnState IN ('accepted', 'queued', 'running')
+           OR (promptTurnState IS NULL AND streaming IN (${MessageStreamingState.Active}, ${MessageStreamingState.Queued}))
+         )`,
     );
     const reconciled = newDb
       .prepare(
@@ -5310,6 +5323,30 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       promptTurnError:
         state === "failed" ? (row.promptTurnError ?? "clawline.promptTurn.failed") : undefined,
     };
+  }
+
+  function recoverIncompletePromptTurnsForReconnect(userId: string, sessionKey: string) {
+    const normalizedSessionKey = normalizeSessionKey(sessionKey);
+    if (
+      activeSessionRuns.has(normalizedSessionKey) ||
+      startingPromptTurnsBySession.has(normalizedSessionKey) ||
+      (queuedPromptTurnsBySession.get(normalizedSessionKey)?.length ?? 0) > 0
+    ) {
+      return;
+    }
+    const recovered = recoverIncompletePromptTurnsBySessionStmt.run(
+      MessageStreamingState.Failed,
+      userId,
+      userId,
+      normalizedSessionKey,
+    );
+    if (recovered.changes > 0) {
+      logger.warn?.("[clawline] prompt_turn_recovered_incomplete_after_reconnect", {
+        userId,
+        sessionKey: normalizedSessionKey,
+        recoveredCount: recovered.changes,
+      });
+    }
   }
 
   function rememberPromptTurnAdmission(facts: PromptTurnAdmissionFacts) {
@@ -8279,6 +8316,7 @@ button.deny { background: #9b1c31; color: white; }
       if (!anchor) {
         historyReset = true;
       }
+      recoverIncompletePromptTurnsForReconnect(session.userId, normalizedSessionKey);
       const rowsDesc = (
         anchor
           ? selectEventsAfterBySessionStmt.all(
