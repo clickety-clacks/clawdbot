@@ -91,11 +91,7 @@ import type {
 import { ClientMessageError, HttpError } from "./errors.js";
 import { callClawlineGatewayAgent } from "./gateway-alert-runtime.js";
 import { createAssetHandlers } from "./http-assets.js";
-import {
-  resolveClawlineMessageReferenceContexts,
-  type ClawlineMessageReference,
-  type ClawlineTranscriptMessageRecord,
-} from "./message-reference-context.js";
+import { resolveClawlineMessageReferenceContexts } from "./message-reference-context.js";
 import { runWithClawlineOutboundCorrelation } from "./outbound.js";
 import { createPerUserTaskQueue } from "./per-user-task-queue.js";
 import { SlidingWindowRateLimiter } from "./rate-limiter.js";
@@ -140,10 +136,6 @@ type PtyProcess = {
 
 function isClientPayload(value: unknown): value is ClientPayload {
   return !!value && typeof value === "object" && !Array.isArray(value);
-}
-
-function normalizeReferenceString(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
 
 type TerminalTmuxBackend = {
@@ -2110,7 +2102,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   let selectEventsTailStmt!: SqliteStatement;
   let selectEventsTailBySessionStmt!: SqliteStatement;
   let selectEventsAfterBySessionStmt!: SqliteStatement;
-  let selectEventsBySessionStmt!: SqliteStatement;
   let selectEventByIdStmt!: SqliteStatement;
   let selectEventPayloadForUserStmt!: SqliteStatement;
   let selectStreamSessionsByUserStmt!: SqliteStatement;
@@ -3311,12 +3302,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
        FROM events
        WHERE userId = ? AND eventType = 'message' AND sessionKey = ?
        ORDER BY sequence DESC LIMIT ?`,
-    );
-    selectEventsBySessionStmt = newDb.prepare(
-      `SELECT id, payloadJson, sequence, timestamp
-       FROM events
-       WHERE userId = ? AND eventType = 'message' AND sessionKey = ?
-       ORDER BY sequence ASC`,
     );
     selectEventsAfterBySessionStmt = newDb.prepare(
       `SELECT id, payloadJson, sequence, timestamp
@@ -7147,173 +7132,6 @@ button.deny { background: #9b1c31; color: white; }
     return {
       normalizedSessionKey: resolved.normalizedKey,
       entry: resolved.existing,
-    };
-  }
-
-  async function readClawlineTranscriptMessages(
-    sessionFile: string,
-  ): Promise<ClawlineTranscriptMessageRecord[] | null> {
-    try {
-      const raw = await fs.readFile(sessionFile, "utf8");
-      const lines = raw.split(/\r?\n/).filter((line) => line.trim().length > 0);
-      const messages: ClawlineTranscriptMessageRecord[] = [];
-      for (const line of lines) {
-        const parsed = parseClawlineTranscriptMessageRecord(line);
-        if (parsed) {
-          messages.push(parsed);
-        }
-      }
-      return messages;
-    } catch {
-      return null;
-    }
-  }
-
-  function parseClawlineTranscriptMessageRecord(
-    rawJson: string,
-  ): ClawlineTranscriptMessageRecord | null {
-    try {
-      const parsed = JSON.parse(rawJson) as Record<string, unknown>;
-      const message = parsed.message;
-      if (!message || typeof message !== "object" || Array.isArray(message)) {
-        return null;
-      }
-      return {
-        id: typeof parsed.id === "string" ? parsed.id : undefined,
-        clientMessageId:
-          typeof parsed.clientMessageId === "string" ? parsed.clientMessageId : undefined,
-        timestamp: typeof parsed.timestamp === "number" ? parsed.timestamp : undefined,
-        message: {
-          role: (message as Record<string, unknown>).role,
-          content: (message as Record<string, unknown>).content,
-        },
-      };
-    } catch {
-      return null;
-    }
-  }
-
-  function parseClawlineServerEventMessageRecord(
-    rawJson: string,
-  ): ClawlineTranscriptMessageRecord | null {
-    try {
-      const trimmed = String(rawJson)
-        .replace(/\u0000/g, "")
-        .trim();
-      const roleMatch = /"role":"(user|assistant)"/.exec(trimmed);
-      if (!roleMatch) {
-        return null;
-      }
-      const idMatch = /"id":"((?:\\.|[^"\\])*)"/.exec(trimmed);
-      const clientMessageIdMatch =
-        /"clientMessageId":"((?:\\.|[^"\\])*)"/.exec(trimmed) ??
-        /"client_message_id":"((?:\\.|[^"\\])*)"/.exec(trimmed);
-      const timestampMatch = /"timestamp":(\d+)/.exec(trimmed);
-      const contentMatch = /"content":"((?:\\.|[^"\\])*)"/.exec(trimmed);
-      const decodedContent = contentMatch ? JSON.parse(`"${contentMatch[1]}"`) : undefined;
-      return {
-        id: idMatch ? JSON.parse(`"${idMatch[1]}"`) : undefined,
-        clientMessageId: clientMessageIdMatch
-          ? JSON.parse(`"${clientMessageIdMatch[1]}"`)
-          : undefined,
-        timestamp: timestampMatch ? Number(timestampMatch[1]) : undefined,
-        message: {
-          role: roleMatch[1] as "user" | "assistant",
-          content: decodedContent,
-        },
-      };
-    } catch {
-      return null;
-    }
-  }
-
-  async function readClawlineReferenceMessages(
-    referenceSessionKey: string,
-    userId: string,
-  ): Promise<ClawlineTranscriptMessageRecord[] | null> {
-    const referenceSession = loadSessionStoreEntryForKey(referenceSessionKey);
-    const transcriptMessages = referenceSession.entry?.sessionId
-      ? await readClawlineTranscriptMessages(
-          typeof referenceSession.entry.sessionFile === "string" &&
-            referenceSession.entry.sessionFile.trim().length > 0
-            ? referenceSession.entry.sessionFile
-            : resolveClawlineSessionTranscriptPath(
-                referenceSession.entry.sessionId,
-                mainSessionAgentId,
-              ),
-        )
-      : null;
-    const dbMessages = selectEventsBySessionStmt.all(userId, referenceSessionKey) as Array<{
-      id: string;
-      payloadJson: string;
-    }>;
-    const normalizedDbMessages = Array.from(dbMessages);
-    const eventMessages: ClawlineTranscriptMessageRecord[] = [];
-    for (let index = 0; index < normalizedDbMessages.length; index += 1) {
-      const row = normalizedDbMessages[index];
-      const parsed = parseClawlineServerEventMessageRecord(row.payloadJson);
-      if (!parsed) {
-        continue;
-      }
-      eventMessages.push({
-        ...parsed,
-        id: parsed.id ?? row.id,
-      });
-    }
-    if (!transcriptMessages && eventMessages.length === 0) {
-      return null;
-    }
-    const merged = [...(transcriptMessages ?? [])];
-    const seenIds = new Set(
-      merged
-        .map((entry) => normalizeReferenceString(entry.id))
-        .filter((entry): entry is string => Boolean(entry)),
-    );
-    for (const entry of eventMessages) {
-      const entryId = normalizeReferenceString(entry.id);
-      if (entryId && seenIds.has(entryId)) {
-        continue;
-      }
-      if (entryId) {
-        seenIds.add(entryId);
-      }
-      merged.push(entry);
-    }
-    return merged;
-  }
-
-  async function resolveClawlineReferenceMessage(
-    reference: ClawlineMessageReference,
-    userId: string,
-  ): Promise<ClawlineTranscriptMessageRecord | null> {
-    const row = selectEventByIdStmt.get(reference.messageId) as
-      | {
-          id: string;
-          userId: string;
-          sessionKey: string | null;
-        }
-      | undefined;
-    const rowSessionKey = typeof row?.sessionKey === "string" ? row.sessionKey.trim() : "";
-    if (!row || row.userId !== userId || rowSessionKey !== reference.sessionKey) {
-      return null;
-    }
-    const sessionRows = Array.from(
-      selectEventsBySessionStmt.all(userId, reference.sessionKey),
-    ) as Array<{
-      id: string;
-      payloadJson: string;
-    }>;
-    const payloadRow = sessionRows.find((entry) => entry.id === reference.messageId);
-    if (!payloadRow) {
-      return null;
-    }
-    const parsed = parseClawlineServerEventMessageRecord(payloadRow.payloadJson);
-    if (!parsed || parsed.message?.role !== reference.messageRole) {
-      return null;
-    }
-    return {
-      ...parsed,
-      id: parsed.id ?? row.id,
     };
   }
 

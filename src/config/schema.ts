@@ -359,7 +359,6 @@ function applyChannelHints(hints: ConfigUiHints, channels: ChannelUiMetadata[]):
 
 function listHeartbeatTargetChannels(channels: ChannelUiMetadata[]): string[] {
   const seen = new Set<string>();
-  const ordered: string[] = [];
   for (const channel of channels) {
     const normalized = normalizeLowercaseStringOrEmpty(channel.id);
     if (!normalized || seen.has(normalized)) {

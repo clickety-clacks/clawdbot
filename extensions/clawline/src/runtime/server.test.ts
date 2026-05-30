@@ -3404,7 +3404,7 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
-  it("delivers outbound interactive HTML attachments addressed by canonical session key", async () => {
+  it("delivers outbound interactive HTML attachments addressed by canonical custom stream session key", async () => {
     const entry = createAllowlistEntry({
       deviceId: randomUUID(),
       userId: "flynn",
@@ -3413,45 +3413,6 @@ describe.sequential("clawline provider server", () => {
     });
     const ctx = await setupTestServer([entry]);
     try {
-      const sessionKey = "agent:main:clawline:flynn:main";
-      const descriptor = {
-        version: 1,
-        html: '<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"></head><body><button>Hello</button></body></html>',
-        metadata: { title: "Session Key Card", height: 96 },
-      };
-      const base64 = Buffer.from(JSON.stringify(descriptor), "utf8").toString("base64");
-
-      const result = await ctx.server.sendMessage({
-        target: sessionKey,
-        text: "",
-        attachments: [
-          {
-            data: base64,
-            mimeType: INTERACTIVE_HTML_MIME,
-          },
-        ],
-      });
-
-      expect(result.attachments).toEqual([
-        {
-          type: "document",
-          mimeType: INTERACTIVE_HTML_MIME,
-          data: base64,
-        },
-      ]);
-      expect(result.assetIds).toEqual([]);
-
-      const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
-      const db = new BetterSqlite3(dbPath);
-      try {
-        const row = db
-          .prepare(`SELECT userId, sessionKey FROM events WHERE id = ?`)
-          .get(result.messageId) as { userId: string; sessionKey: string } | undefined;
-        expect(row).toEqual({ userId: entry.userId, sessionKey });
-      } finally {
-        db.close();
-      }
-
       const pair = await performPairRequest(ctx.port, entry.deviceId);
       const { ws, queue } = await authenticateDeviceWithQueue(
         ctx.port,
@@ -3459,6 +3420,72 @@ describe.sequential("clawline provider server", () => {
         pair.token as string,
       );
       try {
+        const token = pair.token as string;
+        const createResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            idempotencyKey: "req_interactive_html_session_key_stream",
+            displayName: "Artifacts",
+          }),
+        });
+        expect(createResponse.status).toBe(201);
+        const createdPayload = (await createResponse.json()) as {
+          stream: { sessionKey: string; kind: string };
+        };
+        expect(createdPayload.stream.kind).toBe("custom");
+        const sessionKey = createdPayload.stream.sessionKey;
+        expect(sessionKey).toMatch(/^agent:main:clawline:flynn:s_[0-9a-f]{8}$/);
+        const streamCreated = await waitForQueuedMessage(queue, (value) => {
+          const frame = value as { type?: string; stream?: { sessionKey?: string } };
+          return frame.type === "stream_created" && frame.stream?.sessionKey === sessionKey;
+        });
+        expect(streamCreated).toMatchObject({
+          type: "stream_created",
+          stream: { sessionKey },
+        });
+
+        const descriptor = {
+          version: 1,
+          html: '<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"></head><body><button>Hello</button></body></html>',
+          metadata: { title: "Session Key Card", height: 96 },
+        };
+        const base64 = Buffer.from(JSON.stringify(descriptor), "utf8").toString("base64");
+
+        const result = await ctx.server.sendMessage({
+          target: sessionKey,
+          text: "",
+          attachments: [
+            {
+              data: base64,
+              mimeType: INTERACTIVE_HTML_MIME,
+            },
+          ],
+        });
+
+        expect(result.attachments).toEqual([
+          {
+            type: "document",
+            mimeType: INTERACTIVE_HTML_MIME,
+            data: base64,
+          },
+        ]);
+        expect(result.assetIds).toEqual([]);
+
+        const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
+        const db = new BetterSqlite3(dbPath);
+        try {
+          const row = db
+            .prepare(`SELECT userId, sessionKey FROM events WHERE id = ?`)
+            .get(result.messageId) as { userId: string; sessionKey: string } | undefined;
+          expect(row).toEqual({ userId: entry.userId, sessionKey });
+        } finally {
+          db.close();
+        }
+
         const replay = await waitForQueuedMessage(queue, (value) => {
           const frame = value as { type?: string; id?: string };
           return frame.type === "message" && frame.id === result.messageId;

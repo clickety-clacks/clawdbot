@@ -9,13 +9,7 @@ export type ClawlineResponsePrefixContext = {
   identityName?: string;
 };
 
-export type ClawlineQueueMode =
-  | "steer"
-  | "followup"
-  | "collect"
-  | "steer-backlog"
-  | "interrupt"
-  | "queue";
+export type ClawlineQueueMode = "steer" | "followup" | "collect" | "interrupt";
 
 export type ClawlineQueueDropPolicy = "old" | "new" | "summarize";
 
@@ -56,7 +50,7 @@ function normalizeQueueMode(raw?: string): ClawlineQueueMode | undefined {
     return "collect";
   }
   if (cleaned === "steer+backlog" || cleaned === "steer-backlog" || cleaned === "steer_backlog") {
-    return "steer-backlog";
+    return "followup";
   }
   return undefined;
 }

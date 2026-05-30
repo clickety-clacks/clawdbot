@@ -4,8 +4,8 @@ import { fileURLToPath } from "node:url";
 import BetterSqlite3 from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const extensionRoot = __dirname;
+const currentDir = path.dirname(fileURLToPath(import.meta.url));
+const extensionRoot = currentDir;
 const repoRoot = path.resolve(extensionRoot, "../..");
 
 function readJsonFile(filePath: string): unknown {

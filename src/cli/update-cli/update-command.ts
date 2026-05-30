@@ -178,13 +178,6 @@ async function createUpdateConfigSnapshot(): Promise<void> {
   });
 }
 
-async function createUpdateConfigSnapshot(): Promise<void> {
-  await createPreUpdateConfigSnapshot({
-    configPath: CONFIG_PATH,
-    fs: { writeFile: fs.writeFile, readFile: fs.readFile, existsSync },
-  });
-}
-
 const UPDATE_QUIPS = [
   "Leveled up! New skills unlocked. You're welcome.",
   "Fresh code, same lobster. Miss me?",
@@ -1621,6 +1614,7 @@ export async function updatePluginsAfterCoreUpdate(params: {
   opts: UpdateCommandOptions;
   timeoutMs: number;
   pluginInstallRecords?: Record<string, PluginInstallRecord>;
+  updateMode?: UpdateRunResult["mode"];
 }): Promise<PostCorePluginUpdateResult> {
   if (!params.configSnapshot.valid) {
     const invalid = buildInvalidConfigPostCoreUpdateResult();
@@ -2227,6 +2221,7 @@ async function runPostCorePluginUpdate(params: {
   opts: UpdateCommandOptions;
   timeoutMs: number;
   pluginInstallRecords?: Record<string, PluginInstallRecord>;
+  updateMode?: UpdateRunResult["mode"];
 }): Promise<PostCorePluginUpdateResult> {
   return await updatePluginsAfterCoreUpdate({
     root: params.root,
@@ -2237,6 +2232,7 @@ async function runPostCorePluginUpdate(params: {
     opts: params.opts,
     timeoutMs: params.timeoutMs,
     pluginInstallRecords: params.pluginInstallRecords,
+    updateMode: params.updateMode,
   });
 }
 
@@ -3507,6 +3503,7 @@ export async function updateCommand(opts: UpdateCommandOptions): Promise<void> {
       opts,
       timeoutMs: updateStepTimeoutMs,
       pluginInstallRecords: preUpdatePluginInstallRecords,
+      updateMode: result.mode,
     });
   }
 

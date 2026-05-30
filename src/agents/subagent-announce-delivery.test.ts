@@ -990,7 +990,7 @@ describe("deliverSubagentAnnouncement completion delivery", () => {
         payloads: [{ text: "requester voice completion" }],
       },
     });
-    __testing.setDepsForTest({
+    testing.setDepsForTest({
       callGateway,
       dispatchGatewayMethodInProcess,
       getRequesterSessionActivity: () => ({

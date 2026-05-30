@@ -1,7 +1,6 @@
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { resolveSecretInputRef } from "../config/types.secrets.js";
 import { resolveProviderSyntheticAuthWithPlugin } from "../plugins/provider-runtime.js";
-import { resolveDefaultSecretProviderAlias } from "../secrets/ref-contract.js";
 import type { AuthProfileStore } from "./auth-profiles/types.js";
 import {
   isKnownEnvApiKeyMarker,
@@ -43,25 +42,6 @@ export {
 } from "./models-config.providers.secret-helpers.js";
 
 type AuthProfileStoreInput = AuthProfileStore | (() => AuthProfileStore);
-
-const ENV_VAR_NAME_RE = /^[A-Z_][A-Z0-9_]*$/;
-
-function canResolveEnvSecretRefInConfigAuth(params: {
-  config: OpenClawConfig | undefined;
-  provider: string;
-  id: string;
-}): boolean {
-  const providerName = params.provider.trim();
-  const providerConfig = params.config?.secrets?.providers?.[providerName];
-  if (!providerConfig) {
-    return providerName === resolveDefaultSecretProviderAlias(params.config ?? {}, "env");
-  }
-  if (providerConfig.source !== "env") {
-    return false;
-  }
-  const allowlist = providerConfig.allowlist;
-  return !allowlist || allowlist.includes(params.id);
-}
 
 function resolveAuthProfileStoreInput(input: AuthProfileStoreInput) {
   return typeof input === "function" ? input() : input;
