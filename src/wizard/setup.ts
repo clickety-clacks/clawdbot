@@ -725,21 +725,35 @@ export async function runSetupWizard(
   nextConfig = gateway.nextConfig;
   const settings = gateway.settings;
 
+  let channelPostWriteHooks:
+    | ReturnType<
+        typeof import("../commands/onboard-channels.js").createChannelOnboardingPostWriteHookCollector
+      >
+    | undefined;
+  let runChannelPostWriteHooks:
+    | typeof import("../commands/onboard-channels.js").runCollectedChannelOnboardingPostWriteHooks
+    | undefined;
+
   if (opts.skipChannels ?? opts.skipProviders) {
     await prompter.note(t("wizard.setup.skipChannels"), t("wizard.setup.channelsTitle"));
   } else {
     const { listChannelPlugins } = await import("../channels/plugins/index.js");
-    const { setupChannels } = await import("../commands/onboard-channels.js");
+    const onboardChannels = await import("../commands/onboard-channels.js");
+    channelPostWriteHooks = onboardChannels.createChannelOnboardingPostWriteHookCollector();
+    runChannelPostWriteHooks = onboardChannels.runCollectedChannelOnboardingPostWriteHooks;
     const quickstartAllowFromChannels =
       flow === "quickstart"
         ? listChannelPlugins()
             .filter((plugin) => plugin.meta.quickstartAllowFrom)
             .map((plugin) => plugin.id)
         : [];
-    nextConfig = await setupChannels(nextConfig, runtime, prompter, {
+    nextConfig = await onboardChannels.setupChannels(nextConfig, runtime, prompter, {
       allowSignalInstall: true,
       deferStatusUntilSelection: flow === "quickstart",
       forceAllowFromChannels: quickstartAllowFromChannels,
+      onPostWriteHook: (hook) => {
+        channelPostWriteHooks?.collect(hook);
+      },
       skipDmPolicyPrompt: flow === "quickstart",
       skipConfirm: flow === "quickstart",
       quickstartDefaults: flow === "quickstart",
@@ -748,6 +762,16 @@ export async function runSetupWizard(
   }
 
   nextConfig = await writeWizardConfigFile(nextConfig);
+  if (channelPostWriteHooks && runChannelPostWriteHooks) {
+    const postWriteHooksSucceeded = await runChannelPostWriteHooks({
+      hooks: channelPostWriteHooks.drain(),
+      cfg: nextConfig,
+      runtime,
+    });
+    if (!postWriteHooksSucceeded) {
+      return;
+    }
+  }
   const { logConfigUpdated } = await loadConfigLoggingModule();
   logConfigUpdated(runtime);
   await onboardHelpers.ensureWorkspaceAndSessions(workspaceDir, runtime, {

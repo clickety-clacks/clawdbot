@@ -38,6 +38,10 @@ const registryRefreshMocks = vi.hoisted(() => ({
   refreshPluginRegistryAfterConfigMutation: vi.fn(async () => undefined),
 }));
 
+const postWriteMocks = vi.hoisted(() => ({
+  requiredHook: vi.fn(async () => undefined),
+}));
+
 const pluginInstallRecordCommitMocks = vi.hoisted(() => ({
   commitConfigWithPendingPluginInstalls: vi.fn(),
 }));
@@ -434,6 +438,8 @@ describe("channelsAddCommand", () => {
       createTestRegistry(),
     );
     registryRefreshMocks.refreshPluginRegistryAfterConfigMutation.mockClear();
+    postWriteMocks.requiredHook.mockClear();
+    postWriteMocks.requiredHook.mockResolvedValue(undefined);
     channelWizardMocks.prompter.intro.mockClear();
     channelWizardMocks.prompter.outro.mockClear();
     channelWizardMocks.prompter.confirm.mockClear();
@@ -520,6 +526,76 @@ describe("channelsAddCommand", () => {
     );
 
     expect(lifecycleMocks.onAccountConfigChanged).not.toHaveBeenCalled();
+  });
+
+  it("runs required post-write hooks before reporting add success", async () => {
+    const plugin = {
+      ...createLifecycleChatAddTestPlugin(),
+      setup: {
+        ...createLifecycleChatAddTestPlugin().setup,
+        requireSuccessfulPostWrite: true,
+        afterAccountConfigWritten: postWriteMocks.requiredHook,
+      },
+    } as ChannelPlugin;
+    setActivePluginRegistry(
+      createTestRegistry([{ pluginId: "lifecycle-chat", plugin, source: "test" }]),
+    );
+    configMocks.readConfigFileSnapshot.mockResolvedValue({
+      ...baseConfigSnapshot,
+      config: {
+        channels: {
+          "lifecycle-chat": { token: "old-token", enabled: true },
+        },
+      },
+    });
+
+    await channelsAddCommand(
+      { channel: "lifecycle-chat", account: "default", token: "new-token" },
+      runtime,
+      { hasFlags: true },
+    );
+
+    expect(postWriteMocks.requiredHook).toHaveBeenCalledTimes(1);
+    expect(postWriteMocks.requiredHook.mock.invocationCallOrder[0]).toBeLessThan(
+      runtime.log.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+    );
+    expect(runtime.log).toHaveBeenCalledWith('Added Lifecycle Chat account "default".');
+  });
+
+  it("fails add readiness when a required post-write hook fails", async () => {
+    const plugin = {
+      ...createLifecycleChatAddTestPlugin(),
+      setup: {
+        ...createLifecycleChatAddTestPlugin().setup,
+        requireSuccessfulPostWrite: true,
+        afterAccountConfigWritten: postWriteMocks.requiredHook,
+      },
+    } as ChannelPlugin;
+    setActivePluginRegistry(
+      createTestRegistry([{ pluginId: "lifecycle-chat", plugin, source: "test" }]),
+    );
+    postWriteMocks.requiredHook.mockRejectedValueOnce(new Error("restart failed"));
+    configMocks.readConfigFileSnapshot.mockResolvedValue({
+      ...baseConfigSnapshot,
+      config: {
+        channels: {
+          "lifecycle-chat": { token: "old-token", enabled: true },
+        },
+      },
+    });
+
+    await channelsAddCommand(
+      { channel: "lifecycle-chat", account: "default", token: "new-token" },
+      runtime,
+      { hasFlags: true },
+    );
+
+    expect(configMocks.writeConfigFile).toHaveBeenCalledTimes(1);
+    expect(runtime.error).toHaveBeenCalledWith(
+      'Channel lifecycle-chat post-setup failed for "default": restart failed',
+    );
+    expect(runtime.exit).toHaveBeenCalledWith(1);
+    expect(runtime.log).not.toHaveBeenCalledWith('Added Lifecycle Chat account "default".');
   });
 
   it("maps legacy Nextcloud Talk add flags to setup input fields", async () => {

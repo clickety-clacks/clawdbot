@@ -618,6 +618,14 @@ export function buildChannelSetupWizardAdapterFromSetupWizard(params: {
 
       return { cfg: next, accountId };
     },
+    afterConfigWritten: plugin.setup?.afterAccountConfigWritten
+      ? async (ctx) =>
+          await plugin.setup?.afterAccountConfigWritten?.({
+            ...ctx,
+            input: {},
+          })
+      : undefined,
+    requireSuccessfulPostWrite: plugin.setup?.requireSuccessfulPostWrite,
     dmPolicy: wizard.dmPolicy,
     disable: wizard.disable,
     onAccountRecorded: wizard.onAccountRecorded,

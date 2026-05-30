@@ -14,6 +14,7 @@ import {
 import { commitConfigWithPendingPluginInstalls } from "../../cli/plugins-install-record-commit.js";
 import { refreshPluginRegistryAfterConfigMutation } from "../../cli/plugins-registry-refresh.js";
 import type { OpenClawConfig } from "../../config/config.js";
+import { formatErrorMessage } from "../../infra/errors.js";
 import { DEFAULT_ACCOUNT_ID, normalizeAccountId } from "../../routing/session-key.js";
 import { defaultRuntime, type RuntimeEnv } from "../../runtime.js";
 import { createLazyImportLoader } from "../../shared/lazy-promise.js";
@@ -292,11 +293,15 @@ async function channelsAddCommandImpl(
         logger: { warn: (message) => runtime.log(message) },
       });
     }
-    await onboardChannels.runCollectedChannelOnboardingPostWriteHooks({
-      hooks: postWriteHooks.drain(),
-      cfg: writtenConfig,
-      runtime,
-    });
+    const postWriteHooksSucceeded =
+      await onboardChannels.runCollectedChannelOnboardingPostWriteHooks({
+        hooks: postWriteHooks.drain(),
+        cfg: writtenConfig,
+        runtime,
+      });
+    if (!postWriteHooksSucceeded) {
+      return;
+    }
     await prompter.outro("Channels updated.");
     return;
   }
@@ -445,27 +450,43 @@ async function channelsAddCommandImpl(
       logger: { warn: (message) => runtime.log(message) },
     });
   }
-  runtime.log(`Added ${plugin.meta.label ?? channelLabel(channel)} account "${accountId}".`);
   const afterAccountConfigWritten = plugin.setup?.afterAccountConfigWritten;
+  const postWriteHookIsRequired = plugin.setup?.requireSuccessfulPostWrite === true;
   if (afterAccountConfigWritten) {
-    const { runCollectedChannelOnboardingPostWriteHooks } = await loadOnboardChannels();
-    await runCollectedChannelOnboardingPostWriteHooks({
-      hooks: [
-        {
-          channel,
-          accountId,
-          run: async ({ cfg: writtenCfg, runtime: hookRuntime }) =>
-            await afterAccountConfigWritten({
-              previousCfg: cfg,
-              cfg: writtenCfg,
-              accountId,
-              input,
-              runtime: hookRuntime,
-            }),
-        },
-      ],
-      cfg: writtenConfig,
-      runtime,
-    });
+    const runPostWriteHook = async ({ cfg: writtenCfg, runtime: hookRuntime }) =>
+      await afterAccountConfigWritten({
+        previousCfg: cfg,
+        cfg: writtenCfg,
+        accountId,
+        input,
+        runtime: hookRuntime,
+      });
+    if (postWriteHookIsRequired) {
+      try {
+        await runPostWriteHook({ cfg: writtenConfig, runtime });
+      } catch (error) {
+        runtime.error(
+          `Channel ${channel} post-setup failed for "${accountId}": ${formatErrorMessage(error)}`,
+        );
+        runtime.exit(1);
+        return;
+      }
+    } else {
+      runtime.log(`Added ${plugin.meta.label ?? channelLabel(channel)} account "${accountId}".`);
+      const { runCollectedChannelOnboardingPostWriteHooks } = await loadOnboardChannels();
+      await runCollectedChannelOnboardingPostWriteHooks({
+        hooks: [
+          {
+            channel,
+            accountId,
+            run: runPostWriteHook,
+          },
+        ],
+        cfg: writtenConfig,
+        runtime,
+      });
+      return;
+    }
   }
+  runtime.log(`Added ${plugin.meta.label ?? channelLabel(channel)} account "${accountId}".`);
 }

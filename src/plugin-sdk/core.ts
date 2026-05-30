@@ -495,6 +495,7 @@ type CreateChannelPluginBaseOptions<TResolvedAccount> = {
   configSchema?: ChannelPlugin<TResolvedAccount>["configSchema"];
   config?: ChannelPlugin<TResolvedAccount>["config"];
   security?: ChannelPlugin<TResolvedAccount>["security"];
+  lifecycle?: ChannelPlugin<TResolvedAccount>["lifecycle"];
   setup: NonNullable<ChannelPlugin<TResolvedAccount>["setup"]>;
   groups?: ChannelPlugin<TResolvedAccount>["groups"];
 };
@@ -518,6 +519,7 @@ type CreatedChannelPluginBase<TResolvedAccount> = Pick<
       | "configSchema"
       | "config"
       | "security"
+      | "lifecycle"
       | "groups"
     >
   >;
@@ -833,6 +835,7 @@ export function createChannelPluginBase<TResolvedAccount>(
     ...(params.configSchema ? { configSchema: params.configSchema } : {}),
     ...(params.config ? { config: params.config } : {}),
     ...(params.security ? { security: params.security } : {}),
+    ...(params.lifecycle ? { lifecycle: params.lifecycle } : {}),
     ...(params.groups ? { groups: params.groups } : {}),
     setup: params.setup,
   } as CreatedChannelPluginBase<TResolvedAccount>;

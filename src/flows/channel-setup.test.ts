@@ -154,6 +154,9 @@ const collectChannelStatus = vi.hoisted(() =>
   })),
 );
 const isChannelConfigured = vi.hoisted(() => vi.fn((_cfg?: unknown, _channel?: unknown) => true));
+const promptConfiguredAction = vi.hoisted(() => vi.fn());
+const promptRemovalAccountId = vi.hoisted(() => vi.fn());
+const formatAccountLabel = vi.hoisted(() => vi.fn());
 
 vi.mock("../agents/agent-scope.js", () => ({
   resolveAgentWorkspaceDir: (cfg?: unknown, agentId?: unknown) =>
@@ -208,9 +211,9 @@ vi.mock("../config/channel-configured.js", () => ({
 
 vi.mock("./channel-setup.prompts.js", () => ({
   maybeConfigureDmPolicies: vi.fn(),
-  promptConfiguredAction: vi.fn(),
-  promptRemovalAccountId: vi.fn(),
-  formatAccountLabel: vi.fn(),
+  promptConfiguredAction: (...args: unknown[]) => promptConfiguredAction(...args),
+  promptRemovalAccountId: (...args: unknown[]) => promptRemovalAccountId(...args),
+  formatAccountLabel: (...args: unknown[]) => formatAccountLabel(...args),
 }));
 
 vi.mock("./channel-setup.status.js", () => ({
@@ -258,6 +261,11 @@ describe("setupChannels workspace shadow exclusion", () => {
       statusLines: [],
     });
     isChannelConfigured.mockReturnValue(true);
+    promptConfiguredAction.mockReset();
+    promptRemovalAccountId.mockReset();
+    formatAccountLabel.mockReset();
+    promptRemovalAccountId.mockResolvedValue("default");
+    formatAccountLabel.mockReturnValue("default");
   });
 
   it("preloads configured external plugins from the trusted catalog boundary", async () => {
@@ -657,6 +665,148 @@ describe("setupChannels workspace shadow exclusion", () => {
         "external-chat": { enabled: false, token: "secret" },
       },
     });
+  });
+
+  it("runs configured-channel delete lifecycle before deleting from setup", async () => {
+    const beforeAccountRemoved = vi.fn(async () => undefined);
+    const deleteAccount = vi.fn(({ cfg }: { cfg: Record<string, unknown> }) => ({
+      ...cfg,
+      channels: {},
+    }));
+    const activePlugin = {
+      ...makeSetupPlugin({
+        id: "clawline",
+        label: "Clawline",
+        setupWizard: {
+          channel: "clawline",
+          getStatus: vi.fn(async () => ({
+            channel: "clawline",
+            configured: true,
+            statusLines: [],
+          })),
+          configure: vi.fn(),
+        } as ChannelSetupPlugin["setupWizard"],
+      }),
+      config: {
+        resolveAccount: vi.fn(() => ({})),
+        deleteAccount,
+      } as unknown as ChannelSetupPlugin["config"],
+      lifecycle: {
+        beforeAccountRemoved,
+      },
+    };
+    listActiveChannelSetupPlugins.mockReturnValue([activePlugin]);
+    collectChannelStatus.mockResolvedValue({
+      installedPlugins: [activePlugin],
+      catalogEntries: [],
+      installedCatalogEntries: [],
+      statusByChannel: new Map([["clawline", { channel: "clawline", configured: true }]]),
+      statusLines: [],
+    } as never);
+    promptConfiguredAction.mockResolvedValue("delete");
+    const select = vi.fn().mockResolvedValueOnce("clawline").mockResolvedValueOnce("__done__");
+    const confirm = vi.fn(async () => true);
+    const cfg = {
+      channels: {
+        clawline: { server: { cluSecret: "old-secret" } },
+      },
+    };
+    const runtime = {} as never;
+
+    const next = await setupChannels(
+      cfg as never,
+      runtime,
+      {
+        confirm,
+        note: vi.fn(async () => undefined),
+        select,
+      } as never,
+      {
+        allowDisable: true,
+        skipConfirm: true,
+        skipDmPolicyPrompt: true,
+      },
+    );
+
+    expect(beforeAccountRemoved).toHaveBeenCalledWith({
+      cfg,
+      accountId: "default",
+      runtime,
+    });
+    expect(confirm).toHaveBeenCalledWith({
+      message:
+        'Delete Clawline account "default"? This stops gateway access for this channel and re-adding it may regenerate channel secrets.',
+      initialValue: false,
+    });
+    expect(deleteAccount).toHaveBeenCalledWith({ cfg, accountId: "default" });
+    expect(next).toEqual({ channels: {} });
+  });
+
+  it("keeps configured-channel delete fail-closed when lifecycle fails", async () => {
+    const beforeAccountRemoved = vi.fn(async () => {
+      throw new Error("gateway still running");
+    });
+    const deleteAccount = vi.fn(({ cfg }: { cfg: Record<string, unknown> }) => cfg);
+    const activePlugin = {
+      ...makeSetupPlugin({
+        id: "custom-chat",
+        label: "Custom Chat",
+        setupWizard: {
+          channel: "custom-chat",
+          getStatus: vi.fn(async () => ({
+            channel: "custom-chat",
+            configured: true,
+            statusLines: [],
+          })),
+          configure: vi.fn(),
+        } as ChannelSetupPlugin["setupWizard"],
+      }),
+      config: {
+        resolveAccount: vi.fn(() => ({})),
+        deleteAccount,
+      } as unknown as ChannelSetupPlugin["config"],
+      lifecycle: {
+        beforeAccountRemoved,
+      },
+    };
+    listActiveChannelSetupPlugins.mockReturnValue([activePlugin]);
+    collectChannelStatus.mockResolvedValue({
+      installedPlugins: [activePlugin],
+      catalogEntries: [],
+      installedCatalogEntries: [],
+      statusByChannel: new Map([["custom-chat", { channel: "custom-chat", configured: true }]]),
+      statusLines: [],
+    } as never);
+    promptConfiguredAction.mockResolvedValue("delete");
+    const note = vi.fn(async () => undefined);
+    const select = vi.fn().mockResolvedValueOnce("custom-chat").mockResolvedValueOnce("__done__");
+    const cfg = {
+      channels: {
+        "custom-chat": { token: "secret" },
+      },
+    };
+
+    const next = await setupChannels(
+      cfg as never,
+      {} as never,
+      {
+        confirm: vi.fn(async () => true),
+        note,
+        select,
+      } as never,
+      {
+        allowDisable: true,
+        skipConfirm: true,
+        skipDmPolicyPrompt: true,
+      },
+    );
+
+    expect(deleteAccount).not.toHaveBeenCalled();
+    expect(note).toHaveBeenCalledWith(
+      'Could not delete Custom Chat account "default": gateway still running',
+      "Remove channel",
+    );
+    expect(next).toEqual(cfg);
   });
 
   it("honors global plugin disablement before lazy channel setup loads plugins", async () => {

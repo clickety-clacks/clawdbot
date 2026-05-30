@@ -3,7 +3,11 @@ import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import type { RuntimeEnv } from "../../runtime.js";
 import type { WizardPrompter } from "../../wizard/prompts.js";
 import type { ChannelAccessPolicy } from "./setup-group-access.js";
-import type { ChannelConfigAdapter, ChannelSetupAdapter } from "./types.adapters.js";
+import type {
+  ChannelConfigAdapter,
+  ChannelLifecycleAdapter,
+  ChannelSetupAdapter,
+} from "./types.adapters.js";
 import type {
   ChannelCapabilities,
   ChannelId,
@@ -16,6 +20,7 @@ export type ChannelSetupPlugin = {
   meta: ChannelMeta;
   capabilities: ChannelCapabilities;
   config: ChannelConfigAdapter<unknown>;
+  lifecycle?: ChannelLifecycleAdapter;
   setup?: ChannelSetupAdapter;
   setupWizard?: ChannelSetupWizard | ChannelSetupWizardAdapter;
 };
@@ -347,6 +352,7 @@ export type ChannelOnboardingPostWriteContext = {
 export type ChannelOnboardingPostWriteHook = {
   channel: ChannelId;
   accountId: string;
+  required?: boolean;
   run: (ctx: { cfg: OpenClawConfig; runtime: RuntimeEnv }) => Promise<void> | void;
 };
 
@@ -391,6 +397,7 @@ export type ChannelSetupWizardAdapter = {
     ctx: ChannelSetupInteractiveContext,
   ) => Promise<ChannelSetupConfiguredResult>;
   afterConfigWritten?: (ctx: ChannelOnboardingPostWriteContext) => Promise<void> | void;
+  requireSuccessfulPostWrite?: boolean;
   dmPolicy?: ChannelSetupDmPolicy;
   onAccountRecorded?: (accountId: string, options?: SetupChannelsOptions) => void;
   disable?: (cfg: OpenClawConfig) => OpenClawConfig;

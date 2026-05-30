@@ -6695,6 +6695,51 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("uses only the active CLU secret after a gateway restart", async () => {
+    const entry = createAllowlistEntry({ isAdmin: true });
+    const oldSecret = "old-clu-secret-at-least-22-chars";
+    const newSecret = "new-clu-secret-at-least-22-chars";
+    const first = await setupTestServer([entry], {
+      server: { cluSecret: oldSecret },
+    });
+    await first.cleanup();
+
+    const restarted = await setupTestServer([entry], {
+      server: { cluSecret: newSecret },
+    });
+    try {
+      const oldSecretResponse = await fetch(`http://127.0.0.1:${restarted.port}/api/streams`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-CLU-Secret": oldSecret,
+          "X-CLU-User-Id": entry.userId,
+        },
+        body: JSON.stringify({
+          idempotencyKey: "req_create_stream_old_clu_secret_after_restart",
+          displayName: "Old CLU Secret",
+        }),
+      });
+      expect(oldSecretResponse.status).toBe(403);
+
+      const newSecretResponse = await fetch(`http://127.0.0.1:${restarted.port}/api/streams`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-CLU-Secret": newSecret,
+          "X-CLU-User-Id": entry.userId,
+        },
+        body: JSON.stringify({
+          idempotencyKey: "req_create_stream_new_clu_secret_after_restart",
+          displayName: "New CLU Secret",
+        }),
+      });
+      expect(newSecretResponse.status).toBe(201);
+    } finally {
+      await restarted.cleanup();
+    }
+  });
+
   it("rejects stream mutation without HTTP auth even when a WebSocket is active", async () => {
     const entry = createAllowlistEntry();
     const ctx = await setupTestServer([entry]);

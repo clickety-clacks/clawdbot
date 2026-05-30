@@ -44,9 +44,10 @@ async function stopGatewayRuntimeBeforeRemove(params: {
   accountId: string;
   plugin: ChannelPlugin;
   runtime: RuntimeEnv;
-}) {
+  failClosed: boolean;
+}): Promise<boolean> {
   if (!params.plugin.gateway?.startAccount && !params.plugin.gateway?.logoutAccount) {
-    return;
+    return true;
   }
   try {
     await callGateway({
@@ -60,10 +61,15 @@ async function stopGatewayRuntimeBeforeRemove(params: {
       clientName: GATEWAY_CLIENT_NAMES.GATEWAY_CLIENT,
       deviceIdentity: null,
     });
+    return true;
   } catch (error) {
-    params.runtime.log(
-      `Could not stop running ${channelLabel(params.channel)} account "${params.accountId}" before removing it: ${formatErrorMessage(error)}`,
-    );
+    const message = `Could not stop running ${channelLabel(params.channel)} account "${params.accountId}" before removing it: ${formatErrorMessage(error)}`;
+    if (params.failClosed) {
+      params.runtime.error(message);
+      return false;
+    }
+    params.runtime.log(message);
+    return true;
   }
 }
 
@@ -186,13 +192,29 @@ export async function channelsRemoveCommand(
     normalizeAccountId(accountId) ?? resolveChannelDefaultAccountId({ plugin, cfg });
   const accountKey = resolvedAccountId || DEFAULT_ACCOUNT_ID;
 
-  await stopGatewayRuntimeBeforeRemove({
+  if (!useWizard && deleteConfig) {
+    const confirm = createClackPrompter();
+    const ok = await confirm.confirm({
+      message: `Delete ${channelLabel(resolvedChannelId)} account "${accountKey}"? This stops gateway access for this channel and re-adding it may regenerate channel secrets.`,
+      initialValue: false,
+    });
+    if (!ok) {
+      return;
+    }
+  }
+
+  const stoppedGatewayRuntime = await stopGatewayRuntimeBeforeRemove({
     cfg,
     channel: resolvedChannelId,
     accountId: accountKey,
     plugin,
     runtime,
+    failClosed: deleteConfig,
   });
+  if (!stoppedGatewayRuntime) {
+    runtime.exit(1);
+    return;
+  }
 
   let next = { ...cfg };
   const prevCfg = cfg;
@@ -200,6 +222,19 @@ export async function channelsRemoveCommand(
     if (!plugin.config.deleteAccount) {
       runtime.error(
         `${formatUnsupportedChannelActionMessage({ channel, action: "delete" })} Use ${formatCliCommand("openclaw channels remove --channel " + channel)} to disable it without deleting config.`,
+      );
+      runtime.exit(1);
+      return;
+    }
+    try {
+      await plugin.lifecycle?.beforeAccountRemoved?.({
+        cfg: prevCfg,
+        accountId: resolvedAccountId,
+        runtime,
+      });
+    } catch (error) {
+      runtime.error(
+        `Could not prepare ${channelLabel(resolvedChannelId)} account "${accountKey}" for deletion: ${formatErrorMessage(error)}`,
       );
       runtime.exit(1);
       return;

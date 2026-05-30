@@ -501,6 +501,10 @@
       "types": "./dist/plugin-sdk/gateway-runtime.d.ts",
       "default": "./dist/plugin-sdk/gateway-runtime.js"
     },
+    "./plugin-sdk/gateway-lifecycle": {
+      "types": "./dist/plugin-sdk/gateway-lifecycle.d.ts",
+      "default": "./dist/plugin-sdk/gateway-lifecycle.js"
+    },
     "./plugin-sdk/cli-runtime": {
       "types": "./dist/plugin-sdk/cli-runtime.d.ts",
       "default": "./dist/plugin-sdk/cli-runtime.js"

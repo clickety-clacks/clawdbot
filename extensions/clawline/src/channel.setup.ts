@@ -7,6 +7,7 @@ import {
   type ChannelPlugin,
   type OpenClawConfig,
 } from "openclaw/plugin-sdk/core";
+import { stopGatewayServiceBeforeChannelConfigDelete } from "openclaw/plugin-sdk/gateway-lifecycle";
 import { ClawlineConfigSchema } from "./config-schema.js";
 import { clawlineSetupAdapter, clawlineSetupWizard } from "./onboarding.js";
 
@@ -63,7 +64,7 @@ export const clawlineSetupPlugin = createChannelPluginBase({
   configSchema: buildChannelConfigSchema(ClawlineConfigSchema),
   config: {
     ...clawlineConfigAdapter,
-    deleteAccount: undefined,
+    deleteAccount: clawlineConfigAdapter.deleteAccount,
     isConfigured: (account) => account.configured,
     describeAccount: (account) =>
       describeAccountSnapshot({
@@ -72,6 +73,14 @@ export const clawlineSetupPlugin = createChannelPluginBase({
       }),
   },
   setup: clawlineSetupAdapter,
+  lifecycle: {
+    beforeAccountRemoved: async () => {
+      const stopped = await stopGatewayServiceBeforeChannelConfigDelete();
+      if (!stopped) {
+        throw new Error("Gateway service did not stop before Clawline config deletion.");
+      }
+    },
+  },
 }) as ReturnType<typeof createChannelPluginBase<ResolvedClawlineAccount>> &
   Pick<
     ChannelPlugin<ResolvedClawlineAccount>,

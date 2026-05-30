@@ -28,6 +28,13 @@ const gatewayMocks = vi.hoisted(() => ({
   callGateway: vi.fn(async () => ({ stopped: true })),
 }));
 
+const prompterMocks = vi.hoisted(() => ({
+  confirm: vi.fn(async () => true),
+  intro: vi.fn(async () => undefined),
+  outro: vi.fn(async () => undefined),
+  select: vi.fn(),
+}));
+
 vi.mock("../channels/plugins/catalog.js", async () => {
   const actual = await vi.importActual<typeof import("../channels/plugins/catalog.js")>(
     "../channels/plugins/catalog.js",
@@ -61,6 +68,10 @@ vi.mock("../cli/plugins-registry-refresh.js", () => registryRefreshMocks);
 
 vi.mock("../gateway/call.js", () => ({
   callGateway: gatewayMocks.callGateway,
+}));
+
+vi.mock("../wizard/clack-prompter.js", () => ({
+  createClackPrompter: () => prompterMocks,
 }));
 
 const runtime = createTestRuntime();
@@ -103,6 +114,11 @@ describe("channelsRemoveCommand", () => {
     registryRefreshMocks.refreshPluginRegistryAfterConfigMutation.mockClear();
     gatewayMocks.callGateway.mockClear();
     gatewayMocks.callGateway.mockResolvedValue({ stopped: true });
+    prompterMocks.confirm.mockClear();
+    prompterMocks.confirm.mockResolvedValue(true);
+    prompterMocks.intro.mockClear();
+    prompterMocks.outro.mockClear();
+    prompterMocks.select.mockClear();
     setActivePluginRegistry(createTestRegistry());
   });
 
@@ -243,5 +259,98 @@ describe("channelsRemoveCommand", () => {
     });
     const writtenConfig = firstWrittenChannelsConfig();
     expect(writtenConfig?.channels?.["external-chat"]).toBeUndefined();
+  });
+
+  it("fails closed when a runtime-backed destructive delete cannot stop the gateway", async () => {
+    configMocks.readConfigFileSnapshot.mockResolvedValue({
+      ...baseConfigSnapshot,
+      config: {
+        channels: {
+          "external-chat": {
+            enabled: true,
+            token: "token-1",
+          },
+        },
+      },
+    });
+    const catalogEntry: ChannelPluginCatalogEntry = createExternalChatCatalogEntry();
+    catalogMocks.listChannelPluginCatalogEntries.mockReturnValue([catalogEntry]);
+    const scopedPlugin = {
+      ...createExternalChatDeletePlugin(),
+      gateway: {
+        startAccount: vi.fn(),
+      },
+    } as ChannelPlugin;
+    vi.mocked(loadChannelSetupPluginRegistrySnapshotForChannel).mockReturnValue(
+      createTestRegistry([
+        {
+          pluginId: "@vendor/external-chat-plugin",
+          plugin: scopedPlugin,
+          source: "test",
+        },
+      ]),
+    );
+    gatewayMocks.callGateway.mockRejectedValueOnce(new Error("stop failed"));
+
+    await channelsRemoveCommand(
+      {
+        channel: "external-chat",
+        account: "default",
+        delete: true,
+      },
+      runtime,
+      { hasFlags: true },
+    );
+
+    expect(configMocks.writeConfigFile).not.toHaveBeenCalled();
+    expect(runtime.error).toHaveBeenCalledWith(
+      'Could not stop running external-chat account "default" before removing it: stop failed',
+    );
+    expect(runtime.exit).toHaveBeenCalledWith(1);
+  });
+
+  it("requires destructive delete confirmation before stopping and deleting config", async () => {
+    configMocks.readConfigFileSnapshot.mockResolvedValue({
+      ...baseConfigSnapshot,
+      config: {
+        channels: {
+          "external-chat": {
+            enabled: true,
+            token: "token-1",
+          },
+        },
+      },
+    });
+    const catalogEntry: ChannelPluginCatalogEntry = createExternalChatCatalogEntry();
+    catalogMocks.listChannelPluginCatalogEntries.mockReturnValue([catalogEntry]);
+    const scopedPlugin = createExternalChatDeletePlugin();
+    vi.mocked(loadChannelSetupPluginRegistrySnapshotForChannel).mockReturnValue(
+      createTestRegistry([
+        {
+          pluginId: "@vendor/external-chat-plugin",
+          plugin: scopedPlugin,
+          source: "test",
+        },
+      ]),
+    );
+    prompterMocks.confirm.mockResolvedValueOnce(false);
+
+    await channelsRemoveCommand(
+      {
+        channel: "external-chat",
+        account: "default",
+        delete: true,
+      },
+      runtime,
+      { hasFlags: true },
+    );
+
+    expect(prompterMocks.confirm).toHaveBeenCalledWith({
+      message:
+        'Delete external-chat account "default"? This stops gateway access for this channel and re-adding it may regenerate channel secrets.',
+      initialValue: false,
+    });
+    expect(gatewayMocks.callGateway).not.toHaveBeenCalled();
+    expect(configMocks.writeConfigFile).not.toHaveBeenCalled();
   });
 });

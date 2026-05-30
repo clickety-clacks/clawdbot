@@ -101,6 +101,7 @@ export type ChannelSetupAdapter = {
     input: ChannelSetupInput;
     runtime: RuntimeEnv;
   }) => Promise<void> | void;
+  requireSuccessfulPostWrite?: boolean;
   validateInput?: (params: {
     cfg: OpenClawConfig;
     accountId: string;
@@ -544,6 +545,11 @@ export type ChannelDoctorAdapter = {
 };
 
 export type ChannelLifecycleAdapter = {
+  beforeAccountRemoved?: (params: {
+    cfg: OpenClawConfig;
+    accountId: string;
+    runtime: RuntimeEnv;
+  }) => Promise<void> | void;
   onAccountConfigChanged?: (params: {
     prevCfg: OpenClawConfig;
     nextCfg: OpenClawConfig;

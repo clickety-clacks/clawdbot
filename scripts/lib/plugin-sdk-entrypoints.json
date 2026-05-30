@@ -97,6 +97,7 @@
   "secret-ref-runtime",
   "secret-file-runtime",
   "security-runtime",
+  "gateway-lifecycle",
   "gateway-method-runtime",
   "gateway-runtime",
   "cli-runtime",

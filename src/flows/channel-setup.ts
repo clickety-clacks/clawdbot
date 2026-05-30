@@ -72,22 +72,30 @@ export async function runCollectedChannelOnboardingPostWriteHooks(params: {
   hooks: ChannelOnboardingPostWriteHook[];
   cfg: OpenClawConfig;
   runtime: RuntimeEnv;
-}): Promise<void> {
+}): Promise<boolean> {
   for (const hook of params.hooks) {
     try {
       await hook.run({ cfg: params.cfg, runtime: params.runtime });
     } catch (err) {
       const message = formatErrorMessage(err);
+      if (hook.required === true) {
+        params.runtime.error(
+          `Channel ${hook.channel} post-setup failed for "${hook.accountId}": ${message}`,
+        );
+        params.runtime.exit(1);
+        return false;
+      }
       params.runtime.error(
         `Channel ${hook.channel} post-setup warning for "${hook.accountId}": ${message}`,
       );
     }
   }
+  return true;
 }
 
 export function createChannelOnboardingPostWriteHook(params: {
   accountId?: string;
-  adapter?: Pick<ChannelSetupWizardAdapter, "afterConfigWritten">;
+  adapter?: Pick<ChannelSetupWizardAdapter, "afterConfigWritten" | "requireSuccessfulPostWrite">;
   channel: ChannelChoice;
   previousCfg: OpenClawConfig;
 }): ChannelOnboardingPostWriteHook | undefined {
@@ -97,6 +105,7 @@ export function createChannelOnboardingPostWriteHook(params: {
   return {
     channel: params.channel,
     accountId: params.accountId,
+    required: params.adapter.requireSuccessfulPostWrite,
     run: async ({ cfg, runtime }) =>
       await params.adapter?.afterConfigWritten?.({
         previousCfg: params.previousCfg,
@@ -551,11 +560,28 @@ export async function setupChannels(
     const accountLabel = formatAccountLabel(resolvedAccountId);
 
     if (action === "delete") {
+      const deleteMessage = t("wizard.channels.deleteAccount", { label, account: accountLabel });
       const confirmed = await prompter.confirm({
-        message: t("wizard.channels.deleteAccount", { label, account: accountLabel }),
+        message:
+          channel === "clawline"
+            ? `${deleteMessage} This stops gateway access for this channel and re-adding it may regenerate channel secrets.`
+            : deleteMessage,
         initialValue: false,
       });
       if (!confirmed) {
+        return;
+      }
+      try {
+        await plugin?.lifecycle?.beforeAccountRemoved?.({
+          cfg: next,
+          accountId: resolvedAccountId,
+          runtime,
+        });
+      } catch (error) {
+        await prompter.note(
+          `Could not delete ${label} account "${accountLabel}": ${formatErrorMessage(error)}`,
+          t("wizard.channels.removeTitle"),
+        );
         return;
       }
       if (plugin?.config.deleteAccount) {
