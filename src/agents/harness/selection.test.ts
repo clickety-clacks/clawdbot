@@ -272,6 +272,38 @@ describe("runAgentHarnessAttempt", () => {
     expect(piRunAttempt).not.toHaveBeenCalled();
   });
 
+  it("rejects the candidate when the forced plugin harness does not support its provider", async () => {
+    registerFailingCodexHarness();
+
+    const params = createAttemptParams(
+      agentModelRuntimeConfig("9router/cc/claude-opus-4-6", "codex"),
+    );
+    params.provider = "9router";
+    params.modelId = "cc/claude-opus-4-6";
+    params.agentHarnessRuntimeOverride = "codex";
+
+    await expect(runAgentHarnessAttempt(params)).rejects.toThrow(
+      /Requested agent harness "codex" does not support 9router\/cc\/claude-opus-4-6/,
+    );
+    expect(piRunAttempt).not.toHaveBeenCalled();
+  });
+
+  it.each(["openai", "openai-codex"])(
+    "does not override forced Codex harness support rejection for %s",
+    (provider) => {
+      registerFailingCodexHarness();
+
+      expect(() =>
+        selectAgentHarness({
+          provider,
+          modelId: "gpt-5.4",
+          agentHarnessRuntimeOverride: "codex",
+        }),
+      ).toThrow(`Requested agent harness "codex" does not support ${provider}/gpt-5.4`);
+      expect(piRunAttempt).not.toHaveBeenCalled();
+    },
+  );
+
   it("uses the Codex harness by default for OpenAI agent model runs", async () => {
     registerSuccessfulCodexHarness();
 
@@ -632,11 +664,39 @@ describe("selectAgentHarness", () => {
 
     expect(
       selectAgentHarness({
-        provider: "openai",
+        provider: "codex",
         modelId: "gpt-5.4",
         agentHarnessId: "codex",
       }).id,
     ).toBe("codex");
+  });
+
+  it("skips harness compaction preflight for claude-cli runtime sessions", async () => {
+    await expect(
+      maybeCompactAgentHarnessSession({
+        sessionId: "session-1",
+        sessionKey: "agent:main:main",
+        sessionFile: "/tmp/session.jsonl",
+        workspaceDir: "/tmp/workspace",
+        provider: "anthropic",
+        model: "claude-opus-4-7",
+        config: agentModelRuntimeConfig("anthropic/claude-opus-4-7", "claude-cli"),
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("skips harness compaction preflight for claude-cli provider sessions", async () => {
+    await expect(
+      maybeCompactAgentHarnessSession({
+        sessionId: "session-1",
+        sessionKey: "agent:main:main",
+        sessionFile: "/tmp/session.jsonl",
+        workspaceDir: "/tmp/workspace",
+        provider: "claude-cli",
+        model: "claude-opus-4-7",
+        config: providerRuntimeConfig("claude-cli", "claude-cli"),
+      }),
+    ).resolves.toBeUndefined();
   });
 
   it("ignores stale plugin pins during compaction when the provider no longer matches", async () => {
@@ -674,5 +734,62 @@ describe("selectAgentHarness", () => {
       reason: 'Agent harness "codex" does not support compaction.',
       failure: { reason: "unsupported_harness_compaction" },
     });
+  });
+
+  it.each([
+    { provider: "anthropic", modelId: "sonnet-4.6", alias: "claude-cli" },
+    { provider: "google", modelId: "gemini-3-pro-preview", alias: "google-gemini-cli" },
+  ])(
+    "returns PI for explicit CLI runtime alias $alias on $provider instead of throwing MissingAgentHarnessError",
+    ({ provider, modelId, alias }) => {
+      expect(
+        selectAgentHarness({
+          provider,
+          modelId,
+          agentHarnessRuntimeOverride: alias,
+        }).id,
+      ).toBe("pi");
+    },
+  );
+
+  it("still throws MissingAgentHarnessError for an explicit configured cliBackends id", () => {
+    const config = {
+      agents: {
+        defaults: {
+          cliBackends: {
+            "my-custom-cli": { command: "echo" },
+          },
+        },
+      },
+    } as OpenClawConfig;
+
+    expect(() =>
+      selectAgentHarness({
+        provider: "anthropic",
+        modelId: "sonnet-4.6",
+        agentHarnessRuntimeOverride: "my-custom-cli",
+        config,
+      }),
+    ).toThrow('Requested agent harness "my-custom-cli" is not registered');
+  });
+
+  it("still throws MissingAgentHarnessError for an explicit non-CLI unknown runtime", () => {
+    expect(() =>
+      selectAgentHarness({
+        provider: "anthropic",
+        modelId: "sonnet-4.6",
+        agentHarnessRuntimeOverride: "clade-cli",
+      }),
+    ).toThrow('Requested agent harness "clade-cli" is not registered');
+  });
+
+  it("still throws MissingAgentHarnessError for an explicit CLI alias owned by another provider", () => {
+    expect(() =>
+      selectAgentHarness({
+        provider: "anthropic",
+        modelId: "sonnet-4.6",
+        agentHarnessRuntimeOverride: "google-gemini-cli",
+      }),
+    ).toThrow('Requested agent harness "google-gemini-cli" is not registered');
   });
 });

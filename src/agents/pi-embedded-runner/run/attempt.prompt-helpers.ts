@@ -16,8 +16,10 @@ import { isCronSessionKey, isSubagentSessionKey } from "../../../routing/session
 import { joinPresentTextSegments } from "../../../shared/text/join-segments.js";
 import { listActiveProcessSessionReferences } from "../../bash-process-references.js";
 import { resolveHeartbeatPromptForSystemPrompt } from "../../heartbeat-system-prompt.js";
+import { wrapPluginSystemContextSection } from "../../hook-system-context-boundary.js";
 import { buildActiveImageGenerationTaskPromptContextForSession } from "../../image-generation-task-status.js";
 import { buildActiveMusicGenerationTaskPromptContextForSession } from "../../music-generation-task-status.js";
+import { hasOpenAICompatibleConversationTurn } from "../../openai-compatible-conversation-turn.js";
 import { resolveProcessToolScopeKey } from "../../pi-tools.js";
 import { prependSystemPromptAdditionAfterCacheBoundary } from "../../system-prompt-cache-boundary.js";
 import { resolveEffectiveToolFsWorkspaceOnly } from "../../tool-fs-policy.js";
@@ -197,12 +199,12 @@ export async function resolvePromptBuildHookResult(params: {
       legacyResult?.appendContext,
     ]),
     prependSystemContext: joinPresentTextSegments([
-      promptBuildResult?.prependSystemContext,
-      legacyResult?.prependSystemContext,
+      wrapPluginSystemContextSection(promptBuildResult?.prependSystemContext),
+      wrapPluginSystemContextSection(legacyResult?.prependSystemContext),
     ]),
     appendSystemContext: joinPresentTextSegments([
-      promptBuildResult?.appendSystemContext,
-      legacyResult?.appendSystemContext,
+      wrapPluginSystemContextSection(promptBuildResult?.appendSystemContext),
+      wrapPluginSystemContextSection(legacyResult?.appendSystemContext),
     ]),
   };
 }
@@ -251,7 +253,9 @@ export function resolvePromptSubmissionSkipReason(params: {
   if (params.prompt.trim().length > 0 || params.imageCount > 0) {
     return null;
   }
-  return params.messages.length > 0 ? "blank_user_prompt" : "empty_prompt_history_images";
+  return hasOpenAICompatibleConversationTurn(params.messages)
+    ? "blank_user_prompt"
+    : "empty_prompt_history_images";
 }
 
 const QUEUED_USER_MESSAGE_MARKER =
@@ -561,6 +565,7 @@ export function buildAfterTurnRuntimeContext(params: {
       config: params.attempt.config,
       sessionKey: params.attempt.sessionKey,
       agentId: params.activeAgentId,
+      authProfileId: params.attempt.authProfileId,
       contextEnginePluginId: params.contextEnginePluginId,
       purpose: "context-engine.after-turn",
     }),

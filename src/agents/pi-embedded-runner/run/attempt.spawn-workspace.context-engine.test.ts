@@ -20,11 +20,13 @@ import {
   resolvePromptCacheTouchTimestamp,
   runAttemptContextEngineBootstrap,
 } from "./attempt.context-engine-helpers.js";
+import { EmbeddedAttemptSessionTakeoverError } from "./attempt.session-lock.js";
 import {
   cleanupTempPaths,
   createDefaultEmbeddedSession,
   createContextEngineBootstrapAndAssemble,
   createContextEngineAttemptRunner,
+  createSubscriptionMock,
   expectCalledWithSessionKey,
   getHoisted,
   resetEmbeddedAttemptHarness,
@@ -210,6 +212,32 @@ describe("runEmbeddedAttempt context engine sessionKey forwarding", () => {
     vi.restoreAllMocks();
   });
 
+  it("flushes block replies again after compaction retry wait resolves", async () => {
+    const order: string[] = [];
+    let flushCount = 0;
+    const onBlockReplyFlush = vi.fn(async () => {
+      flushCount += 1;
+      order.push(`flush-${flushCount}`);
+    });
+    hoisted.waitForCompactionRetryWithAggregateTimeoutMock.mockImplementation(async () => {
+      order.push("retry-wait");
+      return { timedOut: false };
+    });
+
+    await createContextEngineAttemptRunner({
+      contextEngine: createContextEngineBootstrapAndAssemble(),
+      sessionKey,
+      tempPaths,
+      attemptOverrides: {
+        onBlockReplyFlush,
+      },
+    });
+
+    expect(onBlockReplyFlush).toHaveBeenCalledTimes(2);
+    expect(hoisted.waitForCompactionRetryWithAggregateTimeoutMock).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(["flush-1", "retry-wait", "flush-2"]);
+  });
+
   it("enables Tool Search controls for embedded PI runs when configured", async () => {
     await createContextEngineAttemptRunner({
       contextEngine: {
@@ -316,7 +344,7 @@ describe("runEmbeddedAttempt context engine sessionKey forwarding", () => {
     ]);
   });
 
-  it("sends transcriptPrompt visibly and queues runtime context as hidden custom context", async () => {
+  it("sends transcriptPrompt visibly and keeps runtime context out of transcript messages", async () => {
     const seen: { prompt?: string; messages?: unknown[]; systemPrompt?: string } = {};
 
     const result = await createContextEngineAttemptRunner({
@@ -357,16 +385,10 @@ describe("runEmbeddedAttempt context engine sessionKey forwarding", () => {
         role: "custom",
         customType: "openclaw.runtime-context",
         display: false,
-        content:
-          "<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>\nsecret runtime context\n<<<END_OPENCLAW_INTERNAL_CONTEXT>>>",
       },
     );
-    expect(JSON.stringify(seen.messages)).not.toContain(
-      "OpenClaw runtime context for the immediately preceding user message.",
-    );
-    expect(JSON.stringify(seen.messages)).not.toContain("not user-authored");
     expect(seen.systemPrompt).not.toContain("secret runtime context");
-    expect(seen.systemPrompt).not.toContain("OPENCLAW_INTERNAL_CONTEXT");
+    expect(JSON.stringify(seen.messages)).not.toContain("visible ask");
     const trajectoryEvents = (
       await fs.readFile(path.join(tempPaths[0] ?? "", "session.trajectory.jsonl"), "utf8")
     )
@@ -733,7 +755,7 @@ describe("runEmbeddedAttempt context engine sessionKey forwarding", () => {
     });
   });
 
-  it("keeps before_prompt_build prependContext out of system prompt on transcriptPrompt runs", async () => {
+  it("keeps before_prompt_build prependContext out of post-user transcript messages", async () => {
     const runBeforePromptBuild = vi.fn(async () => ({ prependContext: "dynamic hook context" }));
     hoisted.getGlobalHookRunnerMock.mockReturnValue({
       hasHooks: vi.fn((name: string) => name === "before_prompt_build"),
@@ -774,7 +796,12 @@ describe("runEmbeddedAttempt context engine sessionKey forwarding", () => {
         role: "custom",
         customType: "openclaw.runtime-context",
         display: false,
-        content: "dynamic hook context",
+        content: [
+          "OpenClaw runtime context for the immediately preceding user message.",
+          "This context is runtime-generated, not user-authored. Keep internal details private.",
+          "",
+          "dynamic hook context",
+        ].join("\n"),
       },
     );
   });
@@ -1034,7 +1061,7 @@ describe("runEmbeddedAttempt context engine sessionKey forwarding", () => {
   });
 
   it("keeps inter-session provenance hidden while submitting the visible prompt", async () => {
-    const seen: { prompt?: string; messages?: unknown[] } = {};
+    const seen: { prompt?: string; messages?: unknown[]; systemPrompt?: string } = {};
 
     const result = await createContextEngineAttemptRunner({
       contextEngine: createContextEngineBootstrapAndAssemble(),
@@ -1058,6 +1085,7 @@ describe("runEmbeddedAttempt context engine sessionKey forwarding", () => {
       sessionPrompt: async (session, prompt) => {
         seen.prompt = prompt;
         seen.messages = [...session.messages];
+        seen.systemPrompt = session.agent.state.systemPrompt;
         session.messages = [
           ...session.messages,
           { role: "assistant", content: "done", timestamp: 2 },
@@ -1072,6 +1100,7 @@ describe("runEmbeddedAttempt context engine sessionKey forwarding", () => {
       (message) => message.customType === "openclaw.runtime-context",
       "runtime context message",
     );
+    expect(seen.systemPrompt).not.toContain("[Inter-session message]");
     expect(runtimeContext.content).toContain("[Inter-session message]");
     expect(runtimeContext.content).toContain("isUser=false");
     expect(runtimeContext.content).not.toContain("visible ask");
@@ -1284,6 +1313,65 @@ describe("runEmbeddedAttempt context engine sessionKey forwarding", () => {
     expect(result.finalPromptText).toBeUndefined();
     expect(result.promptErrorSource).toBe("hook:before_agent_run");
     expectInitialLockReleasedBeforePostTurnWrite(lockEvents);
+  });
+
+  it("preserves provider prompt errors when cleanup reacquire detects session takeover", async () => {
+    const providerError = new Error("provider rejected request: HTTP 400");
+    let acquireCount = 0;
+    let cleanupReacquireSessionFile: string | undefined;
+    hoisted.acquireSessionWriteLockMock.mockImplementation(async (params) => {
+      acquireCount += 1;
+      if (acquireCount === 3) {
+        cleanupReacquireSessionFile = params.sessionFile;
+        await fs.appendFile(params.sessionFile, '{"type":"message","id":"takeover"}\n', "utf8");
+      }
+      return { release: async () => {} };
+    });
+
+    const error = await createContextEngineAttemptRunner({
+      contextEngine: createContextEngineBootstrapAndAssemble(),
+      sessionKey,
+      tempPaths,
+      sessionPrompt: async () => {
+        throw providerError;
+      },
+    }).catch((err: unknown) => err);
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).name).toBe("EmbeddedAttemptSessionTakeoverError");
+    expect((error as Error).message).toBe(providerError.message);
+    expect((error as Error).cause).toBeInstanceOf(EmbeddedAttemptSessionTakeoverError);
+    if (!cleanupReacquireSessionFile) {
+      throw new Error("expected cleanup lock reacquire");
+    }
+    expect(((error as Error).cause as Error).message).toContain(cleanupReacquireSessionFile);
+    expect((error as { promptError?: unknown }).promptError).toBe(providerError);
+    expect(hoisted.flushPendingToolResultsAfterIdleMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps cleanup session takeover fatal when no provider prompt error exists", async () => {
+    let releasingCleanupLock = false;
+    hoisted.flushPendingToolResultsAfterIdleMock.mockImplementation(async () => {
+      releasingCleanupLock = true;
+    });
+    hoisted.acquireSessionWriteLockMock.mockImplementation(async (params) => ({
+      release: async () => {
+        if (releasingCleanupLock) {
+          throw new EmbeddedAttemptSessionTakeoverError(params.sessionFile);
+        }
+      },
+    }));
+
+    await expect(
+      createContextEngineAttemptRunner({
+        contextEngine: createContextEngineBootstrapAndAssemble(),
+        sessionKey,
+        tempPaths,
+        sessionPrompt: async (session) => {
+          session.messages = [...session.messages, doneMessage];
+        },
+      }),
+    ).rejects.toBeInstanceOf(EmbeddedAttemptSessionTakeoverError);
   });
 
   it("uses assembled context as the default precheck authority", async () => {
@@ -1512,6 +1600,102 @@ describe("runEmbeddedAttempt context engine sessionKey forwarding", () => {
     expect(events).toContain("bootstrap");
     expect(events).toContain("lock");
     expect(events.indexOf("bootstrap")).toBeLessThan(events.indexOf("lock"));
+  });
+
+  it("does not acquire the session write lock after aborting during prep", async () => {
+    const abortController = new AbortController();
+    hoisted.resolveBootstrapContextForRunMock.mockImplementation(async () => {
+      abortController.abort();
+      return { bootstrapFiles: [], contextFiles: [] };
+    });
+
+    await expect(
+      createContextEngineAttemptRunner({
+        contextEngine: createContextEngineBootstrapAndAssemble(),
+        sessionKey,
+        tempPaths,
+        attemptOverrides: { abortSignal: abortController.signal },
+      }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+
+    expect(hoisted.acquireSessionWriteLockMock).not.toHaveBeenCalled();
+  });
+
+  it("disposes prep runtimes after aborting before the session write lock", async () => {
+    const abortController = new AbortController();
+    const lspDispose = vi.fn(async () => {});
+    hoisted.createBundleLspToolRuntimeMock.mockImplementationOnce(async () => {
+      abortController.abort();
+      return {
+        tools: [],
+        dispose: lspDispose,
+      };
+    });
+
+    await expect(
+      createContextEngineAttemptRunner({
+        contextEngine: createContextEngineBootstrapAndAssemble(),
+        sessionKey,
+        tempPaths,
+        attemptOverrides: {
+          abortSignal: abortController.signal,
+          disableTools: false,
+          toolsAllow: ["*"],
+        },
+      }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+
+    expect(hoisted.acquireSessionWriteLockMock).not.toHaveBeenCalled();
+    expect(hoisted.createBundleLspToolRuntimeMock).toHaveBeenCalledTimes(1);
+    expect(lspDispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops session setup when aborting after the session write lock", async () => {
+    const abortController = new AbortController();
+    const { bootstrap, assemble } = createContextEngineBootstrapAndAssemble();
+    hoisted.sessionManagerOpenMock.mockImplementationOnce(() => {
+      abortController.abort();
+      return hoisted.sessionManager;
+    });
+
+    await expect(
+      createContextEngineAttemptRunner({
+        contextEngine: createTestContextEngine({ bootstrap, assemble }),
+        sessionKey,
+        tempPaths,
+        attemptOverrides: { abortSignal: abortController.signal },
+      }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+
+    expect(hoisted.acquireSessionWriteLockMock).toHaveBeenCalledTimes(1);
+    expect(bootstrap).not.toHaveBeenCalled();
+    expect(assemble).not.toHaveBeenCalled();
+    expect(hoisted.createAgentSessionMock).not.toHaveBeenCalled();
+  });
+
+  it("does not submit a prompt after aborting a created session", async () => {
+    const abortController = new AbortController();
+    const sessionPrompt = vi.fn(async () => {});
+    hoisted.subscribeEmbeddedPiSessionMock.mockImplementationOnce(() => {
+      abortController.abort();
+      return createSubscriptionMock();
+    });
+
+    await expect(
+      createContextEngineAttemptRunner({
+        contextEngine: createContextEngineBootstrapAndAssemble(),
+        sessionKey,
+        tempPaths,
+        createSession: () =>
+          createDefaultEmbeddedSession({
+            initialMessages: [seedMessage],
+            prompt: sessionPrompt,
+          }),
+        attemptOverrides: { abortSignal: abortController.signal },
+      }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+
+    expect(sessionPrompt).not.toHaveBeenCalled();
   });
 
   it("forwards modelId to assemble", async () => {

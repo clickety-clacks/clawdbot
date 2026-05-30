@@ -19,6 +19,7 @@ import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalLowercaseString,
 } from "../shared/string-coerce.js";
+import { normalizeUniqueStringEntries } from "../shared/string-normalization.js";
 import { normalizeOptionalSecretInput } from "../utils/normalize-secret-input.js";
 import { resolveDefaultAgentDir } from "./agent-scope-config.js";
 import {
@@ -33,10 +34,7 @@ import {
   resolveAuthStorePathForDisplay,
 } from "./auth-profiles.js";
 import * as cliCredentials from "./cli-credentials.js";
-import {
-  resolveProviderEnvApiKeyCandidates,
-  resolveProviderEnvAuthEvidence,
-} from "./model-auth-env-vars.js";
+import { resolveProviderEnvAuthLookupMaps } from "./model-auth-env-vars.js";
 import {
   resolveEnvApiKey,
   type EnvApiKeyLookupOptions,
@@ -50,7 +48,6 @@ import {
 } from "./model-auth-markers.js";
 import { type ResolvedProviderAuth } from "./model-auth-runtime-shared.js";
 import { normalizeProviderId } from "./model-selection.js";
-import { resolveProviderAuthAliasMap } from "./provider-auth-aliases.js";
 
 export {
   ensureAuthProfileStore,
@@ -106,6 +103,7 @@ export function createRuntimeProviderAuthLookup(params: {
   cfg?: OpenClawConfig;
   workspaceDir?: string;
   env?: NodeJS.ProcessEnv;
+  includePluginSyntheticAuth?: boolean;
 }): RuntimeProviderAuthLookup {
   const env = params.env ?? process.env;
   const lookupParams = {
@@ -113,14 +111,18 @@ export function createRuntimeProviderAuthLookup(params: {
     workspaceDir: params.workspaceDir,
     env,
   };
-  const syntheticAuthProviderRefs = resolveRuntimeSyntheticAuthProviderRefState(lookupParams);
+  const syntheticAuthProviderRefs =
+    params.includePluginSyntheticAuth === false
+      ? undefined
+      : resolveRuntimeSyntheticAuthProviderRefState(lookupParams);
+  const authLookupMaps = resolveProviderEnvAuthLookupMaps(lookupParams);
   return {
     envApiKey: {
-      aliasMap: resolveProviderAuthAliasMap(lookupParams),
-      candidateMap: resolveProviderEnvApiKeyCandidates(lookupParams),
-      authEvidenceMap: resolveProviderEnvAuthEvidence(lookupParams),
+      aliasMap: authLookupMaps.aliasMap,
+      candidateMap: authLookupMaps.envCandidateMap,
+      authEvidenceMap: authLookupMaps.authEvidenceMap,
     },
-    syntheticAuthProviderRefs: syntheticAuthProviderRefs.complete
+    syntheticAuthProviderRefs: syntheticAuthProviderRefs?.complete
       ? syntheticAuthProviderRefs.refs
       : undefined,
   };
@@ -395,7 +397,7 @@ function listProviderSyntheticAuthRefs(params: {
   if (providerConfig?.api) {
     refs.push(providerConfig.api);
   }
-  return [...new Set(refs.map((ref) => normalizeProviderId(ref)).filter(Boolean))];
+  return normalizeUniqueStringEntries(refs.map((ref) => normalizeProviderId(ref)));
 }
 
 function shouldResolvePluginSyntheticAuth(params: {
@@ -408,11 +410,8 @@ function shouldResolvePluginSyntheticAuth(params: {
   if (!syntheticAuthProviderRefs) {
     return true;
   }
-  if (resolveProviderConfig(params.cfg, params.provider)) {
-    return true;
-  }
   const eligibleRefs = new Set(
-    syntheticAuthProviderRefs.map((ref) => normalizeProviderId(ref)).filter(Boolean),
+    normalizeUniqueStringEntries(syntheticAuthProviderRefs.map((ref) => normalizeProviderId(ref))),
   );
   if (eligibleRefs.size === 0) {
     return false;

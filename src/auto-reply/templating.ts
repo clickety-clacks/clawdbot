@@ -39,11 +39,34 @@ type UntrustedStructuredContextEntry = {
   payload: unknown;
 };
 
-export type InboundMessageReferenceContext = {
-  kind: "reply";
-  llmVisibleMessageId: string;
-  role?: string;
-  preview?: string;
+export type SupplementalContextFacts = {
+  quote?: {
+    id?: string;
+    fullId?: string;
+    body?: string;
+    sender?: string;
+    senderAllowed?: boolean;
+    isExternal?: boolean;
+    isQuote?: boolean;
+  };
+  forwarded?: {
+    from?: string;
+    fromType?: string;
+    fromId?: string;
+    date?: number;
+    senderAllowed?: boolean;
+  };
+  thread?: {
+    id?: string;
+    starterBody?: string;
+    historyBody?: string;
+    label?: string;
+    parentSessionKey?: string;
+    modelParentSessionKey?: string;
+    senderAllowed?: boolean;
+  };
+  untrustedContext?: Array<{ label: string; source?: string; type?: string; payload: unknown }>;
+  groupSystemPrompt?: string;
 };
 
 export type MsgContext = {
@@ -130,6 +153,13 @@ export type MsgContext = {
     forwardedFromUsername?: string;
     forwardedDate?: number;
   }>;
+  /** LLM-visible message references supplied by chat clients. */
+  References?: Array<{
+    kind: "reply";
+    llmVisibleMessageId: string;
+    role?: string;
+    preview?: string;
+  }>;
   ReplyToIsQuote?: boolean;
   /** Forward origin from the reply target (when reply_to_message is a forwarded message). */
   ReplyToForwardedFrom?: string;
@@ -193,12 +223,15 @@ export type MsgContext = {
   MemberRoleIds?: string[];
   GroupMembers?: string;
   GroupSystemPrompt?: string;
+  /**
+   * Canonical inbound supplemental facts for new channel code. `finalizeInboundContext`
+   * projects these to the existing flat reply/forward/thread/group prompt fields.
+   */
+  SupplementalContext?: SupplementalContextFacts;
   /** Untrusted metadata that must not be treated as system instructions. */
   UntrustedContext?: string[];
   /** Structured untrusted metadata rendered by prompt assembly as fenced JSON. */
   UntrustedStructuredContext?: UntrustedStructuredContextEntry[];
-  /** Lightweight client-supplied reply/reference pointers for model context. */
-  References?: InboundMessageReferenceContext[];
   /** System-attached provenance for the current inbound message. */
   InputProvenance?: InputProvenance;
   /** Explicit owner allowlist overrides (trusted, configuration-derived). */

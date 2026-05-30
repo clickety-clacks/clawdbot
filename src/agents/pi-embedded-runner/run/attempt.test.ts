@@ -7,6 +7,7 @@ vi.mock("../context-engine-capabilities.js", () => ({
 import type { OpenClawConfig } from "../../../config/config.js";
 import { addSession, resetProcessRegistryForTests } from "../../bash-process-registry.js";
 import { createProcessSessionFixture } from "../../bash-process-registry.test-helpers.js";
+import { wrapPluginSystemContextSection } from "../../hook-system-context-boundary.js";
 import { SYSTEM_PROMPT_CACHE_BOUNDARY } from "../../system-prompt-cache-boundary.js";
 import { buildAgentSystemPrompt } from "../../system-prompt.js";
 import { resolveBootstrapContextTargets } from "./attempt-bootstrap-routing.js";
@@ -86,6 +87,10 @@ function requireContentItem(
   index = 0,
 ) {
   return requireRecord(content[index], `content item ${index}`);
+}
+
+function wrappedPluginSystemContext(text: string): string {
+  return wrapPluginSystemContextSection(text) ?? "";
 }
 
 function expectSingleTextContent(
@@ -429,33 +434,43 @@ describe("normalizeMessagesForLlmBoundary", () => {
     expect(input[0]).toHaveProperty("details");
   });
 
-  it("keeps historical runtime-context transcript entries out of the LLM boundary", () => {
+  it("keeps only pre-user current-turn runtime context at the LLM boundary", () => {
     const input = [
       {
-        role: "custom",
-        customType: "openclaw.runtime-context",
-        content: "old secret runtime context",
-        display: false,
+        role: "user",
+        content: [{ type: "text", text: "old ask" }],
         timestamp: 0,
       },
       {
-        role: "user",
-        content: [{ type: "text", text: "visible ask" }],
+        role: "assistant",
+        content: [{ type: "text", text: "old answer" }],
         timestamp: 1,
       },
       {
         role: "custom",
         customType: "openclaw.runtime-context",
-        content: "secret runtime context",
+        content: "current secret runtime context",
         display: false,
         timestamp: 2,
+      },
+      {
+        role: "user",
+        content: [{ type: "text", text: "visible ask" }],
+        timestamp: 3,
+      },
+      {
+        role: "custom",
+        customType: "openclaw.runtime-context",
+        content: "post-user stale runtime context",
+        display: false,
+        timestamp: 4,
       },
       {
         role: "custom",
         customType: "other-extension-context",
         content: "normal custom context",
         display: false,
-        timestamp: 3,
+        timestamp: 5,
       },
     ];
 
@@ -463,10 +478,102 @@ describe("normalizeMessagesForLlmBoundary", () => {
       input as Parameters<typeof normalizeMessagesForLlmBoundary>[0],
     ) as unknown as Array<Record<string, unknown>>;
 
-    expect(output).toHaveLength(3);
-    expect(output.some((item) => item.content === "old secret runtime context")).toBe(false);
-    expect(output.some((item) => item.content === "secret runtime context")).toBe(true);
+    expect(output).toHaveLength(5);
+    expect(output.some((item) => item.content === "current secret runtime context")).toBe(true);
+    expect(output.some((item) => item.content === "post-user stale runtime context")).toBe(false);
     expect(output.some((item) => item.customType === "other-extension-context")).toBe(true);
+  });
+
+  it("keeps overflow retry runtime context immediately before the active user", () => {
+    const rebuiltAfterOverflow = [
+      {
+        role: "user",
+        content: [{ type: "text", text: "old ask" }],
+        timestamp: 0,
+      },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "old answer" }],
+        timestamp: 1,
+      },
+      {
+        role: "user",
+        content: [{ type: "text", text: "retry ask" }],
+        timestamp: 2,
+      },
+    ];
+    const runtimeContext = {
+      role: "custom",
+      customType: "openclaw.runtime-context",
+      content: "retry runtime context",
+      display: false,
+      timestamp: 3,
+    };
+
+    const retryMessages = attemptTesting.insertRuntimeContextMessageForPrompt({
+      message: runtimeContext as Parameters<
+        typeof attemptTesting.insertRuntimeContextMessageForPrompt
+      >[0]["message"],
+      messages: rebuiltAfterOverflow as Parameters<typeof normalizeMessagesForLlmBoundary>[0],
+    });
+    const retryInput = normalizeMessagesForLlmBoundary(retryMessages) as unknown as Array<
+      Record<string, unknown>
+    >;
+
+    expect(retryInput.map((message) => message.role)).toEqual([
+      "user",
+      "assistant",
+      "custom",
+      "user",
+    ]);
+    expect(retryInput[2]).toMatchObject({
+      customType: "openclaw.runtime-context",
+      content: "retry runtime context",
+    });
+    expect(retryInput[3]?.content).toEqual([{ type: "text", text: "retry ask" }]);
+  });
+
+  it("keeps prompt-local runtime context before the active user in existing sessions", () => {
+    const promptInput = [
+      {
+        role: "user",
+        content: [{ type: "text", text: "old ask" }],
+        timestamp: 0,
+      },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "old answer" }],
+        timestamp: 1,
+      },
+      {
+        role: "custom",
+        customType: "openclaw.runtime-context",
+        content: "current runtime context",
+        display: false,
+        timestamp: 2,
+      },
+      {
+        role: "user",
+        content: [{ type: "text", text: "visible ask" }],
+        timestamp: 3,
+      },
+    ];
+
+    const modelInput = normalizeMessagesForLlmBoundary(
+      promptInput as Parameters<typeof normalizeMessagesForLlmBoundary>[0],
+    ) as unknown as Array<Record<string, unknown>>;
+
+    expect(modelInput.map((message) => message.role)).toEqual([
+      "user",
+      "assistant",
+      "custom",
+      "user",
+    ]);
+    expect(modelInput[2]).toMatchObject({
+      customType: "openclaw.runtime-context",
+      content: "current runtime context",
+    });
+    expect(modelInput[3]?.content).toEqual([{ type: "text", text: "visible ask" }]);
   });
 
   it("keeps only safe blocked metadata at the LLM boundary", () => {
@@ -613,8 +720,12 @@ describe("resolvePromptBuildHookResult", () => {
 
     expect(result.prependContext).toBe("prompt context\n\nlegacy context");
     expect(result.appendContext).toBe("prompt append context\n\nlegacy append context");
-    expect(result.prependSystemContext).toBe("prompt prepend\n\nlegacy prepend");
-    expect(result.appendSystemContext).toBe("prompt append\n\nlegacy append");
+    expect(result.prependSystemContext).toBe(
+      `${wrappedPluginSystemContext("prompt prepend")}\n\n${wrappedPluginSystemContext("legacy prepend")}`,
+    );
+    expect(result.appendSystemContext).toBe(
+      `${wrappedPluginSystemContext("prompt append")}\n\n${wrappedPluginSystemContext("legacy append")}`,
+    );
   });
 
   it("applies heartbeat prompt contributions only during heartbeat turns", async () => {
@@ -664,29 +775,33 @@ describe("composeSystemPromptWithHookContext", () => {
     expect(
       composeSystemPromptWithHookContext({
         baseSystemPrompt: "  base system  ",
-        prependSystemContext: "  prepend  ",
-        appendSystemContext: "  append  ",
+        prependSystemContext: wrappedPluginSystemContext("  prepend  "),
+        appendSystemContext: wrappedPluginSystemContext("  append  "),
       }),
-    ).toBe("prepend\n\nbase system\n\nappend");
+    ).toBe(
+      `${wrappedPluginSystemContext("  prepend")}\n\nbase system\n\n${wrappedPluginSystemContext("  append")}`,
+    );
   });
 
-  it("normalizes hook system context line endings and trailing whitespace", () => {
+  it("normalizes hook system context block line endings and trailing whitespace", () => {
     expect(
       composeSystemPromptWithHookContext({
         baseSystemPrompt: "  base system  ",
-        prependSystemContext: "  prepend line  \r\nsecond line\t\r\n",
-        appendSystemContext: "  append  \t\r\n",
+        prependSystemContext: wrappedPluginSystemContext("  prepend line  \r\nsecond line\t\r\n"),
+        appendSystemContext: wrappedPluginSystemContext("  append  \t\r\n"),
       }),
-    ).toBe("prepend line\nsecond line\n\nbase system\n\nappend");
+    ).toBe(
+      `${wrappedPluginSystemContext("  prepend line\nsecond line")}\n\nbase system\n\n${wrappedPluginSystemContext("  append")}`,
+    );
   });
 
   it("avoids blank separators when base system prompt is empty", () => {
     expect(
       composeSystemPromptWithHookContext({
         baseSystemPrompt: "   ",
-        appendSystemContext: "  append only  ",
+        appendSystemContext: wrappedPluginSystemContext("  append only  "),
       }),
-    ).toBe("append only");
+    ).toBe(wrappedPluginSystemContext("  append only"));
   });
 
   it("keeps bootstrap truncation notices in the system prompt instead of the user prompt", () => {
@@ -2321,7 +2436,109 @@ describe("wrapStreamFnSanitizeMalformedToolCalls", () => {
     ]);
   });
 
-  it("drops signed thinking turns when replay would expose inline sessions_spawn attachments", async () => {
+  it("keeps signed thinking turns that reuse a mutable earlier tool id", async () => {
+    const messages = [
+      {
+        role: "assistant",
+        content: [{ type: "toolCall", id: "call_1", name: "read", arguments: {} }],
+      },
+      {
+        role: "toolResult",
+        toolCallId: "call_1",
+        content: [{ type: "text", text: "mutable result" }],
+      },
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "internal", thinkingSignature: "sig_1" },
+          { type: "toolUse", id: "call_1", name: "read", input: {} },
+        ],
+      },
+      {
+        role: "toolResult",
+        toolCallId: "call_1",
+        content: [{ type: "text", text: "signed result" }],
+      },
+      {
+        role: "user",
+        content: [{ type: "text", text: "retry" }],
+      },
+    ];
+    const baseFn = vi.fn((_model, _context) =>
+      createFakeStream({ events: [], resultMessage: { role: "assistant", content: [] } }),
+    );
+
+    const wrapped = wrapStreamFnSanitizeMalformedToolCalls(baseFn as never, new Set(["read"]), {
+      validateAnthropicTurns: true,
+      preserveSignatures: true,
+      dropThinkingBlocks: false,
+    } as never);
+    const stream = wrapped(
+      { api: "anthropic-messages" } as never,
+      { messages } as never,
+      {} as never,
+    ) as FakeWrappedStream | Promise<FakeWrappedStream>;
+    await Promise.resolve(stream);
+
+    expect(baseFn).toHaveBeenCalledTimes(1);
+    const seenContext = firstBaseContext(baseFn);
+    expect(seenContext.messages).toBe(messages);
+  });
+
+  it("drops signed thinking reused ids when their real result is displaced", async () => {
+    const firstAssistant = {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "call_1", name: "read", arguments: {} }],
+    };
+    const firstResult = {
+      role: "toolResult",
+      toolCallId: "call_1",
+      toolName: "read",
+      content: [{ type: "text", text: "mutable result" }],
+    };
+    const userMessage = {
+      role: "user",
+      content: [{ type: "text", text: "retry" }],
+    };
+    const messages = [
+      firstAssistant,
+      firstResult,
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "internal", thinkingSignature: "sig_1" },
+          { type: "toolUse", id: "call_1", name: "read", input: {} },
+        ],
+      },
+      userMessage,
+      {
+        role: "toolResult",
+        toolCallId: "call_1",
+        content: [{ type: "text", text: "signed result" }],
+      },
+    ];
+    const baseFn = vi.fn((_model, _context) =>
+      createFakeStream({ events: [], resultMessage: { role: "assistant", content: [] } }),
+    );
+
+    const wrapped = wrapStreamFnSanitizeMalformedToolCalls(baseFn as never, new Set(["read"]), {
+      validateAnthropicTurns: true,
+      preserveSignatures: true,
+      dropThinkingBlocks: false,
+    } as never);
+    const stream = wrapped(
+      { api: "anthropic-messages" } as never,
+      { messages } as never,
+      {} as never,
+    ) as FakeWrappedStream | Promise<FakeWrappedStream>;
+    await Promise.resolve(stream);
+
+    expect(baseFn).toHaveBeenCalledTimes(1);
+    const seenContext = firstBaseContext(baseFn);
+    expect(seenContext.messages).toEqual([firstAssistant, firstResult, userMessage]);
+  });
+
+  it("drops signed thinking turns with inline sessions_spawn attachments when the result is missing", async () => {
     const attachmentContent = "SIGNED_THINKING_INLINE_ATTACHMENT";
     const messages = [
       {
@@ -2374,7 +2591,7 @@ describe("wrapStreamFnSanitizeMalformedToolCalls", () => {
     ]);
   });
 
-  it("drops signed thinking turns when replay would expose non-content attachment payload fields", async () => {
+  it("drops signed thinking turns with non-content attachment payload fields when the result is missing", async () => {
     const attachmentContent = "SIGNED_THINKING_NESTED_ATTACHMENT";
     const messages = [
       {
@@ -2431,6 +2648,60 @@ describe("wrapStreamFnSanitizeMalformedToolCalls", () => {
         content: [{ type: "text", text: "retry" }],
       },
     ]);
+  });
+
+  it("keeps signed thinking turns with sessions_spawn attachments when the tool result is present", async () => {
+    const attachmentContent = "SIGNED_THINKING_PAIRED_ATTACHMENT";
+    const messages = [
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "internal", thinkingSignature: "sig_1" },
+          {
+            type: "toolUse",
+            id: "call_1",
+            name: "sessions_spawn",
+            input: {
+              task: "inspect attachment",
+              attachments: [{ name: "snapshot.txt", content: attachmentContent }],
+            },
+          },
+        ],
+      },
+      {
+        role: "toolResult",
+        toolCallId: "call_1",
+        toolName: "sessions_spawn",
+        content: [{ type: "text", text: "done" }],
+      },
+      {
+        role: "user",
+        content: [{ type: "text", text: "retry" }],
+      },
+    ];
+    const baseFn = vi.fn((_model, _context) =>
+      createFakeStream({ events: [], resultMessage: { role: "assistant", content: [] } }),
+    );
+
+    const wrapped = wrapStreamFnSanitizeMalformedToolCalls(
+      baseFn as never,
+      new Set(["sessions_spawn"]),
+      {
+        validateAnthropicTurns: true,
+        preserveSignatures: true,
+        dropThinkingBlocks: false,
+      } as never,
+    );
+    const stream = wrapped(
+      { api: "anthropic-messages" } as never,
+      { messages } as never,
+      {} as never,
+    ) as FakeWrappedStream | Promise<FakeWrappedStream>;
+    await Promise.resolve(stream);
+
+    expect(baseFn).toHaveBeenCalledTimes(1);
+    const seenContext = firstBaseContext(baseFn);
+    expect(seenContext.messages).toBe(messages);
   });
 
   it("keeps mutable thinking turns outside anthropic replay-only preservation", async () => {
@@ -3044,10 +3315,6 @@ describe("wrapStreamFnSanitizeMalformedToolCalls", () => {
       messages: Array<{ role?: string; content?: unknown[] }>;
     };
     expect(seenContext.messages).toEqual([
-      {
-        role: "assistant",
-        content: [{ type: "text", text: "[tool calls omitted]" }],
-      },
       {
         role: "user",
         content: [{ type: "text", text: "retry" }],

@@ -144,22 +144,8 @@ function resolveSessionDefaultAccountId(params: {
 function resolveStaleSessionEndReason(params: {
   entry: SessionEntry | undefined;
   freshness?: SessionFreshness;
-  now: number;
 }): ReplySessionEndReason | undefined {
-  if (!params.entry || !params.freshness) {
-    return undefined;
-  }
-  const staleDaily =
-    params.freshness.dailyResetAt != null && params.entry.updatedAt < params.freshness.dailyResetAt;
-  const staleIdle =
-    params.freshness.idleExpiresAt != null && params.now > params.freshness.idleExpiresAt;
-  if (staleIdle) {
-    return "idle";
-  }
-  if (staleDaily) {
-    return "daily";
-  }
-  return undefined;
+  return params.entry ? params.freshness?.staleReason : undefined;
 }
 
 function hasProviderOwnedSession(entry: SessionEntry | undefined): boolean {
@@ -493,7 +479,6 @@ export async function initSessionState(params: {
     : resolveStaleSessionEndReason({
         entry,
         freshness: entryFreshness,
-        now,
       });
   clearBootstrapSnapshotOnSessionRollover({
     sessionKey,
@@ -797,6 +782,10 @@ export async function initSessionState(params: {
     // Clear stale context hash so the first flush in the new session is not
     // incorrectly skipped due to a hash match with the old transcript (#30115).
     sessionEntry.memoryFlushContextHash = undefined;
+    sessionEntry.startedAt = undefined;
+    sessionEntry.endedAt = undefined;
+    sessionEntry.runtimeMs = undefined;
+    sessionEntry.status = undefined;
     // Clear stale token metrics from previous session so /status doesn't
     // display the old session's context usage after /new or /reset.
     sessionEntry.totalTokens = undefined;
@@ -804,6 +793,7 @@ export async function initSessionState(params: {
     sessionEntry.outputTokens = undefined;
     sessionEntry.estimatedCostUsd = undefined;
     sessionEntry.contextTokens = undefined;
+    sessionEntry.contextBudgetStatus = undefined;
     // Skills snapshots are prompt/runtime caches. Do not preserve a stale
     // snapshot through /new; the next turn must rebuild the visible skill list.
     sessionEntry.skillsSnapshot = undefined;

@@ -1,5 +1,5 @@
 import { Blob } from "node:buffer";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
@@ -77,6 +77,7 @@ const silentLogger: Logger = {
 const testReplyResolver: typeof getReplyFromConfig = async () => ({ text: "ok" });
 const withMainAlertReplyRequirement = (text: string) =>
   `${text}\n\n${MAIN_SESSION_ALERT_REPLY_TEXT}`;
+const sha256Hex = (value: string) => createHash("sha256").update(value).digest("hex");
 const tinyPngBytes = () =>
   Buffer.from(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAwUBAQGzL2zQAAAAAElFTkSuQmCC",
@@ -2191,6 +2192,146 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("latches cancel when an active run is not registered with the abort seam yet", async () => {
+    const entry = createAllowlistEntry();
+    const sessionKey = "agent:main:clawline:flynn:main";
+    let releaseReply: (() => void) | undefined;
+    const replyResolver: typeof testReplyResolver = async () => {
+      await new Promise<void>((resolve) => {
+        releaseReply = resolve;
+      });
+      return { text: "" };
+    };
+    const ctx = await setupTestServer([entry], { replyResolver });
+    try {
+      await fs.writeFile(
+        ctx.sessionStorePath,
+        JSON.stringify(
+          {
+            [sessionKey]: {
+              sessionId: "session-cancel-test",
+              updatedAt: Date.now(),
+              channel: "clawline",
+              lastChannel: "clawline",
+              lastTo: "device:test",
+            },
+          },
+          null,
+          2,
+        ),
+      );
+      abortAgentHarnessRunMock.mockReturnValue(false);
+      resolveActiveAgentHarnessRunSessionIdMock.mockReturnValue("session-cancel-live");
+      const pairResult = await performPairRequest(ctx.port, entry.deviceId, {
+        claimedName: entry.claimedName,
+      });
+      const authToken = pairResult.token as string;
+      const { ws, queue } = await authenticateDeviceWithQueue(ctx.port, entry.deviceId, authToken);
+      const messageId = `c_${randomUUID()}`;
+      try {
+        ws.send(
+          JSON.stringify({
+            type: "message",
+            id: messageId,
+            sessionKey,
+            content: "cancel before abort is registered",
+          }),
+        );
+        await waitForQueuedMessage(queue, (value) => {
+          const typed = value as { type?: string; id?: string };
+          return typed?.type === "ack" && typed.id === messageId;
+        });
+
+        let runningStatus: Record<string, unknown> | undefined;
+        for (let attempt = 0; attempt < 400; attempt += 1) {
+          const response = await fetch(
+            `http://127.0.0.1:${ctx.port}/api/session-status?sessionKey=${encodeURIComponent(
+              sessionKey,
+            )}`,
+            { headers: { Authorization: `Bearer ${authToken}` } },
+          );
+          const status = (await response.json()) as Record<string, unknown>;
+          if ((status.run as { state?: string } | undefined)?.state === "running") {
+            runningStatus = status;
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        expect(runningStatus).toMatchObject({
+          run: {
+            state: "running",
+            messageId,
+          },
+        });
+
+        const controlResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/session-control`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${authToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ sessionKey, action: "cancel_current_run" }),
+        });
+        expect(controlResponse.status).toBe(200);
+        expect(await controlResponse.json()).toMatchObject({
+          ok: true,
+          sessionKey,
+          action: "cancel_current_run",
+        });
+        expect(resolveActiveAgentHarnessRunSessionIdMock).toHaveBeenCalledWith(sessionKey);
+        expect(abortAgentHarnessRunMock).toHaveBeenCalledWith("session-cancel-live");
+
+        releaseReply?.();
+        releaseReply = undefined;
+        let idleStatus: Record<string, unknown> | undefined;
+        for (let attempt = 0; attempt < 400; attempt += 1) {
+          const response = await fetch(
+            `http://127.0.0.1:${ctx.port}/api/session-status?sessionKey=${encodeURIComponent(
+              sessionKey,
+            )}`,
+            { headers: { Authorization: `Bearer ${authToken}` } },
+          );
+          const status = (await response.json()) as Record<string, unknown>;
+          if ((status.run as { state?: string } | undefined)?.state === "idle") {
+            idleStatus = status;
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        expect(idleStatus).toMatchObject({
+          run: {
+            state: "idle",
+          },
+        });
+        const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
+        const db = new BetterSqlite3(dbPath, { readonly: true });
+        try {
+          const row = db
+            .prepare(
+              `SELECT promptTurnState, promptTurnCancelRequested
+	               FROM messages
+	               WHERE deviceId = ? AND clientId = ?`,
+            )
+            .get(entry.deviceId, messageId) as
+            | { promptTurnState?: string; promptTurnCancelRequested?: number }
+            | undefined;
+          expect(row).toMatchObject({
+            promptTurnState: "canceled",
+            promptTurnCancelRequested: 1,
+          });
+        } finally {
+          db.close();
+        }
+      } finally {
+        releaseReply?.();
+        queue.dispose();
+        ws.terminate();
+      }
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("includes exact device ids in pending approval alerts", async () => {
     const ctx = await setupTestServer([], {
       alertInstructionsText: "",
@@ -4029,7 +4170,7 @@ describe.sequential("clawline provider server", () => {
     const ctx = await setupTestServer([entry]);
     try {
       const pair = await performPairRequest(ctx.port, entry.deviceId);
-      const { ws, auth } = await authenticateDevice(
+      const { ws, queue, auth } = await authenticateDeviceWithQueue(
         ctx.port,
         entry.deviceId,
         pair.token as string,
@@ -4066,7 +4207,7 @@ describe.sequential("clawline provider server", () => {
       });
 
       const pair = await performPairRequest(ctx.port, entry.deviceId);
-      const { ws, auth } = await authenticateDevice(
+      const { ws, queue, auth } = await authenticateDeviceWithQueue(
         ctx.port,
         entry.deviceId,
         pair.token as string,
@@ -5348,16 +5489,28 @@ describe.sequential("clawline provider server", () => {
       const clientMessageId = `c_${randomUUID()}`;
       ws.send(JSON.stringify({ type: "message", id: clientMessageId, content: "show progress" }));
 
-      await waitForQueuedMessageWithTimeout(queue, (value) => {
-        return (
-          typeof value === "object" &&
-          value !== null &&
-          (value as ParsedWsFrame).type === "ack" &&
-          (value as ParsedWsFrame).id === clientMessageId
-        );
-      });
+      const waitForLiveProgressFrame = async (
+        label: string,
+        predicate: (value: unknown) => boolean,
+      ) => {
+        try {
+          return await waitForQueuedMessageWithTimeout(queue, predicate, {
+            attempts: 20,
+            timeoutMs: 120_000,
+          });
+        } catch (err) {
+          const buffered = await collectQueuedMessagesUntilIdle(queue, {
+            idleMs: 50,
+            maxMessages: 20,
+          });
+          throw new Error(
+            `${label}: ${err instanceof Error ? err.message : String(err)}; buffered=${JSON.stringify(buffered)}`,
+            { cause: err },
+          );
+        }
+      };
 
-      const toolProgress = await waitForQueuedMessageWithTimeout(queue, (value) => {
+      const toolProgress = await waitForLiveProgressFrame("tool progress", (value) => {
         const event = (value as { event?: { kind?: unknown; name?: unknown } }).event;
         return (
           typeof value === "object" &&
@@ -5382,7 +5535,7 @@ describe.sequential("clawline provider server", () => {
       expect(typeof toolProgress.seq).toBe("number");
       expect(JSON.stringify(toolProgress)).not.toContain("/private/raw-arg.txt");
 
-      const commandProgress = await waitForQueuedMessageWithTimeout(queue, (value) => {
+      const commandProgress = await waitForLiveProgressFrame("command progress", (value) => {
         const event = (value as { event?: { kind?: unknown; name?: unknown } }).event;
         return (
           typeof value === "object" &&
@@ -5395,7 +5548,7 @@ describe.sequential("clawline provider server", () => {
       expect(JSON.stringify(commandProgress)).not.toContain("raw command output");
       expect(JSON.stringify(commandProgress)).not.toContain("/tmp");
 
-      const doneProgress = await waitForQueuedMessageWithTimeout(queue, (value) => {
+      const doneProgress = await waitForLiveProgressFrame("final progress", (value) => {
         return (
           typeof value === "object" &&
           value !== null &&
@@ -7197,6 +7350,20 @@ describe.sequential("clawline provider server", () => {
       expect(firstEcho.clientMessageId).toBe(firstMessageId);
       expect(firstEcho.sessionKey).toBe("agent:main:clawline:flynn:main");
       await firstStarted;
+      const firstRunningState = (await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const typed = value as {
+          type?: string;
+          event?: string;
+          payload?: { messageId?: string; state?: string };
+        };
+        return (
+          typed.type === "event" &&
+          typed.event === "prompt_turn_state" &&
+          typed.payload?.messageId === firstMessageId &&
+          typed.payload?.state === "running"
+        );
+      })) as { payload?: { state?: string } };
+      expect(firstRunningState.payload?.state).toBe("running");
 
       ws.send(
         JSON.stringify({
@@ -7205,8 +7372,32 @@ describe.sequential("clawline provider server", () => {
           content: "second prompt",
         }),
       );
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const typed = value as { type?: string; id?: string };
+        return typed.type === "ack" && typed.id === secondMessageId;
+      });
+      const secondEcho = (await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const typed = value as { type?: string; role?: string; content?: string };
+        return (
+          typed.type === "message" && typed.role === "user" && typed.content === "second prompt"
+        );
+      })) as { clientMessageId?: string };
+      expect(secondEcho.clientMessageId).toBe(secondMessageId);
       expect(secondStarted).toBe(false);
+      const secondQueuedState = (await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const typed = value as {
+          type?: string;
+          event?: string;
+          payload?: { messageId?: string; state?: string };
+        };
+        return (
+          typed.type === "event" &&
+          typed.event === "prompt_turn_state" &&
+          typed.payload?.messageId === secondMessageId &&
+          typed.payload?.state === "queued"
+        );
+      })) as { payload?: { state?: string } };
+      expect(secondQueuedState.payload?.state).toBe("queued");
 
       releaseBlockedFirst();
 
@@ -7231,6 +7422,596 @@ describe.sequential("clawline provider server", () => {
 
       queue.dispose();
       ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("orders generic interactive callback agent turns behind active same-stream prompts", async () => {
+    const deviceId = randomUUID();
+    const firstMessageId = `c_${randomUUID()}`;
+    let callbackStarted = false;
+    let resolveFirstEntered!: () => void;
+    const firstStarted = new Promise<void>((resolve) => {
+      resolveFirstEntered = resolve;
+    });
+    let releaseBlockedFirst!: () => void;
+    const blockedFirst = new Promise<void>((resolve) => {
+      releaseBlockedFirst = resolve;
+    });
+    const replyResolver: typeof testReplyResolver = async (ctx) => {
+      const messageSid = (ctx as { MessageSid?: unknown }).MessageSid;
+      const body = String((ctx as { Body?: unknown }).Body ?? "");
+      if (messageSid === firstMessageId) {
+        resolveFirstEntered();
+        await blockedFirst;
+        return { text: "first reply" };
+      }
+      if (body.startsWith("[Interactive] action=generic-action")) {
+        callbackStarted = true;
+        return { text: "callback reply" };
+      }
+      return { text: "unexpected reply" };
+    };
+    const entry = createAllowlistEntry({
+      deviceId,
+      userId: "flynn",
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry], { replyResolver });
+    try {
+      const pair = await performPairRequest(ctx.port, deviceId);
+      const token = pair.token as string;
+      const { ws } = await authenticateDevice(ctx.port, deviceId, token);
+      const queue = createMessageQueue(ws);
+
+      ws.send(
+        JSON.stringify({
+          type: "message",
+          id: firstMessageId,
+          content: "first prompt",
+        }),
+      );
+      await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const typed = value as { type?: string; id?: string };
+        return typed.type === "ack" && typed.id === firstMessageId;
+      });
+      const firstEcho = (await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const typed = value as {
+          type?: string;
+          role?: string;
+          content?: string;
+          clientMessageId?: string;
+          id?: string;
+        };
+        return (
+          typed.type === "message" && typed.role === "user" && typed.content === "first prompt"
+        );
+      })) as { id?: string; clientMessageId?: string };
+      expect(firstEcho.id?.startsWith("s_")).toBe(true);
+      expect(firstEcho.clientMessageId).toBe(firstMessageId);
+      await firstStarted;
+
+      ws.send(
+        JSON.stringify({
+          type: "interactive-callback",
+          messageId: firstEcho.id,
+          payload: {
+            action: "generic-action",
+            data: { value: "callback data" },
+          },
+        }),
+      );
+      const callbackEcho = (await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const typed = value as { type?: string; role?: string; content?: string };
+        return (
+          typed.type === "message" &&
+          typed.role === "user" &&
+          typeof typed.content === "string" &&
+          typed.content.startsWith("[Interactive] action=generic-action")
+        );
+      })) as { clientMessageId?: string };
+      expect(callbackEcho.clientMessageId?.startsWith("c_")).toBe(true);
+      expect(callbackStarted).toBe(false);
+      const callbackQueuedState = (await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const typed = value as {
+          type?: string;
+          event?: string;
+          payload?: { messageId?: string; state?: string };
+        };
+        return (
+          typed.type === "event" &&
+          typed.event === "prompt_turn_state" &&
+          typed.payload?.messageId === callbackEcho.clientMessageId &&
+          typed.payload?.state === "queued"
+        );
+      })) as { payload?: { state?: string } };
+      expect(callbackQueuedState.payload?.state).toBe("queued");
+
+      releaseBlockedFirst();
+
+      const firstAssistant = (await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const typed = value as { type?: string; role?: string; content?: string };
+        return typed.type === "message" && typed.role === "assistant";
+      })) as { content?: string };
+      expect(firstAssistant.content).toBe("first reply");
+
+      const callbackAssistant = (await waitForQueuedMessageWithTimeout(queue, (value) => {
+        const typed = value as { type?: string; role?: string; content?: string };
+        return typed.type === "message" && typed.role === "assistant";
+      })) as { content?: string };
+      expect(callbackAssistant.content).toBe("callback reply");
+
+      queue.dispose();
+      ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("replays duplicate retry state without rerunning an active prompt turn", async () => {
+    const deviceId = randomUUID();
+    const messageId = `c_${randomUUID()}`;
+    const sessionKey = "agent:main:clawline:flynn:main";
+    let resolverCalls = 0;
+    let resolveFirstStarted!: () => void;
+    const firstStarted = new Promise<void>((resolve) => {
+      resolveFirstStarted = resolve;
+    });
+    let releaseReply: (() => void) | undefined;
+    const replyResolver: typeof testReplyResolver = async () => {
+      resolverCalls += 1;
+      resolveFirstStarted();
+      await new Promise<void>((resolve) => {
+        releaseReply = resolve;
+      });
+      return { text: "duplicate retry done" };
+    };
+    const entry = createAllowlistEntry({
+      deviceId,
+      userId: "flynn",
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry], { replyResolver });
+    try {
+      const pair = await performPairRequest(ctx.port, deviceId);
+      const token = pair.token as string;
+      const { ws, queue } = await authenticateDeviceWithQueue(ctx.port, deviceId, token);
+      try {
+        const payload = {
+          type: "message",
+          id: messageId,
+          sessionKey,
+          content: "dedupe me",
+        };
+        ws.send(JSON.stringify(payload));
+        await waitForQueuedMessageWithTimeout(queue, (value) => {
+          const typed = value as { type?: string; id?: string };
+          return typed.type === "ack" && typed.id === messageId;
+        });
+        await waitForQueuedMessageWithTimeout(queue, (value) => {
+          const typed = value as { type?: string; role?: string; content?: string };
+          return typed.type === "message" && typed.role === "user" && typed.content === "dedupe me";
+        });
+        await firstStarted;
+
+        ws.send(JSON.stringify(payload));
+        await waitForQueuedMessageWithTimeout(queue, (value) => {
+          const typed = value as { type?: string; id?: string };
+          return typed.type === "ack" && typed.id === messageId;
+        });
+        const stateEvent = (await waitForQueuedMessageWithTimeout(queue, (value) => {
+          const typed = value as {
+            type?: string;
+            event?: string;
+            payload?: { messageId?: string; state?: string; correlationId?: string };
+          };
+          return (
+            typed.type === "event" &&
+            typed.event === "prompt_turn_state" &&
+            typed.payload?.messageId === messageId
+          );
+        })) as { payload?: { state?: string; correlationId?: string } };
+        expect(["queued", "running"]).toContain(stateEvent.payload?.state);
+        expect(stateEvent.payload?.correlationId).toMatch(/^clawline-turn:/);
+        expect(resolverCalls).toBe(1);
+
+        releaseReply?.();
+        releaseReply = undefined;
+        await waitForQueuedMessageWithTimeout(queue, (value) => {
+          const typed = value as { type?: string; role?: string; content?: string };
+          return (
+            typed.type === "message" &&
+            typed.role === "assistant" &&
+            typed.content === "duplicate retry done"
+          );
+        });
+        const postCompletionMessages = await collectQueuedMessagesUntilIdle(queue, {
+          idleMs: 150,
+          maxMessages: 20,
+        });
+        expect(resolverCalls).toBe(1);
+        expect(
+          postCompletionMessages.filter(
+            (value) =>
+              value.type === "message" &&
+              value.role === "assistant" &&
+              value.content === "duplicate retry done",
+          ),
+        ).toHaveLength(0);
+      } finally {
+        releaseReply?.();
+        queue.dispose();
+        ws.terminate();
+      }
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("reports Clawline prompt-turn backlog in session status while an earlier turn runs", async () => {
+    const deviceId = randomUUID();
+    const firstMessageId = `c_${randomUUID()}`;
+    const secondMessageId = `c_${randomUUID()}`;
+    const sessionKey = "agent:main:clawline:flynn:main";
+    let resolveFirstStarted!: () => void;
+    const firstStarted = new Promise<void>((resolve) => {
+      resolveFirstStarted = resolve;
+    });
+    let releaseFirst: (() => void) | undefined;
+    let resolverCalls = 0;
+    const replyResolver: typeof testReplyResolver = async () => {
+      resolverCalls += 1;
+      if (resolverCalls === 1) {
+        resolveFirstStarted();
+        await new Promise<void>((resolve) => {
+          releaseFirst = resolve;
+        });
+        return { text: "first done" };
+      }
+      return { text: "second done" };
+    };
+    const entry = createAllowlistEntry({
+      deviceId,
+      userId: "flynn",
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry], { replyResolver });
+    try {
+      const pair = await performPairRequest(ctx.port, deviceId);
+      const token = pair.token as string;
+      const { ws, queue } = await authenticateDeviceWithQueue(ctx.port, deviceId, token);
+      try {
+        ws.send(
+          JSON.stringify({
+            type: "message",
+            id: firstMessageId,
+            sessionKey,
+            content: "first prompt",
+          }),
+        );
+        await waitForQueuedMessageWithTimeout(queue, (value) => {
+          const typed = value as { type?: string; id?: string };
+          return typed.type === "ack" && typed.id === firstMessageId;
+        });
+        await firstStarted;
+
+        ws.send(
+          JSON.stringify({
+            type: "message",
+            id: secondMessageId,
+            sessionKey,
+            content: "second prompt",
+          }),
+        );
+        await waitForQueuedMessageWithTimeout(queue, (value) => {
+          const typed = value as { type?: string; id?: string };
+          return typed.type === "ack" && typed.id === secondMessageId;
+        });
+
+        const response = await fetch(
+          `http://127.0.0.1:${ctx.port}/api/session-status?sessionKey=${encodeURIComponent(
+            sessionKey,
+          )}`,
+          { headers: { Authorization: `Bearer ${token}` } },
+        );
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({
+          run: {
+            state: "running",
+            messageId: firstMessageId,
+            queueDepth: 1,
+          },
+        });
+
+        releaseFirst?.();
+        releaseFirst = undefined;
+        await waitForQueuedMessageWithTimeout(queue, (value) => {
+          const typed = value as { type?: string; role?: string; content?: string };
+          return (
+            typed.type === "message" && typed.role === "assistant" && typed.content === "first done"
+          );
+        });
+        await waitForQueuedMessageWithTimeout(queue, (value) => {
+          const typed = value as { type?: string; role?: string; content?: string };
+          return (
+            typed.type === "message" &&
+            typed.role === "assistant" &&
+            typed.content === "second done"
+          );
+        });
+      } finally {
+        releaseFirst?.();
+        queue.dispose();
+        ws.terminate();
+      }
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("marks an accepted prompt failed when the agent run produces no delivery", async () => {
+    const entry = createAllowlistEntry();
+    const sessionKey = "agent:main:clawline:flynn:main";
+    const replyResolver: typeof testReplyResolver = async () => ({ text: "" });
+    const ctx = await setupTestServer([entry], { replyResolver });
+    try {
+      const pairResult = await performPairRequest(ctx.port, entry.deviceId, {
+        claimedName: entry.claimedName,
+      });
+      const authToken = pairResult.token as string;
+      const { ws, queue } = await authenticateDeviceWithQueue(ctx.port, entry.deviceId, authToken);
+      const messageId = `c_${randomUUID()}`;
+      try {
+        ws.send(
+          JSON.stringify({
+            type: "message",
+            id: messageId,
+            sessionKey,
+            content: "produce no delivery",
+          }),
+        );
+        await waitForQueuedMessageWithTimeout(queue, (value) => {
+          const typed = value as { type?: string; id?: string };
+          return typed.type === "ack" && typed.id === messageId;
+        });
+        const errorEvent = await waitForQueuedMessageWithTimeout(queue, (value) => {
+          const typed = value as { type?: string; code?: string; messageId?: string };
+          return (
+            typed.type === "error" && typed.code === "server_error" && typed.messageId === messageId
+          );
+        });
+        expect(errorEvent).toMatchObject({
+          type: "error",
+          code: "server_error",
+          message: "Unable to deliver reply",
+          messageId,
+        });
+        const stateEvent = await waitForQueuedMessageWithTimeout(queue, (value) => {
+          const typed = value as {
+            type?: string;
+            event?: string;
+            payload?: {
+              messageId?: string;
+              state?: string;
+              terminalState?: string;
+              error?: string;
+            };
+          };
+          return (
+            typed.type === "event" &&
+            typed.event === "prompt_turn_state" &&
+            typed.payload?.messageId === messageId &&
+            typed.payload?.state === "failed"
+          );
+        });
+        expect(stateEvent).toMatchObject({
+          type: "event",
+          event: "prompt_turn_state",
+          payload: {
+            messageId,
+            state: "failed",
+            terminalState: "failed",
+            error: "clawline.promptTurn.noDelivery",
+          },
+        });
+
+        const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
+        const db = new BetterSqlite3(dbPath, { readonly: true });
+        try {
+          const row = db
+            .prepare(
+              `SELECT promptTurnState, promptTurnError
+	               FROM messages
+	               WHERE deviceId = ? AND clientId = ?`,
+            )
+            .get(entry.deviceId, messageId) as
+            | { promptTurnState?: string; promptTurnError?: string }
+            | undefined;
+          expect(row).toMatchObject({
+            promptTurnState: "failed",
+            promptTurnError: "clawline.promptTurn.noDelivery",
+          });
+        } finally {
+          db.close();
+        }
+      } finally {
+        queue.dispose();
+        ws.terminate();
+      }
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("persists concrete dispatch errors for accepted prompt failures", async () => {
+    const entry = createAllowlistEntry();
+    const sessionKey = "agent:main:clawline:flynn:main";
+    const replyResolver: typeof testReplyResolver = async () => {
+      throw new Error("synthetic dispatch failure");
+    };
+    const ctx = await setupTestServer([entry], { replyResolver });
+    try {
+      const pairResult = await performPairRequest(ctx.port, entry.deviceId, {
+        claimedName: entry.claimedName,
+      });
+      const authToken = pairResult.token as string;
+      const { ws, queue } = await authenticateDeviceWithQueue(ctx.port, entry.deviceId, authToken);
+      const messageId = `c_${randomUUID()}`;
+      try {
+        ws.send(
+          JSON.stringify({
+            type: "message",
+            id: messageId,
+            sessionKey,
+            content: "fail concretely",
+          }),
+        );
+        await waitForQueuedMessageWithTimeout(queue, (value) => {
+          const typed = value as { type?: string; id?: string };
+          return typed.type === "ack" && typed.id === messageId;
+        });
+        const stateEvent = await waitForQueuedMessageWithTimeout(queue, (value) => {
+          const typed = value as {
+            type?: string;
+            event?: string;
+            payload?: { messageId?: string; state?: string; error?: string };
+          };
+          return (
+            typed.type === "event" &&
+            typed.event === "prompt_turn_state" &&
+            typed.payload?.messageId === messageId &&
+            typed.payload?.state === "failed"
+          );
+        });
+        expect((stateEvent as { payload?: { error?: string } }).payload?.error).toContain(
+          "synthetic dispatch failure",
+        );
+
+        const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
+        const db = new BetterSqlite3(dbPath, { readonly: true });
+        try {
+          const row = db
+            .prepare(
+              `SELECT promptTurnState, promptTurnError
+               FROM messages
+               WHERE deviceId = ? AND clientId = ?`,
+            )
+            .get(entry.deviceId, messageId) as
+            | { promptTurnState?: string; promptTurnError?: string }
+            | undefined;
+          expect(row?.promptTurnState).toBe("failed");
+          expect(row?.promptTurnError).toContain("synthetic dispatch failure");
+        } finally {
+          db.close();
+        }
+      } finally {
+        queue.dispose();
+        ws.terminate();
+      }
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("marks stale accepted prompt turns failed during reconnect replay", async () => {
+    const entry = createAllowlistEntry({
+      userId: "flynn",
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const sessionKey = "agent:main:clawline:flynn:main";
+    const ctx = await setupTestServer([entry]);
+    try {
+      const pairResult = await performPairRequest(ctx.port, entry.deviceId, {
+        claimedName: entry.claimedName,
+      });
+      const authToken = pairResult.token as string;
+      const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
+      const messageId = `c_${randomUUID()}`;
+      const eventId = randomUUID();
+      const timestamp = Date.now();
+      const content = "stale accepted prompt";
+      const payload = {
+        type: "message",
+        id: eventId,
+        role: "user",
+        content,
+        timestamp,
+        sessionKey,
+        clientMessageId: messageId,
+        streaming: true,
+      };
+      const db = new BetterSqlite3(dbPath);
+      try {
+        db.prepare(`INSERT OR IGNORE INTO user_sequences (userId, nextSequence) VALUES (?, ?)`).run(
+          entry.userId,
+          2,
+        );
+        db.prepare(
+          `INSERT INTO events
+             (id, userId, sequence, originatingDeviceId, payloadJson, payloadBytes, timestamp, eventType, sessionKey)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'message', ?)`,
+        ).run(
+          eventId,
+          entry.userId,
+          1,
+          entry.deviceId,
+          JSON.stringify(payload),
+          Buffer.byteLength(JSON.stringify(payload)),
+          timestamp,
+          sessionKey,
+        );
+        db.prepare(
+          `INSERT INTO messages
+             (deviceId, userId, clientId, serverEventId, serverSequence, content, contentHash, attachmentsHash, timestamp, streaming, ackSent, promptTurnState, promptTurnCorrelationId)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'accepted', ?)`,
+        ).run(
+          entry.deviceId,
+          entry.userId,
+          messageId,
+          eventId,
+          1,
+          content,
+          sha256Hex(content),
+          sha256Hex("[]"),
+          timestamp,
+          1,
+          1,
+          `clawline-turn:${entry.deviceId}:${messageId}:${eventId}:${sessionKey}`,
+        );
+      } finally {
+        db.close();
+      }
+
+      const { ws, queue, auth } = await authenticateDeviceWithQueue(
+        ctx.port,
+        entry.deviceId,
+        authToken,
+      );
+      try {
+        expect(auth.replayCount).toBeGreaterThan(0);
+        const replayed = (await waitForQueuedMessageWithTimeout(queue, (value) => {
+          const typed = value as {
+            type?: string;
+            id?: string;
+            promptTurnState?: string;
+            promptTurnError?: string;
+          };
+          return typed.type === "message" && typed.id === eventId;
+        })) as { promptTurnState?: string; promptTurnError?: string; streaming?: boolean };
+        expect(replayed).toMatchObject({
+          promptTurnState: "failed",
+          promptTurnError: "clawline.promptTurn.recoveredAfterReconnect",
+          streaming: false,
+        });
+      } finally {
+        queue.dispose();
+        ws.terminate();
+      }
     } finally {
       await ctx.cleanup();
     }
@@ -7365,22 +8146,15 @@ describe.sequential("clawline provider server", () => {
       })) as { content?: string };
       expect(secondAssistant.content).toBe("second reply");
 
-      expect(capturedCtx).toMatchObject({
+      expect(capturedCtx).not.toBeNull();
+      const modelContext = capturedCtx as unknown as Record<string, unknown>;
+      expect(modelContext).toMatchObject({
         SessionKey: sessionKey,
-        UntrustedStructuredContext: [
-          expect.objectContaining({
-            label: `Reply reference: user is replying to message ${firstMessageId}`,
-            source: "clawline",
-            type: "reply_reference",
-            payload: expect.objectContaining({
-              kind: "reply",
-              llm_visible_message_id: firstMessageId,
-              role: "user",
-              preview: "referenced body",
-            }),
-          }),
-        ],
+        ReplyToId: firstMessageId,
+        ReplyToBody: "referenced body",
+        ReplyToSender: "user",
       });
+      expect(modelContext.UntrustedStructuredContext).toBeUndefined();
 
       queue.dispose();
       ws.terminate();

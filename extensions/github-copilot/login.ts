@@ -14,6 +14,7 @@ const DEVICE_CODE_URL = "https://github.com/login/device/code";
 const ACCESS_TOKEN_URL = "https://github.com/login/oauth/access_token";
 const GITHUB_DEVICE_VERIFICATION_URL = "https://github.com/login/device";
 const GITHUB_AUTH_SSRF_POLICY: SsrFPolicy = { hostnameAllowlist: ["github.com"] };
+const GITHUB_DEVICE_FLOW_REQUEST_TIMEOUT_MS = 30_000;
 
 type DeviceCodeResponse = {
   device_code: string;
@@ -85,6 +86,7 @@ async function postGitHubDeviceFlowForm(params: {
   url: string;
   body: URLSearchParams;
   failureLabel: string;
+  timeoutMs?: number;
 }): Promise<Record<string, unknown>> {
   const { response, release } = await githubDeviceFlowFetchGuard({
     url: params.url,
@@ -99,6 +101,7 @@ async function postGitHubDeviceFlowForm(params: {
     requireHttps: true,
     policy: GITHUB_AUTH_SSRF_POLICY,
     auditContext: "github-copilot-device-flow",
+    timeoutMs: params.timeoutMs ?? GITHUB_DEVICE_FLOW_REQUEST_TIMEOUT_MS,
   });
   try {
     if (!response.ok) {

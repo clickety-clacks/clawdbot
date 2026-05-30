@@ -31,6 +31,12 @@ type ClawlineReplyReference = {
   preview?: string;
 };
 
+export type ResolvedClawlineVisibleMessageReference = {
+  llmVisibleMessageId: string;
+  role?: "user" | "assistant";
+  preview?: string;
+};
+
 export type ClawlineMessageReferenceResolution =
   | {
       ok: true;
@@ -88,6 +94,9 @@ function buildReferenceContext(reference: ClawlineReplyReference): ClawlineStruc
 
 export async function resolveClawlineMessageReferenceContexts(params: {
   references: unknown;
+  resolveVisibleMessage?: (
+    llmVisibleMessageId: string,
+  ) => Promise<ResolvedClawlineVisibleMessageReference | null>;
   resolveReferenceMessage?: (
     reference: ClawlineMessageReference,
   ) => Promise<ClawlineTranscriptMessageRecord | null>;
@@ -122,7 +131,17 @@ export async function resolveClawlineMessageReferenceContexts(params: {
         message: "Invalid reference",
       };
     }
-    contexts.push(buildReferenceContext(reference));
+    const resolved = params.resolveVisibleMessage
+      ? await params.resolveVisibleMessage(reference.llmVisibleMessageId)
+      : null;
+    contexts.push(
+      buildReferenceContext({
+        ...reference,
+        role: resolved?.role ?? reference.role,
+        preview: resolved?.preview ?? reference.preview,
+        llmVisibleMessageId: resolved?.llmVisibleMessageId ?? reference.llmVisibleMessageId,
+      }),
+    );
   }
 
   return { ok: true, contexts };

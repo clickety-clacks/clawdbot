@@ -48,7 +48,7 @@ const manifestNormalizationSnapshot = vi.hoisted(() => ({
               "gemini-3-pro": "gemini-3.1-pro-preview",
               "gemini-3-flash": "gemini-3-flash-preview",
               "gemini-3.1-pro": "gemini-3.1-pro-preview",
-              "gemini-3.1-flash-lite": "gemini-3.1-flash-lite-preview",
+              "gemini-3.1-flash-lite-preview": "gemini-3.1-flash-lite",
               "gemini-3.1-flash": "gemini-3-flash-preview",
               "gemini-3.1-flash-preview": "gemini-3-flash-preview",
             },
@@ -58,7 +58,7 @@ const manifestNormalizationSnapshot = vi.hoisted(() => ({
               "gemini-3-pro": "gemini-3.1-pro-preview",
               "gemini-3-flash": "gemini-3-flash-preview",
               "gemini-3.1-pro": "gemini-3.1-pro-preview",
-              "gemini-3.1-flash-lite": "gemini-3.1-flash-lite-preview",
+              "gemini-3.1-flash-lite-preview": "gemini-3.1-flash-lite",
               "gemini-3.1-flash": "gemini-3-flash-preview",
               "gemini-3.1-flash-preview": "gemini-3-flash-preview",
             },
@@ -97,12 +97,17 @@ const manifestNormalizationSnapshot = vi.hoisted(() => ({
   ],
 }));
 
+const providerModelNormalizationMock = vi.hoisted(() => ({
+  normalizeProviderModelIdWithRuntime: vi.fn(() => undefined),
+}));
+
 vi.mock("../plugins/current-plugin-metadata-snapshot.js", () => ({
   getCurrentPluginMetadataSnapshot: () => manifestNormalizationSnapshot,
 }));
 
 vi.mock("./provider-model-normalization.runtime.js", () => ({
-  normalizeProviderModelIdWithRuntime: () => undefined,
+  normalizeProviderModelIdWithRuntime:
+    providerModelNormalizationMock.normalizeProviderModelIdWithRuntime,
 }));
 
 vi.mock("./model-selection-cli.js", () => ({
@@ -330,10 +335,10 @@ describe("model-selection", () => {
         expected: { provider: "google-gemini-cli", model: "gemini-3.1-pro-preview" },
       },
       {
-        name: "normalizes gemini 3.1 flash-lite ids",
+        name: "keeps stable GA gemini 3.1 flash-lite ids",
         variants: ["google/gemini-3.1-flash-lite", "gemini-3.1-flash-lite"],
         defaultProvider: "google",
-        expected: { provider: "google", model: "gemini-3.1-flash-lite-preview" },
+        expected: { provider: "google", model: "gemini-3.1-flash-lite" },
       },
       {
         name: "normalizes deprecated xai grok 4.20 beta ids",
@@ -405,10 +410,10 @@ describe("model-selection", () => {
         expected: { provider: "openai", model: "gpt-5.4-codex-codex" },
       },
       {
-        name: "normalizes gemini 3.1 flash-lite ids for google-vertex",
+        name: "keeps stable GA gemini 3.1 flash-lite ids for google-vertex",
         variants: ["google-vertex/gemini-3.1-flash-lite", "gemini-3.1-flash-lite"],
         defaultProvider: "google-vertex",
-        expected: { provider: "google-vertex", model: "gemini-3.1-flash-lite-preview" },
+        expected: { provider: "google-vertex", model: "gemini-3.1-flash-lite" },
       },
       {
         name: "normalizes anthropic-cli refs to the Claude CLI provider alias",
@@ -823,6 +828,59 @@ describe("model-selection", () => {
       expect(model?.id).toBe("google/gemini-3.1-pro-preview");
       expect(model?.name).toBe("Gemini 3 Pro");
     });
+
+    it("carries configured model compat into catalog entries for provider policy", () => {
+      const cfg = {
+        models: {
+          providers: {
+            vllm: {
+              models: [
+                {
+                  id: "Qwen/Qwen3-8B",
+                  name: "Qwen 3 8B",
+                  reasoning: true,
+                  compat: {
+                    thinkingFormat: "qwen-chat-template",
+                  },
+                },
+              ],
+            },
+          },
+        },
+      } as unknown as OpenClawConfig;
+
+      const model = buildConfiguredModelCatalog({ cfg }).find(
+        (entry) => entry.provider === "vllm" && entry.id === "Qwen/Qwen3-8B",
+      );
+      expect(model?.compat).toEqual({ thinkingFormat: "qwen-chat-template" });
+      expect(model?.reasoning).toBe(true);
+    });
+
+    it("does not infer reasoning from non-vLLM thinking compat", () => {
+      const cfg = {
+        models: {
+          providers: {
+            custom: {
+              models: [
+                {
+                  id: "custom-reasoning",
+                  name: "Custom Reasoning",
+                  compat: {
+                    thinkingFormat: "together",
+                  },
+                },
+              ],
+            },
+          },
+        },
+      } as unknown as OpenClawConfig;
+
+      const model = buildConfiguredModelCatalog({ cfg }).find(
+        (entry) => entry.provider === "custom" && entry.id === "custom-reasoning",
+      );
+      expect(model?.compat).toEqual({ thinkingFormat: "together" });
+      expect(model?.reasoning).toBeUndefined();
+    });
   });
 
   describe("buildModelAliasIndex", () => {
@@ -849,6 +907,36 @@ describe("model-selection", () => {
       });
       expect(index.byAlias.get("smart")?.ref).toEqual({ provider: "openai", model: "gpt-4o" });
       expect(index.byKey.get(modelKey("anthropic", "claude-3-5-sonnet"))).toEqual(["fast"]);
+    });
+
+    it("does not normalize configured model keys that have no alias", () => {
+      providerModelNormalizationMock.normalizeProviderModelIdWithRuntime.mockClear();
+      const models = Object.fromEntries(
+        Array.from({ length: 25 }, (_, index) => [`openai/gpt-5.5-aliasless-${index}`, {}]),
+      );
+      const cfg: Partial<OpenClawConfig> = {
+        agents: {
+          defaults: {
+            models: {
+              ...models,
+              "openai/gpt-5.5-mini": { alias: "mini" },
+            },
+          },
+        },
+      };
+
+      const index = buildModelAliasIndex({
+        cfg: cfg as OpenClawConfig,
+        defaultProvider: "openai",
+      });
+
+      expect(index.byAlias.get("mini")?.ref).toEqual({
+        provider: "openai",
+        model: "gpt-5.5-mini",
+      });
+      expect(
+        providerModelNormalizationMock.normalizeProviderModelIdWithRuntime,
+      ).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -914,6 +1002,43 @@ describe("model-selection", () => {
           alias: "GPT Test Z Alias",
           contextWindow: 64_000,
           compat: { supportedReasoningEfforts: ["low", "medium", "high", "xhigh"] },
+        },
+      ]);
+    });
+
+    it("overlays configured provider metadata after manifest model normalization", () => {
+      const cfg: OpenClawConfig = {
+        models: {
+          providers: {
+            nvidia: {
+              models: [
+                {
+                  id: "llama-fast",
+                  name: "Configured Llama Fast",
+                  contextWindow: 128_000,
+                  reasoning: true,
+                  compat: { thinkingFormat: "qwen" },
+                },
+              ],
+            },
+          },
+        },
+      } as unknown as OpenClawConfig;
+
+      const result = buildAllowedModelSet({
+        cfg,
+        catalog: [{ provider: "nvidia", id: "nvidia/llama-fast", name: "Runtime Llama Fast" }],
+        defaultProvider: "anthropic",
+      });
+
+      expect(result.allowedCatalog).toEqual([
+        {
+          provider: "nvidia",
+          id: "nvidia/llama-fast",
+          name: "Configured Llama Fast",
+          contextWindow: 128_000,
+          reasoning: true,
+          compat: { thinkingFormat: "qwen" },
         },
       ]);
     });
@@ -1724,6 +1849,78 @@ describe("model-selection", () => {
       expect(result).toEqual({ provider: "openai", model: "xiaomi/mimo-v2-pro-mit" });
     });
 
+    it("prefers slash-form aliases before applying auth profile suffixes", () => {
+      const cfg = {
+        agents: {
+          defaults: {
+            model: { primary: "xiaomi/mimo-v2-pro-mit@work" },
+            models: {
+              "openai/xiaomi/mimo-v2-pro-mit": {
+                alias: "xiaomi/mimo-v2-pro-mit",
+              },
+            },
+          },
+        },
+      } as OpenClawConfig;
+
+      const result = resolveConfiguredModelRef({
+        cfg,
+        defaultProvider: "anthropic",
+        defaultModel: "claude-sonnet-4-6",
+      });
+
+      expect(result).toEqual({ provider: "openai", model: "xiaomi/mimo-v2-pro-mit" });
+    });
+
+    it("prefers exact aliases that contain auth-profile-like suffixes", () => {
+      const cfg = {
+        agents: {
+          defaults: {
+            model: { primary: "gpt@prod" },
+            models: {
+              "openai/gpt-5.5": {
+                alias: "gpt@prod",
+              },
+            },
+          },
+        },
+      } as OpenClawConfig;
+
+      const result = resolveConfiguredModelRef({
+        cfg,
+        defaultProvider: "anthropic",
+        defaultModel: "claude-sonnet-4-6",
+      });
+
+      expect(result).toEqual({ provider: "openai", model: "gpt-5.5" });
+    });
+
+    it("resolves provider-qualified defaults without normalizing every aliasless configured model", () => {
+      providerModelNormalizationMock.normalizeProviderModelIdWithRuntime.mockClear();
+      const models = Object.fromEntries(
+        Array.from({ length: 25 }, (_, index) => [`anthropic/claude-extra-${index}`, {}]),
+      );
+      const cfg = {
+        agents: {
+          defaults: {
+            model: { primary: "openai/gpt-5.5" },
+            models,
+          },
+        },
+      } as OpenClawConfig;
+
+      const result = resolveConfiguredModelRef({
+        cfg,
+        defaultProvider: "anthropic",
+        defaultModel: "claude-sonnet-4-6",
+      });
+
+      expect(result).toEqual({ provider: "openai", model: "gpt-5.5" });
+      expect(
+        providerModelNormalizationMock.normalizeProviderModelIdWithRuntime,
+      ).toHaveBeenCalledTimes(1);
+    });
+
     it("should use default provider/model if config is empty", () => {
       const cfg: Partial<OpenClawConfig> = {};
       const result = resolveConfiguredModelRef({
@@ -1784,7 +1981,7 @@ describe("model-selection", () => {
 
       expect(result).toEqual({
         provider: "google-vertex",
-        model: "gemini-3.1-flash-lite-preview",
+        model: "gemini-3.1-flash-lite",
       });
     });
 
