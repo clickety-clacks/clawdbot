@@ -1617,6 +1617,29 @@ describe.sequential("clawline provider server", () => {
           },
         },
       });
+      const persistedCodexSessionStore = JSON.parse(
+        await fs.readFile(codexCtx.sessionStorePath, "utf8"),
+      ) as Record<string, { fastMode?: boolean }>;
+      expect(persistedCodexSessionStore[sessionKey]?.fastMode).toBe(true);
+
+      await fs.writeFile(
+        `${codexSessionFile}.codex-app-server.json`,
+        JSON.stringify(codexAppServerBinding, null, 2),
+      );
+      const codexFastRefreshResponse = await fetch(
+        `http://127.0.0.1:${codexCtx.port}/api/session-status?sessionKey=${encodeURIComponent(
+          sessionKey,
+        )}`,
+        { headers: { Authorization: authHeader } },
+      );
+      expect(codexFastRefreshResponse.status).toBe(200);
+      expect(await codexFastRefreshResponse.json()).toMatchObject({
+        display: {
+          harness: "codex",
+          fastMode: true,
+          mode: "fast",
+        },
+      });
       await fs.rm(`${codexSessionFile}.codex-app-server.json`);
       const codexDetachedStatusResponse = await fetch(
         `http://127.0.0.1:${codexCtx.port}/api/session-status?sessionKey=${encodeURIComponent(

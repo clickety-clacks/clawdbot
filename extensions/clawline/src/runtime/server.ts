@@ -6674,7 +6674,9 @@ button.deny { background: #9b1c31; color: white; }
     const codexFastControl =
       resolvedCodexFastControl ?? (await resolveCodexFastControlState(sessionKey, runtimeContext));
     const displayFastMode = isCodexSessionControlRuntime(runtimeContext.runtime)
-      ? (codexFastControl?.enabled ?? null)
+      ? codexFastControl?.supported === true
+        ? (fastMode ?? codexFastControl.enabled)
+        : null
       : fastMode;
     const modelCatalog = await loadSessionControlModelCatalog(sessionKey, runtimeContext);
     const capabilities = sessionControlCapabilitiesForSession(
@@ -7118,6 +7120,10 @@ button.deny { background: #9b1c31; color: white; }
     }
     try {
       await setCodexAppServerFastMode({ sessionFile, enabled: fastMode });
+      const sessionResult = await applySessionControlPatch(sessionKey, { fastMode });
+      if (!sessionResult.ok) {
+        return sessionResult;
+      }
       return { ok: true, codexFastControl: { supported: true, enabled: fastMode, sessionFile } };
     } catch (err) {
       return {
