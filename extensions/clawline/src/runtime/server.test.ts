@@ -7441,7 +7441,8 @@ describe.sequential("clawline provider server", () => {
     });
     const replyResolver: typeof testReplyResolver = async (ctx) => {
       const messageSid = (ctx as { MessageSid?: unknown }).MessageSid;
-      const body = String((ctx as { Body?: unknown }).Body ?? "");
+      const bodyValue = (ctx as { Body?: unknown }).Body;
+      const body = typeof bodyValue === "string" ? bodyValue : "";
       if (messageSid === firstMessageId) {
         resolveFirstEntered();
         await blockedFirst;
@@ -7545,6 +7546,139 @@ describe.sequential("clawline provider server", () => {
 
       queue.dispose();
       ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("binds interactive callbacks from custom streams as the current Clawline target", async () => {
+    const deviceId = randomUUID();
+    let callbackContext:
+      | {
+          MessageSid?: unknown;
+          Body?: unknown;
+          NativeChannelId?: unknown;
+          OriginatingTo?: unknown;
+        }
+      | undefined;
+    const replyResolver: typeof testReplyResolver = async (ctx) => {
+      const bodyValue = (ctx as { Body?: unknown }).Body;
+      const body = typeof bodyValue === "string" ? bodyValue : "";
+      if (body.startsWith("[Interactive] action=custom-stream-action")) {
+        callbackContext = ctx as typeof callbackContext;
+        return { text: "callback reply" };
+      }
+      return { text: "unexpected reply" };
+    };
+    const entry = createAllowlistEntry({
+      deviceId,
+      userId: "flynn",
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry], { replyResolver });
+    try {
+      const pair = await performPairRequest(ctx.port, deviceId);
+      const token = pair.token as string;
+      const { ws, queue } = await authenticateDeviceWithQueue(ctx.port, deviceId, token);
+      try {
+        const createResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            idempotencyKey: "req_interactive_callback_current_custom_stream",
+            displayName: "Callback Stream",
+          }),
+        });
+        expect(createResponse.status).toBe(201);
+        const createdPayload = (await createResponse.json()) as {
+          stream: { sessionKey: string };
+        };
+        const sessionKey = createdPayload.stream.sessionKey;
+        expect(sessionKey).toMatch(/^agent:main:clawline:flynn:s_[0-9a-f]{8}$/);
+        const streamSuffix = sessionKey.split(":").at(-1);
+        const currentTarget = `flynn:${streamSuffix}`;
+
+        await waitForQueuedMessage(queue, (value) => {
+          const frame = value as { type?: string; stream?: { sessionKey?: string } };
+          return frame.type === "stream_created" && frame.stream?.sessionKey === sessionKey;
+        });
+
+        const descriptor = {
+          version: 1,
+          html: '<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"></head><body><button data-action="custom-stream-action">Run</button></body></html>',
+          metadata: { title: "Callback", height: 80 },
+        };
+        const base64 = Buffer.from(JSON.stringify(descriptor), "utf8").toString("base64");
+        const delivered = await ctx.server.sendMessage({
+          target: sessionKey,
+          text: "",
+          attachments: [
+            {
+              data: base64,
+              mimeType: INTERACTIVE_HTML_MIME,
+            },
+          ],
+        });
+
+        const sourceMessage = await waitForQueuedMessage(queue, (value) => {
+          const typed = value as { type?: string; id?: string; sessionKey?: string };
+          return typed.type === "message" && typed.id === delivered.messageId;
+        });
+        expect(sourceMessage).toMatchObject({ sessionKey });
+
+        ws.send(
+          JSON.stringify({
+            type: "interactive-callback",
+            messageId: delivered.messageId,
+            payload: {
+              action: "custom-stream-action",
+              data: { ticket: "T1179" },
+            },
+          }),
+        );
+
+        const callbackEcho = (await waitForQueuedMessageWithTimeout(queue, (value) => {
+          const typed = value as {
+            type?: string;
+            role?: string;
+            content?: string;
+            sessionKey?: string;
+          };
+          return (
+            typed.type === "message" &&
+            typed.role === "user" &&
+            typed.sessionKey === sessionKey &&
+            typeof typed.content === "string" &&
+            typed.content.startsWith("[Interactive] action=custom-stream-action")
+          );
+        })) as { clientMessageId?: string };
+        expect(callbackEcho.clientMessageId?.startsWith("c_")).toBe(true);
+
+        const callbackAssistant = (await waitForQueuedMessageWithTimeout(queue, (value) => {
+          const typed = value as {
+            type?: string;
+            role?: string;
+            content?: string;
+            sessionKey?: string;
+          };
+          return (
+            typed.type === "message" &&
+            typed.role === "assistant" &&
+            typed.sessionKey === sessionKey
+          );
+        })) as { content?: string };
+        expect(callbackAssistant.content).toBe("callback reply");
+
+        expect(callbackContext?.NativeChannelId).toBe(currentTarget);
+        expect(callbackContext?.OriginatingTo).toBe(currentTarget);
+      } finally {
+        queue.dispose();
+        ws.terminate();
+      }
     } finally {
       await ctx.cleanup();
     }

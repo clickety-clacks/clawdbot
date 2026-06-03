@@ -5288,16 +5288,18 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     streaming: number;
     promptTurnState?: string | null;
   }): PromptTurnState {
-    switch (row.promptTurnState) {
+    const promptTurnState = row.promptTurnState ?? "";
+    switch (promptTurnState) {
       case "accepted":
       case "queued":
       case "running":
       case "delivered":
       case "canceled":
       case "failed":
-        return row.promptTurnState;
+        return promptTurnState;
     }
-    switch (row.streaming) {
+    const streaming = row.streaming as MessageStreamingState;
+    switch (streaming) {
       case MessageStreamingState.Finalized:
         return "delivered";
       case MessageStreamingState.Failed:
@@ -10392,7 +10394,7 @@ button.deny { background: #9b1c31; color: white; }
         resolvedSessionKey = session.sessionKey;
       }
 
-      let streamSuffix: "main" | "dm" | "global" = "main";
+      let streamSuffix: string;
       if (sessionKeyEq(resolvedSessionKey, session.personalSessionKey)) {
         streamSuffix = "main";
       } else if (
@@ -10402,6 +10404,13 @@ button.deny { background: #9b1c31; color: white; }
         streamSuffix = "dm";
       } else if (sessionKeyEq(resolvedSessionKey, session.globalSessionKey)) {
         streamSuffix = "global";
+      } else {
+        const parsed = parseClawlineUserSessionKey(resolvedSessionKey);
+        const normalizedUserId = sanitizeUserId(session.userId).toLowerCase();
+        if (!parsed || parsed.userId !== normalizedUserId) {
+          throw new ClientMessageError("stream_not_found", "Stream not found");
+        }
+        streamSuffix = parsed.streamSuffix;
       }
       if (streamSuffix === "global" && !session.isAdmin) {
         throw new ClientMessageError("forbidden", "Admin channel requires admin access");

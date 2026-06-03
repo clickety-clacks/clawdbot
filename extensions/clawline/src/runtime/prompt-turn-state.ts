@@ -239,4 +239,5 @@ function classifyReplay(state: Exclude<PromptTurnState, "failed">): {
     case "canceled":
       return { classification: "canceled-terminal-replay", terminalState: "canceled" };
   }
+  return undefined as never;
 }
