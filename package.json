@@ -222,6 +222,10 @@
       "types": "./dist/plugin-sdk/plugin-config-runtime.d.ts",
       "default": "./dist/plugin-sdk/plugin-config-runtime.js"
     },
+    "./plugin-sdk/foreman-runtime": {
+      "types": "./dist/plugin-sdk/foreman-runtime.d.ts",
+      "default": "./dist/plugin-sdk/foreman-runtime.js"
+    },
     "./plugin-sdk/config-mutation": {
       "types": "./dist/plugin-sdk/config-mutation.d.ts",
       "default": "./dist/plugin-sdk/config-mutation.js"

@@ -7,6 +7,7 @@ import type {
 export type ForemanAttemptPhase =
   | "queued"
   | "submitting"
+  | "submitted_to_pty"
   | "accepted"
   | "running"
   | "waiting_for_owner_check"
@@ -34,11 +35,15 @@ export type ForemanAssignmentInput = {
 };
 
 export type ForemanWorkerEventType =
+  | "agent.prompt_submitted_to_pty"
   | "agent.prompt_accepted"
   | "agent.started_work"
   | "agent.idle_after_work"
+  | "agent.host_unreachable"
   | "agent.session_not_found"
   | "agent.agent_not_detected"
+  | "agent.agent_busy"
+  | "agent.prompt_submit_failed"
   | "agent.prompt_not_accepted";
 
 export type ForemanWorkerEvent = {
@@ -46,13 +51,17 @@ export type ForemanWorkerEvent = {
   attemptId: string;
   eventId: string;
   eventType: ForemanWorkerEventType;
+  idempotencyKey?: string;
   hostId: string;
   agentName: string;
   workerSeq: number;
+  expectedFlowRevision?: number;
+  observedAt?: number;
   occurredAt?: number;
   idleMs?: number;
   lastActivityAt?: number;
   paneRef?: ForemanPaneRef;
+  payload?: JsonValue;
   summary?: string;
 };
 
@@ -65,6 +74,7 @@ type ForemanAttemptState = {
   idempotencyKey: string;
   promptHash: string;
   createdAt: number;
+  submittedAt?: number;
   acceptedAt?: number;
   startedWorkAt?: number;
   idleAfterWorkAt?: number;
@@ -101,9 +111,11 @@ export type ForemanEventResult =
         | "flow_not_found"
         | "not_managed"
         | "attempt_not_found"
+        | "attempt_mismatch"
         | "duplicate_event"
         | "stale_event"
         | "out_of_order_event"
+        | "invalid_phase_transition"
         | "revision_conflict";
       flow?: ManagedTaskFlowRecord;
     };
@@ -118,6 +130,15 @@ function stableHash(value: string): string {
     hash = Math.imul(hash, 16777619);
   }
   return `fnv1a32:${(hash >>> 0).toString(16).padStart(8, "0")}`;
+}
+
+function assignmentIdempotencyKey(input: ForemanAssignmentInput): string {
+  return (
+    input.idempotencyKey ??
+    stableHash(
+      `${input.ownerSessionKey}:${input.goal}:${input.hostId}:${input.agentName}:${input.prompt}`,
+    )
+  );
 }
 
 function asForemanState(value: JsonValue | null | undefined): ForemanFlowState | null {
@@ -137,6 +158,49 @@ function toJson(value: unknown): JsonValue {
 
 type ForemanEventRejectReason = Exclude<ForemanEventResult, { applied: true }>["reason"];
 
+function getEventPayloadObject(event: ForemanWorkerEvent): Record<string, JsonValue> {
+  return event.payload && typeof event.payload === "object" && !Array.isArray(event.payload)
+    ? event.payload
+    : {};
+}
+
+function getPayloadNumber(event: ForemanWorkerEvent, key: string): number | undefined {
+  const value = getEventPayloadObject(event)[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function isControllerTransportEvent(event: ForemanWorkerEvent): boolean {
+  return (
+    event.eventType === "agent.host_unreachable" &&
+    getEventPayloadObject(event).source === "foreman_live_transport_controller"
+  );
+}
+
+function canApplyEventFromPhase(
+  eventType: ForemanWorkerEventType,
+  attempt: ForemanAttemptState,
+): boolean {
+  const phase = attempt.phase;
+  if (eventType === "agent.prompt_submitted_to_pty") {
+    return (
+      phase === "queued" ||
+      phase === "submitting" ||
+      phase === "submitted_to_pty" ||
+      (phase === "blocked" && attempt.blockedReason === "agent.host_unreachable")
+    );
+  }
+  if (eventType === "agent.prompt_accepted") {
+    return phase === "submitted_to_pty" || phase === "accepted";
+  }
+  if (eventType === "agent.started_work") {
+    return phase === "submitted_to_pty" || phase === "accepted" || phase === "running";
+  }
+  if (eventType === "agent.idle_after_work") {
+    return phase === "running" || phase === "waiting_for_owner_check";
+  }
+  return phase === "queued" || phase === "submitting" || phase === "submitted_to_pty";
+}
+
 function nextStateWithEvent(
   state: ForemanFlowState,
   event: ForemanWorkerEvent,
@@ -149,30 +213,52 @@ function nextStateWithEvent(
   if (!attempt) {
     return { reason: "attempt_not_found" };
   }
+  if (state.activeAttemptId !== event.attemptId) {
+    return { reason: "attempt_mismatch" };
+  }
+  if (event.idempotencyKey !== undefined && event.idempotencyKey !== attempt.idempotencyKey) {
+    return { reason: "attempt_mismatch" };
+  }
   const seqKey = `${event.hostId}:${event.attemptId}`;
   const lastSeq = state.eventDedupe.lastSeqByAttempt[seqKey] ?? 0;
-  if (event.workerSeq <= lastSeq) {
-    return { reason: "stale_event" };
+  const sequenceTracked = !isControllerTransportEvent(event);
+  if (sequenceTracked) {
+    if (event.workerSeq <= lastSeq) {
+      return { reason: "stale_event" };
+    }
+    if (event.workerSeq !== lastSeq + 1) {
+      return { reason: "out_of_order_event" };
+    }
   }
-  if (event.workerSeq !== lastSeq + 1) {
-    return { reason: "out_of_order_event" };
+  if (!canApplyEventFromPhase(event.eventType, attempt)) {
+    return { reason: "invalid_phase_transition" };
   }
 
-  const eventAt = event.occurredAt ?? now;
+  const eventAt = event.observedAt ?? event.occurredAt ?? now;
   let phase: ForemanAttemptPhase = attempt.phase;
   let blockedReason = attempt.blockedReason ?? null;
+  if (event.eventType === "agent.prompt_submitted_to_pty") {
+    phase = "submitted_to_pty";
+    blockedReason = null;
+  }
   if (event.eventType === "agent.prompt_accepted") {
     phase = "accepted";
+    blockedReason = null;
   }
   if (event.eventType === "agent.started_work") {
     phase = "running";
+    blockedReason = null;
   }
   if (event.eventType === "agent.idle_after_work") {
     phase = "waiting_for_owner_check";
+    blockedReason = null;
   }
   if (
     event.eventType === "agent.session_not_found" ||
+    event.eventType === "agent.host_unreachable" ||
     event.eventType === "agent.agent_not_detected" ||
+    event.eventType === "agent.agent_busy" ||
+    event.eventType === "agent.prompt_submit_failed" ||
     event.eventType === "agent.prompt_not_accepted"
   ) {
     phase = "blocked";
@@ -182,6 +268,8 @@ function nextStateWithEvent(
   const seenEventIds = [...state.eventDedupe.seenEventIds, event.eventId].slice(
     -MAX_SEEN_EVENT_IDS,
   );
+  const workerReachability =
+    event.eventType === "agent.host_unreachable" ? "unreachable" : "reachable";
   return {
     state: {
       ...state,
@@ -192,11 +280,16 @@ function nextStateWithEvent(
           ...attempt,
           phase,
           paneRef: event.paneRef ?? attempt.paneRef,
+          submittedAt:
+            event.eventType === "agent.prompt_submitted_to_pty" ? eventAt : attempt.submittedAt,
           acceptedAt: event.eventType === "agent.prompt_accepted" ? eventAt : attempt.acceptedAt,
           startedWorkAt: event.eventType === "agent.started_work" ? eventAt : attempt.startedWorkAt,
           idleAfterWorkAt:
             event.eventType === "agent.idle_after_work" ? eventAt : attempt.idleAfterWorkAt,
-          lastMeaningfulActivityAt: event.lastActivityAt ?? attempt.lastMeaningfulActivityAt,
+          lastMeaningfulActivityAt:
+            event.lastActivityAt ??
+            getPayloadNumber(event, "lastActivityAt") ??
+            attempt.lastMeaningfulActivityAt,
           lastWorkerSeq: event.workerSeq,
           lastEventId: event.eventId,
           lastEventType: event.eventType,
@@ -208,13 +301,15 @@ function nextStateWithEvent(
         [event.hostId]: {
           ...state.workers[event.hostId],
           lastEventAt: eventAt,
-          lastKnownReachability: "reachable",
+          lastKnownReachability: workerReachability,
           lastError: blockedReason,
         },
       },
       eventDedupe: {
         seenEventIds,
-        lastSeqByAttempt: { ...state.eventDedupe.lastSeqByAttempt, [seqKey]: event.workerSeq },
+        lastSeqByAttempt: sequenceTracked
+          ? { ...state.eventDedupe.lastSeqByAttempt, [seqKey]: event.workerSeq }
+          : state.eventDedupe.lastSeqByAttempt,
       },
     },
   };
@@ -233,11 +328,7 @@ export class ForemanTaskFlowController {
   createAssignment(input: ForemanAssignmentInput): ManagedTaskFlowRecord {
     const now = input.now ?? Date.now();
     const attemptId = input.attemptId ?? `attempt_${now}`;
-    const idempotencyKey =
-      input.idempotencyKey ??
-      stableHash(
-        `${input.ownerSessionKey}:${input.goal}:${input.hostId}:${input.agentName}:${input.prompt}`,
-      );
+    const idempotencyKey = assignmentIdempotencyKey(input);
     const runtime = this.taskFlows.bindSession({
       sessionKey: input.ownerSessionKey,
       requesterOrigin: input.requesterOrigin,
@@ -276,6 +367,40 @@ export class ForemanTaskFlowController {
     });
   }
 
+  findAssignmentByIdempotency(input: ForemanAssignmentInput): ManagedTaskFlowRecord | undefined {
+    const idempotencyKey = assignmentIdempotencyKey(input);
+    const runtime = this.taskFlows.bindSession({
+      sessionKey: input.ownerSessionKey,
+      requesterOrigin: input.requesterOrigin,
+    });
+    return runtime.list().find((flow): flow is ManagedTaskFlowRecord => {
+      if (flow.syncMode !== "managed" || flow.controllerId !== CONTROLLER_ID) {
+        return false;
+      }
+      const state = asForemanState(flow.stateJson);
+      const attempt = state ? state.attempts[state.activeAttemptId] : undefined;
+      if (
+        state?.ownerSessionKey !== input.ownerSessionKey ||
+        attempt?.idempotencyKey !== idempotencyKey
+      ) {
+        return false;
+      }
+      return input.idempotencyKey
+        ? true
+        : state.goal === input.goal &&
+            attempt.hostId === input.hostId &&
+            attempt.agentName === input.agentName;
+    });
+  }
+
+  getAssignment(ownerSessionKey: string, flowId: string): ManagedTaskFlowRecord | undefined {
+    const runtime = this.taskFlows.bindSession({ sessionKey: ownerSessionKey });
+    const flow = runtime.get(flowId);
+    return flow?.syncMode === "managed" && flow.controllerId === CONTROLLER_ID
+      ? (flow as ManagedTaskFlowRecord)
+      : undefined;
+  }
+
   applyWorkerEvent(
     ownerSessionKey: string,
     event: ForemanWorkerEvent,
@@ -292,6 +417,12 @@ export class ForemanTaskFlowController {
     const state = asForemanState(flow.stateJson);
     if (!state) {
       return { applied: false, reason: "attempt_not_found", flow: flow as ManagedTaskFlowRecord };
+    }
+    if (state.eventDedupe.seenEventIds.includes(event.eventId)) {
+      return { applied: false, reason: "duplicate_event", flow: flow as ManagedTaskFlowRecord };
+    }
+    if (event.expectedFlowRevision !== undefined && event.expectedFlowRevision !== flow.revision) {
+      return { applied: false, reason: "revision_conflict", flow: flow as ManagedTaskFlowRecord };
     }
     const next = nextStateWithEvent(state, event, now);
     if (!next.state) {
@@ -318,8 +449,8 @@ export class ForemanTaskFlowController {
           ...((event.paneRef ?? next.state.attempts[event.attemptId]?.paneRef)
             ? { paneRef: event.paneRef ?? next.state.attempts[event.attemptId]?.paneRef }
             : {}),
-          lastActivityAt: event.lastActivityAt ?? now,
-          idleMs: event.idleMs ?? 0,
+          lastActivityAt: event.lastActivityAt ?? getPayloadNumber(event, "lastActivityAt") ?? now,
+          idleMs: event.idleMs ?? getPayloadNumber(event, "idleMs") ?? 0,
           lastWorkerEventId: event.eventId,
           lastWorkerSeq: event.workerSeq,
           allowedActions: [
