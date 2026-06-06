@@ -3568,6 +3568,58 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("materializes generated inline image data URLs sent through the Clawline outbound adapter", async () => {
+    const entry = createAllowlistEntry({
+      deviceId: randomUUID(),
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry]);
+    try {
+      setClawlineOutboundSender(async (payload) => ctx.server.sendMessage(payload));
+
+      const { clawlineOutbound } = await import("../outbound.js");
+      const result = await clawlineOutbound.sendText?.({
+        to: entry.userId,
+        text: "Here is the render:\n\n![generated image](data:image/png;base64,aGVsbG8=)",
+      } as never);
+
+      expect(result).toMatchObject({
+        channel: "clawline",
+        meta: {
+          userId: entry.userId,
+          assetIds: [],
+        },
+      });
+
+      const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
+      const db = new BetterSqlite3(dbPath);
+      try {
+        const row = db
+          .prepare(`SELECT payloadJson FROM events WHERE id = ?`)
+          .get(result?.messageId) as { payloadJson: string } | undefined;
+        expect(row).toBeDefined();
+        const event = JSON.parse(row?.payloadJson ?? "{}") as {
+          content?: unknown;
+          attachments?: unknown;
+        };
+        expect(event.content).toBe("Here is the render:");
+        expect(event.attachments).toEqual([
+          {
+            type: "image",
+            mimeType: "image/png",
+            data: "aGVsbG8=",
+          },
+        ]);
+      } finally {
+        db.close();
+      }
+    } finally {
+      setClawlineOutboundSender(null);
+      await ctx.cleanup();
+    }
+  });
+
   it("delivers outbound interactive HTML attachments addressed by canonical custom stream session key", async () => {
     const entry = createAllowlistEntry({
       deviceId: randomUUID(),
