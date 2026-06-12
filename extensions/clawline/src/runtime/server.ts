@@ -376,8 +376,6 @@ const STREAM_OPERATION_CREATE = "create_stream";
 const STREAM_OPERATION_DELETE = "delete_stream";
 const MAX_STREAMS_BODY_BYTES = 16 * 1024;
 const STREAM_SESSION_KEY_PATH_DECODE_PASSES = 4;
-const TRACKER_TICKET_ID_PATTERN = /\bT\d{2,}\b/gi;
-const DEFAULT_TRACKER_DB_PATH = "/Volumes/Microverse/openclaw/tracker/tracking/tracker.db";
 
 function stripControlChars(value: string): string {
   let result = "";
@@ -398,7 +396,6 @@ type ClawlineAnnounceQueueItem = {
   summaryLine?: string;
   enqueuedAt: number;
   sessionKey: string;
-  alertTicketOwners?: AlertTicketOwner[];
   origin?: {
     channel?: string;
     to?: string;
@@ -406,148 +403,6 @@ type ClawlineAnnounceQueueItem = {
     threadId?: string | number;
   };
 };
-
-type AlertTicketOwner = {
-  ticketId: string;
-  ownerSessionKey: string;
-};
-
-type AlertTicketOwnerGuardResult =
-  | { allow: true; ticketOwners: AlertTicketOwner[] }
-  | {
-      allow: false;
-      ticketId: string;
-      ownerSessionKey: string;
-      targetSessionKey: string;
-    };
-
-function extractTrackerTicketIds(text: string): string[] {
-  const ids = new Set<string>();
-  for (const match of text.matchAll(TRACKER_TICKET_ID_PATTERN)) {
-    const id = match[0]?.trim().toUpperCase();
-    if (id) {
-      ids.add(id);
-    }
-  }
-  return [...ids];
-}
-
-function resolveTrackerDbPaths(): string[] {
-  const configured = process.env.OPENCLAW_TRACKER_DB_PATH?.trim();
-  return [configured, DEFAULT_TRACKER_DB_PATH].filter((candidate): candidate is string =>
-    Boolean(candidate),
-  );
-}
-
-function readTrackerTicketOwners(ticketIds: string[]): Map<string, string> {
-  const owners = new Map<string, string>();
-  if (ticketIds.length === 0) {
-    return owners;
-  }
-
-  let db: BetterSqlite3.Database | undefined;
-  let lastError: unknown;
-  for (const dbPath of resolveTrackerDbPaths()) {
-    try {
-      db = new BetterSqlite3(dbPath, { readonly: true, fileMustExist: true });
-      break;
-    } catch (err) {
-      lastError = err;
-    }
-  }
-  if (!db) {
-    if (process.env.OPENCLAW_TRACKER_DB_PATH?.trim()) {
-      throw lastError;
-    }
-    return owners;
-  }
-
-  try {
-    const stmt = db.prepare("SELECT owner_session_key FROM tickets WHERE upper(id) = ?");
-    for (const ticketId of ticketIds) {
-      const row = stmt.get(ticketId) as { owner_session_key?: unknown } | undefined;
-      const ownerSessionKey =
-        typeof row?.owner_session_key === "string" ? row.owner_session_key.trim() : "";
-      if (ownerSessionKey) {
-        owners.set(ticketId, ownerSessionKey);
-      }
-    }
-    return owners;
-  } finally {
-    db.close();
-  }
-}
-
-function ticketOwnerMapToList(
-  ticketIds: string[],
-  owners: Map<string, string>,
-): AlertTicketOwner[] {
-  return ticketIds.flatMap((ticketId) => {
-    const ownerSessionKey = owners.get(ticketId);
-    return ownerSessionKey ? [{ ticketId, ownerSessionKey }] : [];
-  });
-}
-
-function guardAlertTicketOwners(params: {
-  logger: Logger;
-  targetSessionKey: string;
-  text: string;
-}): AlertTicketOwnerGuardResult {
-  const targetSessionKey = params.targetSessionKey.trim();
-  if (!targetSessionKey.startsWith("agent:main:clawline:")) {
-    return { allow: true, ticketOwners: [] };
-  }
-
-  const ticketIds = extractTrackerTicketIds(params.text);
-  if (ticketIds.length === 0) {
-    return { allow: true, ticketOwners: [] };
-  }
-
-  let owners: Map<string, string>;
-  try {
-    owners = readTrackerTicketOwners(ticketIds);
-  } catch (err) {
-    params.logger.warn?.(`alert_ticket_owner_guard_unavailable: ${formatError(err)}`);
-    return { allow: true, ticketOwners: [] };
-  }
-
-  for (const ticketId of ticketIds) {
-    const ownerSessionKey = owners.get(ticketId);
-    if (ownerSessionKey && ownerSessionKey !== targetSessionKey) {
-      return {
-        allow: false,
-        ticketId,
-        ownerSessionKey,
-        targetSessionKey,
-      };
-    }
-  }
-
-  return { allow: true, ticketOwners: ticketOwnerMapToList(ticketIds, owners) };
-}
-
-function guardQueuedAlertTicketOwners(params: {
-  item: ClawlineAnnounceQueueItem;
-}): AlertTicketOwnerGuardResult {
-  const targetSessionKey = params.item.sessionKey.trim();
-  const ticketOwners = params.item.alertTicketOwners ?? [];
-  if (!targetSessionKey.startsWith("agent:main:clawline:") || ticketOwners.length === 0) {
-    return { allow: true, ticketOwners };
-  }
-
-  for (const owner of ticketOwners) {
-    if (owner.ownerSessionKey !== targetSessionKey) {
-      return {
-        allow: false,
-        ticketId: owner.ticketId,
-        ownerSessionKey: owner.ownerSessionKey,
-        targetSessionKey,
-      };
-    }
-  }
-
-  return { allow: true, ticketOwners };
-}
 
 function truncateUtf8(value: string, maxBytes: number): string {
   if (Buffer.byteLength(value, "utf8") <= maxBytes) {
@@ -4929,18 +4784,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
 
       logger.info?.(`[clawline] alert_wake_start sessionKey=${resolvedSessionKey}`);
 
-      const ownerGuard = guardAlertTicketOwners({
-        logger,
-        targetSessionKey: resolvedSessionKey,
-        text,
-      });
-      if (!ownerGuard.allow) {
-        logger.warn?.(
-          `[clawline] alert_ticket_owner_guard_drop ticketId=${ownerGuard.ticketId} targetSessionKey=${ownerGuard.targetSessionKey} ownerSessionKey=${ownerGuard.ownerSessionKey}`,
-        );
-        return;
-      }
-
       const queueSettings = resolveClawlineQueueSettings({ cfg: openClawCfg });
       const alertRunId = randomUUID();
       const sendQueuedAlert = async (item: ClawlineAnnounceQueueItem) => {
@@ -4949,17 +4792,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           sessionKey: item.sessionKey,
           runId: correlatedRunId,
         };
-        const queuedOwnerGuard = guardQueuedAlertTicketOwners({ item });
-        if (!queuedOwnerGuard.allow) {
-          logger.warn?.(
-            `[clawline] queued_alert_ticket_owner_guard_drop ticketId=${queuedOwnerGuard.ticketId} targetSessionKey=${queuedOwnerGuard.targetSessionKey} ownerSessionKey=${queuedOwnerGuard.ownerSessionKey} runId=${correlatedRunId}`,
-          );
-          logAlertRunPhase("no-reply", {
-            ...phaseBase,
-            payloadCount: 0,
-          });
-          return;
-        }
         const origin = item.origin;
         const threadId =
           origin?.threadId != null && origin.threadId !== "" ? String(origin.threadId) : undefined;
@@ -5021,7 +4853,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
           summaryLine: "System Alert",
           enqueuedAt: Date.now(),
           sessionKey: resolvedSessionKey,
-          alertTicketOwners: ownerGuard.ticketOwners,
           origin: alertOrigin,
         } as ClawlineAnnounceQueueItem,
         settings: queueSettings,

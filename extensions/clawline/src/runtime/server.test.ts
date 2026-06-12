@@ -360,7 +360,6 @@ function createMessageQueue(ws: WebSocket) {
 }
 
 beforeEach(() => {
-  delete process.env.OPENCLAW_TRACKER_DB_PATH;
   gatewayCallMock.mockReset();
   gatewayCallMock.mockResolvedValue({ ok: true });
   enqueueAnnounceMock.mockReset();
@@ -6242,123 +6241,6 @@ describe.sequential("clawline provider server", () => {
       });
     } finally {
       await ctx.cleanup();
-    }
-  });
-
-  it("drops ticket alerts when the target Clawline stream does not own the ticket", async () => {
-    const entry = createAllowlistEntry();
-    const trackerRoot = await fs.mkdtemp(path.join(os.tmpdir(), "clawline-tracker-owner-"));
-    const trackerDbPath = path.join(trackerRoot, "tracker.db");
-    const trackerDb = new BetterSqlite3(trackerDbPath);
-    trackerDb.exec(`
-      CREATE TABLE tickets (id TEXT PRIMARY KEY, owner_session_key TEXT);
-      INSERT INTO tickets (id, owner_session_key)
-      VALUES ('T1269', 'agent:main:clawline:flynn:s_d2cd7901');
-    `);
-    trackerDb.close();
-    process.env.OPENCLAW_TRACKER_DB_PATH = trackerDbPath;
-    const warn = vi.fn();
-    const ctx = await setupTestServer([entry], {
-      logger: {
-        ...silentLogger,
-        warn,
-      },
-    });
-    const authHeader = await createAuthHeader(ctx, entry);
-    try {
-      const response = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: authHeader },
-        body: JSON.stringify({
-          message: "T1269 Tracker reconciliation result",
-          source: "janus-prodder",
-          sessionKey: "agent:main:clawline:flynn:main",
-        }),
-      });
-      expect(response.status).toBe(200);
-      expect(await response.json()).toEqual({ ok: true });
-      expect(enqueueAnnounceMock).not.toHaveBeenCalled();
-      expect(warn).toHaveBeenCalledWith(
-        expect.stringContaining(
-          "alert_ticket_owner_guard_drop ticketId=T1269 targetSessionKey=agent:main:clawline:flynn:main ownerSessionKey=agent:main:clawline:flynn:s_d2cd7901",
-        ),
-      );
-    } finally {
-      delete process.env.OPENCLAW_TRACKER_DB_PATH;
-      await ctx.cleanup();
-      await fs.rm(trackerRoot, { recursive: true, force: true });
-    }
-  });
-
-  it("drops queued ticket alerts when drain metadata no longer matches the owning stream", async () => {
-    const entry = createAllowlistEntry();
-    const trackerRoot = await fs.mkdtemp(path.join(os.tmpdir(), "clawline-tracker-owner-"));
-    const trackerDbPath = path.join(trackerRoot, "tracker.db");
-    const trackerDb = new BetterSqlite3(trackerDbPath);
-    trackerDb.exec(`
-      CREATE TABLE tickets (id TEXT PRIMARY KEY, owner_session_key TEXT);
-      INSERT INTO tickets (id, owner_session_key)
-      VALUES ('T1269', 'agent:main:clawline:flynn:main');
-    `);
-    trackerDb.close();
-    process.env.OPENCLAW_TRACKER_DB_PATH = trackerDbPath;
-    const warn = vi.fn();
-    const info = vi.fn();
-    const ctx = await setupTestServer([entry], {
-      logger: {
-        ...silentLogger,
-        info,
-        warn,
-      },
-    });
-    const authHeader = await createAuthHeader(ctx, entry);
-    try {
-      const response = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: authHeader },
-        body: JSON.stringify({
-          message: "T1269 Tracker reconciliation result",
-          source: "janus-prodder",
-          sessionKey: "agent:main:clawline:flynn:main",
-        }),
-      });
-      expect(response.status).toBe(200);
-      expect(await response.json()).toEqual({ ok: true });
-      expect(enqueueAnnounceMock).toHaveBeenCalledTimes(1);
-      const queued = enqueueAnnounceMock.mock.calls[0]?.[0] as
-        | {
-            item?: {
-              alertTicketOwners?: Array<{ ticketId?: string; ownerSessionKey?: string }>;
-              announceId?: string;
-              sessionKey?: string;
-            };
-            send?: (item: unknown) => Promise<void>;
-          }
-        | undefined;
-      expect(queued?.item?.alertTicketOwners).toEqual([
-        { ticketId: "T1269", ownerSessionKey: "agent:main:clawline:flynn:main" },
-      ]);
-
-      await queued?.send?.({
-        ...queued.item,
-        sessionKey: "agent:main:clawline:flynn:s_4a2b448d",
-      });
-
-      expect(gatewayCallMock).not.toHaveBeenCalled();
-      expect(warn).toHaveBeenCalledWith(
-        expect.stringContaining(
-          "queued_alert_ticket_owner_guard_drop ticketId=T1269 targetSessionKey=agent:main:clawline:flynn:s_4a2b448d ownerSessionKey=agent:main:clawline:flynn:main",
-        ),
-      );
-      expect(info).toHaveBeenCalledWith(
-        expect.stringContaining(
-          `phase=no-reply sessionKey=agent:main:clawline:flynn:s_4a2b448d runId=${queued?.item?.announceId} payloadCount=0`,
-        ),
-      );
-    } finally {
-      delete process.env.OPENCLAW_TRACKER_DB_PATH;
-      await ctx.cleanup();
-      await fs.rm(trackerRoot, { recursive: true, force: true });
     }
   });
 
