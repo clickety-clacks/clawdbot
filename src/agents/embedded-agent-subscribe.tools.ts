@@ -631,11 +631,11 @@ export function extractToolErrorMessage(result: unknown): string | undefined {
 }
 
 function resolveMessageToolTarget(args: Record<string, unknown>): string | undefined {
-  const toRaw = readStringValue(args.to);
-  if (toRaw) {
-    return toRaw;
-  }
-  return readStringValue(args.target);
+  return (
+    normalizeOptionalString(args.target) ??
+    normalizeOptionalString(args.to) ??
+    normalizeOptionalString(args.channelId)
+  );
 }
 
 export function extractMessagingToolSend(
