@@ -1584,6 +1584,7 @@ describe("messaging tool media URL tracking", () => {
           {
             type: "text",
             text: JSON.stringify({
+              ok: true,
               mediaUrls: ["file:///img-a.jpg", "file:///img-b.jpg"],
             }),
           },

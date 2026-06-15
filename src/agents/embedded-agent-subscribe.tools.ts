@@ -5,6 +5,7 @@ import { asOptionalRecord as readRecord } from "@openclaw/normalization-core/rec
 import {
   normalizeOptionalLowercaseString,
   normalizeOptionalString,
+  normalizeOptionalStringifiedId,
   readStringValue,
 } from "@openclaw/normalization-core/string-coerce";
 import { uniqueStrings } from "@openclaw/normalization-core/string-normalization";
