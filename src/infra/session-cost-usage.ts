@@ -1,6 +1,9 @@
+// Persists and formats per-session cost and usage records.
 import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
+import { asFiniteNumber } from "@openclaw/normalization-core/number-coercion";
+import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import type { NormalizedUsage, UsageLike } from "../agents/usage.js";
 import { normalizeUsage } from "../agents/usage.js";
 import { stripInboundMetadata } from "../auto-reply/reply/strip-inbound-meta.js";
@@ -19,8 +22,6 @@ import type { SessionEntry } from "../config/sessions/types.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { stripEnvelope, stripMessageIdHints } from "../shared/chat-envelope.js";
-import { asFiniteNumber } from "../shared/number-coercion.js";
-import { normalizeOptionalString } from "../shared/string-coerce.js";
 import { runTasksWithConcurrency } from "../utils/run-with-concurrency.js";
 import { countToolResults, extractToolCallNames } from "../utils/transcript-tools.js";
 import {
@@ -90,14 +91,21 @@ const USAGE_COST_CACHE_VERSION = 4;
 const USAGE_COST_CACHE_FILE = ".usage-cost-cache.json";
 const USAGE_COST_CACHE_LOCK_WRITE_GRACE_MS = 10_000;
 const USAGE_COST_TRANSCRIPT_STAT_CONCURRENCY = 32;
+// Checkpoint policy for refreshCostUsageCache: bound the cost of full cache
+// serialization when scanning thousands of session files. Smaller of the two
+// limits triggers the next durable write.
+const USAGE_COST_CACHE_CHECKPOINT_FILES = 256;
+const USAGE_COST_CACHE_CHECKPOINT_INTERVAL_MS = 5_000;
 const logger = createSubsystemLogger("usage-cost-cache");
 
 type UsageCostRefreshState = {
   agentId?: string;
+  cachePath: string;
   config?: OpenClawConfig;
   fullRefreshRequested: boolean;
   pendingSessionFiles: Set<string>;
   running: boolean;
+  sessionsDir: string;
   timer?: ReturnType<typeof setTimeout>;
 };
 
@@ -370,9 +378,9 @@ async function writeUsageCostCache(cachePath: string, cache: UsageCostCacheFile)
 
 async function listUsageCountedTranscriptFileStats(
   agentId?: string,
-  params?: { minMtimeMs?: number },
+  params?: { minMtimeMs?: number; sessionsDir?: string },
 ): Promise<UsageCostTranscriptFile[]> {
-  const sessionsDir = resolveSessionTranscriptsDirForAgent(agentId);
+  const sessionsDir = params?.sessionsDir ?? resolveSessionTranscriptsDirForAgent(agentId);
   const entries = await fs.promises.readdir(sessionsDir, { withFileTypes: true }).catch(() => []);
   const tasks = entries
     .filter((entry) => entry.isFile() && isUsageCountedSessionTranscriptFileName(entry.name))
@@ -396,8 +404,9 @@ async function listUsageCountedTranscriptFileStats(
 
 async function listUsageCountedTranscriptFiles(
   agentId?: string,
+  params?: { sessionsDir?: string },
 ): Promise<UsageCostTranscriptFile[]> {
-  return await listUsageCountedTranscriptFileStats(agentId);
+  return await listUsageCountedTranscriptFileStats(agentId, params);
 }
 
 function isUsageCostCacheEntryFresh(params: {
@@ -1494,14 +1503,16 @@ async function scanUsageFileForCache(params: {
   };
 }
 
-export async function refreshCostUsageCache(params?: {
+async function refreshCostUsageCacheForPath(params?: {
   config?: OpenClawConfig;
   agentId?: string;
+  cachePath?: string;
   maxFiles?: number;
+  sessionsDir?: string;
   sessionFiles?: string[];
   startMs?: number;
 }): Promise<UsageCostRefreshResult> {
-  const cachePath = resolveUsageCostCachePath(params?.agentId);
+  const cachePath = params?.cachePath ?? resolveUsageCostCachePath(params?.agentId);
   const lock = await acquireUsageCostCacheRefreshLock(cachePath);
   if (!lock.acquired) {
     return "busy";
@@ -1509,7 +1520,9 @@ export async function refreshCostUsageCache(params?: {
   try {
     const pricingFingerprint = resolveUsageCostPricingFingerprint(params?.config);
     const cache = await readUsageCostCache(cachePath);
-    const files = await listUsageCountedTranscriptFiles(params?.agentId);
+    const files = await listUsageCountedTranscriptFiles(params?.agentId, {
+      sessionsDir: params?.sessionsDir,
+    });
     const sessionSummaryFiles = new Set(params?.sessionFiles ?? []);
     const refreshStartMs = params?.startMs;
     const refreshFiles =
@@ -1519,9 +1532,11 @@ export async function refreshCostUsageCache(params?: {
           ? files
           : files.filter((file) => file.mtimeMs >= refreshStartMs);
     const livePaths = new Set(files.map((file) => file.filePath));
+    let cacheMutated = false;
     for (const filePath of Object.keys(cache.files)) {
       if (!livePaths.has(filePath)) {
         delete cache.files[filePath];
+        cacheMutated = true;
       }
     }
 
@@ -1543,6 +1558,14 @@ export async function refreshCostUsageCache(params?: {
       .slice(0, maxFiles);
     const resolveCost = createUsageCostResolver(params?.config);
 
+    // Throttle full cache rewrites: writing a 100MB+ JSON cache after every
+    // single scanned session balloons CPU/IO into O(N * cacheSize). Instead,
+    // checkpoint at most once every USAGE_COST_CACHE_CHECKPOINT_INTERVAL_MS
+    // (or every USAGE_COST_CACHE_CHECKPOINT_FILES files) so an interrupted
+    // refresh still makes durable forward progress while a normal refresh of
+    // thousands of files only pays the serialization cost a handful of times.
+    let dirtyCount = 0;
+    let lastCheckpointMs = Date.now();
     for (const file of staleFiles) {
       cache.files[file.filePath] = await scanUsageFileForCache({
         file,
@@ -1551,16 +1574,38 @@ export async function refreshCostUsageCache(params?: {
         previous: cache.files[file.filePath],
         includeSessionSummary: sessionSummaryFiles.has(file.filePath),
       });
+      dirtyCount += 1;
+      cacheMutated = true;
+      const now = Date.now();
+      if (
+        dirtyCount >= USAGE_COST_CACHE_CHECKPOINT_FILES ||
+        now - lastCheckpointMs >= USAGE_COST_CACHE_CHECKPOINT_INTERVAL_MS
+      ) {
+        cache.updatedAt = now;
+        await writeUsageCostCache(cachePath, cache);
+        dirtyCount = 0;
+        lastCheckpointMs = Date.now();
+      }
+    }
+
+    if (cacheMutated || dirtyCount > 0) {
       cache.updatedAt = Date.now();
       await writeUsageCostCache(cachePath, cache);
     }
-
-    cache.updatedAt = Date.now();
-    await writeUsageCostCache(cachePath, cache);
     return "refreshed";
   } finally {
     await lock.release();
   }
+}
+
+export async function refreshCostUsageCache(params?: {
+  config?: OpenClawConfig;
+  agentId?: string;
+  maxFiles?: number;
+  sessionFiles?: string[];
+  startMs?: number;
+}): Promise<UsageCostRefreshResult> {
+  return await refreshCostUsageCacheForPath(params);
 }
 
 export async function loadCostUsageSummaryFromCache(params: {
@@ -1619,7 +1664,7 @@ export async function loadCostUsageSummaryFromCache(params: {
     startMs: params.startMs,
     endMs: params.endMs,
     pricingFingerprint,
-    refreshing: usageCostRefreshes.has(params.agentId ?? "main") || refreshRunning,
+    refreshing: usageCostRefreshes.has(cachePath) || refreshRunning,
   });
 }
 
@@ -1694,7 +1739,8 @@ export async function loadSessionCostSummaryFromCache(params: {
       refreshRequested = true;
     }
   }
-  const refreshRunning = await isUsageCostCacheRefreshRunning(cachePath);
+  const refreshRunning =
+    usageCostRefreshes.has(cachePath) || (await isUsageCostCacheRefreshRunning(cachePath));
   let summary = stale ? null : (entry?.sessionSummary ?? null);
   if (!summary && params.refreshMode === "sync-when-empty") {
     summary = await loadSessionCostSummary({
@@ -1756,8 +1802,8 @@ export function requestCostUsageCacheRefresh(params?: {
   agentId?: string;
   sessionFiles?: string[];
 }): void {
-  const agentId = params?.agentId ?? "main";
-  const existing = usageCostRefreshes.get(agentId);
+  const cachePath = resolveUsageCostCachePath(params?.agentId);
+  const existing = usageCostRefreshes.get(cachePath);
   if (existing) {
     mergeUsageCostRefreshRequest(existing, params);
     return;
@@ -1765,14 +1811,16 @@ export function requestCostUsageCacheRefresh(params?: {
 
   const state: UsageCostRefreshState = {
     agentId: params?.agentId,
+    cachePath,
     config: params?.config,
     fullRefreshRequested: false,
     pendingSessionFiles: new Set(),
     running: false,
+    sessionsDir: path.dirname(cachePath),
   };
   mergeUsageCostRefreshRequest(state, params);
-  usageCostRefreshes.set(agentId, state);
-  scheduleUsageCostRefresh(agentId, state);
+  usageCostRefreshes.set(cachePath, state);
+  scheduleUsageCostRefresh(cachePath, state);
 }
 
 function mergeUsageCostRefreshRequest(
@@ -1799,7 +1847,7 @@ function mergeUsageCostRefreshRequest(
 }
 
 function scheduleUsageCostRefresh(
-  agentId: string,
+  refreshKey: string,
   state: UsageCostRefreshState,
   delayMs = 0,
 ): void {
@@ -1808,14 +1856,14 @@ function scheduleUsageCostRefresh(
   }
   const timer = setTimeout(() => {
     state.timer = undefined;
-    void runQueuedUsageCostRefresh(agentId, state);
+    void runQueuedUsageCostRefresh(refreshKey, state);
   }, delayMs);
   timer.unref?.();
   state.timer = timer;
 }
 
 async function runQueuedUsageCostRefresh(
-  agentId: string,
+  refreshKey: string,
   state: UsageCostRefreshState,
 ): Promise<void> {
   state.running = true;
@@ -1828,9 +1876,11 @@ async function runQueuedUsageCostRefresh(
         state.pendingSessionFiles.clear();
       }
       state.fullRefreshRequested = false;
-      const result = await refreshCostUsageCache({
+      const result = await refreshCostUsageCacheForPath({
+        cachePath: state.cachePath,
         config: state.config,
         agentId: state.agentId,
+        sessionsDir: state.sessionsDir,
         sessionFiles: fullRefreshRequested ? undefined : sessionFiles,
       });
       if (result === "busy") {
@@ -1850,9 +1900,9 @@ async function runQueuedUsageCostRefresh(
   } finally {
     state.running = false;
     if (state.fullRefreshRequested || state.pendingSessionFiles.size > 0) {
-      scheduleUsageCostRefresh(agentId, state, retryDelayMs);
+      scheduleUsageCostRefresh(refreshKey, state, retryDelayMs);
     } else {
-      usageCostRefreshes.delete(agentId);
+      usageCostRefreshes.delete(refreshKey);
     }
   }
 }
@@ -2024,18 +2074,20 @@ export async function loadSessionCostSummary(params: {
       if (entry.role === "assistant") {
         messageCounts.assistant += 1;
         messageCounts.total += 1;
-        const ts = entry.timestamp?.getTime();
-        if (ts !== undefined) {
+        const tsLocal = entry.timestamp?.getTime();
+        if (tsLocal !== undefined) {
           const latencyMs =
             entry.durationMs ??
-            (lastUserTimestamp !== undefined ? Math.max(0, ts - lastUserTimestamp) : undefined);
+            (lastUserTimestamp !== undefined
+              ? Math.max(0, tsLocal - lastUserTimestamp)
+              : undefined);
           if (
             latencyMs !== undefined &&
             Number.isFinite(latencyMs) &&
             latencyMs <= MAX_LATENCY_MS
           ) {
             latencyValues.push(latencyMs);
-            const dayKey = formatDayKey(entry.timestamp ?? new Date(ts));
+            const dayKey = formatDayKey(entry.timestamp ?? new Date(tsLocal));
             const dailyLatencies = dailyLatencyMap.get(dayKey) ?? [];
             dailyLatencies.push(latencyMs);
             dailyLatencyMap.set(dayKey, dailyLatencies);
@@ -2276,6 +2328,12 @@ export async function loadSessionUsageTimeSeries(params: {
     return null;
   }
 
+  if (params.maxPoints !== undefined && params.maxPoints !== null) {
+    if (!Number.isFinite(params.maxPoints) || params.maxPoints <= 0) {
+      return { sessionId: params.sessionId, points: [] };
+    }
+  }
+
   const points: SessionUsageTimePoint[] = [];
   let cumulativeTokens = 0;
   let cumulativeCost = 0;
@@ -2317,11 +2375,6 @@ export async function loadSessionUsageTimeSeries(params: {
   const sortedPoints = points.toSorted((a, b) => a.timestamp - b.timestamp);
 
   // Optionally downsample if too many points
-  if (params.maxPoints !== undefined && params.maxPoints !== null) {
-    if (!Number.isFinite(params.maxPoints) || params.maxPoints <= 0) {
-      return { sessionId: params.sessionId, points: [] };
-    }
-  }
   const maxPoints = params.maxPoints ?? 100;
   if (sortedPoints.length > maxPoints) {
     const step = Math.ceil(sortedPoints.length / maxPoints);

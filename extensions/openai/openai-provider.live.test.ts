@@ -1,4 +1,4 @@
-import { getModel, type Api, type Model } from "@earendil-works/pi-ai";
+// Openai tests cover openai provider plugin behavior.
 import OpenAI from "openai";
 import type { ProviderRuntimeModel } from "openclaw/plugin-sdk/plugin-entry";
 import { describe, expect, it } from "vitest";
@@ -19,10 +19,6 @@ type LiveModelCase = {
   reasoning: boolean;
   textVerbosity: "low" | "medium";
 };
-
-function findOpenAIModel(modelId: string): Model<Api> | null {
-  return (getModel("openai", modelId as never) as Model<Api> | undefined) ?? null;
-}
 
 function resolveLiveModelCase(modelId: string): LiveModelCase {
   switch (modelId) {
@@ -130,10 +126,6 @@ describeLive("buildOpenAIProvider live", () => {
           if (providerId !== "openai") {
             return null;
           }
-          const exactModel = findOpenAIModel(id);
-          if (exactModel) {
-            return exactModel;
-          }
           if (id === liveCase.templateId) {
             return {
               id: liveCase.templateId,
@@ -191,6 +183,6 @@ describeLive("buildOpenAIProvider live", () => {
 
       expect(response.output_text.trim()).toMatch(/^OK[.!]?$/);
     },
-    30_000,
+    180_000,
   );
 });

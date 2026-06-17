@@ -1,3 +1,4 @@
+// Covers package dist inventory collection and validation.
 import fs from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -85,6 +86,20 @@ describe("package dist inventory", () => {
         "qa-lab",
         "cli.d.ts",
       );
+      const omittedDeepPluginSdkDeclaration = path.join(
+        packageRoot,
+        "dist",
+        "plugin-sdk",
+        "src",
+        "plugin-sdk",
+        "provider-entry.d.ts",
+      );
+      const flatPluginSdkDeclaration = path.join(
+        packageRoot,
+        "dist",
+        "plugin-sdk",
+        "provider-entry.d.ts",
+      );
       const omittedQaRuntimeChunk = path.join(packageRoot, "dist", "qa-runtime-B9LDtssJ.js");
       const [omittedBuildStamp, omittedRuntimePostBuildStamp] = LOCAL_BUILD_METADATA_DIST_PATHS.map(
         (relativePath) => path.join(packageRoot, relativePath),
@@ -95,6 +110,7 @@ describe("package dist inventory", () => {
       await fs.mkdir(path.dirname(omittedQaMatrixChunk), { recursive: true });
       await fs.mkdir(path.dirname(omittedQaLabTypes), { recursive: true });
       await fs.mkdir(path.join(packageRoot, "dist", "plugin-sdk"), { recursive: true });
+      await fs.mkdir(path.dirname(omittedDeepPluginSdkDeclaration), { recursive: true });
       await fs.writeFile(packagedQaChannelRuntime, "export {};\n", "utf8");
       await fs.writeFile(packagedQaLabRuntime, "export {};\n", "utf8");
       await fs.writeFile(omittedQaChunk, "export {};\n", "utf8");
@@ -104,12 +120,16 @@ describe("package dist inventory", () => {
       await fs.writeFile(omittedQaChannelPluginSdk, "export {};\n", "utf8");
       await fs.writeFile(omittedQaChannelProtocolPluginSdk, "export {};\n", "utf8");
       await fs.writeFile(omittedQaLabTypes, "export {};\n", "utf8");
+      await fs.writeFile(omittedDeepPluginSdkDeclaration, "export {};\n", "utf8");
+      await fs.writeFile(flatPluginSdkDeclaration, "export {};\n", "utf8");
       await fs.writeFile(omittedQaRuntimeChunk, "export {};\n", "utf8");
       await fs.writeFile(omittedBuildStamp, "{}\n", "utf8");
       await fs.writeFile(omittedRuntimePostBuildStamp, "{}\n", "utf8");
       await fs.writeFile(omittedMap, "{}", "utf8");
 
-      await expect(writePackageDistInventory(packageRoot)).resolves.toStrictEqual([]);
+      await expect(writePackageDistInventory(packageRoot)).resolves.toStrictEqual([
+        "dist/plugin-sdk/provider-entry.d.ts",
+      ]);
     });
   });
 

@@ -1,3 +1,4 @@
+// Setup wizard tests cover end-to-end onboarding prompt flows.
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -618,16 +619,31 @@ describe("runSetupWizard", () => {
       prompter,
     );
 
+    expect(replaceConfigFile).toHaveBeenCalledTimes(3);
+    const migrationParams = requireRecord(
+      getMockCallArg(replaceConfigFile, 0, 0, "migration config replacement"),
+      "migration config replacement params",
+    );
+    expect(
+      requireRecord(migrationParams.nextConfig, "migration next config").plugins,
+    ).toBeUndefined();
+    const migrationWriteOptions = expectRecordFields(
+      migrationParams.writeOptions,
+      { allowConfigSizeDrop: true },
+      "migration config replacement write options",
+    );
+    expect(migrationWriteOptions.unsetPaths).toContainEqual(["plugins", "installs"]);
+
     const replaceParams = requireRecord(
-      getMockCallArg(replaceConfigFile, 0, 0, "config replacement"),
+      getMockCallArg(replaceConfigFile, 2, 0, "config replacement"),
       "config replacement params",
     );
-    const writeOptions = expectRecordFields(
+    expect(requireRecord(replaceParams.nextConfig, "next config").plugins).toBeUndefined();
+    expectRecordFields(
       replaceParams.writeOptions,
-      { allowConfigSizeDrop: true },
+      { allowConfigSizeDrop: false },
       "config replacement write options",
     );
-    expect(writeOptions.unsetPaths).toContainEqual(["plugins", "installs"]);
   });
 
   it("fails fast if the auth choice prompt returns nothing", async () => {
@@ -929,7 +945,7 @@ describe("runSetupWizard", () => {
         agents: {
           defaults: {
             model: {
-              primary: "openai-codex/gpt-5.5",
+              primary: "openai/gpt-5.5",
             },
           },
         },
@@ -943,7 +959,7 @@ describe("runSetupWizard", () => {
       {
         acceptRisk: true,
         flow: "quickstart",
-        authChoice: "openai-codex-api-key",
+        authChoice: "openai-chatgpt-api-key",
         openaiApiKey: "sk-flag-value",
         installDaemon: false,
         skipChannels: true,
@@ -958,7 +974,7 @@ describe("runSetupWizard", () => {
     );
 
     expect(applyAuthChoice).toHaveBeenCalledTimes(1);
-    const call = getMockCallArg(applyAuthChoice, 0, 0, "openai-codex auth choice");
+    const call = getMockCallArg(applyAuthChoice, 0, 0, "openai auth choice");
     const opts = (call as { opts?: Record<string, unknown> }).opts ?? {};
     expect(opts.openaiApiKey).toBe("sk-flag-value");
   });
@@ -1223,13 +1239,13 @@ describe("runSetupWizard", () => {
     resolvePluginProvidersRuntime.mockClear();
     resolveManifestProviderAuthChoice.mockReturnValue({
       pluginId: "openai",
-      providerId: "openai-codex",
+      providerId: "openai",
       methodId: "oauth",
-      choiceId: "openai-codex",
+      choiceId: "openai",
       choiceLabel: "ChatGPT/Codex Browser Login",
     });
     resolvePluginSetupProvider.mockReturnValue({
-      id: "openai-codex",
+      id: "openai",
       label: "OpenAI Codex",
       auth: [
         {
@@ -1245,7 +1261,7 @@ describe("runSetupWizard", () => {
         },
       ],
     });
-    promptAuthChoiceGrouped.mockResolvedValueOnce("openai-codex");
+    promptAuthChoiceGrouped.mockResolvedValueOnce("openai");
     const prompter = buildWizardPrompter({});
     const runtime = createRuntime();
 
@@ -1266,7 +1282,7 @@ describe("runSetupWizard", () => {
     expectRecordFields(
       getMockCallArg(resolvePluginSetupProvider, 0, 0, "plugin setup provider"),
       {
-        provider: "openai-codex",
+        provider: "openai",
         pluginIds: ["openai"],
       },
       "plugin setup provider params",

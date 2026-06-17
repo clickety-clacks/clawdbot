@@ -1,6 +1,8 @@
-import type { MessagingToolSend } from "../../agents/pi-embedded-messaging.types.js";
+/** Prepares queued follow-up payloads for source-channel delivery. */
+import type { MessagingToolSend } from "../../agents/embedded-agent-messaging.types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { stripHeartbeatToken } from "../heartbeat.js";
+import { copyReplyPayloadMetadata } from "../reply-payload.js";
 import type { OriginatingChannelType } from "../templating.js";
 import type { ReplyPayload } from "../types.js";
 import {
@@ -23,6 +25,7 @@ function hasReplyPayloadMedia(payload: ReplyPayload): boolean {
   return Array.isArray(payload.mediaUrls) && payload.mediaUrls.some((url) => url.trim().length > 0);
 }
 
+/** Strips heartbeat tokens, applies threading, and dedupes message-tool sends. */
 export function resolveFollowupDeliveryPayloads(params: {
   cfg: OpenClawConfig;
   payloads: ReplyPayload[];
@@ -58,7 +61,7 @@ export function resolveFollowupDeliveryPayloads(params: {
     if (stripped.shouldSkip && !hasMedia) {
       continue;
     }
-    sanitizedPayloads.push({ ...payload, text: stripped.text });
+    sanitizedPayloads.push(copyReplyPayloadMetadata(payload, { ...payload, text: stripped.text }));
   }
   const replyTaggedPayloads = applyReplyThreading({
     payloads: sanitizedPayloads,

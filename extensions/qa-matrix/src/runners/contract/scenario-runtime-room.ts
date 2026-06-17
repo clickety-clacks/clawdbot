@@ -1,3 +1,4 @@
+// Qa Matrix plugin module implements scenario runtime room behavior.
 import { randomUUID } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -525,6 +526,7 @@ export async function runAllowlistHotReloadScenario(context: MatrixQaScenarioCon
       },
     },
     {
+      replacePaths: [`channels.matrix.accounts.${accountId}.groupAllowFrom`],
       restartDelayMs: MATRIX_QA_HOT_RELOAD_RESTART_DELAY_MS,
     },
   );

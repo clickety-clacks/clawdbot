@@ -1,3 +1,6 @@
+/**
+ * Runtime plugin config regression tests.
+ */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 
@@ -20,7 +23,7 @@ describe("resolveGatewayPluginConfig", () => {
     mocks.getCurrentPluginMetadataSnapshot.mockReset();
   });
 
-  it("reuses auto-enabled config for the same runtime config and metadata snapshot", async () => {
+  it("delegates same-snapshot freshness to plugin auto-enable", async () => {
     const { resolveGatewayPluginConfig } = await import("./runtime-plugin-config.js");
     const config = { channels: { telegram: { botToken: "token" } } } as OpenClawConfig;
     const snapshot = { manifestRegistry: { plugins: [], diagnostics: [] } };
@@ -31,10 +34,17 @@ describe("resolveGatewayPluginConfig", () => {
     expect(resolveGatewayPluginConfig({ config })).toBe(resolved);
     expect(resolveGatewayPluginConfig({ config })).toBe(resolved);
 
-    expect(mocks.applyPluginAutoEnable).toHaveBeenCalledTimes(1);
+    expect(mocks.applyPluginAutoEnable).toHaveBeenCalledTimes(2);
+    expect(mocks.applyPluginAutoEnable).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        config,
+        manifestRegistry: snapshot.manifestRegistry,
+      }),
+    );
   });
 
-  it("refreshes the cached config when metadata snapshot changes", async () => {
+  it("uses the current metadata snapshot on every resolution", async () => {
     const { resolveGatewayPluginConfig } = await import("./runtime-plugin-config.js");
     const config = { channels: { telegram: { botToken: "token" } } } as OpenClawConfig;
     const first = { manifestRegistry: { plugins: [], diagnostics: [] } };
@@ -50,23 +60,25 @@ describe("resolveGatewayPluginConfig", () => {
     expect(mocks.applyPluginAutoEnable).toHaveBeenCalledTimes(2);
   });
 
-  it("refreshes the cached config when env object changes", async () => {
+  it("does not reuse stale output after the same env object changes", async () => {
     const { resolveGatewayPluginConfig } = await import("./runtime-plugin-config.js");
-    const config = { channels: { telegram: { botToken: "token" } } } as OpenClawConfig;
+    const config = {} as OpenClawConfig;
+    const env = { OPENCLAW_TEST_AUTO_ENABLE: "one" } as NodeJS.ProcessEnv;
     const snapshot = { manifestRegistry: { plugins: [], diagnostics: [] } };
     mocks.getCurrentPluginMetadataSnapshot.mockReturnValue(snapshot);
     mocks.applyPluginAutoEnable
-      .mockReturnValueOnce({ config: { ...config, first: true }, changes: [] })
-      .mockReturnValueOnce({ config: { ...config, second: true }, changes: [] });
+      .mockReturnValueOnce({ config: { value: "one" }, changes: [] })
+      .mockReturnValueOnce({ config: { value: "two" }, changes: [] });
 
-    expect(resolveGatewayPluginConfig({ config, env: { A: "1" } })).toMatchObject({
-      first: true,
-    });
-    expect(resolveGatewayPluginConfig({ config, env: { A: "2" } })).toMatchObject({
-      second: true,
-    });
+    expect(resolveGatewayPluginConfig({ config, env })).toMatchObject({ value: "one" });
+    env.OPENCLAW_TEST_AUTO_ENABLE = "two";
+    expect(resolveGatewayPluginConfig({ config, env })).toMatchObject({ value: "two" });
 
     expect(mocks.applyPluginAutoEnable).toHaveBeenCalledTimes(2);
+    expect(mocks.applyPluginAutoEnable).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ config, env }),
+    );
   });
 
   it("does not cache without a current metadata snapshot", async () => {

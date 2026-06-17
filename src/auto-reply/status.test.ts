@@ -1,9 +1,14 @@
+/** Tests auto-reply status message formatting. */
 import fs from "node:fs";
 import path from "node:path";
 import { withTempHome } from "openclaw/plugin-sdk/test-env";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { normalizeTestText } from "../../test/helpers/normalize-text.js";
-import { MODEL_CONTEXT_TOKEN_CACHE } from "../agents/context-cache.js";
+import { testing as cliBackendsTesting } from "../agents/cli-backends.js";
+import {
+  MODEL_CONTEXT_TOKEN_CACHE,
+  providerContextTokenCacheKey,
+} from "../agents/context-cache.js";
 import type { OpenClawConfig } from "../config/config.js";
 import { applyModelOverrideToSessionEntry } from "../sessions/model-overrides.js";
 import { createSuccessfulImageMediaDecision } from "./media-understanding.test-fixtures.js";
@@ -32,12 +37,47 @@ vi.mock("../plugins/commands.js", () => ({
   listPluginCommands,
 }));
 
+beforeEach(() => {
+  cliBackendsTesting.setDepsForTest({
+    resolvePluginSetupRegistry: () => ({
+      providers: [],
+      cliBackends: [],
+      configMigrations: [],
+      autoEnableProbes: [],
+      diagnostics: [],
+    }),
+    resolveRuntimeCliBackends: () => [],
+  });
+});
+
 afterEach(() => {
   vi.restoreAllMocks();
+  cliBackendsTesting.resetDepsForTest();
   listPluginCommands.mockReset();
   listPluginCommands.mockImplementation(() => []);
   MODEL_CONTEXT_TOKEN_CACHE.clear();
 });
+
+function registerAnthropicCliBackendForTest(): void {
+  cliBackendsTesting.setDepsForTest({
+    resolvePluginSetupRegistry: () => ({
+      providers: [],
+      cliBackends: [],
+      configMigrations: [],
+      autoEnableProbes: [],
+      diagnostics: [],
+    }),
+    resolveRuntimeCliBackends: () => [
+      {
+        id: "claude-cli",
+        modelProvider: "anthropic",
+        pluginId: "anthropic",
+        config: { command: "claude" },
+        bundleMcp: false,
+      },
+    ],
+  });
+}
 
 describe("buildStatusMessage", () => {
   it("summarizes agent readiness and context usage", () => {
@@ -49,7 +89,7 @@ describe("buildStatusMessage", () => {
               apiKey: "test-key",
               models: [
                 {
-                  id: "pi:opus",
+                  id: "test:opus",
                   cost: {
                     input: 1,
                     output: 1,
@@ -63,7 +103,7 @@ describe("buildStatusMessage", () => {
         },
       } as unknown as OpenClawConfig,
       agent: {
-        model: "anthropic/pi:opus",
+        model: "anthropic/test:opus",
         contextTokens: 32_000,
       },
       sessionEntry: {
@@ -72,6 +112,7 @@ describe("buildStatusMessage", () => {
         inputTokens: 1200,
         outputTokens: 800,
         totalTokens: 16_000,
+        totalTokensFresh: true,
         contextTokens: 32_000,
         thinkingLevel: "low",
         verboseLevel: "on",
@@ -81,14 +122,16 @@ describe("buildStatusMessage", () => {
       sessionScope: "per-sender",
       resolvedThink: "medium",
       resolvedVerbose: "off",
+      resolvedHarness: "openclaw",
       queue: { mode: "collect", depth: 0 },
       modelAuth: "api-key",
+      subagentsLine: "🤖 Subagents: 1\n- active run",
       now: 10 * 60_000, // 10 minutes later
     });
     const normalized = normalizeTestText(text);
 
     expect(normalized).toContain("OpenClaw");
-    expect(normalized).toContain("Model: anthropic/pi:opus");
+    expect(normalized).toContain("Model: anthropic/test:opus");
     expect(normalized).toContain("api-key");
     expect(normalized).toContain("Tokens: 1.2k in / 800 out");
     expect(normalized).toContain("Cost: $0.0020");
@@ -97,12 +140,13 @@ describe("buildStatusMessage", () => {
     expect(normalized).toContain("Session: agent:main:main");
     expect(normalized).toContain("updated 10m ago");
     expect(normalized).toContain("Execution: direct");
-    expect(normalized).toContain("Runtime: OpenClaw Pi Default");
+    expect(normalized).toContain("Runtime: OpenClaw Default");
     expect(normalized).not.toContain("Runner:");
     expect(normalized).toContain("Think: medium");
     expect(normalized).not.toContain("verbose");
     expect(normalized).toContain("elevated");
     expect(normalized).toContain("Queue: collect");
+    expect(normalized).toContain("- active run");
   });
 
   it("shows configured model costs for aws-sdk providers", () => {
@@ -159,7 +203,7 @@ describe("buildStatusMessage", () => {
   it("does not render stale totalTokens as current context usage", () => {
     const text = buildStatusMessage({
       agent: {
-        model: "anthropic/pi:opus",
+        model: "anthropic/test:opus",
         contextTokens: 1_000_000,
       },
       sessionEntry: {
@@ -183,10 +227,34 @@ describe("buildStatusMessage", () => {
     expect(normalized).not.toContain("Context: 3.8m/1.0m");
   });
 
+  it("preserves legacy unknown-freshness totalTokens as context usage", () => {
+    const text = buildStatusMessage({
+      agent: {
+        model: "anthropic/test:opus",
+        contextTokens: 1_000_000,
+      },
+      sessionEntry: {
+        sessionId: "abc",
+        updatedAt: 0,
+        totalTokens: 25_000,
+        contextTokens: 1_000_000,
+      },
+      sessionKey: "agent:main:main",
+      sessionScope: "per-sender",
+      queue: { mode: "collect", depth: 0 },
+      modelAuth: "api-key",
+      now: 10 * 60_000,
+    });
+    const normalized = normalizeTestText(text);
+
+    expect(normalized).toContain("Context: 25k/1.0m");
+    expect(normalized).not.toContain("Context: ?/1.0m");
+  });
+
   it("uses estimated context budget status when fresh totalTokens are unavailable", () => {
     const text = buildStatusMessage({
       agent: {
-        model: "anthropic/pi:opus",
+        model: "anthropic/claude-sonnet-4.6",
         contextTokens: 1_000_000,
       },
       sessionEntry: {
@@ -202,7 +270,7 @@ describe("buildStatusMessage", () => {
           source: "pre-prompt-estimate",
           updatedAt: 1,
           provider: "anthropic",
-          model: "pi:opus",
+          model: "claude-sonnet-4.6",
           route: "fits",
           shouldCompact: false,
           estimatedPromptTokens: 640_000,
@@ -233,7 +301,7 @@ describe("buildStatusMessage", () => {
   it("prefers fresh totalTokens over estimated context budget status", () => {
     const text = buildStatusMessage({
       agent: {
-        model: "anthropic/pi:opus",
+        model: "anthropic/claude-sonnet-4.6",
         contextTokens: 1_000_000,
       },
       sessionEntry: {
@@ -247,7 +315,7 @@ describe("buildStatusMessage", () => {
           source: "pre-prompt-estimate",
           updatedAt: 1,
           provider: "anthropic",
-          model: "pi:opus",
+          model: "claude-sonnet-4.6",
           route: "fits",
           shouldCompact: false,
           estimatedPromptTokens: 640_000,
@@ -277,7 +345,7 @@ describe("buildStatusMessage", () => {
   it("uses estimated context budget status when token usage is absent", () => {
     const text = buildStatusMessage({
       agent: {
-        model: "anthropic/pi:opus",
+        model: "anthropic/claude-sonnet-4.6",
         contextTokens: 1_000_000,
       },
       sessionEntry: {
@@ -289,7 +357,7 @@ describe("buildStatusMessage", () => {
           source: "pre-prompt-estimate",
           updatedAt: 1,
           provider: "anthropic",
-          model: "pi:opus",
+          model: "claude-sonnet-4.6",
           route: "fits",
           shouldCompact: false,
           estimatedPromptTokens: 125_000,
@@ -454,7 +522,7 @@ describe("buildStatusMessage", () => {
   it("falls back to sessionEntry levels when resolved levels are not passed", () => {
     const text = buildStatusMessage({
       agent: {
-        model: "anthropic/pi:opus",
+        model: "anthropic/test:opus",
       },
       sessionEntry: {
         sessionId: "abc",
@@ -477,7 +545,7 @@ describe("buildStatusMessage", () => {
     const visible = normalizeTestText(
       buildStatusMessage({
         agent: {
-          model: "anthropic/pi:opus",
+          model: "anthropic/test:opus",
         },
         sessionEntry: {
           sessionId: "abc",
@@ -497,7 +565,7 @@ describe("buildStatusMessage", () => {
     const hidden = normalizeTestText(
       buildStatusMessage({
         agent: {
-          model: "anthropic/pi:opus",
+          model: "anthropic/test:opus",
         },
         sessionEntry: {
           sessionId: "abc",
@@ -523,7 +591,7 @@ describe("buildStatusMessage", () => {
     const visible = normalizeTestText(
       buildStatusMessage({
         agent: {
-          model: "anthropic/pi:opus",
+          model: "anthropic/test:opus",
         },
         sessionEntry: {
           sessionId: "abc",
@@ -550,7 +618,7 @@ describe("buildStatusMessage", () => {
     const hidden = normalizeTestText(
       buildStatusMessage({
         agent: {
-          model: "anthropic/pi:opus",
+          model: "anthropic/test:opus",
         },
         sessionEntry: {
           sessionId: "abc",
@@ -567,7 +635,7 @@ describe("buildStatusMessage", () => {
     const visible = normalizeTestText(
       buildStatusMessage({
         agent: {
-          model: "anthropic/pi:opus",
+          model: "anthropic/test:opus",
         },
         sessionEntry: {
           sessionId: "abc",
@@ -592,7 +660,7 @@ describe("buildStatusMessage", () => {
     const visible = normalizeTestText(
       buildStatusMessage({
         agent: {
-          model: "anthropic/pi:opus",
+          model: "anthropic/test:opus",
         },
         sessionEntry: {
           sessionId: "abc",
@@ -650,25 +718,25 @@ describe("buildStatusMessage", () => {
     expect(normalized).not.toContain("· codex");
   });
 
-  it("shows the default PI harness as the model runtime", () => {
+  it("shows the default OpenClaw harness as the model runtime", () => {
     const text = buildStatusMessage({
       agent: {
         model: "openai/gpt-5.4",
       },
       sessionEntry: {
-        sessionId: "pi-harness",
+        sessionId: "openclaw-harness",
         updatedAt: 0,
         fastMode: true,
       },
       sessionKey: "agent:main:main",
       queue: { mode: "collect", depth: 0 },
-      resolvedHarness: "pi",
+      resolvedHarness: "openclaw",
     });
 
     const normalized = normalizeTestText(text);
     expect(normalized).toContain("Fast");
-    expect(normalized).toContain("Runtime: OpenClaw Pi Default");
-    expect(normalized).not.toContain("· pi");
+    expect(normalized).toContain("Runtime: OpenClaw Default");
+    expect(normalized).not.toContain("· openclaw");
   });
 
   it("shows fast mode when disabled", () => {
@@ -693,9 +761,9 @@ describe("buildStatusMessage", () => {
       config: {
         agents: {
           defaults: {
-            model: "openai-codex/gpt-5.4",
+            model: "openai/gpt-5.4",
             models: {
-              "openai-codex/gpt-5.4": {
+              "openai/gpt-5.4": {
                 params: {
                   textVerbosity: "low",
                 },
@@ -705,7 +773,7 @@ describe("buildStatusMessage", () => {
         },
       } as unknown as OpenClawConfig,
       agent: {
-        model: "openai-codex/gpt-5.4",
+        model: "openai/gpt-5.4",
       },
       sessionEntry: {
         sessionId: "abc",
@@ -723,9 +791,9 @@ describe("buildStatusMessage", () => {
       config: {
         agents: {
           defaults: {
-            model: "openai-codex/gpt-5.4",
+            model: "openai/gpt-5.4",
             models: {
-              "openai-codex/gpt-5.4": {
+              "openai/gpt-5.4": {
                 params: {
                   textVerbosity: "high",
                 },
@@ -744,7 +812,7 @@ describe("buildStatusMessage", () => {
       } as unknown as OpenClawConfig,
       agentId: "main",
       agent: {
-        model: "openai-codex/gpt-5.4",
+        model: "openai/gpt-5.4",
       },
       sessionEntry: {
         sessionId: "abc",
@@ -818,6 +886,7 @@ describe("buildStatusMessage", () => {
         channel: "discord",
         groupId: "123",
         totalTokens: 49_000,
+        totalTokensFresh: true,
         contextTokens: 1_048_576,
       },
       sessionKey: "agent:main:main",
@@ -853,6 +922,7 @@ describe("buildStatusMessage", () => {
         sessionId: "ctx1m",
         updatedAt: 0,
         totalTokens: 200_000,
+        totalTokensFresh: true,
       },
       sessionKey: "agent:main:main",
       sessionScope: "per-sender",
@@ -871,6 +941,7 @@ describe("buildStatusMessage", () => {
         sessionId: "opus47",
         updatedAt: 0,
         totalTokens: 200_000,
+        totalTokensFresh: true,
       },
       sessionKey: "agent:main:main",
       sessionScope: "per-sender",
@@ -890,6 +961,7 @@ describe("buildStatusMessage", () => {
       modelOverride: "small-model",
       contextTokens: 4_096,
       totalTokens: 1_024,
+      totalTokensFresh: true,
     };
 
     applyModelOverrideToSessionEntry({
@@ -943,6 +1015,7 @@ describe("buildStatusMessage", () => {
         fallbackNoticeActiveModel: "minimax-portal/MiniMax-M2.7",
         fallbackNoticeReason: "model not allowed",
         totalTokens: 49_000,
+        totalTokensFresh: true,
         contextTokens: 1_048_576,
       },
       sessionKey: "agent:main:main",
@@ -959,6 +1032,8 @@ describe("buildStatusMessage", () => {
   });
 
   it("renders CLI runtime aliases as the selected model route", () => {
+    registerAnthropicCliBackendForTest();
+
     const text = buildStatusMessage({
       agent: {
         model: "anthropic/claude-opus-4-7",
@@ -996,6 +1071,8 @@ describe("buildStatusMessage", () => {
   });
 
   it("prefers active CLI OAuth over selected env API-key labels for runtime aliases", () => {
+    registerAnthropicCliBackendForTest();
+
     const text = buildStatusMessage({
       config: {
         models: {
@@ -1071,6 +1148,7 @@ describe("buildStatusMessage", () => {
         fallbackNoticeActiveModel: "minimax-portal/MiniMax-M2.7",
         fallbackNoticeReason: "model not allowed",
         totalTokens: 49_000,
+        totalTokensFresh: true,
         contextTokens: 1_048_576,
       },
       sessionKey: "agent:main:main",
@@ -1115,6 +1193,7 @@ describe("buildStatusMessage", () => {
         fallbackNoticeActiveModel: "minimax-portal/MiniMax-M2.7",
         fallbackNoticeReason: "model not allowed",
         totalTokens: 49_000,
+        totalTokensFresh: true,
         contextTokens: 123_456,
       },
       sessionKey: "agent:main:main",
@@ -1161,6 +1240,7 @@ describe("buildStatusMessage", () => {
         fallbackNoticeActiveModel: "minimax-portal/MiniMax-M2.7",
         fallbackNoticeReason: "model not allowed",
         totalTokens: 49_000,
+        totalTokensFresh: true,
       },
       sessionKey: "agent:main:main",
       sessionScope: "per-sender",
@@ -1206,6 +1286,7 @@ describe("buildStatusMessage", () => {
         fallbackNoticeActiveModel: "minimax-portal/MiniMax-M2.7",
         fallbackNoticeReason: "model not allowed",
         totalTokens: 49_000,
+        totalTokensFresh: true,
       },
       sessionKey: "agent:main:main",
       sessionScope: "per-sender",
@@ -1250,6 +1331,7 @@ describe("buildStatusMessage", () => {
         fallbackNoticeActiveModel: "minimax-portal/MiniMax-M2.7",
         fallbackNoticeReason: "model not allowed",
         totalTokens: 49_000,
+        totalTokensFresh: true,
       },
       sessionKey: "agent:main:main",
       sessionScope: "per-sender",
@@ -1291,6 +1373,7 @@ describe("buildStatusMessage", () => {
         fallbackNoticeActiveModel: "custom-runtime/unknown-fallback-model",
         fallbackNoticeReason: "model not allowed",
         totalTokens: 49_000,
+        totalTokensFresh: true,
         contextTokens: 128_000,
       },
       sessionKey: "agent:main:main",
@@ -1547,6 +1630,38 @@ describe("buildStatusMessage", () => {
 
     const normalized = normalizeTestText(text);
     expect(normalized).toContain("Fallbacks: google/gemini-2.5-flash, openai/gpt-5-mini");
+  });
+
+  it("omits configured fallbacks for a session-selected model", () => {
+    const text = buildStatusMessage({
+      configuredDefaultModelLabel: "google/gemini-3-flash-preview",
+      agent: {
+        model: {
+          primary: "google/gemini-3-flash-preview",
+          fallbacks: [
+            "google/gemini-3.1-flash-lite",
+            "google/gemini-2.5-flash",
+            "google/gemini-3.1-pro-preview",
+          ],
+        },
+      },
+      sessionEntry: {
+        sessionId: "fb-session-selected",
+        updatedAt: 0,
+        modelProvider: "google",
+        model: "gemini-3.1-flash-lite",
+        modelOverride: "gemini-3.1-flash-lite",
+        modelOverrideSource: "user",
+      },
+      sessionKey: "agent:main:main",
+      sessionScope: "per-sender",
+      queue: { mode: "collect", depth: 0 },
+      modelAuth: "api-key",
+    });
+
+    const normalized = normalizeTestText(text);
+    expect(normalized).toContain("Session selected: google/gemini-3.1-flash-lite");
+    expect(normalized).not.toContain("Fallbacks:");
   });
 
   it("omits configured fallbacks line when no fallbacks provided", () => {
@@ -1907,6 +2022,54 @@ describe("buildStatusMessage", () => {
     );
   });
 
+  it("does not let legacy cumulative session totals override fresh transcript context usage", async () => {
+    await withTempHome(
+      async (dir) => {
+        const sessionId = "sess-legacy-cumulative-context";
+        writeTranscriptUsageLog({
+          dir,
+          agentId: "main",
+          sessionId,
+          usage: {
+            input: 10_000,
+            output: 1_000,
+            cacheRead: 26_000,
+            cacheWrite: 0,
+            totalTokens: 36_000,
+          },
+        });
+
+        const text = buildStatusMessage({
+          agent: {
+            model: "anthropic/claude-opus-4-6",
+            contextTokens: 1_000_000,
+          },
+          sessionEntry: {
+            sessionId,
+            updatedAt: 0,
+            inputTokens: 16,
+            outputTokens: 5_100,
+            cacheRead: 2_300_000,
+            cacheWrite: 11_000,
+            totalTokens: 2_300_000,
+            contextTokens: 1_000_000,
+          },
+          sessionKey: "agent:main:main",
+          sessionScope: "per-sender",
+          queue: { mode: "collect", depth: 0 },
+          includeTranscriptUsage: true,
+          modelAuth: "api-key",
+        });
+        const normalized = normalizeTestText(text);
+
+        expect(normalized).toContain("Cache: 100% hit · 2.3m cached, 11k new");
+        expect(normalized).toContain("Context: 36k/1.0m (4%)");
+        expect(normalized).not.toContain("Context: 2.3m/1.0m");
+      },
+      { prefix: "openclaw-status-" },
+    );
+  });
+
   it("reads transcript usage for non-default agents", async () => {
     await withTempHome(
       async (dir) => {
@@ -2163,6 +2326,7 @@ describe("buildStatusMessage", () => {
         sessionId: "sess-runtime-slash-id",
         updatedAt: 0,
         totalTokens: 1205,
+        totalTokensFresh: true,
         model: "google/gemini-2.5-pro",
       },
       sessionKey: "agent:main:main",
@@ -2205,6 +2369,7 @@ describe("buildStatusMessage", () => {
         fallbackNoticeActiveModel: "fake-minimax/FakeMiniMax-M2.5",
         fallbackNoticeReason: "model not allowed",
         totalTokens: 49_000,
+        totalTokensFresh: true,
       },
       sessionKey: "agent:main:main",
       sessionScope: "per-sender",
@@ -2240,6 +2405,7 @@ describe("buildStatusMessage", () => {
         updatedAt: 0,
         model: "openai/gpt-4o",
         totalTokens: 49_000,
+        totalTokensFresh: true,
       },
       sessionKey: "agent:main:main",
       sessionScope: "per-sender",
@@ -2257,7 +2423,10 @@ describe("buildStatusMessage", () => {
     await withTempHome(
       async (dir) => {
         MODEL_CONTEXT_TOKEN_CACHE.set("gemini-2.5-pro", 128_000);
-        MODEL_CONTEXT_TOKEN_CACHE.set("google-gemini-cli/gemini-2.5-pro", 1_000_000);
+        MODEL_CONTEXT_TOKEN_CACHE.set(
+          providerContextTokenCacheKey("google-gemini-cli", "gemini-2.5-pro"),
+          1_000_000,
+        );
 
         const sessionId = "sess-google-bare-model";
         writeTranscriptUsageLog({
@@ -2300,7 +2469,10 @@ describe("buildStatusMessage", () => {
 
   it("prefers provider-qualified context windows for fresh bare model ids", () => {
     MODEL_CONTEXT_TOKEN_CACHE.set("claude-opus-4-6", 200_000);
-    MODEL_CONTEXT_TOKEN_CACHE.set("anthropic/claude-opus-4-6", 1_000_000);
+    MODEL_CONTEXT_TOKEN_CACHE.set(
+      providerContextTokenCacheKey("anthropic", "claude-opus-4-6"),
+      1_000_000,
+    );
 
     const text = buildStatusMessage({
       agent: {
@@ -2310,6 +2482,7 @@ describe("buildStatusMessage", () => {
         sessionId: "sess-anthropic-qualified-context",
         updatedAt: 0,
         totalTokens: 25_000,
+        totalTokensFresh: true,
       },
       sessionKey: "agent:main:main",
       sessionScope: "per-sender",
@@ -2323,7 +2496,7 @@ describe("buildStatusMessage", () => {
   });
 
   it("does not let agent contextTokens inflate status above the model window", () => {
-    MODEL_CONTEXT_TOKEN_CACHE.set("openai/gpt-5.5", 272_000);
+    MODEL_CONTEXT_TOKEN_CACHE.set(providerContextTokenCacheKey("openai", "gpt-5.5"), 272_000);
 
     const text = buildStatusMessage({
       agent: {
@@ -2331,9 +2504,10 @@ describe("buildStatusMessage", () => {
         contextTokens: 1_000_000,
       },
       sessionEntry: {
-        sessionId: "sess-openai-codex-cap-context",
+        sessionId: "sess-openai-chatgpt-cap-context",
         updatedAt: 0,
         totalTokens: 25_000,
+        totalTokensFresh: true,
       },
       sessionKey: "agent:main:main",
       sessionScope: "per-sender",
@@ -2355,9 +2529,10 @@ describe("buildStatusMessage", () => {
       explicitConfiguredContextTokens: 1_000_000,
       runtimeContextTokens: 272_000,
       sessionEntry: {
-        sessionId: "sess-openai-codex-runtime-cap-context",
+        sessionId: "sess-openai-chatgpt-runtime-cap-context",
         updatedAt: 0,
         totalTokens: 25_000,
+        totalTokensFresh: true,
       },
       sessionKey: "agent:main:main",
       sessionScope: "per-sender",
@@ -2395,6 +2570,7 @@ describe("buildStatusMessage", () => {
         fallbackNoticeActiveModel: "custom-runtime/unknown-fallback-model",
         fallbackNoticeReason: "model not allowed",
         totalTokens: 49_000,
+        totalTokensFresh: true,
         contextTokens: 128_000,
       },
       sessionKey: "agent:main:main",

@@ -1,3 +1,4 @@
+// Discord tests cover handle action plugin behavior.
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -77,6 +78,24 @@ describe("handleDiscordMessageAction", () => {
       },
       cfg,
     });
+  });
+
+  it("rejects fractional moderation durations before invoking Discord runtime", async () => {
+    const cfg = discordConfig({ moderation: true });
+    await expect(
+      handleDiscordMessageAction({
+        action: "timeout",
+        params: {
+          guildId: "guild-1",
+          userId: "user-2",
+          durationMin: 5.5,
+        },
+        cfg,
+        requesterSenderId: "trusted-sender-id",
+        toolContext: { currentChannelProvider: "discord" },
+      }),
+    ).rejects.toThrow("durationMin must be a non-negative integer");
+    expect(handleDiscordActionMock).not.toHaveBeenCalled();
   });
 
   it("uses Discord requesterSenderId for guild admin actions and ignores params senderUserId", async () => {

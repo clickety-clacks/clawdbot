@@ -1,3 +1,4 @@
+// Channel id tests cover identifier normalization and validation helpers.
 import { describe, expect, it } from "vitest";
 import { listBundledChannelCatalogEntries } from "./bundled-channel-catalog-read.js";
 import {
@@ -36,6 +37,7 @@ describe("channel ids", () => {
     expect(normalizeChatChannelId("gchat")).toBe("googlechat");
     expect(normalizeChatChannelId("google-chat")).toBe("googlechat");
     expect(normalizeChatChannelId("internet-relay-chat")).toBe("irc");
+    expect(normalizeChatChannelId("clawline-dm")).toBe("clawline");
     expect(normalizeChatChannelId("telegram")).toBe("telegram");
     expect(normalizeChatChannelId("web")).toBeNull();
     expect(normalizeChatChannelId("nope")).toBeNull();

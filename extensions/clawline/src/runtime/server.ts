@@ -55,12 +55,13 @@ import {
   resolveModelAuthMode,
   resolveSessionStoreEntry,
   resolvePinnedHostname,
-  readCodexAppServerFastMode,
-  setCodexAppServerFastMode,
+  readCodexConversationFastMode,
+  setCodexConversationFastMode,
   updateSessionStore,
   applySessionsPatchToStore,
   buildAllowedModelSet,
   loadModelCatalog,
+  type CodexConversationFastModeStatus,
   type ModelCatalogEntry,
   type PinnedHostname,
   type ReplyPayload,
@@ -147,6 +148,19 @@ type PtyProcess = {
   onData(callback: (data: string) => void): void;
   onExit(callback: (event: { exitCode?: number }) => void): void;
 };
+
+async function readClawlineCodexConversationFastMode(params: {
+  sessionFile: string;
+}): Promise<CodexConversationFastModeStatus> {
+  return await readCodexConversationFastMode(params);
+}
+
+async function setClawlineCodexConversationFastMode(params: {
+  sessionFile: string;
+  enabled: boolean;
+}): Promise<void> {
+  await setCodexConversationFastMode(params);
+}
 
 function isClientPayload(value: unknown): value is ClientPayload {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -475,28 +489,6 @@ function parseClientFeatures(payload: unknown): Set<string> {
     addValues(clientRecord.features);
   }
   return out;
-}
-
-function parseAdoptedSessionKeys(payload: unknown): string[] {
-  if (!payload || typeof payload !== "object") {
-    return [];
-  }
-  const record = payload as { adoptedSessionKeys?: unknown };
-  if (!Array.isArray(record.adoptedSessionKeys)) {
-    return [];
-  }
-  const deduped = new Map<string, string>();
-  for (const item of record.adoptedSessionKeys) {
-    if (typeof item !== "string") {
-      continue;
-    }
-    const trimmed = item.trim();
-    if (!trimmed) {
-      continue;
-    }
-    deduped.set(trimmed.toLowerCase(), trimmed.toLowerCase());
-  }
-  return [...deduped.values()];
 }
 
 function normalizeMimeForComparison(value: unknown): string | null {
@@ -6446,7 +6438,7 @@ button.deny { background: #9b1c31; color: white; }
     if (!sessionFile) {
       return { supported: false, enabled: null, reason: "codex_thread_not_attached" };
     }
-    const fastMode = await readCodexAppServerFastMode({ sessionFile });
+    const fastMode = await readClawlineCodexConversationFastMode({ sessionFile });
     if (!fastMode.available) {
       return { supported: false, enabled: null, reason: fastMode.reason };
     }
@@ -7119,7 +7111,7 @@ button.deny { background: #9b1c31; color: white; }
       };
     }
     try {
-      await setCodexAppServerFastMode({ sessionFile, enabled: fastMode });
+      await setClawlineCodexConversationFastMode({ sessionFile, enabled: fastMode });
       const sessionResult = await applySessionControlPatch(sessionKey, { fastMode });
       if (!sessionResult.ok) {
         return sessionResult;
@@ -7815,7 +7807,17 @@ button.deny { background: #9b1c31; color: white; }
     if (!session.isAdmin) {
       return null;
     }
-    return resolveAlertFallbackSessionKey(sessionKey);
+    const fallbackSessionKey = await resolveAlertFallbackSessionKey(sessionKey);
+    if (!fallbackSessionKey) {
+      return null;
+    }
+    const { entry } = loadSessionStoreEntryForKey(fallbackSessionKey);
+    const channelLabel =
+      normalizeChannelLabel(entry?.lastChannel) || normalizeChannelLabel(entry?.channel);
+    if (channelLabel === "openclaw" || channelLabel === "clawline") {
+      return null;
+    }
+    return fallbackSessionKey;
   }
 
   async function handleAdoptSessionRequest(req: http.IncomingMessage, res: http.ServerResponse) {
@@ -11786,14 +11788,7 @@ button.deny { background: #9b1c31; color: white; }
     }
     const peerId = derivePeerId(entry);
     const clientFeatures = parseClientFeatures(payload);
-    const clientAdoptedSessionKeys = entry.isAdmin ? parseAdoptedSessionKeys(payload) : [];
-    const storedAdoptedSessionKeys = entry.isAdmin
-      ? readAdoptedSessionKeysForUser(entry.userId)
-      : [];
-    const adoptedSessionKeys = dedupeKeys([
-      ...storedAdoptedSessionKeys,
-      ...clientAdoptedSessionKeys,
-    ]);
+    const adoptedSessionKeys = entry.isAdmin ? readAdoptedSessionKeysForUser(entry.userId) : [];
     let resolveReplayBarrier!: () => void;
     const replayBarrier = new Promise<void>((resolve) => {
       resolveReplayBarrier = resolve;

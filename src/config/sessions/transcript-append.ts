@@ -1,8 +1,10 @@
+// Transcript append utilities create headers, migrate linear JSONL, and append parent-linked turns.
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { resolveTimestampMsToIsoString } from "@openclaw/normalization-core/number-coercion";
+import type { AgentMessage } from "../../agents/runtime/index.js";
 import {
   acquireSessionWriteLock,
   resolveSessionWriteLockOptions,
@@ -10,20 +12,21 @@ import {
 import { redactTranscriptMessage } from "../../agents/transcript-redact.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { redactSecrets } from "../../logging/redact.js";
+import { createSessionTranscriptHeader } from "./transcript-header.js";
+import {
+  appendJsonlEntry,
+  serializeJsonlLine,
+  writeJsonlEntry,
+  writeJsonlLines,
+} from "./transcript-jsonl.js";
 import { streamSessionTranscriptLinesReverse } from "./transcript-stream.js";
 import { resolveOwnedSessionTranscriptWriteLockRunner } from "./transcript-write-context.js";
+import { CURRENT_SESSION_VERSION } from "./version.js";
 
 const TRANSCRIPT_APPEND_SCAN_CHUNK_BYTES = 64 * 1024;
 const SESSION_MANAGER_APPEND_MAX_BYTES = 8 * 1024 * 1024;
 
-let piCodingAgentModulePromise: Promise<typeof import("@earendil-works/pi-coding-agent")> | null =
-  null;
 const transcriptAppendQueues = new Map<string, Promise<void>>();
-
-async function loadCurrentSessionVersion(): Promise<number> {
-  piCodingAgentModulePromise ??= import("@earendil-works/pi-coding-agent");
-  return (await piCodingAgentModulePromise).CURRENT_SESSION_VERSION;
-}
 
 type TranscriptLeafInfo = {
   leafId?: string;
@@ -32,7 +35,9 @@ type TranscriptLeafInfo = {
 };
 
 async function yieldTranscriptAppendScan(): Promise<void> {
-  await new Promise<void>((resolve) => setImmediate(resolve));
+  await new Promise<void>((resolve) => {
+    setImmediate(resolve);
+  });
 }
 
 function lineParentLinkedEntryId(line: string): string | undefined {
@@ -93,6 +98,7 @@ async function readTranscriptLeafInfo(transcriptPath: string): Promise<Transcrip
           hasParentLinkedEntries = true;
         }
       }
+      // Large transcripts are scanned cooperatively so appends do not monopolize the event loop.
       await yieldTranscriptAppendScan();
     }
     const tail = carry + decoder.end();
@@ -130,7 +136,6 @@ async function migrateLinearTranscriptToParentLinked(transcriptPath: string): Pr
   leafId?: string;
 }> {
   const raw = await fs.readFile(transcriptPath, "utf-8");
-  const currentSessionVersion = await loadCurrentSessionVersion();
   const existingIds = new Set<string>();
   const output: string[] = [];
   let previousId: string | null = null;
@@ -152,23 +157,21 @@ async function migrateLinearTranscriptToParentLinked(transcriptPath: string): Pr
     }
     const record = parsed as Record<string, unknown>;
     if (record.type === "session") {
-      output.push(JSON.stringify({ ...record, version: currentSessionVersion }));
+      output.push(serializeJsonlLine({ ...record, version: CURRENT_SESSION_VERSION }));
       continue;
     }
     const id = normalizeEntryId(record.id) ?? generateEntryId(existingIds);
     existingIds.add(id);
     record.id = id;
     if (!Object.hasOwn(record, "parentId")) {
+      // Legacy linear transcripts become a linked list while preserving existing ids when present.
       record.parentId = previousId;
     }
     previousId = id;
     leafId = id;
-    output.push(JSON.stringify(record));
+    output.push(serializeJsonlLine(record));
   }
-  await fs.writeFile(transcriptPath, `${output.join("\n")}\n`, {
-    encoding: "utf-8",
-    mode: 0o600,
-  });
+  await writeJsonlLines(transcriptPath, output, { mode: 0o600 });
   const result: { leafId?: string } = {};
   if (leafId) {
     result.leafId = leafId;
@@ -184,17 +187,9 @@ async function ensureTranscriptHeader(
   if (stat?.isFile() && stat.size > 0) {
     return;
   }
-  const currentSessionVersion = await loadCurrentSessionVersion();
   await fs.mkdir(path.dirname(transcriptPath), { recursive: true });
-  const header = {
-    type: "session",
-    version: currentSessionVersion,
-    id: params.sessionId ?? randomUUID(),
-    timestamp: new Date().toISOString(),
-    cwd: params.cwd ?? process.cwd(),
-  };
-  await fs.writeFile(transcriptPath, `${JSON.stringify(header)}\n`, {
-    encoding: "utf-8",
+  const header = createSessionTranscriptHeader(params);
+  await writeJsonlEntry(transcriptPath, header, {
     mode: 0o600,
     flag: stat?.isFile() ? "w" : "wx",
   });
@@ -222,6 +217,8 @@ async function withTranscriptAppendQueue<T>(
     releaseCurrent = resolve;
   });
   const tail = previous.catch(() => undefined).then(() => current);
+  // Per-file queue is in-process only; the external session write lock still owns cross-process
+  // ordering.
   transcriptAppendQueues.set(queueKey, tail);
   await previous.catch(() => undefined);
   try {
@@ -361,10 +358,10 @@ async function appendSessionTranscriptMessageLocked<TMessage>(
     type: "message",
     id: messageId,
     ...(shouldRawAppend ? {} : { parentId: leafInfo.leafId ?? null }),
-    timestamp: new Date(now).toISOString(),
+    timestamp: resolveTimestampMsToIsoString(now),
     message: finalMessage,
   };
-  await fs.appendFile(params.transcriptPath, `${JSON.stringify(entry)}\n`, "utf-8");
+  await appendJsonlEntry(params.transcriptPath, entry);
   return { messageId, message: finalMessage, appended: true };
 }
 

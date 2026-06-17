@@ -1,3 +1,4 @@
+// Gateway CLI coverage tests cover gateway command branches and output modes.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -44,8 +45,18 @@ const { runtimeLogs, runtimeErrors, defaultRuntime } = mocks;
 vi.mock(
   new URL("../../gateway/call.ts", new URL("./gateway-cli/call.ts", import.meta.url)).href,
   () => ({
+    buildGatewayConnectionDetails: () => ({
+      message: "Gateway mode: local\nGateway target: ws://127.0.0.1:18789",
+      url: "ws://127.0.0.1:18789",
+    }),
+    buildGatewayProbeConnectionDetails: () => ({
+      preauthHandshakeTimeoutMs: 1000,
+      tlsFingerprint: undefined,
+      url: "ws://127.0.0.1:18789",
+    }),
     callGateway: (opts: unknown) => callGateway(opts),
     formatGatewayTransportErrorJson: (error: unknown) => formatGatewayTransportErrorJson(error),
+    isGatewayCredentialsRequiredError: () => false,
     randomIdempotencyKey: () => "rk_test",
   }),
 );
@@ -156,6 +167,15 @@ describe("gateway-cli coverage", () => {
 
     expect(callGateway).toHaveBeenCalledTimes(1);
     expect(runtimeLogs.join("\n")).toContain('"ok": true');
+  });
+
+  it("rejects invalid gateway call timeout before calling Gateway", async () => {
+    callGateway.mockClear();
+
+    await expectGatewayExit(["gateway", "call", "health", "--timeout", "1000ms", "--json"]);
+
+    expect(callGateway).not.toHaveBeenCalled();
+    expect(runtimeErrors.join("\n")).toContain("Gateway call failed: Error: Invalid --timeout");
   });
 
   it("registers gateway probe and routes to gatewayStatusCommand", async () => {
@@ -413,11 +433,11 @@ describe("gateway-cli coverage", () => {
     expect(runtimeErrors.join("\n")).toContain("Invalid --timeout");
   });
 
-  it("validates gateway ports and handles force/start errors", async () => {
-    // Invalid port
+  it("validates gateway ports before starting", async () => {
     await expectGatewayExit(["gateway", "--port", "0", "--token", "test-token"]);
+  });
 
-    // Force free failure
+  it("reports force-free port failures", async () => {
     forceFreePortAndWait.mockImplementationOnce(async () => {
       throw new Error("boom");
     });
@@ -430,8 +450,9 @@ describe("gateway-cli coverage", () => {
       "--force",
       "--allow-unconfigured",
     ]);
+  });
 
-    // Start failure (generic)
+  it("reports gateway start failures without leaking signal listeners", async () => {
     startGatewayServer.mockRejectedValueOnce(new Error("nope"));
     const beforeSigterm = new Set(process.listeners("SIGTERM"));
     const beforeSigint = new Set(process.listeners("SIGINT"));

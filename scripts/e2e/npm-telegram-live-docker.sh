@@ -11,7 +11,8 @@ DOCKER_TARGET="${OPENCLAW_NPM_TELEGRAM_DOCKER_TARGET:-build}"
 PACKAGE_SPEC="${OPENCLAW_NPM_TELEGRAM_PACKAGE_SPEC:-openclaw@beta}"
 PACKAGE_TGZ="${OPENCLAW_NPM_TELEGRAM_PACKAGE_TGZ:-${OPENCLAW_CURRENT_PACKAGE_TGZ:-}}"
 PACKAGE_LABEL="${OPENCLAW_NPM_TELEGRAM_PACKAGE_LABEL:-}"
-OUTPUT_DIR="${OPENCLAW_NPM_TELEGRAM_OUTPUT_DIR:-.artifacts/qa-e2e/npm-telegram-live}"
+RUN_ID="${OPENCLAW_NPM_TELEGRAM_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+OUTPUT_DIR="${OPENCLAW_NPM_TELEGRAM_OUTPUT_DIR:-.artifacts/qa-e2e/npm-telegram-live/$RUN_ID}"
 
 resolve_credential_source() {
   if [ -n "${OPENCLAW_NPM_TELEGRAM_CREDENTIAL_SOURCE:-}" ]; then
@@ -73,9 +74,11 @@ resolve_package_tgz() {
 
 package_mount_args=()
 package_install_source="$PACKAGE_SPEC"
+package_source_kind="npm-package"
 resolved_package_tgz="$(resolve_package_tgz "$PACKAGE_TGZ")"
 if [ -n "$resolved_package_tgz" ]; then
   package_install_source="/package-under-test/$(basename "$resolved_package_tgz")"
+  package_source_kind="packed-tarball"
   package_mount_args=(-v "$resolved_package_tgz:$package_install_source:ro")
 else
   validate_openclaw_package_spec "$PACKAGE_SPEC"
@@ -90,8 +93,12 @@ fi
 
 credential_source="$(resolve_credential_source)"
 credential_role="$(resolve_credential_role)"
-if [ -z "$credential_role" ] && [ -n "${CI:-}" ] && [ "$credential_source" = "convex" ]; then
-  credential_role="ci"
+if [ -z "$credential_role" ] && [ "$credential_source" = "convex" ]; then
+  if [ -n "${CI:-}" ]; then
+    credential_role="ci"
+  else
+    credential_role="maintainer"
+  fi
 fi
 
 validate_credential_preflight() {
@@ -148,16 +155,10 @@ validate_credential_preflight
 
 docker_e2e_build_or_reuse "$IMAGE_NAME" npm-telegram-live "$ROOT_DIR/scripts/e2e/Dockerfile" "$ROOT_DIR" "$DOCKER_TARGET"
 
-host_output_dir="$OUTPUT_DIR"
-case "$host_output_dir" in
-  /*) ;;
-  *) host_output_dir="$ROOT_DIR/$host_output_dir" ;;
-esac
-mkdir -p "$host_output_dir"
-run_log="$host_output_dir/npm-telegram-live.log"
-: >"$run_log"
+mkdir -p "$ROOT_DIR/.artifacts/qa-e2e"
+run_log="$(mktemp "${TMPDIR:-/tmp}/openclaw-npm-telegram-live.XXXXXX")"
 npm_prefix_host="$(mktemp -d "$ROOT_DIR/.artifacts/qa-e2e/npm-telegram-live-prefix.XXXXXX")"
-trap 'rm -rf "$npm_prefix_host"' EXIT
+trap 'rm -f "$run_log"; rm -rf "$npm_prefix_host"' EXIT
 
 docker_env=(
   -e COREPACK_ENABLE_DOWNLOAD_PROMPT=0
@@ -165,8 +166,10 @@ docker_env=(
   -e OPENCLAW_NPM_TELEGRAM_PACKAGE_SPEC="$PACKAGE_SPEC"
   -e OPENCLAW_NPM_TELEGRAM_PACKAGE_LABEL="$PACKAGE_LABEL"
   -e OPENCLAW_NPM_TELEGRAM_OUTPUT_DIR="$OUTPUT_DIR"
+  -e OPENCLAW_QA_PACKAGE_SOURCE="$package_install_source"
+  -e OPENCLAW_QA_PACKAGE_SOURCE_KIND="$package_source_kind"
+  -e OPENCLAW_QA_RUNNER="${OPENCLAW_QA_RUNNER:-docker}"
   -e OPENCLAW_NPM_TELEGRAM_FAST="${OPENCLAW_NPM_TELEGRAM_FAST:-1}"
-  -e OPENCLAW_QA_SUITE_PROGRESS="${OPENCLAW_QA_SUITE_PROGRESS:-1}"
 )
 
 forward_env_if_set() {
@@ -205,7 +208,7 @@ for key in \
   OPENCLAW_QA_CREDENTIAL_OWNER_ID \
   OPENCLAW_QA_ALLOW_INSECURE_HTTP \
   OPENCLAW_QA_REDACT_PUBLIC_METADATA \
-  OPENCLAW_QA_TELEGRAM_CAPTURE_CONTENT \
+  OPENCLAW_QA_PACKAGE_SOURCE_SHA \
   OPENCLAW_QA_TELEGRAM_CANARY_TIMEOUT_MS \
   OPENCLAW_QA_TELEGRAM_SCENARIO_TIMEOUT_MS \
   OPENCLAW_QA_SUITE_PROGRESS \
@@ -213,6 +216,10 @@ for key in \
   OPENCLAW_NPM_TELEGRAM_MODEL \
   OPENCLAW_NPM_TELEGRAM_ALT_MODEL \
   OPENCLAW_NPM_TELEGRAM_SCENARIOS \
+  OPENCLAW_NPM_TELEGRAM_RTT_SAMPLES \
+  OPENCLAW_NPM_TELEGRAM_RTT_CHECKS \
+  OPENCLAW_NPM_TELEGRAM_RTT_TIMEOUT_MS \
+  OPENCLAW_NPM_TELEGRAM_RTT_MAX_FAILURES \
   OPENCLAW_NPM_TELEGRAM_SKIP_HOTPATH \
   OPENCLAW_NPM_TELEGRAM_SUT_ACCOUNT \
   OPENCLAW_NPM_TELEGRAM_ALLOW_FAILURES; do
@@ -220,13 +227,12 @@ for key in \
 done
 
 run_logged() {
-  set +e
-  "$@" 2>&1 | tee -a "$run_log"
-  local status="${PIPESTATUS[0]}"
-  set -e
-  if [ "$status" -ne 0 ]; then
-    exit "$status"
+  if ! "$@" >"$run_log" 2>&1; then
+    docker_e2e_print_log "$run_log"
+    exit 1
   fi
+  docker_e2e_print_log "$run_log"
+  >"$run_log"
 }
 
 echo "Running package Telegram live Docker E2E ($PACKAGE_LABEL)..."
@@ -304,7 +310,7 @@ dump_hotpath_logs() {
     /tmp/openclaw-npm-telegram-doctor-check.log; do
     if [ -f "$file" ]; then
       echo "--- $file ---" >&2
-      sed -n '1,220p' "$file" >&2 || true
+      openclaw_e2e_print_log "$file" >&2
     fi
   done
 }

@@ -1056,19 +1056,16 @@ install_openclaw_from_git() {
   ensure_pnpm
   ensure_pnpm_binary_for_scripts
 
-  local cloned_repo=0
   if [[ -d "$repo_dir/.git" ]]; then
     :
   elif [[ -d "$repo_dir" ]]; then
     if [[ -z "$(ls -A "$repo_dir" 2>/dev/null || true)" ]]; then
       git clone "$repo_url" "$repo_dir"
-      cloned_repo=1
     else
       fail "Git install dir exists but is not a git repo: ${repo_dir}"
     fi
   else
     git clone "$repo_url" "$repo_dir"
-    cloned_repo=1
   fi
 
   local git_ref

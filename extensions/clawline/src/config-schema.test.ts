@@ -11,11 +11,15 @@ describe("ClawlineConfigSchema", () => {
         maxStreamsPerUser: 32,
         maxDisplayNameBytes: 120,
       },
+      sessions: {
+        maxReplayMessagesPerStream: 20,
+      },
     });
 
     expect(parsed.server?.cluSecret).toBe("clu-secret-1");
     expect(parsed.streams?.maxStreamsPerUser).toBe(32);
     expect(parsed.streams?.maxDisplayNameBytes).toBe(120);
+    expect(parsed.sessions?.maxReplayMessagesPerStream).toBe(20);
   });
 
   it("rejects non-phaseA built-in rename/delete flags", () => {

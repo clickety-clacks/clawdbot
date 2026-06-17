@@ -1,3 +1,4 @@
+// Plugin npm manifest tests validate generated plugin package manifests.
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, win32 } from "node:path";
@@ -274,7 +275,7 @@ describe("plugin npm package manifest staging", () => {
       },
       openclaw: {
         extensions: ["./index.ts"],
-        setupEntry: "./setup-entry.ts",
+        setupEntry: "./dist/setup-entry.js",
         compat: {
           pluginApi: ">=2026.4.30",
         },
@@ -295,6 +296,7 @@ describe("plugin npm package manifest staging", () => {
         );
         expect(stagedPackageJson.openclaw.extensions).toEqual(["./index.ts"]);
         expect(stagedPackageJson.openclaw.runtimeExtensions).toEqual(["./dist/index.js"]);
+        expect(stagedPackageJson.openclaw.setupEntry).toBe("./dist/setup-entry.js");
         expect(stagedPackageJson.openclaw.runtimeSetupEntry).toBe("./dist/setup-entry.js");
         expect(stagedPackageJson.bundledDependencies).toEqual([]);
         expect(stagedPackageJson.bundleDependencies).toBeUndefined();
@@ -306,6 +308,43 @@ describe("plugin npm package manifest staging", () => {
       },
     );
     expect(readFileSync(join(packageDir, "package.json"), "utf8")).toBe(originalText);
+  });
+
+  it("rewrites source exports to package-local runtime outputs while packing", () => {
+    const repoDir = makeTempRepoRoot(tempDirs, "openclaw-plugin-npm-package-exports-");
+    const packageDir = writePublishablePluginPackage(repoDir);
+    writeFileText(join(packageDir, "runtime-api.ts"), "export const marker = true;\n");
+    writeFileText(join(packageDir, "dist", "index.js"), "export {};\n");
+    writeFileText(join(packageDir, "dist", "runtime-api.js"), "export const marker = true;\n");
+    writeFileText(join(packageDir, "dist", "setup-entry.js"), "export {};\n");
+    writeJsonFile(join(packageDir, "package.json"), {
+      name: "@openclaw/diffs",
+      version: "2026.5.3",
+      type: "module",
+      exports: {
+        ".": "./index.ts",
+        "./runtime-api.js": "./runtime-api.ts",
+      },
+      openclaw: {
+        extensions: ["./index.ts"],
+        setupEntry: "./setup-entry.ts",
+        compat: {
+          pluginApi: ">=2026.4.30",
+        },
+        release: {
+          publishToNpm: true,
+        },
+      },
+    });
+
+    const resolved = resolveAugmentedPluginNpmPackageJson({
+      repoRoot: repoDir,
+      packageDir,
+    });
+    expect(resolved.packageJson?.exports).toEqual({
+      ".": "./dist/index.js",
+      "./runtime-api.js": "./dist/runtime-api.js",
+    });
   });
 
   it("installs and cleans package-local bundled dependencies while packing", () => {
