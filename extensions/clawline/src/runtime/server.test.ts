@@ -5548,6 +5548,12 @@ describe.sequential("clawline provider server", () => {
           status: "completed",
           cwd: "/tmp",
         });
+        await opts?.onApprovalEvent?.({
+          phase: "requested",
+          kind: "tool",
+          status: "blocked",
+          title: "Approval requested",
+        });
         return { text: "ok" };
       },
     });
@@ -5672,6 +5678,28 @@ describe.sequential("clawline provider server", () => {
       });
       expect(JSON.stringify(commandProgress)).not.toContain("raw command output");
       expect(JSON.stringify(commandProgress)).not.toContain("/tmp");
+
+      const blockedProgress = await waitForLiveProgressFrame("blocked progress", (value) => {
+        const event = (value as { event?: { kind?: unknown; status?: unknown } }).event;
+        return (
+          typeof value === "object" &&
+          value !== null &&
+          (value as ParsedWsFrame).type === "agent_progress" &&
+          event?.kind === "approval" &&
+          event?.status === "blocked"
+        );
+      });
+      expect(blockedProgress).toMatchObject({
+        type: "agent_progress",
+        version: 1,
+        messageId: clientMessageId,
+        state: "running",
+        event: {
+          kind: "approval",
+          status: "blocked",
+          title: "Approval requested",
+        },
+      });
 
       const completionProgress = await waitForLiveProgressFrame("completion progress", (value) => {
         const event = (value as { event?: { kind?: unknown; phase?: unknown } }).event;
@@ -8044,7 +8072,11 @@ describe.sequential("clawline provider server", () => {
         claimedName: entry.claimedName,
       });
       const authToken = pairResult.token as string;
-      const { ws, queue } = await authenticateDeviceWithQueue(ctx.port, entry.deviceId, authToken);
+      const { ws, queue } = await authenticateDeviceWithQueue(ctx.port, entry.deviceId, authToken, {
+        authPayload: {
+          clientFeatures: ["live_agent_progress_v1"],
+        },
+      });
       const messageId = `c_${randomUUID()}`;
       try {
         ws.send(
@@ -8097,6 +8129,33 @@ describe.sequential("clawline provider server", () => {
             state: "failed",
             terminalState: "failed",
             error: "clawline.promptTurn.noDelivery",
+          },
+        });
+        const failedProgress = await waitForQueuedMessageWithTimeout(queue, (value) => {
+          const typed = value as {
+            type?: string;
+            state?: string;
+            messageId?: string;
+            event?: { kind?: string; status?: string; title?: string };
+          };
+          return (
+            typed.type === "agent_progress" &&
+            typed.state === "error" &&
+            typed.messageId === messageId &&
+            typed.event?.kind === "run" &&
+            typed.event?.status === "error"
+          );
+        });
+        expect(failedProgress).toMatchObject({
+          type: "agent_progress",
+          version: 1,
+          messageId,
+          state: "error",
+          event: {
+            kind: "run",
+            phase: "error",
+            status: "error",
+            title: "Agent run failed",
           },
         });
 
