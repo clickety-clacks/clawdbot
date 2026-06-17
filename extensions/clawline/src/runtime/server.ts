@@ -8829,6 +8829,27 @@ button.deny { background: #9b1c31; color: white; }
 
     return {
       emitRunning: (input: AgentProgressItem) => emit("running", input),
+      emitPreModel: () =>
+        emit("running", {
+          kind: "stage",
+          phase: "pre_model",
+          status: "running",
+          title: "Preparing prompt",
+        }),
+      emitModelActive: () =>
+        emit("running", {
+          kind: "model",
+          phase: "active",
+          status: "running",
+          title: "Generating response",
+        }),
+      emitCompletionHandoff: () =>
+        emit("running", {
+          kind: "stage",
+          phase: "completion_handoff",
+          status: "running",
+          title: "Finishing response",
+        }),
       emitDone: () =>
         emit("final", {
           kind: "run",
@@ -9171,17 +9192,20 @@ button.deny { background: #9b1c31; color: white; }
       fastMode: null,
       cancelRequested: false,
     };
+    params.setActiveRunForProgress(activeRun);
+    activeSessionRuns.set(normalizeSessionKey(params.sessionKey), activeRun);
     let prepared: PreparedClawlinePromptTurnContext;
     try {
       params.markProcessStage?.("prompt_turn_context_finalize");
+      params.agentProgress.emitPreModel();
       prepared = await params.buildContext();
     } catch (err) {
       startingPromptTurnsBySession.delete(normalizeSessionKey(params.sessionKey));
+      activeSessionRuns.delete(normalizeSessionKey(params.sessionKey));
+      params.setActiveRunForProgress(null);
       throw err;
     }
     startingPromptTurnsBySession.delete(normalizeSessionKey(params.sessionKey));
-    params.setActiveRunForProgress(activeRun);
-    activeSessionRuns.set(normalizeSessionKey(params.sessionKey), activeRun);
     const promptRowAfterContext = selectMessageStmt.get(params.deviceId, params.messageId) as
       | { promptTurnCancelRequested?: number | null; promptTurnState?: string | null }
       | undefined;
@@ -9287,6 +9311,7 @@ button.deny { background: #9b1c31; color: white; }
                       thinkingLevel: ctx.thinkLevel ?? "off",
                       fastMode: ctx.fastMode ?? null,
                     });
+                    params.agentProgress.emitModelActive();
                   },
                 },
                 replyResolver: params.replyResolver,
@@ -9314,6 +9339,7 @@ button.deny { background: #9b1c31; color: white; }
         finalCount: result.dispatchResult.counts.final,
         elapsedMs: Date.now() - dispatchStartedAt,
       });
+      params.agentProgress.emitCompletionHandoff();
     } catch (err) {
       dispatchFailed = true;
       dispatchError = formatError(err);

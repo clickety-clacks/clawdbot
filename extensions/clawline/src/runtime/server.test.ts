@@ -5523,6 +5523,12 @@ describe.sequential("clawline provider server", () => {
     });
     const ctx = await setupTestServer([entry], {
       replyResolver: async (_ctx, opts) => {
+        opts?.onModelSelected?.({
+          provider: "openai",
+          model: "gpt-5.5",
+          thinkLevel: "medium",
+          fastMode: false,
+        });
         await opts?.onToolStart?.({
           name: "read",
           phase: "start",
@@ -5585,6 +5591,50 @@ describe.sequential("clawline provider server", () => {
         }
       };
 
+      const preModelProgress = await waitForLiveProgressFrame("pre-model progress", (value) => {
+        const event = (value as { event?: { kind?: unknown; phase?: unknown } }).event;
+        return (
+          typeof value === "object" &&
+          value !== null &&
+          (value as ParsedWsFrame).type === "agent_progress" &&
+          event?.kind === "stage" &&
+          event?.phase === "pre_model"
+        );
+      });
+      expect(preModelProgress).toMatchObject({
+        type: "agent_progress",
+        version: 1,
+        messageId: clientMessageId,
+        state: "running",
+        event: {
+          kind: "stage",
+          phase: "pre_model",
+          title: "Preparing prompt",
+        },
+      });
+
+      const modelProgress = await waitForLiveProgressFrame("model progress", (value) => {
+        const event = (value as { event?: { kind?: unknown; phase?: unknown } }).event;
+        return (
+          typeof value === "object" &&
+          value !== null &&
+          (value as ParsedWsFrame).type === "agent_progress" &&
+          event?.kind === "model" &&
+          event?.phase === "active"
+        );
+      });
+      expect(modelProgress).toMatchObject({
+        type: "agent_progress",
+        version: 1,
+        messageId: clientMessageId,
+        state: "running",
+        event: {
+          kind: "model",
+          phase: "active",
+          title: "Generating response",
+        },
+      });
+
       const toolProgress = await waitForLiveProgressFrame("tool progress", (value) => {
         const event = (value as { event?: { kind?: unknown; name?: unknown } }).event;
         return (
@@ -5622,6 +5672,28 @@ describe.sequential("clawline provider server", () => {
       });
       expect(JSON.stringify(commandProgress)).not.toContain("raw command output");
       expect(JSON.stringify(commandProgress)).not.toContain("/tmp");
+
+      const completionProgress = await waitForLiveProgressFrame("completion progress", (value) => {
+        const event = (value as { event?: { kind?: unknown; phase?: unknown } }).event;
+        return (
+          typeof value === "object" &&
+          value !== null &&
+          (value as ParsedWsFrame).type === "agent_progress" &&
+          event?.kind === "stage" &&
+          event?.phase === "completion_handoff"
+        );
+      });
+      expect(completionProgress).toMatchObject({
+        type: "agent_progress",
+        version: 1,
+        messageId: clientMessageId,
+        state: "running",
+        event: {
+          kind: "stage",
+          phase: "completion_handoff",
+          title: "Finishing response",
+        },
+      });
 
       const doneProgress = await waitForLiveProgressFrame("final progress", (value) => {
         return (
