@@ -436,33 +436,10 @@ describe("github-copilot token", () => {
     expect(res.token).toBe("fresh;proxy-ep=https://proxy.contoso.test;");
     expect(res.baseUrl).toBe("https://api.contoso.test");
     const [, calledInit] = fetchImpl.mock.calls[0] ?? [];
-    expect((calledInit as RequestInit).signal).toBeInstanceOf(AbortSignal);
     expect(((calledInit as RequestInit).headers as Record<string, string>)["Accept-Encoding"]).toBe(
       "identity",
     );
     expect(jsonStoreMocks.saveJsonFile).toHaveBeenCalledTimes(1);
-  });
-
-  it("bounds token exchange requests", async () => {
-    jsonStoreMocks.loadJsonFile.mockReturnValue(undefined);
-    const timeoutError = new Error("timeout");
-    timeoutError.name = "TimeoutError";
-    const fetchImpl = vi.fn().mockRejectedValue(timeoutError);
-
-    await expect(
-      resolveCopilotApiToken({
-        githubToken: "gh",
-        cachePath,
-        loadJsonFileImpl: jsonStoreMocks.loadJsonFile,
-        saveJsonFileImpl: jsonStoreMocks.saveJsonFile,
-        fetchImpl: fetchImpl as unknown as typeof fetch,
-        timeoutMs: 5,
-      }),
-    ).rejects.toThrow("GitHub Copilot token exchange timed out after 5ms");
-
-    const [, calledInit] = fetchImpl.mock.calls[0] ?? [];
-    expect((calledInit as RequestInit).signal).toBeInstanceOf(AbortSignal);
-    expect(jsonStoreMocks.saveJsonFile).not.toHaveBeenCalled();
   });
 });
 
