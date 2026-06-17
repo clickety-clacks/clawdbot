@@ -173,6 +173,14 @@ type LegacyClientMessageFrame = {
   references?: unknown;
 };
 
+function logClawlineProviderDiag(
+  logGateway: SubsystemLogger,
+  event: string,
+  details: Record<string, unknown>,
+): void {
+  logGateway.info(`[ClawlineProviderDiag] ${event} ${JSON.stringify(details)}`);
+}
+
 function legacyClientMessageToChatSendRequest(frame: LegacyClientMessageFrame): RequestFrame {
   return {
     type: "req",
@@ -544,6 +552,7 @@ export function attachGatewayWsMessageHandler(params: GatewayWsMessageHandlerPar
 
     const text = rawDataToString(data);
     try {
+      const payloadBytes = getRawDataByteLength(data);
       const parsed = JSON.parse(text);
       const frameType =
         parsed && typeof parsed === "object" && "type" in parsed
@@ -1937,6 +1946,22 @@ export function attachGatewayWsMessageHandler(params: GatewayWsMessageHandlerPar
 
       // After handshake, accept normal request frames and the legacy Clawline message frame.
       const legacyClientMessageFrame = parseLegacyClientMessageFrame(parsed);
+      if (legacyClientMessageFrame) {
+        logClawlineProviderDiag(logGateway, "ws_legacy_frame_received", {
+          connId,
+          clientMessageId: legacyClientMessageFrame.id,
+          sessionKey: legacyClientMessageFrame.sessionKey,
+          contentChars: legacyClientMessageFrame.content.length,
+          attachmentCount: Array.isArray(legacyClientMessageFrame.attachments)
+            ? legacyClientMessageFrame.attachments.length
+            : 0,
+          hasReferences: legacyClientMessageFrame.references !== undefined,
+          payloadBytes,
+          clientId: client.connect?.client?.id,
+          deviceId: client.connect?.device?.id,
+          scopes: client.connect?.scopes,
+        });
+      }
       if (!legacyClientMessageFrame && !validateRequestFrame(parsed)) {
         send({
           type: "res",
@@ -1953,6 +1978,14 @@ export function attachGatewayWsMessageHandler(params: GatewayWsMessageHandlerPar
         ? legacyClientMessageToChatSendRequest(legacyClientMessageFrame)
         : parsed;
       const legacyClientMessageId = legacyClientMessageFrame?.id;
+      if (legacyClientMessageFrame) {
+        logClawlineProviderDiag(logGateway, "ws_legacy_frame_mapped", {
+          connId,
+          clientMessageId: legacyClientMessageId,
+          reqId: req.id,
+          method: req.method,
+        });
+      }
       logWs("in", "req", { connId, id: req.id, method: req.method });
       for (;;) {
         const barrier = deviceCredentialMutationBarrier;
@@ -1988,6 +2021,18 @@ export function attachGatewayWsMessageHandler(params: GatewayWsMessageHandlerPar
         error?: ErrorShape,
         meta?: Record<string, unknown>,
       ) => {
+        if (legacyClientMessageId) {
+          logClawlineProviderDiag(logGateway, "ws_legacy_response", {
+            connId,
+            clientMessageId: legacyClientMessageId,
+            reqId: req.id,
+            method: req.method,
+            ok,
+            errorCode: error?.code,
+            errorMessage: error?.message,
+            ...meta,
+          });
+        }
         if (legacyClientMessageId) {
           if (ok) {
             send({ type: "ack", id: legacyClientMessageId });

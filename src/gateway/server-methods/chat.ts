@@ -2344,7 +2344,38 @@ export const chatHandlers: GatewayRequestHandlers = {
     });
   },
   "chat.send": async ({ params, respond, context, client }) => {
+    const logClawlineChatDiag = (event: string, details: Record<string, unknown>): void => {
+      context.logGateway.info(`[ClawlineProviderDiag] ${event} ${JSON.stringify(details)}`);
+    };
+    const rawParams =
+      params && typeof params === "object" && !Array.isArray(params)
+        ? (params as Record<string, unknown>)
+        : undefined;
+    const diagIdempotencyKey =
+      typeof rawParams?.idempotencyKey === "string" ? rawParams.idempotencyKey : undefined;
+    const diagSessionKey =
+      typeof rawParams?.sessionKey === "string" ? rawParams.sessionKey : undefined;
+    const diagMessageChars =
+      typeof rawParams?.message === "string" ? rawParams.message.length : undefined;
+    const diagAttachmentCount = Array.isArray(rawParams?.attachments)
+      ? rawParams.attachments.length
+      : undefined;
+    logClawlineChatDiag("chat_send_enter", {
+      idempotencyKey: diagIdempotencyKey,
+      sessionKey: diagSessionKey,
+      messageChars: diagMessageChars,
+      attachmentCount: diagAttachmentCount,
+      hasReferences: rawParams?.references !== undefined,
+      clientId: client?.connect?.client?.id,
+      deviceId: client?.connect?.device?.id,
+      connId: client?.connId,
+    });
     if (!validateChatSendParams(params)) {
+      logClawlineChatDiag("chat_send_validation_failed", {
+        idempotencyKey: diagIdempotencyKey,
+        sessionKey: diagSessionKey,
+        errors: formatValidationErrors(validateChatSendParams.errors),
+      });
       respond(
         false,
         undefined,
@@ -2448,6 +2479,19 @@ export const chatHandlers: GatewayRequestHandlers = {
         },
       },
     );
+    logClawlineChatDiag("chat_send_session_loaded", {
+      idempotencyKey: p.idempotencyKey,
+      rawSessionKey,
+      sessionKey,
+      hasEntry: entry !== undefined,
+      sessionId: entry?.sessionId,
+      agentId: resolveSessionAgentId({
+        sessionKey,
+        config: cfg,
+      }),
+      chatType: entry?.chatType,
+      channel: entry?.channel,
+    });
     const requestedSessionId = normalizeOptionalText(p.sessionId);
     const backingSessionId = entry?.sessionId ?? requestedSessionId;
     const deletedAgentId = resolveDeletedAgentIdFromSessionKey(cfg, sessionKey);
@@ -2492,6 +2536,11 @@ export const chatHandlers: GatewayRequestHandlers = {
       chatType: entry?.chatType,
     });
     if (sendPolicy === "deny") {
+      logClawlineChatDiag("chat_send_policy_denied", {
+        idempotencyKey: p.idempotencyKey,
+        sessionKey,
+        sendPolicy,
+      });
       respond(
         false,
         undefined,
@@ -2522,6 +2571,11 @@ export const chatHandlers: GatewayRequestHandlers = {
 
     const cached = context.dedupe.get(`chat:${clientRunId}`);
     if (cached) {
+      logClawlineChatDiag("chat_send_dedupe_cached", {
+        idempotencyKey: p.idempotencyKey,
+        sessionKey,
+        ok: cached.ok,
+      });
       respond(cached.ok, cached.payload, cached.error, {
         cached: true,
       });
@@ -2530,6 +2584,10 @@ export const chatHandlers: GatewayRequestHandlers = {
 
     const activeExisting = context.chatAbortControllers.get(clientRunId);
     if (activeExisting) {
+      logClawlineChatDiag("chat_send_active_existing", {
+        idempotencyKey: p.idempotencyKey,
+        sessionKey,
+      });
       respond(true, { runId: clientRunId, status: "in_flight" as const }, undefined, {
         cached: true,
         runId: clientRunId,
@@ -2659,6 +2717,11 @@ export const chatHandlers: GatewayRequestHandlers = {
         kind: "chat-send",
       });
       if (!activeRunAbort.registered) {
+        logClawlineChatDiag("chat_send_abort_controller_existing", {
+          idempotencyKey: p.idempotencyKey,
+          sessionKey,
+          backingSessionId,
+        });
         respond(true, { runId: clientRunId, status: "in_flight" as const }, undefined, {
           cached: true,
           runId: clientRunId,
@@ -2676,11 +2739,25 @@ export const chatHandlers: GatewayRequestHandlers = {
         sessionKey,
         clientRunId,
       });
+      logClawlineChatDiag("chat_send_registered", {
+        idempotencyKey: p.idempotencyKey,
+        sessionKey,
+        backingSessionId,
+        timeoutMs,
+        providerId: resolvedSessionModel.provider,
+        authProviderId: resolvedSessionAuthProvider,
+        attachmentCount: normalizedAttachments.length,
+      });
       const ackPayload = {
         runId: clientRunId,
         status: "started" as const,
       };
       respond(true, ackPayload, undefined, { runId: clientRunId });
+      logClawlineChatDiag("chat_send_ack_started", {
+        idempotencyKey: p.idempotencyKey,
+        sessionKey,
+        runId: clientRunId,
+      });
       const persistedImagesPromise = persistChatSendImages({
         images: parsedImages,
         imageOrder,
@@ -2843,6 +2920,10 @@ export const chatHandlers: GatewayRequestHandlers = {
         },
       });
       const persistGatewayUserTurnTranscript = async () => {
+        logClawlineChatDiag("chat_send_persist_user_transcript_start", {
+          idempotencyKey: p.idempotencyKey,
+          sessionKey,
+        });
         await measureDiagnosticsTimelineSpan(
           "gateway.chat_send.persist_user_transcript",
           async () => {
@@ -2854,6 +2935,10 @@ export const chatHandlers: GatewayRequestHandlers = {
             attributes: chatSendTraceAttributes,
           },
         );
+        logClawlineChatDiag("chat_send_persist_user_transcript_success", {
+          idempotencyKey: p.idempotencyKey,
+          sessionKey,
+        });
       };
       const persistGatewayUserTurnTranscriptBestEffort = async () => {
         await persistGatewayUserTurnTranscript().catch(() => undefined);
@@ -2982,6 +3067,14 @@ export const chatHandlers: GatewayRequestHandlers = {
       void measureDiagnosticsTimelineSpan(
         "gateway.chat_send.dispatch_inbound",
         async () => {
+          logClawlineChatDiag("chat_send_dispatch_start", {
+            idempotencyKey: p.idempotencyKey,
+            sessionKey,
+            hasAttachments: normalizedAttachments.length > 0,
+            explicitDeliverRoute,
+            originatingChannel,
+            originatingTo,
+          });
           applyChatSendManagedMediaFields(ctx, await pluginBoundMediaFieldsPromise);
           const dispatchResult = await dispatchInboundMessage({
             ctx,
@@ -2997,6 +3090,11 @@ export const chatHandlers: GatewayRequestHandlers = {
               userTurnTranscriptRecorder: userTurnRecorder,
               onAgentRunStart: (runId) => {
                 agentRunStarted = true;
+                logClawlineChatDiag("chat_send_agent_run_start", {
+                  idempotencyKey: p.idempotencyKey,
+                  sessionKey,
+                  runId,
+                });
                 const connId = typeof client?.connId === "string" ? client.connId : undefined;
                 const wantsToolEvents = hasGatewayClientCap(
                   client?.connect?.caps,
@@ -3029,6 +3127,12 @@ export const chatHandlers: GatewayRequestHandlers = {
           if (dispatchResult.beforeAgentRunBlocked === true) {
             userTurnRecorder.markBlocked();
           }
+          logClawlineChatDiag("chat_send_dispatch_result", {
+            idempotencyKey: p.idempotencyKey,
+            sessionKey,
+            beforeAgentRunBlocked: dispatchResult.beforeAgentRunBlocked === true,
+            agentRunStarted,
+          });
           return dispatchResult;
         },
         {
@@ -3038,6 +3142,12 @@ export const chatHandlers: GatewayRequestHandlers = {
         },
       )
         .then(async () => {
+          logClawlineChatDiag("chat_send_dispatch_then", {
+            idempotencyKey: p.idempotencyKey,
+            sessionKey,
+            agentRunStarted,
+            deliveredReplyCount: deliveredReplies.length,
+          });
           await measureDiagnosticsTimelineSpan(
             "gateway.chat_send.post_dispatch",
             async () => {
@@ -3611,6 +3721,14 @@ export const chatHandlers: GatewayRequestHandlers = {
           );
         })
         .catch(async (err) => {
+          logClawlineChatDiag("chat_send_dispatch_error", {
+            idempotencyKey: p.idempotencyKey,
+            sessionKey,
+            error: formatForLog(err),
+            agentRunStarted,
+            userTurnPersisted: userTurnRecorder.hasPersisted(),
+            userTurnBlocked: userTurnRecorder.isBlocked(),
+          });
           const emitAfterError =
             userTurnRecorder.hasPersisted() || userTurnRecorder.isBlocked()
               ? Promise.resolve()
@@ -3643,10 +3761,23 @@ export const chatHandlers: GatewayRequestHandlers = {
           });
         })
         .finally(() => {
+          logClawlineChatDiag("chat_send_cleanup", {
+            idempotencyKey: p.idempotencyKey,
+            sessionKey,
+            agentRunStarted,
+            deliveredReplyCount: deliveredReplies.length,
+            userTurnPersisted: userTurnRecorder.hasPersisted(),
+            userTurnBlocked: userTurnRecorder.isBlocked(),
+          });
           activeRunAbort.cleanup();
           context.removeChatRun(clientRunId, clientRunId, sessionKey);
         });
     } catch (err) {
+      logClawlineChatDiag("chat_send_sync_error", {
+        idempotencyKey: p.idempotencyKey,
+        sessionKey,
+        error: formatForLog(err),
+      });
       context.chatAbortControllers.delete(clientRunId);
       context.removeChatRun(clientRunId, clientRunId, sessionKey);
       const error = errorShape(ErrorCodes.UNAVAILABLE, String(err));
