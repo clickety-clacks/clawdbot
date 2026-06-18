@@ -5902,6 +5902,171 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("does not block prompt admission when stream tail send callbacks stall", async () => {
+    const primaryDeviceId = randomUUID();
+    const secondaryDeviceId = randomUUID();
+    const warnings: Array<{ message: unknown; meta: unknown }> = [];
+    let resolveReplyStarted!: () => void;
+    const replyStarted = new Promise<void>((resolve) => {
+      resolveReplyStarted = resolve;
+    });
+    const baseEntry = {
+      claimedName: "QA Sim",
+      deviceInfo: {
+        platform: "iOS",
+        model: "iPhone",
+      },
+      userId: "tail_stall_user",
+      isAdmin: false,
+      tokenDelivered: true,
+      createdAt: Date.now() - 10_000,
+      lastSeenAt: Date.now() - 5_000,
+    };
+    const ctx = await setupTestServer(
+      [
+        {
+          ...baseEntry,
+          deviceId: primaryDeviceId,
+        },
+        {
+          ...baseEntry,
+          deviceId: secondaryDeviceId,
+        },
+      ],
+      {
+        logger: {
+          ...silentLogger,
+          warn: (message: unknown, meta: unknown) => {
+            warnings.push({ message, meta });
+          },
+        },
+        replyResolver: async () => {
+          resolveReplyStarted();
+          return { text: "ok" };
+        },
+      },
+    );
+    const originalSend = WebSocket.prototype.send;
+    const sendSpy = vi.spyOn(WebSocket.prototype, "send").mockImplementation(function (
+      this: WebSocket,
+      data: WebSocket.Data,
+      optionsOrCb?:
+        | {
+            mask?: boolean | undefined;
+            binary?: boolean | undefined;
+            compress?: boolean | undefined;
+            fin?: boolean | undefined;
+          }
+        | ((err?: Error) => void),
+      cb?: (err?: Error) => void,
+    ) {
+      if (typeof data === "string") {
+        try {
+          const parsed = JSON.parse(data) as { type?: string };
+          if (parsed.type === "stream_tail_state") {
+            return;
+          }
+        } catch {
+          // Forward non-JSON frames unchanged.
+        }
+      }
+      const args =
+        cb !== undefined
+          ? [data, optionsOrCb, cb]
+          : optionsOrCb !== undefined
+            ? [data, optionsOrCb]
+            : [data];
+      return (originalSend as (...sendArgs: unknown[]) => void).apply(this, args);
+    });
+
+    let primaryQueue: ReturnType<typeof createMessageQueue> | null = null;
+    let secondaryQueue: ReturnType<typeof createMessageQueue> | null = null;
+    let primaryWs: WebSocket | null = null;
+    let secondaryWs: WebSocket | null = null;
+    try {
+      const primaryPair = await performPairRequest(ctx.port, primaryDeviceId);
+      const secondaryPair = await performPairRequest(ctx.port, secondaryDeviceId);
+      const primary = await authenticateDeviceWithQueue(
+        ctx.port,
+        primaryDeviceId,
+        primaryPair.token as string,
+        { authPayload: { client: { id: "primary-test-client", name: "Primary Test" } } },
+      );
+      const secondary = await authenticateDeviceWithQueue(
+        ctx.port,
+        secondaryDeviceId,
+        secondaryPair.token as string,
+        { authPayload: { client: { id: "secondary-test-client", name: "Secondary Test" } } },
+      );
+      primaryWs = primary.ws;
+      secondaryWs = secondary.ws;
+      primaryQueue = primary.queue;
+      secondaryQueue = secondary.queue;
+      const mainStream = (
+        primary.streamSnapshot.streams as Array<{ kind: string; sessionKey: string }>
+      ).find((stream) => stream.kind === "main");
+
+      const clientMessageId = `c_${randomUUID()}`;
+      primaryWs.send(
+        JSON.stringify({
+          type: "message",
+          id: clientMessageId,
+          content: "tail stall",
+          attachments: [],
+          sessionKey: mainStream?.sessionKey,
+        }),
+      );
+
+      await waitForQueuedMessageWithTimeout(
+        primaryQueue,
+        (value) =>
+          typeof value === "object" &&
+          value !== null &&
+          (value as { type?: string; id?: string }).type === "ack" &&
+          (value as { id?: string }).id === clientMessageId,
+      );
+      await Promise.race([
+        replyStarted,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("Reply resolver did not start")), 750),
+        ),
+      ]);
+      await vi.waitFor(
+        () => {
+          expect(warnings).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                message: "[clawline] awaited_stream_event_send_timeout",
+                meta: expect.objectContaining({
+                  sessionId: expect.any(String),
+                  deviceId: expect.stringMatching(
+                    new RegExp(`^(${primaryDeviceId}|${secondaryDeviceId})$`),
+                  ),
+                  clientId: expect.stringMatching(/^(primary-test-client|secondary-test-client)$/u),
+                  claimedName: "QA Sim",
+                  platform: "iOS",
+                  model: "iPhone",
+                  payloadType: "stream_tail_state",
+                  readyState: "open",
+                  elapsedMs: expect.any(Number),
+                  removalReason: "send_timeout",
+                }),
+              }),
+            ]),
+          );
+        },
+        { timeout: 3_000 },
+      );
+    } finally {
+      sendSpy.mockRestore();
+      primaryQueue?.dispose();
+      secondaryQueue?.dispose();
+      primaryWs?.terminate();
+      secondaryWs?.terminate();
+      await ctx.cleanup();
+    }
+  });
+
   it("surfaces a reason when terminal attachments are filtered for clients without terminal_bubbles_v1", async () => {
     const noFeatureDeviceId = randomUUID();
     const withFeatureDeviceId = randomUUID();

@@ -491,6 +491,45 @@ function parseClientFeatures(payload: unknown): Set<string> {
   return out;
 }
 
+function parseClientIdentity(payload: unknown): { clientId?: string; clientName?: string } {
+  if (!payload || typeof payload !== "object") {
+    return {};
+  }
+  const record = payload as { client?: unknown };
+  if (!record.client || typeof record.client !== "object") {
+    return {};
+  }
+  const clientRecord = record.client as { id?: unknown; name?: unknown };
+  const clientId = typeof clientRecord.id === "string" ? clientRecord.id.trim() : "";
+  const clientName = typeof clientRecord.name === "string" ? clientRecord.name.trim() : "";
+  return {
+    ...(clientId ? { clientId } : {}),
+    ...(clientName ? { clientName } : {}),
+  };
+}
+
+function parseAdoptedSessionKeys(payload: unknown): string[] {
+  if (!payload || typeof payload !== "object") {
+    return [];
+  }
+  const record = payload as { adoptedSessionKeys?: unknown };
+  if (!Array.isArray(record.adoptedSessionKeys)) {
+    return [];
+  }
+  const deduped = new Map<string, string>();
+  for (const item of record.adoptedSessionKeys) {
+    if (typeof item !== "string") {
+      continue;
+    }
+    const trimmed = item.trim();
+    if (!trimmed) {
+      continue;
+    }
+    deduped.set(trimmed.toLowerCase(), trimmed.toLowerCase());
+  }
+  return [...deduped.values()];
+}
+
 function normalizeMimeForComparison(value: unknown): string | null {
   if (typeof value !== "string") {
     return null;
@@ -1260,8 +1299,13 @@ type Session = {
   /** Global DM session key (shared operator session; admin-only). */
   globalSessionKey: string;
   peerId: string;
+  clientId?: string;
+  clientName?: string;
   claimedName?: string;
   deviceInfo?: DeviceInfo;
+  remoteAddress?: string;
+  origin?: string;
+  userAgent?: string;
   replayInProgress: boolean;
   replayDeliveredMessageIds: Set<string>;
   replayBufferedMessages: ServerMessage[];
@@ -4948,6 +4992,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const sessionsByDevice = new Map<string, Session>();
   const userSessions = new Map<string, Set<Session>>();
   const promptTurnAdmissions = new Map<string, PromptTurnAdmissionFacts>();
+  const AWAITED_BROADCAST_SEND_TIMEOUT_MS = 2_000;
   const perUserTaskQueue = createPerUserTaskQueue({
     onTaskError: (err) => {
       logger.warn?.(`per_user_task_failed: ${formatError(err)}`);
@@ -6230,6 +6275,69 @@ button.deny { background: #9b1c31; color: white; }
     }
   }
 
+  function describeBroadcastSend(
+    session: Session,
+    payload: StreamServerMessage,
+    elapsedMs: number,
+  ) {
+    return {
+      sessionId: session.sessionId,
+      deviceId: session.deviceId,
+      userId: session.userId,
+      peerId: session.peerId,
+      clientId: session.clientId ?? null,
+      clientName: session.clientName ?? null,
+      claimedName: session.claimedName ?? null,
+      platform: session.deviceInfo?.platform ?? null,
+      model: session.deviceInfo?.model ?? null,
+      osVersion: session.deviceInfo?.osVersion ?? null,
+      appVersion: session.deviceInfo?.appVersion ?? null,
+      remoteAddress: session.remoteAddress ?? null,
+      origin: session.origin ?? null,
+      userAgent: session.userAgent ?? null,
+      clientFeatures: Array.from(session.clientFeatures).sort(),
+      payloadType: payload.type,
+      sessionKey: "sessionKey" in payload ? payload.sessionKey : null,
+      readyState: socketStateLabel(session.socket),
+      elapsedMs,
+      timeoutMs: AWAITED_BROADCAST_SEND_TIMEOUT_MS,
+    };
+  }
+
+  async function sendStreamEventWithTimeout(
+    session: Session,
+    payload: StreamServerMessage,
+  ): Promise<boolean> {
+    const startedAt = Date.now();
+    let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+    const sendResult = sendJson(session.socket, payload).then((delivered) =>
+      delivered ? "delivered" : "not_delivered",
+    );
+    const timeoutResult = new Promise<"timeout">((resolve) => {
+      timeoutHandle = setTimeout(() => resolve("timeout"), AWAITED_BROADCAST_SEND_TIMEOUT_MS);
+    });
+    const result = await Promise.race([sendResult, timeoutResult]);
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
+    const elapsedMs = Date.now() - startedAt;
+    if (result === "timeout") {
+      logger.warn?.("[clawline] awaited_stream_event_send_timeout", {
+        ...describeBroadcastSend(session, payload, elapsedMs),
+        removalReason: "send_timeout",
+      });
+      return false;
+    }
+    if (result === "not_delivered") {
+      logger.warn?.("[clawline] awaited_stream_event_send_not_delivered", {
+        ...describeBroadcastSend(session, payload, elapsedMs),
+        removalReason: "send_failed_or_socket_not_open",
+      });
+      return false;
+    }
+    return true;
+  }
+
   function markAckSent(deviceId: string, clientId: string) {
     updateMessageAckStmt.run(deviceId, clientId);
   }
@@ -7402,6 +7510,23 @@ button.deny { background: #9b1c31; color: white; }
     await broadcastStreamEvent(userId, payload);
   }
 
+  function broadcastStreamTailStateForUserDetached(
+    userId: string,
+    event: ServerMessage,
+    reason: string,
+  ) {
+    void broadcastStreamTailStateForUser(userId, event).catch((err) => {
+      logger.warn?.("[clawline] detached_stream_tail_state_broadcast_failed", {
+        userId,
+        reason,
+        messageId: event.id,
+        sessionKey: event.sessionKey,
+        role: event.role,
+        error: formatError(err),
+      });
+    });
+  }
+
   function loadStreamRowForUser(userId: string, sessionKey: string): StreamSessionRow | null {
     const row = selectStreamSessionByKeyStmt.get(userId, sessionKey) as
       | StreamSessionRow
@@ -7500,7 +7625,9 @@ button.deny { background: #9b1c31; color: white; }
       if (session.replayInProgress) {
         continue;
       }
-      sends.push(sendJson(session.socket, payload).then((delivered) => ({ session, delivered })));
+      sends.push(
+        sendStreamEventWithTimeout(session, payload).then((delivered) => ({ session, delivered })),
+      );
     }
     const results = await Promise.allSettled(sends);
     for (const result of results) {
@@ -9229,8 +9356,7 @@ button.deny { background: #9b1c31; color: white; }
     let dispatchError: string | undefined;
     const dispatchStartedAt = Date.now();
     const useNativeClawlineSourceDelivery =
-      params.isNativeClawlineTurn &&
-      openClawCfg.messages?.visibleReplies === undefined;
+      params.isNativeClawlineTurn && openClawCfg.messages?.visibleReplies === undefined;
     try {
       logger.info?.("[clawline] agent_run_phase", {
         ...logContext,
@@ -10098,7 +10224,7 @@ button.deny { background: #9b1c31; color: white; }
         });
         markProcessStage("broadcast_user_message");
         broadcastToSessionKey(resolvedSessionKey, event);
-        await broadcastStreamTailStateForUser(targetUserId, event);
+        broadcastStreamTailStateForUserDetached(targetUserId, event, "prompt_admission");
 
         markProcessStage("prepare_turn_route");
         const routeSessionKey = resolvedSessionKey;
@@ -11012,7 +11138,7 @@ button.deny { background: #9b1c31; color: white; }
           await handlePairRequest(ws, payload);
           break;
         case "auth":
-          await handleAuth(ws, payload);
+          await handleAuth(ws, payload, req);
           break;
         case "message":
           await handleAuthedMessage(ws, payload);
@@ -11746,7 +11872,7 @@ button.deny { background: #9b1c31; color: white; }
     );
   }
 
-  async function handleAuth(ws: WebSocket, payload: ClientPayload) {
+  async function handleAuth(ws: WebSocket, payload: ClientPayload, req?: http.IncomingMessage) {
     if (payload.protocolVersion !== PROTOCOL_VERSION) {
       await sendJson(ws, {
         type: "error",
@@ -11805,7 +11931,17 @@ button.deny { background: #9b1c31; color: white; }
     }
     const peerId = derivePeerId(entry);
     const clientFeatures = parseClientFeatures(payload);
-    const adoptedSessionKeys = entry.isAdmin ? readAdoptedSessionKeysForUser(entry.userId) : [];
+    const clientIdentity = parseClientIdentity(payload);
+    const originHeader = req?.headers?.origin;
+    const userAgentHeader = req?.headers?.["user-agent"];
+    const clientAdoptedSessionKeys = entry.isAdmin ? parseAdoptedSessionKeys(payload) : [];
+    const storedAdoptedSessionKeys = entry.isAdmin
+      ? readAdoptedSessionKeysForUser(entry.userId)
+      : [];
+    const adoptedSessionKeys = dedupeKeys([
+      ...storedAdoptedSessionKeys,
+      ...clientAdoptedSessionKeys,
+    ]);
     let resolveReplayBarrier!: () => void;
     const replayBarrier = new Promise<void>((resolve) => {
       resolveReplayBarrier = resolve;
@@ -11826,8 +11962,12 @@ button.deny { background: #9b1c31; color: white; }
       dmSessionKey: "",
       globalSessionKey: "",
       peerId,
+      ...clientIdentity,
       claimedName: entry.claimedName,
       deviceInfo: entry.deviceInfo,
+      remoteAddress: req?.socket?.remoteAddress,
+      origin: Array.isArray(originHeader) ? originHeader[0] : originHeader,
+      userAgent: Array.isArray(userAgentHeader) ? userAgentHeader[0] : userAgentHeader,
       replayInProgress: true,
       replayDeliveredMessageIds: new Set(),
       replayBufferedMessages: [],
