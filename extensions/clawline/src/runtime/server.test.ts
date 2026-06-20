@@ -7958,6 +7958,277 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("delivers final assistant text for Clawline direct prompts without message tool sends", async () => {
+    const entry = createAllowlistEntry();
+    const sessionKey = "agent:main:clawline:flynn:main";
+    let sourceReplyDeliveryMode: unknown;
+    const replyResolver: typeof testReplyResolver = async (_ctx, opts) => {
+      sourceReplyDeliveryMode = opts?.sourceReplyDeliveryMode;
+      return { text: "visible final reply" };
+    };
+    const ctx = await setupTestServer([entry], { replyResolver });
+    try {
+      const pairResult = await performPairRequest(ctx.port, entry.deviceId, {
+        claimedName: entry.claimedName,
+      });
+      const authToken = pairResult.token as string;
+      const { ws, queue } = await authenticateDeviceWithQueue(ctx.port, entry.deviceId, authToken);
+      const messageId = `c_${randomUUID()}`;
+      try {
+        ws.send(
+          JSON.stringify({
+            type: "message",
+            id: messageId,
+            sessionKey,
+            content: "reply normally",
+          }),
+        );
+        await waitForQueuedMessageWithTimeout(queue, (value) => {
+          const typed = value as { type?: string; id?: string };
+          return typed.type === "ack" && typed.id === messageId;
+        });
+        const assistantMessage = await waitForQueuedMessageWithTimeout(queue, (value) => {
+          const typed = value as { type?: string; role?: string; content?: string };
+          return (
+            typed.type === "message" &&
+            typed.role === "assistant" &&
+            typed.content === "visible final reply"
+          );
+        });
+        expect(assistantMessage).toMatchObject({
+          type: "message",
+          role: "assistant",
+          content: "visible final reply",
+          replyToClientMessageId: messageId,
+        });
+        const stateEvent = await waitForQueuedMessageWithTimeout(queue, (value) => {
+          const typed = value as {
+            type?: string;
+            event?: string;
+            payload?: { messageId?: string; state?: string; terminalState?: string };
+          };
+          return (
+            typed.type === "event" &&
+            typed.event === "prompt_turn_state" &&
+            typed.payload?.messageId === messageId &&
+            typed.payload?.state === "delivered"
+          );
+        });
+        expect(stateEvent).toMatchObject({
+          type: "event",
+          event: "prompt_turn_state",
+          payload: {
+            messageId,
+            state: "delivered",
+            terminalState: "delivered",
+          },
+        });
+        expect(sourceReplyDeliveryMode).toBe("automatic");
+
+        const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
+        const db = new BetterSqlite3(dbPath, { readonly: true });
+        try {
+          const row = db
+            .prepare(
+              `SELECT promptTurnState, promptTurnError
+               FROM messages
+               WHERE deviceId = ? AND clientId = ?`,
+            )
+            .get(entry.deviceId, messageId) as
+            | { promptTurnState?: string; promptTurnError?: string | null }
+            | undefined;
+          expect(row).toMatchObject({
+            promptTurnState: "delivered",
+            promptTurnError: null,
+          });
+        } finally {
+          db.close();
+        }
+      } finally {
+        queue.dispose();
+        ws.terminate();
+      }
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("reports message-tool-only Clawline direct prompts with a precise missing-tool error", async () => {
+    const entry = createAllowlistEntry();
+    const sessionKey = "agent:main:clawline:flynn:main";
+    let sourceReplyDeliveryMode: unknown;
+    const replyResolver: typeof testReplyResolver = async (_ctx, opts) => {
+      sourceReplyDeliveryMode = opts?.sourceReplyDeliveryMode;
+      return { text: "suppressed final reply" };
+    };
+    const ctx = await setupTestServer([entry], {
+      openClawConfig: {
+        ...testOpenClawConfig,
+        messages: { visibleReplies: "message_tool" },
+      } as OpenClawConfig,
+      replyResolver,
+    });
+    try {
+      const pairResult = await performPairRequest(ctx.port, entry.deviceId, {
+        claimedName: entry.claimedName,
+      });
+      const authToken = pairResult.token as string;
+      const { ws, queue } = await authenticateDeviceWithQueue(ctx.port, entry.deviceId, authToken);
+      const messageId = `c_${randomUUID()}`;
+      try {
+        ws.send(
+          JSON.stringify({
+            type: "message",
+            id: messageId,
+            sessionKey,
+            content: "reply through the message tool",
+          }),
+        );
+        await waitForQueuedMessageWithTimeout(queue, (value) => {
+          const typed = value as { type?: string; id?: string };
+          return typed.type === "ack" && typed.id === messageId;
+        });
+        const stateEvent = await waitForQueuedMessageWithTimeout(queue, (value) => {
+          const typed = value as {
+            type?: string;
+            event?: string;
+            payload?: { messageId?: string; state?: string; error?: string };
+          };
+          return (
+            typed.type === "event" &&
+            typed.event === "prompt_turn_state" &&
+            typed.payload?.messageId === messageId &&
+            typed.payload?.state === "failed"
+          );
+        });
+        expect(stateEvent).toMatchObject({
+          type: "event",
+          event: "prompt_turn_state",
+          payload: {
+            messageId,
+            state: "failed",
+            terminalState: "failed",
+            error: "clawline.promptTurn.message_tool_missing",
+          },
+        });
+        expect(sourceReplyDeliveryMode).toBe("message_tool_only");
+
+        const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
+        const db = new BetterSqlite3(dbPath, { readonly: true });
+        try {
+          const row = db
+            .prepare(
+              `SELECT promptTurnState, promptTurnError
+               FROM messages
+               WHERE deviceId = ? AND clientId = ?`,
+            )
+            .get(entry.deviceId, messageId) as
+            | { promptTurnState?: string; promptTurnError?: string }
+            | undefined;
+          expect(row).toMatchObject({
+            promptTurnState: "failed",
+            promptTurnError: "clawline.promptTurn.message_tool_missing",
+          });
+        } finally {
+          db.close();
+        }
+      } finally {
+        queue.dispose();
+        ws.terminate();
+      }
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("marks explicit message-tool-only Clawline direct prompts delivered when the tool sends", async () => {
+    const entry = createAllowlistEntry();
+    const sessionKey = "agent:main:clawline:flynn:main";
+    let sourceReplyDeliveryMode: unknown;
+    const replyResolver: typeof testReplyResolver = async (_ctx, opts) => {
+      sourceReplyDeliveryMode = opts?.sourceReplyDeliveryMode;
+      await opts?.onObservedReplyDelivery?.();
+      return { text: "" };
+    };
+    const ctx = await setupTestServer([entry], {
+      openClawConfig: {
+        ...testOpenClawConfig,
+        messages: { visibleReplies: "message_tool" },
+      } as OpenClawConfig,
+      replyResolver,
+    });
+    try {
+      const pairResult = await performPairRequest(ctx.port, entry.deviceId, {
+        claimedName: entry.claimedName,
+      });
+      const authToken = pairResult.token as string;
+      const { ws, queue } = await authenticateDeviceWithQueue(ctx.port, entry.deviceId, authToken);
+      const messageId = `c_${randomUUID()}`;
+      try {
+        ws.send(
+          JSON.stringify({
+            type: "message",
+            id: messageId,
+            sessionKey,
+            content: "send through the message tool",
+          }),
+        );
+        await waitForQueuedMessageWithTimeout(queue, (value) => {
+          const typed = value as { type?: string; id?: string };
+          return typed.type === "ack" && typed.id === messageId;
+        });
+        const stateEvent = await waitForQueuedMessageWithTimeout(queue, (value) => {
+          const typed = value as {
+            type?: string;
+            event?: string;
+            payload?: { messageId?: string; state?: string; terminalState?: string };
+          };
+          return (
+            typed.type === "event" &&
+            typed.event === "prompt_turn_state" &&
+            typed.payload?.messageId === messageId &&
+            typed.payload?.state === "delivered"
+          );
+        });
+        expect(stateEvent).toMatchObject({
+          type: "event",
+          event: "prompt_turn_state",
+          payload: {
+            messageId,
+            state: "delivered",
+            terminalState: "delivered",
+          },
+        });
+        expect(sourceReplyDeliveryMode).toBe("message_tool_only");
+
+        const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
+        const db = new BetterSqlite3(dbPath, { readonly: true });
+        try {
+          const row = db
+            .prepare(
+              `SELECT promptTurnState, promptTurnError
+               FROM messages
+               WHERE deviceId = ? AND clientId = ?`,
+            )
+            .get(entry.deviceId, messageId) as
+            | { promptTurnState?: string; promptTurnError?: string | null }
+            | undefined;
+          expect(row).toMatchObject({
+            promptTurnState: "delivered",
+            promptTurnError: null,
+          });
+        } finally {
+          db.close();
+        }
+      } finally {
+        queue.dispose();
+        ws.terminate();
+      }
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("marks an accepted prompt failed when the agent run produces no delivery", async () => {
     const entry = createAllowlistEntry();
     const sessionKey = "agent:main:clawline:flynn:main";
