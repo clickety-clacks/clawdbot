@@ -3,7 +3,10 @@ import { getBundledChannelSetupPlugin } from "../../channels/plugins/bundled.js"
 import { parseOptionalDelimitedEntries } from "../../channels/plugins/helpers.js";
 import { getLoadedChannelPlugin, normalizeChannelId } from "../../channels/plugins/index.js";
 import { moveSingleAccountChannelSectionToDefaultAccount } from "../../channels/plugins/setup-helpers.js";
-import type { ChannelSetupPlugin } from "../../channels/plugins/setup-wizard-types.js";
+import type {
+  ChannelOnboardingPostWriteHook,
+  ChannelSetupPlugin,
+} from "../../channels/plugins/setup-wizard-types.js";
 import type { ChannelPlugin } from "../../channels/plugins/types.plugin.js";
 import type { ChannelId, ChannelSetupInput } from "../../channels/plugins/types.public.js";
 import { formatCliCommand } from "../../cli/command-format.js";
@@ -453,7 +456,10 @@ async function channelsAddCommandImpl(
   const afterAccountConfigWritten = plugin.setup?.afterAccountConfigWritten;
   const postWriteHookIsRequired = plugin.setup?.requireSuccessfulPostWrite === true;
   if (afterAccountConfigWritten) {
-    const runPostWriteHook = async ({ cfg: writtenCfg, runtime: hookRuntime }) =>
+    const runPostWriteHook = async ({
+      cfg: writtenCfg,
+      runtime: hookRuntime,
+    }: Parameters<ChannelOnboardingPostWriteHook["run"]>[0]) =>
       await afterAccountConfigWritten({
         previousCfg: cfg,
         cfg: writtenCfg,

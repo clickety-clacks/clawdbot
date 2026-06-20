@@ -1,6 +1,7 @@
 import { normalizeProviderId } from "../agents/provider-id.js";
 import { formatCliCommand } from "../cli/command-format.js";
 import { commitConfigWriteWithPendingPluginInstalls } from "../cli/plugins-install-record-commit.js";
+import { PLUGIN_INSTALLS_CONFIG_PATH } from "../plugins/installed-plugin-index-records.js";
 import type {
   AuthChoice,
   GatewayAuthChoice,
@@ -50,18 +51,34 @@ function loadConfigLoggingModule(): Promise<ConfigLoggingModule> {
   return configLoggingModulePromise;
 }
 
+function isPluginInstallsUnsetPath(path: readonly string[]): boolean {
+  return (
+    path.length === PLUGIN_INSTALLS_CONFIG_PATH.length &&
+    path.every((part, index) => part === PLUGIN_INSTALLS_CONFIG_PATH[index])
+  );
+}
+
 function loadModelPickerModule(): Promise<ModelPickerModule> {
   modelPickerModulePromise ??= import("../commands/model-picker.js");
   return modelPickerModulePromise;
 }
 
-async function writeWizardConfigFile(config: OpenClawConfig): Promise<OpenClawConfig> {
+async function writeWizardConfigFile(
+  config: OpenClawConfig,
+  opts: { allowConfigSizeDrop?: boolean } = {},
+): Promise<OpenClawConfig> {
+  const allowConfigSizeDrop = opts.allowConfigSizeDrop === true;
   const committed = await commitConfigWriteWithPendingPluginInstalls({
     nextConfig: config,
     commit: async (nextConfig, writeOptions) => {
+      const allowPluginInstallMigrationSizeDrop =
+        writeOptions?.unsetPaths?.some(isPluginInstallsUnsetPath) === true;
       return await replaceConfigFile({
         nextConfig,
-        writeOptions: { ...writeOptions, allowConfigSizeDrop: true },
+        writeOptions: {
+          ...writeOptions,
+          allowConfigSizeDrop: allowConfigSizeDrop || allowPluginInstallMigrationSizeDrop,
+        },
         afterWrite: { mode: "auto" },
       });
     },

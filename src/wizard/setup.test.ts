@@ -93,6 +93,15 @@ const detectSetupMigrationSources = vi.hoisted(() => vi.fn(async () => []));
 const runSetupMigrationImport = vi.hoisted(() => vi.fn(async () => {}));
 
 const setupChannels = vi.hoisted(() => vi.fn(async (cfg) => cfg));
+const createChannelOnboardingPostWriteHookCollector = vi.hoisted(() =>
+  vi.fn(() => ({
+    collect: vi.fn(),
+    drain: vi.fn(() => []),
+  })),
+);
+const runCollectedChannelOnboardingPostWriteHooks = vi.hoisted(() =>
+  vi.fn(async () => true),
+);
 const setupSkills = vi.hoisted(() => vi.fn(async (cfg) => cfg));
 
 function providerPluginStub(
@@ -197,6 +206,8 @@ function expectMockCallArgNotNull(
 }
 
 vi.mock("../commands/onboard-channels.js", () => ({
+  createChannelOnboardingPostWriteHookCollector,
+  runCollectedChannelOnboardingPostWriteHooks,
   setupChannels,
 }));
 
@@ -550,7 +561,7 @@ describe("runSetupWizard", () => {
     );
     expectRecordFields(
       replaceParams.writeOptions,
-      { allowConfigSizeDrop: true },
+      { allowConfigSizeDrop: false },
       "config replacement write options",
     );
     expect(getMockCallArg(ensureWorkspaceAndSessions, 0, 0, "workspace setup")).toBe(workspaceDir);
