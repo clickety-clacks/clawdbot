@@ -481,6 +481,87 @@ describe("gateway sessions patch", () => {
     expect(entry.liveModelSwitchPending).toBe(true);
   });
 
+  test("clears stale Codex runtime pins when model patch selects ZAI GLM", async () => {
+    const store = mainStoreEntry({
+      sessionId: "sess-stale-codex-runtime",
+      providerOverride: "openai",
+      modelOverride: OPENAI_GPT_ID,
+      agentRuntimeOverride: "codex",
+      agentHarnessId: "codex",
+    });
+
+    const entry = await applyMainModelPatch({
+      store,
+      model: "zai/glm-4.6",
+      catalogRefs: [OPENAI_GPT_MODEL, "zai/glm-4.6"],
+    });
+
+    expectModelSelection(entry, "zai", "glm-4.6");
+    expect(entry.agentRuntimeOverride).toBeUndefined();
+    expect(entry.agentHarnessId).toBeUndefined();
+    expect(entry.liveModelSwitchPending).toBe(true);
+  });
+
+  test("preserves matching explicit runtime pins when selected model belongs to that runtime", async () => {
+    const store = mainStoreEntry({
+      sessionId: "sess-valid-codex-runtime",
+      providerOverride: "zai",
+      modelOverride: "glm-4.6",
+      agentRuntimeOverride: "codex",
+      agentHarnessId: "codex",
+    });
+
+    const entry = await applyMainModelPatch({
+      store,
+      cfg: {
+        agents: {
+          defaults: {
+            models: {
+              [OPENAI_GPT_MODEL]: { agentRuntime: { id: "codex" } },
+            },
+          },
+        },
+      } as OpenClawConfig,
+      model: OPENAI_GPT_MODEL,
+      catalogRefs: [OPENAI_GPT_MODEL, "zai/glm-4.6"],
+    });
+
+    expectModelSelection(entry, "openai", OPENAI_GPT_ID);
+    expect(entry.agentRuntimeOverride).toBe("codex");
+    expect(entry.agentHarnessId).toBe("codex");
+    expect(entry.liveModelSwitchPending).toBe(true);
+  });
+
+  test("preserves matching explicit runtime override while clearing stale harness state", async () => {
+    const store = mainStoreEntry({
+      sessionId: "sess-valid-runtime-stale-harness",
+      providerOverride: "zai",
+      modelOverride: "glm-4.6",
+      agentRuntimeOverride: "codex",
+      agentHarnessId: "openclaw",
+    });
+
+    const entry = await applyMainModelPatch({
+      store,
+      cfg: {
+        agents: {
+          defaults: {
+            models: {
+              [OPENAI_GPT_MODEL]: { agentRuntime: { id: "codex" } },
+            },
+          },
+        },
+      } as OpenClawConfig,
+      model: OPENAI_GPT_MODEL,
+      catalogRefs: [OPENAI_GPT_MODEL, "zai/glm-4.6"],
+    });
+
+    expectModelSelection(entry, "openai", OPENAI_GPT_ID);
+    expect(entry.agentRuntimeOverride).toBe("codex");
+    expect(entry.agentHarnessId).toBeUndefined();
+    expect(entry.liveModelSwitchPending).toBe(true);
+  });
+
   test("clears pending live model switches for model reset patches", async () => {
     const store = mainStoreEntry({
       sessionId: "sess-live-reset",
