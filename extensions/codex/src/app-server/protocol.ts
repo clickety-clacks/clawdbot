@@ -1,3 +1,4 @@
+// Codex plugin module implements protocol behavior.
 export type JsonValue = null | boolean | number | string | JsonValue[] | JsonObject;
 export type JsonObject = { [key: string]: JsonValue };
 export type CodexServiceTier = string;
@@ -89,6 +90,7 @@ export type CodexThreadStartParams = JsonObject & {
   developerInstructions?: string;
   experimentalRawEvents?: boolean;
   environments?: CodexTurnEnvironmentParams[] | null;
+  /** Retired by Codex 0.137, but still sent for supported custom app-server 0.125-0.136. */
   persistExtendedHistory?: boolean;
 };
 
@@ -103,6 +105,7 @@ export type CodexThreadResumeParams = JsonObject & {
   serviceTier?: CodexServiceTier | null;
   config?: JsonObject;
   developerInstructions?: string;
+  /** Retired by Codex 0.137, but still sent for supported custom app-server 0.125-0.136. */
   persistExtendedHistory?: boolean;
 };
 
@@ -448,9 +451,32 @@ export type CodexSkillsListParams = {
   forceReload?: boolean;
 };
 
+export type CodexSkillScope = "user" | "repo" | "system" | "admin";
+
+export type CodexSkillMetadata = {
+  name: string;
+  description: string;
+  shortDescription?: string;
+  interface?: JsonObject;
+  dependencies?: JsonObject;
+  path: string;
+  scope: CodexSkillScope;
+  enabled: boolean;
+};
+
+export type CodexSkillErrorInfo = {
+  path: string;
+  message: string;
+};
+
+export type CodexSkillsListEntry = {
+  cwd: string;
+  skills: CodexSkillMetadata[];
+  errors: CodexSkillErrorInfo[];
+};
+
 export type CodexSkillsListResponse = {
-  data: JsonValue[];
-  nextCursor?: string | null;
+  data: CodexSkillsListEntry[];
 };
 
 export type CodexHooksListParams = {

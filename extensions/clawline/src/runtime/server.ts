@@ -55,12 +55,13 @@ import {
   resolveModelAuthMode,
   resolveSessionStoreEntry,
   resolvePinnedHostname,
-  readCodexAppServerFastMode,
-  setCodexAppServerFastMode,
+  readCodexConversationFastMode,
+  setCodexConversationFastMode,
   updateSessionStore,
   applySessionsPatchToStore,
   buildAllowedModelSet,
   loadModelCatalog,
+  type CodexConversationFastModeStatus,
   type ModelCatalogEntry,
   type PinnedHostname,
   type ReplyPayload,
@@ -147,6 +148,19 @@ type PtyProcess = {
   onData(callback: (data: string) => void): void;
   onExit(callback: (event: { exitCode?: number }) => void): void;
 };
+
+async function readClawlineCodexConversationFastMode(params: {
+  sessionFile: string;
+}): Promise<CodexConversationFastModeStatus> {
+  return await readCodexConversationFastMode(params);
+}
+
+async function setClawlineCodexConversationFastMode(params: {
+  sessionFile: string;
+  enabled: boolean;
+}): Promise<void> {
+  await setCodexConversationFastMode(params);
+}
 
 function isClientPayload(value: unknown): value is ClientPayload {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -6532,7 +6546,7 @@ button.deny { background: #9b1c31; color: white; }
     if (!sessionFile) {
       return { supported: false, enabled: null, reason: "codex_thread_not_attached" };
     }
-    const fastMode = await readCodexAppServerFastMode({ sessionFile });
+    const fastMode = await readClawlineCodexConversationFastMode({ sessionFile });
     if (!fastMode.available) {
       return { supported: false, enabled: null, reason: fastMode.reason };
     }
@@ -7205,7 +7219,7 @@ button.deny { background: #9b1c31; color: white; }
       };
     }
     try {
-      await setCodexAppServerFastMode({ sessionFile, enabled: fastMode });
+      await setClawlineCodexConversationFastMode({ sessionFile, enabled: fastMode });
       const sessionResult = await applySessionControlPatch(sessionKey, { fastMode });
       if (!sessionResult.ok) {
         return sessionResult;
@@ -7920,7 +7934,17 @@ button.deny { background: #9b1c31; color: white; }
     if (!session.isAdmin) {
       return null;
     }
-    return resolveAlertFallbackSessionKey(sessionKey);
+    const fallbackSessionKey = await resolveAlertFallbackSessionKey(sessionKey);
+    if (!fallbackSessionKey) {
+      return null;
+    }
+    const { entry } = loadSessionStoreEntryForKey(fallbackSessionKey);
+    const channelLabel =
+      normalizeChannelLabel(entry?.lastChannel) || normalizeChannelLabel(entry?.channel);
+    if (channelLabel === "openclaw" || channelLabel === "clawline") {
+      return null;
+    }
+    return fallbackSessionKey;
   }
 
   async function handleAdoptSessionRequest(req: http.IncomingMessage, res: http.ServerResponse) {
@@ -9197,6 +9221,7 @@ button.deny { background: #9b1c31; color: white; }
     deviceId: string;
     rawContent: string;
     route: ClawlinePromptTurnRoute;
+    isNativeClawlineTurn: boolean;
     dispatcher: ReturnType<typeof createReplyDispatcherWithTyping>["dispatcher"];
     replyOptions: ReturnType<typeof createReplyDispatcherWithTyping>["replyOptions"];
     markDispatchIdle: ReturnType<typeof createReplyDispatcherWithTyping>["markDispatchIdle"];
@@ -9354,6 +9379,8 @@ button.deny { background: #9b1c31; color: white; }
     let dispatchFailed = false;
     let dispatchError: string | undefined;
     const dispatchStartedAt = Date.now();
+    const useNativeClawlineSourceDelivery =
+      params.isNativeClawlineTurn && openClawCfg.messages?.visibleReplies === undefined;
     try {
       logger.info?.("[clawline] agent_run_phase", {
         ...logContext,
@@ -9399,6 +9426,9 @@ button.deny { background: #9b1c31; color: white; }
                 replyOptions: {
                   ...params.replyOptions,
                   ...params.agentProgress.replyOptions,
+                  ...(useNativeClawlineSourceDelivery
+                    ? { sourceReplyDeliveryMode: "automatic" as const }
+                    : {}),
                   images: prepared.inboundImages.length > 0 ? prepared.inboundImages : undefined,
                   onModelSelected: (ctx) => {
                     params.prefixContext.provider = ctx.provider;
@@ -9425,10 +9455,18 @@ button.deny { background: #9b1c31; color: white; }
           ),
       });
       queuedFinal = result.dispatchResult.queuedFinal;
+      const observedReplyDelivery = result.dispatchResult.observedReplyDelivery === true;
+      if (
+        result.dispatchResult.sourceReplyDeliveryMode === "message_tool_only" &&
+        !observedReplyDelivery
+      ) {
+        dispatchError = "clawline.promptTurn.message_tool_missing";
+      }
       deliveredCount = Math.max(
         result.dispatchResult.counts.block +
           result.dispatchResult.counts.tool +
-          result.dispatchResult.counts.final,
+          result.dispatchResult.counts.final +
+          (observedReplyDelivery ? 1 : 0),
         params.getPersistedAssistantDeliveryCount(),
       );
       logger.info?.("[clawline] agent_run_phase", {
@@ -10361,6 +10399,7 @@ button.deny { background: #9b1c31; color: white; }
             deviceId: session.deviceId,
             rawContent,
             route,
+            isNativeClawlineTurn: inboundTarget.kind === "clawline",
             dispatcher,
             replyOptions,
             markDispatchIdle,
@@ -10801,6 +10840,7 @@ button.deny { background: #9b1c31; color: white; }
               deviceId: session.deviceId,
               rawContent,
               route,
+              isNativeClawlineTurn: true,
               dispatcher,
               replyOptions,
               markDispatchIdle,

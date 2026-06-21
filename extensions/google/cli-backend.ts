@@ -1,3 +1,4 @@
+// Google plugin module implements cli backend behavior.
 import type { CliBackendPlugin } from "openclaw/plugin-sdk/cli-backend";
 import {
   CLI_FRESH_WATCHDOG_DEFAULTS,
@@ -14,6 +15,7 @@ const GEMINI_CLI_DEFAULT_MODEL_REF = "google-gemini-cli/gemini-3-flash-preview";
 export function buildGoogleGeminiCliBackend(): CliBackendPlugin {
   return {
     id: "google-gemini-cli",
+    modelProvider: "google",
     liveTest: {
       defaultModelRef: GEMINI_CLI_DEFAULT_MODEL_REF,
       defaultImageProbe: true,

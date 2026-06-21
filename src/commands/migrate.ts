@@ -1,4 +1,10 @@
+/** CLI command orchestration for migration list, plan, and apply flows. */
 import { cancel, confirm, isCancel, log } from "@clack/prompts";
+import {
+  stylePromptHint,
+  stylePromptMessage,
+  stylePromptTitle,
+} from "../../packages/terminal-core/src/prompt-style.js";
 import { formatCliCommand } from "../cli/command-format.js";
 import { withProgress } from "../cli/progress.js";
 import { promptYesNo } from "../cli/prompt.js";
@@ -11,7 +17,6 @@ import {
 import type { MigrationApplyResult, MigrationPlan } from "../plugins/types.js";
 import type { RuntimeEnv } from "../runtime.js";
 import { writeRuntimeJson } from "../runtime.js";
-import { stylePromptHint, stylePromptMessage, stylePromptTitle } from "../terminal/prompt-style.js";
 import { runMigrationApply } from "./migrate/apply.js";
 import { formatMigrationPreview } from "./migrate/output.js";
 import { createMigrationPlan, resolveMigrationProvider } from "./migrate/providers.js";
@@ -45,45 +50,10 @@ import type {
 
 export type { MigrateApplyOptions, MigrateCommonOptions, MigrateDefaultOptions };
 
-const CODEX_UNVERIFIED_APP_BACKED_PLUGIN_WARNING =
-  "Codex app-backed plugins were planned without source app accessibility verification.";
-
-function isPlannedUnverifiedCodexAppPlugin(item: MigrationPlan["items"][number]): boolean {
-  return (
-    item.kind === "plugin" &&
-    item.action === "install" &&
-    item.status === "planned" &&
-    item.details?.sourceAppVerification === "not_run"
-  );
-}
-
-function filterSelectionScopedWarnings(
-  plan: MigrationPlan,
-  opts: MigrateCommonOptions,
-): MigrationPlan {
-  if (
-    opts.plugins === undefined ||
-    plan.providerId !== "codex" ||
-    !plan.warnings?.some((warning) =>
-      warning.includes(CODEX_UNVERIFIED_APP_BACKED_PLUGIN_WARNING),
-    ) ||
-    plan.items.some(isPlannedUnverifiedCodexAppPlugin)
-  ) {
-    return plan;
-  }
-  const warnings = plan.warnings.filter(
-    (warning) => !warning.includes(CODEX_UNVERIFIED_APP_BACKED_PLUGIN_WARNING),
-  );
-  return {
-    ...plan,
-    ...(warnings.length > 0 ? { warnings } : { warnings: undefined }),
-  };
-}
-
 function selectMigrationItems(plan: MigrationPlan, opts: MigrateCommonOptions): MigrationPlan {
-  return filterSelectionScopedWarnings(
-    applyMigrationPluginSelection(applyMigrationSkillSelection(plan, opts.skills), opts.plugins),
-    opts,
+  return applyMigrationPluginSelection(
+    applyMigrationSkillSelection(plan, opts.skills),
+    opts.plugins,
   );
 }
 
@@ -135,9 +105,9 @@ async function createMigrationPlanWithProgress(
     { label: `Scanning ${opts.provider} migration…`, indeterminate: true },
     async (progress) => {
       progress.setLabel("Reading migration source…");
-      const plan = await createPlan();
+      const planLocal = await createPlan();
       progress.tick();
-      return plan;
+      return planLocal;
     },
   );
   return selectMigrationItems(plan, opts);
@@ -161,6 +131,8 @@ async function createInteractiveMigrationPlanWithAuthPrompt(
     }
     return initialPlan;
   }
+  // Build the first plan without secrets, then only rescan with secrets after
+  // explicit consent so credential handling is opt-in for interactive users.
   const includeSecrets = await confirm({
     message: stylePromptMessage("Do you want to migrate your auth credentials as well?"),
     initialValue: true,
@@ -365,6 +337,7 @@ function logNoCodexSelection(runtime: RuntimeEnv, plan: MigrationPlan): void {
   runtime.log("No Codex skills or native Codex plugins selected for migration.");
 }
 
+/** Lists available migration providers as JSON or terse terminal rows. */
 export async function migrateListCommand(runtime: RuntimeEnv, opts: { json?: boolean } = {}) {
   const cfg = getRuntimeConfig();
   ensureStandaloneMigrationProviderRegistryLoaded({ cfg });
@@ -394,6 +367,7 @@ export async function migrateListCommand(runtime: RuntimeEnv, opts: { json?: boo
   );
 }
 
+/** Creates and prints a migration plan without applying it. */
 export async function migratePlanCommand(
   runtime: RuntimeEnv,
   opts: MigrateCommonOptions,
@@ -418,10 +392,12 @@ export async function migratePlanCommand(
   return plan;
 }
 
+/** Applies a migration non-interactively when `yes` is true. */
 export async function migrateApplyCommand(
   runtime: RuntimeEnv,
   opts: MigrateApplyOptions & { yes: true },
 ): Promise<MigrationApplyResult>;
+/** Plans interactively when needed, prompts, then applies the selected migration. */
 export async function migrateApplyCommand(
   runtime: RuntimeEnv,
   opts: MigrateApplyOptions,
@@ -489,6 +465,7 @@ export async function migrateApplyCommand(
   });
 }
 
+/** Default migrate command: list providers, plan, dry-run, or apply based on flags. */
 export async function migrateDefaultCommand(
   runtime: RuntimeEnv,
   opts: MigrateDefaultOptions,

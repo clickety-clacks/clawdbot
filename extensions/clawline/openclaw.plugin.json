@@ -1,5 +1,8 @@
 {
   "id": "clawline",
+  "activation": {
+    "onStartup": false
+  },
   "channels": ["clawline"],
   "skills": ["./skills"],
   "configSchema": {

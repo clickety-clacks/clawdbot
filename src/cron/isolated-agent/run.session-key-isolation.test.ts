@@ -1,3 +1,4 @@
+// Session key isolation tests cover separate keys for concurrent cron runs.
 import { describe, expect, it } from "vitest";
 import {
   makeIsolatedAgentTurnJob,
@@ -11,7 +12,7 @@ import {
   mockRunCronFallbackPassthrough,
   resolveCronSessionMock,
   runCliAgentMock,
-  runEmbeddedPiAgentMock,
+  runEmbeddedAgentMock,
 } from "./run.test-harness.js";
 
 const runCronIsolatedAgentTurn = await loadRunCronIsolatedAgentTurn();
@@ -59,8 +60,8 @@ describe("runCronIsolatedAgentTurn isolated session identity", () => {
     ) as { forceNew?: boolean; sessionKey?: string };
     expect(sessionRequest.forceNew).toBe(true);
     expect(sessionRequest.sessionKey).toBe("agent:default:cron:daily-monitor");
-    expect(runEmbeddedPiAgentMock).toHaveBeenCalledOnce();
-    const runRequest = requireFirstMockArg(runEmbeddedPiAgentMock, "runEmbeddedPiAgentMock") as {
+    expect(runEmbeddedAgentMock).toHaveBeenCalledOnce();
+    const runRequest = requireFirstMockArg(runEmbeddedAgentMock, "runEmbeddedAgentMock") as {
       sessionId?: string;
       sessionKey?: string;
       promptCacheKey?: string;
@@ -110,7 +111,7 @@ describe("runCronIsolatedAgentTurn isolated session identity", () => {
     await runCronIsolatedAgentTurn(params);
     await runCronIsolatedAgentTurn(params);
 
-    const requests = runEmbeddedPiAgentMock.mock.calls.map(
+    const requests = runEmbeddedAgentMock.mock.calls.map(
       ([arg]) =>
         arg as {
           sessionId?: string;
@@ -147,8 +148,8 @@ describe("runCronIsolatedAgentTurn isolated session identity", () => {
 
     expect(result.status).toBe("ok");
     expect(result.sessionKey).toBe("agent:default:project-alpha-monitor");
-    expect(runEmbeddedPiAgentMock).toHaveBeenCalledOnce();
-    const runRequest = requireFirstMockArg(runEmbeddedPiAgentMock, "runEmbeddedPiAgentMock") as {
+    expect(runEmbeddedAgentMock).toHaveBeenCalledOnce();
+    const runRequest = requireFirstMockArg(runEmbeddedAgentMock, "runEmbeddedAgentMock") as {
       sessionId?: string;
       sessionKey?: string;
       promptCacheKey?: string;

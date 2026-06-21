@@ -1,3 +1,4 @@
+// Augments plugin npm package manifests with generated runtime/package metadata.
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -35,6 +36,15 @@ function packageRelativePathExists(packageDir, relativePath) {
 
 function normalizePackPath(value) {
   return value.trim().replaceAll("\\", "/").replace(/^\.\//u, "");
+}
+
+function normalizePackageEntry(value) {
+  return typeof value === "string" ? value.trim().replaceAll("\\", "/") : "";
+}
+
+function toPackageRuntimeEntry(entry) {
+  const normalized = normalizePackageEntry(entry).replace(/^\.\//u, "");
+  return `./dist/${normalized.replace(/\.[^.]+$/u, ".js")}`;
 }
 
 function escapeRegExp(value) {
@@ -117,6 +127,23 @@ function hasPackageRuntimeDependencies(packageJson) {
   );
 }
 
+function resolvePackageRuntimeExports(plan) {
+  const packageExports = plan.packageJson.exports;
+  if (!packageExports || typeof packageExports !== "object" || Array.isArray(packageExports)) {
+    return undefined;
+  }
+  const runtimeTargetsBySource = new Map(
+    plan.sourceEntries.map((entry) => [normalizePackageEntry(entry), toPackageRuntimeEntry(entry)]),
+  );
+  const resolvedEntries = Object.entries(packageExports).map(([key, value]) => {
+    if (typeof value !== "string") {
+      return [key, value];
+    }
+    return [key, runtimeTargetsBySource.get(normalizePackageEntry(value)) ?? value];
+  });
+  return Object.fromEntries(resolvedEntries);
+}
+
 function listPackageRuntimeDependencyNames(packageJson) {
   return [
     ...Object.keys(packageJson.dependencies ?? {}),
@@ -137,6 +164,7 @@ function listConfiguredBundledDependencyNames(packageJson) {
   return [];
 }
 
+/** Resolve an npm command invocation for plugin package scripts. */
 export function resolvePluginNpmCommand(args, params = {}) {
   return resolveNpmRunner({
     comSpec: params.comSpec,
@@ -405,6 +433,7 @@ function installPackageLocalBundledDependencies(params) {
   };
 }
 
+/** Build the package.json that should be used while packaging a plugin for npm. */
 export function resolveAugmentedPluginNpmPackageJson(params) {
   const repoRoot = path.resolve(params.repoRoot ?? ".");
   const packageDir = resolvePackageDir(repoRoot, params.packageDir);
@@ -433,15 +462,22 @@ export function resolveAugmentedPluginNpmPackageJson(params) {
   }
   assertPluginNpmRuntimeBuildExists(plan);
 
+  const packageRuntimeExports = resolvePackageRuntimeExports(plan);
   const packageJson = {
     ...plan.packageJson,
+    ...(packageRuntimeExports ? { exports: packageRuntimeExports } : {}),
     files: plan.packageFiles,
     peerDependencies: plan.packagePeerMetadata.peerDependencies,
     peerDependenciesMeta: plan.packagePeerMetadata.peerDependenciesMeta,
     openclaw: {
       ...plan.packageJson.openclaw,
       runtimeExtensions: plan.runtimeExtensions,
-      ...(plan.runtimeSetupEntry ? { runtimeSetupEntry: plan.runtimeSetupEntry } : {}),
+      ...(plan.runtimeSetupEntry
+        ? {
+            setupEntry: plan.runtimeSetupEntry,
+            runtimeSetupEntry: plan.runtimeSetupEntry,
+          }
+        : {}),
     },
   };
   if (shouldBundleDependencies(params.bundleDependencies, plan.packageJson)) {
@@ -462,6 +498,7 @@ export function resolveAugmentedPluginNpmPackageJson(params) {
   };
 }
 
+/** Read generated bundled channel config metadata keyed by plugin id. */
 export function readGeneratedBundledChannelConfigs(repoRoot) {
   const metadataPath = path.join(repoRoot, GENERATED_BUNDLED_CHANNEL_CONFIG_METADATA_PATH);
   if (!fs.existsSync(metadataPath)) {
@@ -528,6 +565,7 @@ function readGeneratedBundledChannelConfigEntries(source) {
   }
 }
 
+/** Merge generated channel config schemas into a plugin manifest without clobbering labels. */
 export function mergeGeneratedChannelConfigs(manifest, generatedChannelConfigs) {
   if (!generatedChannelConfigs || Object.keys(generatedChannelConfigs).length === 0) {
     return manifest;
@@ -561,6 +599,7 @@ export function mergeGeneratedChannelConfigs(manifest, generatedChannelConfigs) 
   };
 }
 
+/** Build the plugin manifest that should be used while packaging a plugin for npm. */
 export function resolveAugmentedPluginNpmManifest(params) {
   const repoRoot = path.resolve(params.repoRoot ?? ".");
   const packageDir = resolvePackageDir(repoRoot, params.packageDir);
@@ -590,6 +629,7 @@ export function resolveAugmentedPluginNpmManifest(params) {
   };
 }
 
+/** Temporarily write augmented manifest/package metadata while a packaging callback runs. */
 export function withAugmentedPluginNpmManifestForPackage(params, callback) {
   const repoRoot = path.resolve(params.repoRoot ?? ".");
   const packageDir = resolvePackageDir(repoRoot, params.packageDir);
@@ -671,18 +711,25 @@ export function withAugmentedPluginNpmManifestForPackage(params, callback) {
   }
 }
 
-function parseRunArgs(argv) {
-  if (argv[0] !== "--run") {
-    throw new Error(
-      "usage: node scripts/lib/plugin-npm-package-manifest.mjs --run <package-dir> -- <command> [args...]",
-    );
-  }
+const RUN_USAGE =
+  "usage: node scripts/lib/plugin-npm-package-manifest.mjs --run <package-dir> -- <command> [args...]";
+
+function readRunPackageDir(argv) {
   const packageDir = argv[1];
+  if (!packageDir || packageDir.startsWith("--")) {
+    throw new Error(RUN_USAGE);
+  }
+  return packageDir;
+}
+
+export function parseRunArgs(argv) {
+  if (argv[0] !== "--run") {
+    throw new Error(RUN_USAGE);
+  }
+  const packageDir = readRunPackageDir(argv);
   const separatorIndex = argv.indexOf("--", 2);
   if (!packageDir || separatorIndex === -1 || separatorIndex === argv.length - 1) {
-    throw new Error(
-      "usage: node scripts/lib/plugin-npm-package-manifest.mjs --run <package-dir> -- <command> [args...]",
-    );
+    throw new Error(RUN_USAGE);
   }
   return {
     packageDir,

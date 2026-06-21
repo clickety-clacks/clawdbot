@@ -1,5 +1,7 @@
+// Ollama plugin module implements stream behavior.
 import { randomUUID } from "node:crypto";
-import type { StreamFn } from "@earendil-works/pi-agent-core";
+import type { StreamFn } from "openclaw/plugin-sdk/agent-core";
+import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import type {
   AssistantMessage,
   StopReason,
@@ -8,9 +10,8 @@ import type {
   ToolCall,
   Tool,
   Usage,
-} from "@earendil-works/pi-ai";
-import { createAssistantMessageEventStream, streamSimple } from "@earendil-works/pi-ai";
-import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
+} from "openclaw/plugin-sdk/llm";
+import { createAssistantMessageEventStream, streamSimple } from "openclaw/plugin-sdk/llm";
 import type {
   OpenClawConfig,
   ProviderRuntimeModel,
@@ -23,6 +24,7 @@ import {
 } from "openclaw/plugin-sdk/provider-model-shared";
 import {
   createMoonshotThinkingWrapper,
+  createPlainTextToolCallCompatWrapper,
   resolveMoonshotThinkingType,
   streamWithPayloadPatch,
 } from "openclaw/plugin-sdk/provider-stream-shared";
@@ -50,10 +52,48 @@ const log = createSubsystemLogger("ollama-stream");
 
 export const OLLAMA_NATIVE_BASE_URL = OLLAMA_DEFAULT_BASE_URL;
 
+const OLLAMA_STREAM_COOPERATIVE_YIELD_INTERVAL_MS = 12;
+const OLLAMA_STREAM_COOPERATIVE_YIELD_MAX_EVENTS = 64;
 const GARBLED_VISIBLE_TEXT_MODEL_RE = /\b(?:glm|kimi)\b/i;
 const GARBLED_VISIBLE_TEXT_MIN_CHARS = 80;
 const GARBLED_VISIBLE_TEXT_SYMBOL_RE = /[$#%&="'_~`^|\\/*+\-[\]{}()<>:;,.!?]/gu;
 const LETTER_OR_DIGIT_RE = /[\p{L}\p{N}]/gu;
+
+type OllamaStreamCooperativeScheduler = {
+  afterEvent: () => Promise<void>;
+};
+
+function throwIfOllamaStreamAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new Error("Request was aborted");
+  }
+}
+
+function createOllamaStreamCooperativeScheduler(
+  signal?: AbortSignal,
+): OllamaStreamCooperativeScheduler {
+  let lastYieldedAt = Date.now();
+  let eventsSinceYield = 0;
+  return {
+    async afterEvent() {
+      throwIfOllamaStreamAborted(signal);
+      eventsSinceYield += 1;
+      const now = Date.now();
+      if (
+        eventsSinceYield < OLLAMA_STREAM_COOPERATIVE_YIELD_MAX_EVENTS &&
+        now - lastYieldedAt < OLLAMA_STREAM_COOPERATIVE_YIELD_INTERVAL_MS
+      ) {
+        return;
+      }
+      eventsSinceYield = 0;
+      lastYieldedAt = now;
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 0);
+      });
+      throwIfOllamaStreamAborted(signal);
+    },
+  };
+}
 
 function countMatches(text: string, re: RegExp): number {
   re.lastIndex = 0;
@@ -471,6 +511,7 @@ type StreamModelDescriptor = {
   api: string;
   provider: string;
   id: string;
+  reasoning?: boolean;
 };
 
 type OllamaUsageFallback = {
@@ -522,18 +563,22 @@ function buildStreamAssistantMessage(params: {
 
 function buildStreamErrorAssistantMessage(params: {
   model: StreamModelDescriptor;
+  stopReason: Extract<StopReason, "aborted" | "error">;
   errorMessage: string;
   timestamp?: number;
-}): AssistantMessage & { stopReason: "error"; errorMessage: string } {
+}): AssistantMessage & {
+  stopReason: Extract<StopReason, "aborted" | "error">;
+  errorMessage: string;
+} {
   return {
     ...buildStreamAssistantMessage({
       model: params.model,
       content: [],
-      stopReason: "error",
+      stopReason: params.stopReason,
       usage: buildUsageWithNoCost({}),
       timestamp: params.timestamp,
     }),
-    stopReason: "error",
+    stopReason: params.stopReason,
     errorMessage: params.errorMessage,
   };
 }
@@ -623,8 +668,12 @@ function estimateOllamaPromptTokens(params: {
   return estimateTokensFromChars(chars);
 }
 
-function estimateOllamaCompletionTokens(response: OllamaChatResponse): number {
+function estimateOllamaCompletionTokens(
+  response: OllamaChatResponse,
+  extraOutputChars = 0,
+): number {
   const chars =
+    extraOutputChars +
     response.message.content.length +
     (response.message.thinking?.length ?? 0) +
     (response.message.reasoning?.length ?? 0) +
@@ -978,7 +1027,10 @@ export function buildAssistantMessage(
   options: OllamaAssistantMessageBuildOptions = {},
 ): AssistantMessage {
   const content: (TextContent | ThinkingContent | ToolCall)[] = [];
-  const thinking = response.message.thinking ?? response.message.reasoning ?? "";
+  const thinking =
+    modelInfo.reasoning === false
+      ? ""
+      : (response.message.thinking ?? response.message.reasoning ?? "");
   if (thinking) {
     content.push({ type: "thinking", thinking });
   }
@@ -1080,7 +1132,7 @@ function resolveOllamaRequestTimeoutMs(
   return typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : undefined;
 }
 
-export function createOllamaStreamFn(
+function createRawOllamaStreamFn(
   baseUrl: string,
   defaultHeaders?: Record<string, string>,
 ): StreamFn {
@@ -1163,11 +1215,19 @@ export function createOllamaStreamFn(
           let accumulatedRawContent = "";
           let accumulatedVisibleContent = "";
           let accumulatedThinking = "";
+          let suppressedThinking = "";
           const accumulatedToolCalls: OllamaToolCall[] = [];
           let finalResponse: OllamaChatResponse | undefined;
           let pendingFinalVisibleContent: string | undefined;
-          const modelInfo = { api: model.api, provider: model.provider, id: model.id };
+          const modelInfo = {
+            api: model.api,
+            provider: model.provider,
+            id: model.id,
+            reasoning: model.reasoning,
+          };
+          const shouldEmitThinking = model.reasoning ?? true;
           const visibleContentSanitizer = createOllamaVisibleContentSanitizer(model.id);
+          const cooperativeScheduler = createOllamaStreamCooperativeScheduler(options?.signal);
           let streamStarted = false;
           let thinkingStarted = false;
           let thinkingEnded = false;
@@ -1262,17 +1322,10 @@ export function createOllamaStreamFn(
             }
 
             accumulatedVisibleContent = nextVisibleContent;
-            const partial = buildStreamAssistantMessage({
-              model: modelInfo,
-              content: buildCurrentContent(),
-              stopReason: "stop",
-              usage: buildUsageWithNoCost({}),
-            });
             stream.push({
               type: "text_delta",
               contentIndex: textContentIndex(),
               delta,
-              partial,
             });
           };
 
@@ -1288,8 +1341,9 @@ export function createOllamaStreamFn(
           };
 
           for await (const chunk of parseNdjsonStream(reader)) {
+            throwIfOllamaStreamAborted(options?.signal);
             const thinkingDelta = chunk.message?.thinking ?? chunk.message?.reasoning;
-            if (thinkingDelta) {
+            if (thinkingDelta && shouldEmitThinking) {
               if (!streamStarted) {
                 streamStarted = true;
                 const emptyPartial = buildStreamAssistantMessage({
@@ -1324,6 +1378,9 @@ export function createOllamaStreamFn(
                 partial,
               });
             }
+            if (thinkingDelta && !shouldEmitThinking) {
+              suppressedThinking += thinkingDelta;
+            }
 
             if (chunk.message?.content) {
               const rawDelta = chunk.message.content;
@@ -1340,6 +1397,7 @@ export function createOllamaStreamFn(
               finalResponse = chunk;
               break;
             }
+            await cooperativeScheduler.afterEvent();
           }
 
           if (!finalResponse) {
@@ -1373,7 +1431,7 @@ export function createOllamaStreamFn(
 
           const usageFallback = {
             input: estimateOllamaPromptTokens({ messages: ollamaMessages, tools: ollamaTools }),
-            output: estimateOllamaCompletionTokens(finalResponse),
+            output: estimateOllamaCompletionTokens(finalResponse, suppressedThinking.length),
           };
           const assistantMessage = buildAssistantMessage(finalResponse, modelInfo, usageFallback, {
             ...toolCallNameOptions,
@@ -1391,11 +1449,13 @@ export function createOllamaStreamFn(
           await release();
         }
       } catch (err) {
+        const stopReason = options?.signal?.aborted ? "aborted" : "error";
         stream.push({
           type: "error",
-          reason: "error",
+          reason: stopReason,
           error: buildStreamErrorAssistantMessage({
             model,
+            stopReason,
             errorMessage: formatErrorMessage(err),
           }),
         });
@@ -1407,6 +1467,13 @@ export function createOllamaStreamFn(
     queueMicrotask(() => void run());
     return stream;
   };
+}
+
+export function createOllamaStreamFn(
+  baseUrl: string,
+  defaultHeaders?: Record<string, string>,
+): StreamFn {
+  return createPlainTextToolCallCompatWrapper(createRawOllamaStreamFn(baseUrl, defaultHeaders));
 }
 
 export function createConfiguredOllamaStreamFn(params: {

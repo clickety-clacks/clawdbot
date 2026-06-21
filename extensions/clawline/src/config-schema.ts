@@ -54,6 +54,7 @@ const SessionsSchema = z
   .object({
     maxMessageBytes: z.number().int().positive().optional(),
     maxReplayMessages: z.number().int().positive().optional(),
+    maxReplayMessagesPerStream: z.number().int().positive().optional(),
     maxPromptMessages: z.number().int().positive().optional(),
     maxMessagesPerSecond: z.number().int().positive().optional(),
     maxTypingPerSecond: z.number().int().positive().optional(),

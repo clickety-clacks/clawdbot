@@ -1,7 +1,8 @@
+// Verifies live session model selection, switch queuing, and pending-flag cleanup.
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const state = vi.hoisted(() => ({
-  abortEmbeddedPiRunMock: vi.fn(),
+  abortEmbeddedAgentRunMock: vi.fn(),
   requestEmbeddedRunModelSwitchMock: vi.fn(),
   consumeEmbeddedRunModelSwitchMock: vi.fn(),
   resolveDefaultModelForAgentMock: vi.fn(),
@@ -9,16 +10,16 @@ const state = vi.hoisted(() => ({
   loadSessionStoreMock: vi.fn(),
   resolveStorePathMock: vi.fn(),
   updateSessionStoreMock: vi.fn(),
-  piEmbeddedModuleImported: false,
+  embeddedAgentModuleImported: false,
 }));
 
-vi.mock("./pi-embedded.js", () => {
-  state.piEmbeddedModuleImported = true;
+vi.mock("./embedded-agent.js", () => {
+  state.embeddedAgentModuleImported = true;
   return {};
 });
 
-vi.mock("./pi-embedded-runner/runs.js", () => ({
-  abortEmbeddedPiRun: (...args: unknown[]) => state.abortEmbeddedPiRunMock(...args),
+vi.mock("./embedded-agent-runner/runs.js", () => ({
+  abortEmbeddedAgentRun: (...args: unknown[]) => state.abortEmbeddedAgentRunMock(...args),
   requestEmbeddedRunModelSwitch: (...args: unknown[]) =>
     state.requestEmbeddedRunModelSwitchMock(...args),
   consumeEmbeddedRunModelSwitch: (...args: unknown[]) =>
@@ -63,6 +64,8 @@ type ShouldSwitchParams = Parameters<
 >[0];
 
 function makeShouldSwitchParams(overrides: Partial<ShouldSwitchParams> = {}): ShouldSwitchParams {
+  // Defaults model an active Anthropic run so individual tests can override
+  // only the persisted/live selection fields under scrutiny.
   return {
     cfg: { session: { store: "/tmp/custom-store.json" } },
     sessionKey: "main",
@@ -81,10 +84,10 @@ describe("live model switch", () => {
   });
 
   beforeEach(() => {
-    state.abortEmbeddedPiRunMock.mockReset().mockReturnValue(false);
+    state.abortEmbeddedAgentRunMock.mockReset().mockReturnValue(false);
     state.requestEmbeddedRunModelSwitchMock.mockReset();
     state.consumeEmbeddedRunModelSwitchMock.mockReset();
-    state.piEmbeddedModuleImported = false;
+    state.embeddedAgentModuleImported = false;
     state.resolveDefaultModelForAgentMock
       .mockReset()
       .mockReturnValue({ provider: "anthropic", model: "claude-opus-4-6" });
@@ -232,6 +235,8 @@ describe("live model switch", () => {
   });
 
   it("preserves provider when runtime model is a vendor-prefixed OpenRouter id", async () => {
+    // OpenRouter models often contain provider-like slashes. An explicit
+    // runtime provider must keep the full nested model id intact.
     state.loadSessionStoreMock.mockReturnValue({
       main: {
         modelProvider: "openrouter",
@@ -286,8 +291,8 @@ describe("live model switch", () => {
   it("strips duplicated provider prefixes from persisted overrides", async () => {
     state.loadSessionStoreMock.mockReturnValue({
       main: {
-        providerOverride: "openai-codex",
-        modelOverride: "openai-codex/gpt-5.4",
+        providerOverride: "openai",
+        modelOverride: "openai/gpt-5.4",
       },
     });
 
@@ -302,7 +307,7 @@ describe("live model switch", () => {
         defaultModel: "claude-opus-4-6",
       }),
     ).toEqual({
-      provider: "openai-codex",
+      provider: "openai",
       model: "gpt-5.4",
       authProfileId: undefined,
       authProfileIdSource: undefined,
@@ -310,6 +315,8 @@ describe("live model switch", () => {
   });
 
   it("routes normalized overrides back through persisted ref resolution", async () => {
+    // Normalization strips duplicate provider prefixes before handing the
+    // choice to the shared persisted-ref resolver.
     state.loadSessionStoreMock.mockReturnValue({
       main: {
         providerOverride: "z-ai",
@@ -337,7 +344,9 @@ describe("live model switch", () => {
   });
 
   it("queues a live switch only when an active run was aborted", async () => {
-    state.abortEmbeddedPiRunMock.mockReturnValue(true);
+    // Switching live runs is two-phase: abort the active run, then queue the
+    // selected provider/model for the restarted embedded run to consume.
+    state.abortEmbeddedAgentRunMock.mockReturnValue(true);
 
     const { requestLiveSessionModelSwitch } = await loadModule();
 
@@ -347,7 +356,7 @@ describe("live model switch", () => {
         selection: { provider: "openai", model: "gpt-5.4", authProfileId: "profile-gpt" },
       }),
     ).toBe(true);
-    expect(state.abortEmbeddedPiRunMock).toHaveBeenCalledWith("session-1");
+    expect(state.abortEmbeddedAgentRunMock).toHaveBeenCalledWith("session-1");
     expect(state.requestEmbeddedRunModelSwitchMock).toHaveBeenCalledWith("session-1", {
       provider: "openai",
       model: "gpt-5.4",
@@ -355,19 +364,19 @@ describe("live model switch", () => {
     });
   });
 
-  it("does not import the broad pi-embedded barrel on module load", async () => {
+  it("does not import the broad embedded-agent barrel on module load", async () => {
     await loadModule();
 
-    expect(state.piEmbeddedModuleImported).toBe(false);
+    expect(state.embeddedAgentModuleImported).toBe(false);
   });
 
-  it("treats active openai-codex as an already-applied openai runtime promotion", async () => {
+  it("treats active openai as an already-applied openai runtime promotion", async () => {
     const { hasDifferentLiveSessionModelSelection } = await loadModule();
 
     expect(
       hasDifferentLiveSessionModelSelection(
         {
-          provider: "openai-codex",
+          provider: "openai",
           model: "gpt-5.5",
         },
         {
@@ -380,19 +389,6 @@ describe("live model switch", () => {
 
   it("does not suppress explicit runtime provider switches with the same model", async () => {
     const { hasDifferentLiveSessionModelSelection } = await loadModule();
-
-    expect(
-      hasDifferentLiveSessionModelSelection(
-        {
-          provider: "openai",
-          model: "gpt-5.5",
-        },
-        {
-          provider: "openai-codex",
-          model: "gpt-5.5",
-        },
-      ),
-    ).toBe(true);
 
     expect(
       hasDifferentLiveSessionModelSelection(
@@ -414,7 +410,7 @@ describe("live model switch", () => {
     expect(
       hasDifferentLiveSessionModelSelection(
         {
-          provider: "openai-codex",
+          provider: "openai",
           model: "gpt-5.5",
         },
         {
@@ -497,6 +493,7 @@ describe("live model switch", () => {
 
       expect(result).toBeUndefined();
       expect(state.loadSessionStoreMock).toHaveBeenCalledWith("/tmp/session-store.json", {
+        hydrateSkillPromptRefs: false,
         skipCache: true,
         clone: false,
       });
@@ -520,6 +517,8 @@ describe("live model switch", () => {
     });
 
     it("clears the stale liveModelSwitchPending flag when models already match", async () => {
+      // A stale pending flag should self-heal once the active runtime already
+      // matches the persisted selection.
       const sessionEntry = {
         liveModelSwitchPending: true,
         providerOverride: "anthropic",
@@ -550,7 +549,7 @@ describe("live model switch", () => {
       expect(result).toBeUndefined();
     });
 
-    it("does not trigger switch when runtime promotes openai to openai-codex", async () => {
+    it("does not trigger switch when runtime promotes openai to openai", async () => {
       const sessionEntry = {
         liveModelSwitchPending: true,
         providerOverride: "openai",
@@ -562,7 +561,7 @@ describe("live model switch", () => {
 
       const result = shouldSwitchToLiveModel(
         makeShouldSwitchParams({
-          currentProvider: "openai-codex",
+          currentProvider: "openai",
           currentModel: "gpt-5.5",
           defaultProvider: "openai",
           defaultModel: "gpt-5.5",

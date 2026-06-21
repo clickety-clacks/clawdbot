@@ -1,9 +1,12 @@
+// Tracks active reply runs so stop, queue, and status commands can coordinate.
+import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
+import { createAgentRunRestartAbortError } from "../../agents/run-termination.js";
 import {
   markDiagnosticEmbeddedRunEnded,
   markDiagnosticEmbeddedRunStarted,
 } from "../../logging/diagnostic-run-activity.js";
 import { resolveGlobalSingleton } from "../../shared/global-singleton.js";
-import { normalizeOptionalString } from "../../shared/string-coerce.js";
+import { resolveTimerTimeoutMs } from "../../shared/number-coercion.js";
 
 export type ReplyRunKey = string;
 
@@ -49,6 +52,7 @@ export type ReplyOperationResult =
 export type ReplyOperation = {
   readonly key: ReplyRunKey;
   readonly sessionId: string;
+  readonly routeThreadId?: string | number;
   readonly abortSignal: AbortSignal;
   readonly resetTriggered: boolean;
   readonly phase: ReplyOperationPhase;
@@ -73,6 +77,7 @@ export type ReplyRunRegistry = {
     sessionKey: string;
     sessionId: string;
     resetTriggered: boolean;
+    routeThreadId?: string | number;
     upstreamAbortSignal?: AbortSignal;
   }): ReplyOperation;
   get(sessionKey: string): ReplyOperation | undefined;
@@ -226,6 +231,7 @@ export function createReplyOperation(params: {
   sessionKey: string;
   sessionId: string;
   resetTriggered: boolean;
+  routeThreadId?: string | number;
   upstreamAbortSignal?: AbortSignal;
 }): ReplyOperation {
   const sessionKey = normalizeOptionalString(params.sessionKey);
@@ -297,6 +303,9 @@ export function createReplyOperation(params: {
     },
     get sessionId() {
       return currentSessionId;
+    },
+    get routeThreadId() {
+      return params.routeThreadId;
     },
     get abortSignal() {
       return controller.signal;
@@ -390,7 +399,7 @@ export function createReplyOperation(params: {
     },
     abortForRestart() {
       const phaseBeforeAbort = phase;
-      abortWithReason("restart", new Error("Reply operation aborted for restart"), {
+      abortWithReason("restart", createAgentRunRestartAbortError(), {
         abortedCode: "aborted_for_restart",
       });
       if (phaseBeforeAbort === "queued") {
@@ -473,7 +482,10 @@ export const replyRunRegistry: ReplyRunRegistry = {
         },
       };
       if (typeof timeoutMs === "number" && Number.isFinite(timeoutMs)) {
-        waiter.timer = setTimeout(() => waiter.finish(false), Math.max(100, timeoutMs));
+        waiter.timer = setTimeout(
+          () => waiter.finish(false),
+          resolveTimerTimeoutMs(timeoutMs, 100, 100),
+        );
       }
       if (opts?.signal) {
         abortHandler = () => waiter.finish(false);
@@ -499,8 +511,17 @@ export function resolveActiveReplyRunSessionId(sessionKey: string): string | und
   return replyRunRegistry.resolveSessionId(sessionKey);
 }
 
+export function resolveActiveReplyRunThreadId(sessionKey: string): string | number | undefined {
+  return replyRunRegistry.get(sessionKey)?.routeThreadId;
+}
+
 export function isReplyRunActiveForSessionId(sessionId: string): boolean {
   return resolveReplyRunForCurrentSessionId(sessionId) !== undefined;
+}
+
+export function isReplyRunAbortableForCompaction(sessionId: string): boolean {
+  const operation = resolveReplyRunForCurrentSessionId(sessionId);
+  return Boolean(operation && operation.phase !== "queued");
 }
 
 export function isReplyRunStreamingForSessionId(sessionId: string): boolean {

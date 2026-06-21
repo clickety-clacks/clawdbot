@@ -1,8 +1,9 @@
+// Plugin MCP serve tests cover serving plugin tools over MCP.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   type HookContext,
   wrapToolWithBeforeToolCallHook,
-} from "../agents/pi-tools.before-tool-call.js";
+} from "../agents/agent-tools.before-tool-call.js";
 import type { AnyAgentTool } from "../agents/tools/common.js";
 import {
   initializeGlobalHookRunner,

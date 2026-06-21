@@ -1,7 +1,8 @@
-import type { StreamFn } from "@earendil-works/pi-agent-core";
-import type { Context, Model } from "@earendil-works/pi-ai";
+// Deepinfra tests cover cache wrapper plugin behavior.
 import { describe, expect, it } from "vitest";
 import { createDeepInfraAnthropicCacheWrapper } from "./cache-wrapper.js";
+
+type StreamFn = Parameters<typeof createDeepInfraAnthropicCacheWrapper>[0];
 
 function capturePayload(params: { modelId: string; initialPayload: Record<string, unknown> }): {
   captured: Record<string, unknown>;
@@ -24,8 +25,8 @@ function capturePayload(params: { modelId: string; initialPayload: Record<string
       provider: "deepinfra",
       id: params.modelId,
       reasoning: false,
-    } as Model<"openai-completions">,
-    { messages: [] } as Context,
+    } as Parameters<StreamFn>[0],
+    { messages: [] } as Parameters<StreamFn>[1],
     {} as never,
   );
 

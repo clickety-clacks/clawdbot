@@ -33,23 +33,26 @@ function readWorkspaceBuildAllowlist(): string[] {
 }
 
 describe("Clawline package metadata", () => {
-  it("is synced to the OpenClaw v2026.5.4 plugin/runtime contract", () => {
+  it("is synced to the OpenClaw v2026.6.8 plugin/runtime contract", () => {
     const manifest = readJsonFile(path.join(extensionRoot, "package.json")) as {
       version?: string;
       dependencies?: Record<string, string>;
       peerDependencies?: Record<string, string>;
       openclaw?: {
+        channel?: { aliases?: string[] };
         install?: { minHostVersion?: string };
         compat?: { pluginApi?: string };
         build?: { openclawVersion?: string };
       };
     };
 
-    expect(manifest.version).toBe("2026.5.4");
-    expect(manifest.peerDependencies?.openclaw).toBe(">=2026.5.4");
+    expect(manifest.version).toBe("2026.6.8");
+    expect(manifest.peerDependencies?.openclaw).toBe(">=2026.6.8");
     expect(manifest.openclaw?.install?.minHostVersion).toBe(">=2026.5.4");
-    expect(manifest.openclaw?.compat?.pluginApi).toBe(">=2026.5.4");
-    expect(manifest.openclaw?.build?.openclawVersion).toBe("2026.5.4");
+    expect(manifest.openclaw?.compat?.pluginApi).toBe(">=2026.6.8");
+    expect(manifest.openclaw?.build?.openclawVersion).toBe("2026.6.8");
+    expect(manifest.openclaw?.channel?.aliases).toEqual(["clawline-dm"]);
+    expect(manifest.dependencies?.["@openclaw/codex"]).toBe("workspace:*");
     expect(manifest.dependencies?.["better-sqlite3"]).toBe("12.6.2");
   });
 

@@ -1,3 +1,4 @@
+// Powershell script supports OpenClaw repository automation.
 import {
   configPathMapKey,
   modelProviderConfigBatchJson,
@@ -138,7 +139,7 @@ for (const op of payload.operations || []) {
 const selectedModelEntry = cfg.agents.defaults.models[payload.modelId];
 if (selectedModelEntry && typeof selectedModelEntry === "object" && !Array.isArray(selectedModelEntry)) {
   if (canWriteAgentRuntime) {
-    selectedModelEntry.agentRuntime = { id: "pi" };
+    selectedModelEntry.agentRuntime = { id: "openclaw" };
   } else {
     delete selectedModelEntry.agentRuntime;
   }
@@ -168,7 +169,11 @@ Remove-Item Env:OPENCLAW_PARALLELS_AGENT_RUNTIME_POLICY_SUPPORTED -Force -ErrorA
 if ($agentTurnConfigPatchExit -ne 0) { throw "agent turn config patch failed" }`;
 }
 
-export const windowsOpenClawResolver = String.raw`function Resolve-OpenClawCommand {
+export const windowsOpenClawResolver = String.raw`$portableNode = if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'Programs\nodejs' } else { $null }
+if ($portableNode -and (Test-Path (Join-Path $portableNode 'node.exe'))) {
+  $env:PATH = "$portableNode;$env:PATH"
+}
+function Resolve-OpenClawCommand {
   if ($script:OpenClawResolvedCommand) { return $script:OpenClawResolvedCommand }
   $shimCandidates = @()
   if ($env:APPDATA) {

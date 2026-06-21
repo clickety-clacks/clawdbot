@@ -1,3 +1,4 @@
+// Covers default Vitest scheduling config helpers.
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { parseVitestProcessStats } from "../../test/vitest/vitest.system-load.ts";
@@ -218,6 +219,29 @@ describe("base vitest config", () => {
     expect(normalizeConfigPath(baseConfig.test?.runner)).toMatch(
       /(?:^|\/)test\/non-isolated-runner\.ts$/u,
     );
+  });
+
+  it("classifies Crabbox shared dependencies as external dependencies", () => {
+    expect(baseConfig.test?.deps?.moduleDirectories).toEqual([
+      "/node_modules/",
+      "/openclaw-pnpm-node-modules/",
+    ]);
+
+    const externalPatterns = baseConfig.test?.server?.deps?.external ?? [];
+    expect(
+      externalPatterns.some(
+        (pattern) =>
+          pattern instanceof RegExp &&
+          pattern.test("/tmp/openclaw-pnpm-node-modules/some-dep/dist/index.mjs"),
+      ),
+    ).toBe(true);
+    expect(
+      externalPatterns.some(
+        (pattern) =>
+          pattern instanceof RegExp &&
+          pattern.test("/tmp/openclaw-pnpm-node-modules/vite/dist/client/env.mjs"),
+      ),
+    ).toBe(false);
   });
 });
 
