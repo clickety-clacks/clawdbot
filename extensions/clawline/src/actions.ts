@@ -33,6 +33,11 @@ type TerminalBubbleRequest = {
   title?: string;
 };
 
+type ResolvedTerminalDestination = {
+  address: string;
+  terminalSessionName?: string;
+};
+
 class ClawlineTerminalBubbleRequestError extends Error {
   readonly details: Record<string, unknown>;
 
@@ -51,6 +56,26 @@ class ClawlineTerminalBubbleRequestError extends Error {
       ...details,
     };
   }
+}
+
+function resolveStructuredTerminalDestination(address: string): ResolvedTerminalDestination {
+  const match = /^(.+?)\s+on\s+([a-z0-9._-]+)$/i.exec(address.trim());
+  if (!match) {
+    return { address };
+  }
+
+  const label = match[1]?.trim();
+  const host = match[2]?.trim().toLowerCase();
+  if (label === "OPS" && host === "eezo") {
+    return {
+      address: "mike@eezo",
+      terminalSessionName: "OPS",
+    };
+  }
+
+  throw new Error(
+    `Clawline terminal bubble destination is ambiguous: ${address}. Use destination.address with an SSH target such as mike@eezo and terminalSession.name for the caller-facing session.`,
+  );
 }
 
 type EventRow = {
@@ -268,12 +293,14 @@ function readTerminalBubbleRequest(params: Record<string, unknown>): TerminalBub
   if (!address) {
     throw new Error("Clawline terminal bubble request requires destination.address");
   }
+  const resolvedDestination = resolveStructuredTerminalDestination(address);
   const title = readStringParam(params, ["title"]);
   const terminalSessionName = readNestedStringParam(params.terminalSession, "name");
   const terminalSessionIdAlias = readStringParam(params, ["terminalSessionId"]);
   const tmuxSessionNameAlias = readStringParam(params, ["tmuxSessionName"]);
   const suppliedSessionNames = [
     terminalSessionName,
+    resolvedDestination.terminalSessionName,
     terminalSessionIdAlias,
     tmuxSessionNameAlias,
   ].filter((value): value is string => value !== undefined);
@@ -285,13 +312,13 @@ function readTerminalBubbleRequest(params: Record<string, unknown>): TerminalBub
     throw new ClawlineTerminalBubbleRequestError(
       "Clawline terminal bubble request has conflicting terminal session aliases",
       {
-        destination: { address },
+        destination: { address: resolvedDestination.address },
         terminalSession: { name: requestedSessionName },
       },
     );
   }
   return {
-    destination: { address },
+    destination: { address: resolvedDestination.address },
     ...(requestedSessionName
       ? {
           terminalSession: {

@@ -442,6 +442,73 @@ describe("clawlineMessageActions", () => {
     expect(descriptor.terminalSessionId).not.toBe("flynn-existing-agent");
   });
 
+  it("sendAttachment resolves OPS on eezo to the real destination and caller-facing session", async () => {
+    const cfg: OpenClawConfig = { channels: { clawline: { enabled: true } } };
+    vi.mocked(sendClawlineOutboundMessage).mockResolvedValueOnce({
+      messageId: "msg-ops-eezo-term-request",
+      userId: "flynn",
+      deviceId: "device-1",
+      attachments: [
+        {
+          type: "document",
+          mimeType: "application/vnd.clawline.terminal-session+json",
+          data: "placeholder",
+        },
+      ],
+      assetIds: [],
+    });
+
+    await runClawlineAction({
+      action: "sendAttachment",
+      params: {
+        target: "flynn:s_111df227",
+        mimeType: "application/vnd.clawline.terminal-session+json",
+        destination: { address: "OPS on eezo" },
+      },
+      cfg,
+      accountId: null,
+    });
+
+    const call = vi.mocked(sendClawlineOutboundMessage).mock.calls[0]?.[0];
+    const attachment = call?.attachments?.[0];
+    const descriptor = JSON.parse(
+      Buffer.from((attachment as { data: string }).data, "base64").toString("utf8"),
+    ) as {
+      version: number;
+      terminalSessionId: string;
+      title?: string;
+      destination?: { address?: string };
+      terminalSession?: { name?: string; provisioning?: string };
+    };
+    expect(call?.target).toBe("flynn:s_111df227");
+    expect(descriptor).toMatchObject({
+      version: 3,
+      title: "mike@eezo",
+      destination: { address: "mike@eezo" },
+      terminalSession: { name: "OPS", provisioning: "attach_or_create" },
+    });
+    expect(descriptor.terminalSessionId).toMatch(/^termmsg_[a-f0-9]+$/);
+  });
+
+  it("sendAttachment rejects unresolved caller-facing terminal destinations", async () => {
+    const cfg: OpenClawConfig = { channels: { clawline: { enabled: true } } };
+
+    await expect(
+      runClawlineAction({
+        action: "sendAttachment",
+        params: {
+          target: "flynn:s_111df227",
+          mimeType: "application/vnd.clawline.terminal-session+json",
+          destination: { address: "OPS on unknownhost" },
+        },
+        cfg,
+        accountId: null,
+      }),
+    ).rejects.toThrow("Clawline terminal bubble destination is ambiguous: OPS on unknownhost");
+
+    expect(vi.mocked(sendClawlineOutboundMessage)).not.toHaveBeenCalled();
+  });
+
   it("sendAttachment accepts matching compatibility aliases for the terminal session name", async () => {
     const cfg: OpenClawConfig = { channels: { clawline: { enabled: true } } };
     vi.mocked(sendClawlineOutboundMessage).mockResolvedValueOnce({
