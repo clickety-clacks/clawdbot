@@ -2552,6 +2552,7 @@ export async function runAgentTurnWithFallback(params: {
                           summary: readStringValue(evt.data.summary),
                           progressText: readStringValue(evt.data.progressText),
                           meta: readStringValue(evt.data.meta),
+                          toolCallId: readStringValue(evt.data.toolCallId),
                           approvalId: readStringValue(evt.data.approvalId),
                           approvalSlug: readStringValue(evt.data.approvalSlug),
                         });

@@ -151,6 +151,8 @@ async function forwardFollowupProgressEvent(params: {
     const name = readStringValue(evt.data.name);
     if (phase === "start" || phase === "update") {
       await opts?.onToolStart?.({
+        itemId: readStringValue(evt.data.itemId),
+        toolCallId: readStringValue(evt.data.toolCallId),
         name,
         phase,
         args:
@@ -177,6 +179,7 @@ async function forwardFollowupProgressEvent(params: {
       summary: readStringValue(evt.data.summary),
       progressText: readStringValue(evt.data.progressText),
       meta: readStringValue(evt.data.meta),
+      toolCallId: readStringValue(evt.data.toolCallId),
       approvalId: readStringValue(evt.data.approvalId),
       approvalSlug: readStringValue(evt.data.approvalSlug),
     });

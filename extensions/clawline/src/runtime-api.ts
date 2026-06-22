@@ -18,6 +18,7 @@ export {
 export type { ModelCatalogEntry } from "openclaw/plugin-sdk/agent-runtime";
 export {
   abortAgentHarnessRun,
+  inferToolMetaFromArgs,
   resolveActiveAgentHarnessRunSessionId,
 } from "openclaw/plugin-sdk/agent-harness-runtime";
 export type { OpenClawConfig } from "openclaw/plugin-sdk/core";
@@ -62,6 +63,7 @@ export {
   optimizeImageToJpeg,
   optimizeImageToPng,
 } from "openclaw/plugin-sdk/web-media";
+export { redactToolPayloadText } from "openclaw/plugin-sdk/logging-core";
 export { isPrivateOrLoopbackHost } from "openclaw/plugin-sdk/ssrf-runtime";
 export {
   DEFAULT_ACCOUNT_ID,

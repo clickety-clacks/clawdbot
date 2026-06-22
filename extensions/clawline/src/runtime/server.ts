@@ -31,6 +31,7 @@ import {
   enqueueAnnounce,
   getDefaultLocalRoots,
   hasAlphaChannel,
+  inferToolMetaFromArgs,
   isLoopbackHost,
   isPrivateOrLoopbackHost,
   loadWebMedia,
@@ -42,6 +43,7 @@ import {
   optimizeImageToPng,
   parseAgentSessionKey,
   rawDataToString,
+  redactToolPayloadText,
   recordInboundSession,
   resolveAgentIdentity,
   resolveAgentIdFromSessionKey,
@@ -629,21 +631,55 @@ function sanitizeLabel(label?: string): string | undefined {
   return truncateUtf8(stripped, 64);
 }
 
+function sanitizeAgentProgressString(value: string): string | undefined {
+  const stripped = stripControlChars(value).trim();
+  if (!stripped) {
+    return undefined;
+  }
+  const redacted = redactToolPayloadText(stripped).trim();
+  return redacted ? redacted : undefined;
+}
+
+function sanitizeAgentProgressValue(value: unknown): AgentProgressValue | undefined {
+  if (typeof value === "string") {
+    return sanitizeAgentProgressString(value);
+  }
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : undefined;
+  }
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    const sanitized: AgentProgressValue[] = value
+      .map((entry) => sanitizeAgentProgressValue(entry))
+      .filter((entry): entry is AgentProgressValue => entry !== undefined);
+    return sanitized.length > 0 ? sanitized : undefined;
+  }
+  if (value === null) {
+    return null;
+  }
+  if (typeof value === "object") {
+    const sanitized: { [key: string]: AgentProgressValue } = {};
+    for (const [key, entry] of Object.entries(value)) {
+      const sanitizedEntry = sanitizeAgentProgressValue(entry);
+      if (sanitizedEntry !== undefined) {
+        sanitized[key] = sanitizedEntry;
+      }
+    }
+    return Object.keys(sanitized).length > 0 ? sanitized : undefined;
+  }
+  return undefined;
+}
+
 function compactAgentProgressItem(input: AgentProgressItem): AgentProgressItem {
   const event: AgentProgressItem = {};
-  const assign = (key: keyof AgentProgressItem, value: string | undefined) => {
-    const sanitized = sanitizeLabel(value);
-    if (sanitized) {
+  for (const [key, value] of Object.entries(input)) {
+    const sanitized = sanitizeAgentProgressValue(value);
+    if (sanitized !== undefined) {
       event[key] = sanitized;
     }
-  };
-  assign("kind", input.kind);
-  assign("phase", input.phase);
-  assign("status", input.status);
-  assign("title", input.title);
-  assign("name", input.name);
-  assign("summary", input.summary);
-  assign("progressText", input.progressText);
+  }
   return event;
 }
 
@@ -1346,7 +1382,15 @@ type ServerMessage = {
   promptTurnError?: string;
 };
 
-type AgentProgressItem = {
+type AgentProgressValue =
+  | string
+  | number
+  | boolean
+  | null
+  | AgentProgressValue[]
+  | { [key: string]: AgentProgressValue };
+
+type AgentProgressItem = Record<string, AgentProgressValue | undefined> & {
   kind?: string;
   phase?: string;
   status?: string;
@@ -8997,18 +9041,33 @@ button.deny { background: #9b1c31; color: white; }
         suppressDefaultToolProgressMessages: true,
         allowProgressCallbacksWhenSourceDeliverySuppressed: true,
         onToolStart: async (payload: {
+          itemId?: string;
+          toolCallId?: string;
           name?: string;
           phase?: string;
+          args?: Record<string, unknown>;
           detailMode?: "explain" | "raw";
         }) => {
+          // Use the shared tool-display formatter for Clawline progress: it derives the
+          // same detail as item events while redacting secrets and without forwarding args.
+          const meta = payload.name
+            ? inferToolMetaFromArgs(payload.name, payload.args, {
+                detailMode: payload.detailMode,
+              })
+            : undefined;
+          const title = payload.name ? (meta ? `${payload.name} ${meta}` : payload.name) : meta;
           emit("running", {
             kind: "tool",
+            itemId: payload.itemId,
+            toolCallId: payload.toolCallId,
             phase: payload.phase,
             name: payload.name,
-            title: payload.name ? `Using ${payload.name}` : "Using tool",
+            meta,
+            title: title ?? "tool",
           });
         },
         onItemEvent: async (payload: {
+          itemId?: string;
           kind?: string;
           title?: string;
           name?: string;
@@ -9016,23 +9075,40 @@ button.deny { background: #9b1c31; color: white; }
           status?: string;
           summary?: string;
           progressText?: string;
+          meta?: string;
+          toolCallId?: string;
+          approvalId?: string;
+          approvalSlug?: string;
         }) => {
           emit("running", {
             kind: payload.kind ?? "item",
+            itemId: payload.itemId,
             phase: payload.phase,
             status: payload.status,
             title: payload.title,
             name: payload.name,
+            meta: payload.meta,
+            toolCallId: payload.toolCallId,
+            approvalId: payload.approvalId,
+            approvalSlug: payload.approvalSlug,
             summary: payload.summary,
             progressText: payload.progressText,
           });
         },
-        onPlanUpdate: async (payload: { phase?: string; title?: string; explanation?: string }) => {
+        onPlanUpdate: async (payload: {
+          phase?: string;
+          title?: string;
+          explanation?: string;
+          steps?: string[];
+          source?: string;
+        }) => {
           emit("running", {
             kind: "plan",
             phase: payload.phase,
             title: payload.title ?? "Plan updated",
             summary: payload.explanation,
+            steps: payload.steps,
+            source: payload.source,
           });
         },
         onApprovalEvent: async (payload: {
@@ -9040,40 +9116,76 @@ button.deny { background: #9b1c31; color: white; }
           kind?: string;
           status?: string;
           title?: string;
+          itemId?: string;
+          toolCallId?: string;
+          approvalId?: string;
+          approvalSlug?: string;
+          command?: string;
+          host?: string;
+          reason?: string;
+          scope?: "turn" | "session";
+          message?: string;
         }) => {
           emit("running", {
             kind: "approval",
+            itemId: payload.itemId,
+            toolCallId: payload.toolCallId,
+            approvalId: payload.approvalId,
+            approvalSlug: payload.approvalSlug,
             phase: payload.phase,
             status: payload.status,
             title: payload.title ?? "Approval requested",
             name: payload.kind,
+            command: payload.command,
+            host: payload.host,
+            reason: payload.reason,
+            scope: payload.scope,
+            message: payload.message,
           });
         },
         onCommandOutput: async (payload: {
+          itemId?: string;
           phase?: string;
           title?: string;
+          toolCallId?: string;
           name?: string;
           status?: string;
+          exitCode?: number | null;
+          durationMs?: number;
         }) => {
           emit("running", {
             kind: "command-output",
+            itemId: payload.itemId,
             phase: payload.phase,
             status: payload.status,
             title: payload.title ?? "Command output",
+            toolCallId: payload.toolCallId,
             name: payload.name,
+            exitCode: payload.exitCode,
+            durationMs: payload.durationMs,
           });
         },
         onPatchSummary: async (payload: {
+          itemId?: string;
           phase?: string;
           title?: string;
+          toolCallId?: string;
           name?: string;
+          added?: string[];
+          modified?: string[];
+          deleted?: string[];
           summary?: string;
         }) => {
           emit("running", {
             kind: "patch",
+            itemId: payload.itemId,
             phase: payload.phase,
             title: payload.title ?? "Patch updated",
+            toolCallId: payload.toolCallId,
             name: payload.name,
+            added: payload.added,
+            modified: payload.modified,
+            deleted: payload.deleted,
             summary: payload.summary,
           });
         },

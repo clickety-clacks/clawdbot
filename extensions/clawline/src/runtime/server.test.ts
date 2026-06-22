@@ -34,6 +34,10 @@ const readCodexConversationFastModeMock = vi.fn();
 const setCodexConversationFastModeMock = vi.fn();
 const loadModelCatalogMock = vi.fn();
 const loadSessionStoreMock = vi.fn();
+vi.mock("@openclaw/codex/runtime-api.js", () => ({
+  readCodexConversationFastMode: (...args: unknown[]) => readCodexConversationFastModeMock(...args),
+  setCodexConversationFastMode: (...args: unknown[]) => setCodexConversationFastModeMock(...args),
+}));
 vi.mock("../runtime-api.js", async () => {
   const actual = await vi.importActual("../runtime-api.js");
   return {
@@ -41,9 +45,6 @@ vi.mock("../runtime-api.js", async () => {
     abortAgentHarnessRun: (...args: unknown[]) => abortAgentHarnessRunMock(...args),
     resolveActiveAgentHarnessRunSessionId: (...args: unknown[]) =>
       resolveActiveAgentHarnessRunSessionIdMock(...args),
-    readCodexConversationFastMode: (...args: unknown[]) =>
-      readCodexConversationFastModeMock(...args),
-    setCodexConversationFastMode: (...args: unknown[]) => setCodexConversationFastModeMock(...args),
     enqueueAnnounce: (...args: unknown[]) => enqueueAnnounceMock(...args),
     loadSessionStore: (...args: unknown[]) => {
       loadSessionStoreMock(...args);
@@ -5660,7 +5661,13 @@ describe.sequential("clawline provider server", () => {
       expect(typeof toolProgress.runId).toBe("string");
       expect(typeof toolProgress.sessionKey).toBe("string");
       expect(typeof toolProgress.seq).toBe("number");
-      expect(JSON.stringify(toolProgress)).not.toContain("/private/raw-arg.txt");
+      expect(toolProgress).toMatchObject({
+        event: {
+          meta: "from /private/raw-arg.txt",
+          title: "read from /private/raw-arg.txt",
+        },
+      });
+      expect(JSON.stringify(toolProgress)).not.toContain('"args"');
 
       const commandProgress = await waitForLiveProgressFrame("command progress", (value) => {
         const event = (value as { event?: { kind?: unknown; name?: unknown } }).event;
@@ -8951,38 +8958,24 @@ describe.sequential("clawline provider server", () => {
     });
     const ctx = await setupTestServer([entry], { replyResolver });
     try {
-      await fs.writeFile(
-        ctx.sessionStorePath,
-        JSON.stringify(
-          {
-            [adoptedSessionKey]: {
-              sessionId: "sess_adopted_main",
-              updatedAt: Date.now() - 100,
-              displayName: "Main Session",
-              channel: "openclaw",
-              lastChannel: "openclaw",
-              lastTo: adoptedSessionKey,
-            },
-          },
-          null,
-          2,
-        ),
-      );
-
       const pair = await performPairRequest(ctx.port, deviceId);
       const token = pair.token as string;
-      const { ws, auth, sessionInfo } = await authenticateDevice(ctx.port, deviceId, token, {
-        authPayload: {
-          adoptedSessionKeys: [adoptedSessionKey],
+      const { ws, queue, auth, sessionInfo } = await authenticateDeviceWithQueue(
+        ctx.port,
+        deviceId,
+        token,
+        {
+          authPayload: {
+            adoptedSessionKeys: [adoptedSessionKey],
+          },
         },
-      });
+      );
       expect(auth.sessionKeys).toEqual(["agent:main:clawline:flynn:main", "agent:main:main"]);
       expect((sessionInfo as { sessionKeys?: string[] } | null)?.sessionKeys).toEqual([
         "agent:main:clawline:flynn:main",
         "agent:main:main",
       ]);
 
-      const queue = createMessageQueue(ws);
       const messageId = `c_${randomUUID()}`;
       ws.send(
         JSON.stringify({
@@ -9285,17 +9278,21 @@ describe.sequential("clawline provider server", () => {
 
       const pair = await performPairRequest(ctx.port, deviceId);
       const token = pair.token as string;
-      const { ws, auth, sessionInfo } = await authenticateDevice(ctx.port, deviceId, token, {
-        authPayload: {
-          adoptedSessionKeys: [adoptedSessionKey],
+      const { ws, queue, auth, sessionInfo } = await authenticateDeviceWithQueue(
+        ctx.port,
+        deviceId,
+        token,
+        {
+          authPayload: {
+            adoptedSessionKeys: [adoptedSessionKey],
+          },
         },
-      });
+      );
       expect(auth.sessionKeys).toEqual(["agent:main:clawline:flynn:main"]);
       expect((sessionInfo as { sessionKeys?: string[] } | null)?.sessionKeys).toEqual([
         "agent:main:clawline:flynn:main",
       ]);
 
-      const queue = createMessageQueue(ws);
       ws.send(
         JSON.stringify({
           type: "message",
