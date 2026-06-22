@@ -47,15 +47,14 @@ import { ensureSelectedAgentHarnessPlugin } from "../../agents/harness/runtime-p
 import { LiveSessionModelSwitchError } from "../../agents/live-model-switch-error.js";
 import { isMissingProviderAuthError } from "../../agents/model-auth.js";
 import { runWithModelFallback, isFallbackSummaryError } from "../../agents/model-fallback.js";
-import {
-  isCliRuntimeAliasForProvider,
-  resolveCliRuntimeExecutionProvider,
-} from "../../agents/model-runtime-aliases.js";
+import { resolveCliRuntimeExecutionProvider } from "../../agents/model-runtime-aliases.js";
 import {
   isCliProvider,
   resolveModelRefFromString,
   resolvePersistedOverrideModelRef,
 } from "../../agents/model-selection.js";
+import { resolveSessionRuntimeOverrideForProvider } from "../../agents/session-runtime-compat.js";
+export { resolveSessionRuntimeOverrideForProvider } from "../../agents/session-runtime-compat.js";
 import { resolveOpenAIRuntimeProvider } from "../../agents/openai-routing.js";
 import {
   AGENT_RUN_RESTART_ABORT_STOP_REASON,
@@ -1417,26 +1416,6 @@ function emitModelFallbackStepLifecycle(params: {
       ...params.step,
     },
   });
-}
-
-/** Resolves runtime provider override stored on the session entry. */
-export function resolveSessionRuntimeOverrideForProvider(params: {
-  provider: string;
-  entry?: Pick<SessionEntry, "agentRuntimeOverride">;
-  cfg?: OpenClawConfig;
-}): string | undefined {
-  const provider = normalizeLowercaseStringOrEmpty(params.provider);
-  const runtime = normalizeLowercaseStringOrEmpty(params.entry?.agentRuntimeOverride);
-  if (!runtime || runtime === "auto" || runtime === "default") {
-    return undefined;
-  }
-  if (provider === "openai" && runtime === "codex") {
-    return "codex";
-  }
-  if (isCliRuntimeAliasForProvider({ provider, runtime, cfg: params.cfg })) {
-    return runtime;
-  }
-  return undefined;
 }
 
 /** Decides whether to retry after rechecking auto-fallback primary probe state. */

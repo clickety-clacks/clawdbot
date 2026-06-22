@@ -48,11 +48,11 @@ import {
   resolveAgentWorkspaceDir,
   resolveActiveAgentHarnessRunSessionId,
   resolveAllAgentSessionStoreTargetsSync,
-  resolveDefaultModelForAgent,
   resolveAgentHarnessPolicy,
   resolveEffectiveMessagesConfig,
   resolveHumanDelayConfig,
   resolveModelAuthMode,
+  resolveSessionModelSelection,
   resolveSessionStoreEntry,
   resolvePinnedHostname,
   readCodexConversationFastMode,
@@ -6401,6 +6401,7 @@ button.deny { background: #9b1c31; color: white; }
     provider: string;
     model: string;
     runtime: string;
+    harnessId?: string;
   };
 
   const PI_THINKING_OPTIONS = [
@@ -6465,25 +6466,20 @@ button.deny { background: #9b1c31; color: white; }
     const normalizedSessionKey = normalizeSessionKey(sessionKey);
     const activeRun = activeSessionRuns.get(normalizedSessionKey) ?? null;
     const snapshot = sessionRuntimeStatusSnapshots.get(normalizedSessionKey) ?? null;
-    const selectedModel =
-      modelStatus ??
-      resolveStatusModel(
-        loadSessionStoreEntryForKey(sessionKey).entry,
-        activeRun ?? snapshot,
-        sessionKey,
-      );
-    const policy = resolveAgentHarnessPolicy({
-      provider: selectedModel.provider,
-      modelId: selectedModel.model,
-      config: openClawCfg,
+    const entry = loadSessionStoreEntryForKey(sessionKey).entry;
+    const selectedModel = resolveSessionModelSelection({
+      cfg: openClawCfg,
+      entry,
       agentId,
       sessionKey,
+      snapshot: modelStatus ?? activeRun ?? snapshot,
     });
     return {
       agentId,
       provider: selectedModel.provider,
       model: selectedModel.model,
-      runtime: policy.runtime,
+      runtime: selectedModel.runtime,
+      ...(selectedModel.harnessId ? { harnessId: selectedModel.harnessId } : {}),
     };
   }
 
@@ -6691,28 +6687,6 @@ button.deny { background: #9b1c31; color: white; }
     return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
   }
 
-  function resolveStatusModel(
-    entry: SessionEntry | undefined,
-    snapshot: SessionStatusRuntimeSnapshot | null,
-    sessionKey: string,
-  ) {
-    const defaultModel = resolveDefaultModelForAgent({
-      cfg: openClawCfg,
-      agentId: resolveAgentIdFromSessionKey(sessionKey),
-    });
-    const provider =
-      normalizeStatusString(entry?.providerOverride) ??
-      normalizeStatusString(entry?.modelProvider) ??
-      snapshot?.provider ??
-      defaultModel.provider;
-    const model =
-      normalizeStatusString(entry?.modelOverride) ??
-      normalizeStatusString(entry?.model) ??
-      snapshot?.model ??
-      defaultModel.model;
-    return { provider, model };
-  }
-
   function resolveStatusFastMode(
     entry: SessionEntry | undefined,
     snapshot: SessionStatusRuntimeSnapshot | null,
@@ -6763,7 +6737,13 @@ button.deny { background: #9b1c31; color: white; }
         ?.filter((turn) => turn.state === "queued") ?? [];
     const queueDepth = getClawlineFollowupQueueDepth(sessionKey) + promptTurnQueue.length;
     const queuedPromptTurn = promptTurnQueue[0] ?? null;
-    const modelStatus = resolveStatusModel(entry, activeRun ?? snapshot, sessionKey);
+    const modelStatus = resolveSessionModelSelection({
+      cfg: openClawCfg,
+      entry,
+      agentId: resolveAgentIdFromSessionKey(sessionKey),
+      sessionKey,
+      snapshot: activeRun ?? snapshot,
+    });
     const thinkingLevel =
       normalizeStatusString(entry?.thinkingLevel) ??
       activeRun?.thinkingLevel ??
@@ -6910,11 +6890,13 @@ button.deny { background: #9b1c31; color: white; }
     capability: SessionControlCapability,
   ): Promise<{ ok: true } | { ok: false; code: string; message: string }> {
     if (action === "set_model") {
-      const catalog = await loadSessionControlModelCatalog(sessionKey, context);
       const model = typeof patch.model === "string" ? patch.model : undefined;
       if (!model) {
         return { ok: true };
       }
+      const catalog = await loadSessionControlModelCatalog(sessionKey, context, {
+        runtimeScoped: false,
+      });
       if (!catalog.available) {
         return {
           ok: false,
@@ -6924,16 +6906,6 @@ button.deny { background: #9b1c31; color: white; }
       }
       if (catalog.models.some((entry) => entry.ref === model)) {
         return { ok: true };
-      }
-      const unscopedCatalog = await loadSessionControlModelCatalog(sessionKey, context, {
-        runtimeScoped: false,
-      });
-      if (unscopedCatalog.models.some((entry) => entry.ref === model)) {
-        return {
-          ok: false,
-          code: "unsupported_runtime_model",
-          message: "The selected model is not available for this session runtime.",
-        };
       }
     }
     if (

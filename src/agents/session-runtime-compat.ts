@@ -5,6 +5,7 @@
  */
 import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
 import type { SessionEntry } from "../config/sessions.js";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { isDefaultAgentRuntimeId } from "./agent-runtime-id.js";
 import { normalizeOptionalAgentRuntimeId } from "./agent-runtime-id.js";
 import { resolveCliRuntimeModelBackendBinding } from "./cli-backends.js";
@@ -31,6 +32,7 @@ export function resolvePersistedSessionRuntimeId(
 export function resolveSessionRuntimeOverrideForProvider(params: {
   provider: string;
   entry?: Pick<SessionEntry, "agentRuntimeOverride">;
+  cfg?: OpenClawConfig;
 }): string | undefined {
   const provider = normalizeLowercaseStringOrEmpty(params.provider);
   const runtime = normalizeOptionalAgentRuntimeId(params.entry?.agentRuntimeOverride);
@@ -45,7 +47,11 @@ export function resolveSessionRuntimeOverrideForProvider(params: {
   }
   // CLI runtime bindings are provider-specific; an override from another
   // provider must not leak into this session's model route.
-  return resolveCliRuntimeModelBackendBinding({ provider, runtime })?.runtime;
+  return resolveCliRuntimeModelBackendBinding({
+    provider,
+    runtime,
+    config: params.cfg,
+  })?.runtime;
 }
 
 /** Resolves the context config provider for a persisted session runtime route. */

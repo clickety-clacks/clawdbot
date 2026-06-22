@@ -256,6 +256,61 @@ describe("applyModelOverrideToSessionEntry", () => {
     expect(entry.authProfileOverride).toBe("newprofile");
     expect(entry.liveModelSwitchPending).toBe(true);
   });
+
+  it("clears persisted runtime pins when a selection resolves to another runtime", () => {
+    const before = Date.now() - 5_000;
+    const entry: SessionEntry = {
+      sessionId: "sess-runtime-switch",
+      updatedAt: before,
+      providerOverride: "openai",
+      modelOverride: "gpt-5.4",
+      agentRuntimeOverride: "codex",
+      agentHarnessId: "codex",
+    };
+
+    const result = applyModelOverrideToSessionEntry({
+      entry,
+      selection: {
+        provider: "anthropic",
+        model: "claude-sonnet-4-6",
+      },
+      cfg: {},
+      sessionKey: "sess-runtime-switch",
+    });
+
+    expect(result.updated).toBe(true);
+    expect(entry.providerOverride).toBe("anthropic");
+    expect(entry.modelOverride).toBe("claude-sonnet-4-6");
+    expect(entry.agentRuntimeOverride).toBeUndefined();
+    expect(entry.agentHarnessId).toBeUndefined();
+  });
+
+  it("keeps persisted runtime pins when the selected model resolves to the same runtime", () => {
+    const entry: SessionEntry = {
+      sessionId: "sess-runtime-retained",
+      updatedAt: Date.now() - 5_000,
+      providerOverride: "openai",
+      modelOverride: "gpt-5.4",
+      agentRuntimeOverride: "codex",
+      agentHarnessId: "codex",
+    };
+
+    const result = applyModelOverrideToSessionEntry({
+      entry,
+      selection: {
+        provider: "openai",
+        model: "gpt-5.5",
+      },
+      cfg: {},
+      sessionKey: "sess-runtime-retained",
+    });
+
+    expect(result.updated).toBe(true);
+    expect(entry.providerOverride).toBe("openai");
+    expect(entry.modelOverride).toBe("gpt-5.5");
+    expect(entry.agentRuntimeOverride).toBe("codex");
+    expect(entry.agentHarnessId).toBe("codex");
+  });
 });
 
 describe("repairProviderWrappedModelOverride", () => {

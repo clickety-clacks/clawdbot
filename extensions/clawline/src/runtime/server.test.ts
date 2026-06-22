@@ -1350,10 +1350,15 @@ describe.sequential("clawline provider server", () => {
       });
       expect(gpt55Response.status).toBe(200);
       expect(await gpt55Response.json()).toMatchObject({
-        ok: false,
+        ok: true,
         sessionKey,
         action: "set_model",
-        code: "unsupported_runtime_model",
+        status: {
+          display: {
+            model: "gpt-5.5",
+            provider: "openai",
+          },
+        },
       });
 
       const updatedStatusResponse = await fetch(
@@ -1365,8 +1370,8 @@ describe.sequential("clawline provider server", () => {
       expect(updatedStatusResponse.status).toBe(200);
       expect(await updatedStatusResponse.json()).toMatchObject({
         display: {
-          model: "claude-sonnet-4-6",
-          provider: "anthropic",
+          model: "gpt-5.5",
+          provider: "openai",
           authMode: "oauth",
           thinkingLevel: "low",
           fastMode: true,
@@ -1722,10 +1727,15 @@ describe.sequential("clawline provider server", () => {
       );
       expect(codexPiModelResponse.status).toBe(200);
       expect(await codexPiModelResponse.json()).toMatchObject({
-        ok: false,
+        ok: true,
         sessionKey,
         action: "set_model",
-        code: "unsupported_runtime_model",
+        status: {
+          display: {
+            model: "claude-sonnet-4-6",
+            provider: "anthropic",
+          },
+        },
       });
 
       ws.terminate();
@@ -1864,10 +1874,15 @@ describe.sequential("clawline provider server", () => {
       );
       expect(piCodexModelResponse.status).toBe(200);
       expect(await piCodexModelResponse.json()).toMatchObject({
-        ok: false,
+        ok: true,
         sessionKey,
         action: "set_model",
-        code: "unsupported_runtime_model",
+        status: {
+          display: {
+            model: "gpt-5.5",
+            provider: "openai-codex",
+          },
+        },
       });
 
       const piPluginModelResponse = await fetch(
@@ -1887,10 +1902,15 @@ describe.sequential("clawline provider server", () => {
       );
       expect(piPluginModelResponse.status).toBe(200);
       expect(await piPluginModelResponse.json()).toMatchObject({
-        ok: false,
+        ok: true,
         sessionKey,
         action: "set_model",
-        code: "unsupported_runtime_model",
+        status: {
+          display: {
+            model: "claude-cli-only",
+            provider: "anthropic",
+          },
+        },
       });
 
       ws.terminate();

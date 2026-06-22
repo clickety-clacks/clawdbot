@@ -1,6 +1,9 @@
 // Session model override helpers normalize per-session provider model choices.
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
+import { normalizeOptionalAgentRuntimeId } from "../agents/agent-runtime-id.js";
+import { resolveAgentHarnessPolicy } from "../agents/harness/policy.js";
 import type { SessionEntry } from "../config/sessions.js";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
 
 /** User or automatic model/provider override selection for a session entry. */
 export type ModelOverrideSelection = {
@@ -31,6 +34,9 @@ export function applyModelOverrideToSessionEntry(params: {
   preserveAuthProfileOverride?: boolean;
   selectionSource?: "auto" | "user";
   markLiveSwitchPending?: boolean;
+  cfg?: OpenClawConfig;
+  agentId?: string;
+  sessionKey?: string;
 }): { updated: boolean } {
   const { entry, selection, profileOverride } = params;
   const profileOverrideSource = params.profileOverrideSource ?? "user";
@@ -109,6 +115,30 @@ export function applyModelOverrideToSessionEntry(params: {
   ) {
     delete entry.contextBudgetStatus;
     updated = true;
+  }
+
+  if (params.cfg) {
+    const selectedRuntime = resolveAgentHarnessPolicy({
+      provider: selection.provider,
+      modelId: selection.model,
+      config: params.cfg,
+      agentId: params.agentId,
+      sessionKey: params.sessionKey,
+    }).runtime;
+    const runtimeOverride = normalizeOptionalAgentRuntimeId(entry.agentRuntimeOverride);
+    const harnessId = normalizeOptionalAgentRuntimeId(entry.agentHarnessId);
+    if (runtimeOverride && runtimeOverride !== selectedRuntime) {
+      if (entry.agentRuntimeOverride !== undefined) {
+        delete entry.agentRuntimeOverride;
+        updated = true;
+      }
+    }
+    if (harnessId && harnessId !== selectedRuntime) {
+      if (entry.agentHarnessId !== undefined) {
+        delete entry.agentHarnessId;
+        updated = true;
+      }
+    }
   }
 
   if (profileOverride) {

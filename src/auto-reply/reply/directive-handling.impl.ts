@@ -451,6 +451,9 @@ export async function handleDirectiveOnly(
         selection: modelSelection,
         profileOverride,
         markLiveSwitchPending: true,
+        cfg: params.cfg,
+        agentId: activeAgentId,
+        sessionKey,
       });
       modelSelectionUpdated = applied.updated;
     }

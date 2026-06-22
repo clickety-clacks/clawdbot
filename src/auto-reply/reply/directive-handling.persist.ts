@@ -272,6 +272,9 @@ export async function persistInlineDirectives(params: {
           selection: modelResolution.modelSelection,
           profileOverride: modelResolution.profileOverride,
           markLiveSwitchPending: params.markLiveSwitchPending,
+          cfg,
+          agentId: activeAgentId,
+          sessionKey,
         });
         const runtimeOverride = resolveModelRuntimeOverride({
           rawRuntime: directives.rawModelRuntime,

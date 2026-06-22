@@ -30,6 +30,7 @@ export {
   resolveStorePath,
   updateSessionStore,
 } from "openclaw/plugin-sdk/session-store-runtime";
+export { resolveSessionModelSelection } from "openclaw/plugin-sdk/model-session-runtime";
 export { recordInboundSession } from "openclaw/plugin-sdk/conversation-runtime";
 export {
   createReplyDispatcherWithTyping,
