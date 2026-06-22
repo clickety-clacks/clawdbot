@@ -3717,6 +3717,7 @@ describe("runAgentTurnWithFallback", () => {
         stream: "item",
         data: {
           itemId: "tool:read-1",
+          toolCallId: "read-1",
           kind: "tool",
           title: "read",
           name: "read",
@@ -3760,6 +3761,7 @@ describe("runAgentTurnWithFallback", () => {
     expect(result.kind).toBe("success");
     expect(onItemEvent).toHaveBeenCalledWith({
       itemId: "tool:read-1",
+      toolCallId: "read-1",
       kind: "tool",
       title: "read",
       name: "read",
@@ -3776,6 +3778,7 @@ describe("runAgentTurnWithFallback", () => {
         stream: "item",
         data: {
           itemId: "cmd-1",
+          toolCallId: "cmd-1",
           kind: "command",
           title: "Command",
           name: "bash",
@@ -3826,6 +3829,7 @@ describe("runAgentTurnWithFallback", () => {
         stream: "item",
         data: {
           itemId: "cmd-1",
+          toolCallId: "cmd-1",
           kind: "command",
           title: "Command",
           name: "bash",
@@ -3859,6 +3863,7 @@ describe("runAgentTurnWithFallback", () => {
     expect(result.kind).toBe("success");
     expect(onItemEvent).toHaveBeenCalledWith({
       itemId: "cmd-1",
+      toolCallId: "cmd-1",
       kind: "command",
       title: "Command",
       name: "bash",

@@ -143,6 +143,7 @@ export type GetReplyOptions = {
     summary?: string;
     progressText?: string;
     meta?: string;
+    toolCallId?: string;
     approvalId?: string;
     approvalSlug?: string;
   }) => Promise<void> | void;

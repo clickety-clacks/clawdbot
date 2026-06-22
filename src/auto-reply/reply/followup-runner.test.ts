@@ -1473,6 +1473,7 @@ describe("createFollowupRunner runtime config", () => {
           data: {
             kind: "preamble",
             itemId: "commentary-1",
+            toolCallId: "toolu_commentary",
             progressText: "Let me check the files.",
           },
         });
@@ -2051,6 +2052,8 @@ describe("createFollowupRunner progress forwarding", () => {
         await args.onAgentEvent?.({
           stream: "tool",
           data: {
+            itemId: "tool:queued-progress",
+            toolCallId: "queued-progress",
             phase: "start",
             name: "exec",
             args: { command: "echo queued-progress" },
@@ -2072,6 +2075,8 @@ describe("createFollowupRunner progress forwarding", () => {
     await runner(queued);
 
     expect(onToolStart).toHaveBeenCalledWith({
+      itemId: "tool:queued-progress",
+      toolCallId: "queued-progress",
       name: "exec",
       phase: "start",
       args: { command: "echo queued-progress" },
@@ -2175,6 +2180,8 @@ describe("createFollowupRunner progress forwarding", () => {
         await args.onAgentEvent?.({
           stream: "tool",
           data: {
+            itemId: "tool:queued-suppressed-preview",
+            toolCallId: "queued-suppressed-preview",
             phase: "start",
             name: "exec",
             args: { command: "echo queued-suppressed-preview" },
@@ -2200,6 +2207,8 @@ describe("createFollowupRunner progress forwarding", () => {
     await runner(queued);
 
     expect(onToolStart).toHaveBeenCalledWith({
+      itemId: "tool:queued-suppressed-preview",
+      toolCallId: "queued-suppressed-preview",
       name: "exec",
       phase: "start",
       args: { command: "echo queued-suppressed-preview" },
