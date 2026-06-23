@@ -29,7 +29,10 @@ import {
   resolvePluginConversationBindingApproval,
 } from "openclaw/plugin-sdk/conversation-runtime";
 import { isApprovalNotFoundError } from "openclaw/plugin-sdk/error-runtime";
-import { applyModelOverrideToSessionEntry } from "openclaw/plugin-sdk/model-session-runtime";
+import {
+  applyModelOverrideToSessionEntry,
+  resolveSessionDefaultModelSelection,
+} from "openclaw/plugin-sdk/model-session-runtime";
 import { formatModelsAvailableHeader } from "openclaw/plugin-sdk/models-provider-runtime";
 import { parseStrictPositiveInteger } from "openclaw/plugin-sdk/number-runtime";
 import { resolveAgentRoute } from "openclaw/plugin-sdk/routing";
@@ -2707,17 +2710,17 @@ export const registerTelegramHandlers = ({
               agentId: sessionState.agentId,
             });
 
-            const resolvedDefault = resolveDefaultModelForAgent({
-              cfg: runtimeCfg,
-              agentId: sessionState.agentId,
-            });
-            const isDefaultSelection =
-              selection.provider === resolvedDefault.provider &&
-              selection.model === resolvedDefault.model;
-
             try {
               await updateSessionStore(storePath, (store) => {
                 const sessionKey = sessionState.sessionKey;
+                const resolvedDefault = resolveSessionDefaultModelSelection({
+                  cfg: runtimeCfg,
+                  agentId: sessionState.agentId,
+                  sessionKey,
+                });
+                const isDefaultSelection =
+                  selection.provider === resolvedDefault.provider &&
+                  selection.model === resolvedDefault.model;
                 const entry = store[sessionKey] ?? {};
                 store[sessionKey] = entry;
                 applyModelOverrideToSessionEntry({
@@ -2739,6 +2742,14 @@ export const registerTelegramHandlers = ({
             // Update message to show success with visual feedback
             const escapeHtml = (text: string) =>
               text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+            const resolvedDefault = resolveSessionDefaultModelSelection({
+              cfg: runtimeCfg,
+              agentId: sessionState.agentId,
+              sessionKey: sessionState.sessionKey,
+            });
+            const isDefaultSelection =
+              selection.provider === resolvedDefault.provider &&
+              selection.model === resolvedDefault.model;
             const actionText = isDefaultSelection
               ? "reset to default"
               : `changed to <b>${escapeHtml(selection.provider)}/${escapeHtml(selection.model)}</b>`;
