@@ -80,6 +80,7 @@ import {
   resolveAgentIdFromSessionKey,
   toAgentStoreSessionKey,
 } from "../../routing/session-key.js";
+import { resolveSessionModelSelection } from "../../sessions/model-selection-resolver.js";
 import { ADMIN_SCOPE } from "../operator-scopes.js";
 import { resolveSessionKeyForRun } from "../server-session-key.js";
 import {
@@ -2133,7 +2134,12 @@ export const sessionsHandlers: GatewayRequestHandlers = {
         ? target.agentId
         : (parsed?.agentId ?? resolveDefaultAgentId(cfg)),
     );
-    const resolved = resolveSessionModelRef(cfg, applied.entry, agentId);
+    const resolved = resolveSessionModelSelection({
+      cfg,
+      entry: applied.entry,
+      agentId,
+      sessionKey: target.canonicalKey ?? key,
+    });
     const resolvedDisplayModel = resolveSessionDisplayModelIdentityRef({
       cfg,
       agentId,
@@ -2531,7 +2537,9 @@ export const sessionsHandlers: GatewayRequestHandlers = {
         return;
       }
 
-      const resolvedModel = resolveSessionModelRef(cfg, entry, target.agentId);
+      const resolvedModel = resolveSessionModelRef(cfg, entry, target.agentId, {
+        sessionKey: target.canonicalKey,
+      });
       const workspaceDir =
         normalizeOptionalString(entry?.spawnedWorkspaceDir) ||
         resolveAgentWorkspaceDir(cfg, target.agentId);

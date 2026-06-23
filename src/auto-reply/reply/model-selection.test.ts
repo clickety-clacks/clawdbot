@@ -916,6 +916,34 @@ describe("createModelSelectionState respects session model override", () => {
     expect(state.model).toBe(defaultModel);
   });
 
+  it("uses inherited subagent default when no explicit override is set", async () => {
+    const cfg = {
+      agents: {
+        defaults: {
+          model: { primary: "anthropic/claude-sonnet-4-6" },
+          subagents: { model: "synthetic/hf:moonshotai/Kimi-K2.5" },
+        },
+        list: [{ id: "kimi" }],
+      },
+    } as OpenClawConfig;
+    const state = await createModelSelectionState({
+      cfg,
+      agentCfg: cfg.agents?.defaults,
+      sessionEntry: makeEntry(),
+      sessionStore: {},
+      sessionKey: "agent:kimi:subagent:child",
+      defaultProvider: "anthropic",
+      defaultModel: "claude-sonnet-4-6",
+      provider: "anthropic",
+      model: "claude-sonnet-4-6",
+      agentId: "kimi",
+      hasModelDirective: false,
+    });
+
+    expect(state.provider).toBe("synthetic");
+    expect(state.model).toBe("hf:moonshotai/Kimi-K2.5");
+  });
+
   it("respects modelOverride even when session model field differs", async () => {
     // From issue #14783: stored override should beat last-used fallback model.
     const state = await resolveState(
@@ -1128,6 +1156,8 @@ describe("createModelSelectionState auto-failover overrides", () => {
     primaryModel?: string;
     isHeartbeat?: boolean;
     skipStoredModelOverride?: boolean;
+    agentRuntimeOverride?: string;
+    agentHarnessId?: string;
   }) {
     const cfg = {} as OpenClawConfig;
     const sessionEntry = makeEntry({
@@ -1139,6 +1169,8 @@ describe("createModelSelectionState auto-failover overrides", () => {
       fallbackNoticeSelectedModel: params.fallbackNoticeSelectedModel,
       authProfileOverride: params.authProfileOverride,
       authProfileOverrideSource: params.authProfileOverrideSource,
+      agentRuntimeOverride: params.agentRuntimeOverride,
+      agentHarnessId: params.agentHarnessId,
     });
     const sessionStore = { [sessionKey]: sessionEntry };
     const state = await createModelSelectionState({
@@ -1165,6 +1197,8 @@ describe("createModelSelectionState auto-failover overrides", () => {
       providerOverride: "openrouter",
       modelOverride: "minimax/minimax-m2.7",
       modelOverrideSource: "auto",
+      agentRuntimeOverride: "codex",
+      agentHarnessId: "codex",
     });
 
     expect(state.provider).toBe(defaultProvider);
@@ -1172,6 +1206,8 @@ describe("createModelSelectionState auto-failover overrides", () => {
     expect(sessionStore[sessionKey]?.providerOverride).toBeUndefined();
     expect(sessionStore[sessionKey]?.modelOverride).toBeUndefined();
     expect(sessionStore[sessionKey]?.modelOverrideSource).toBeUndefined();
+    expect(sessionStore[sessionKey]?.agentRuntimeOverride).toBeUndefined();
+    expect(sessionStore[sessionKey]?.agentHarnessId).toBeUndefined();
     expect(state.resetModelOverride).toBe(true);
     expect(state.resetModelOverrideRef).toBe("openrouter/minimax/minimax-m2.7");
   });

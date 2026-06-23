@@ -14,6 +14,8 @@ type TestSessionEntry = {
   modelProvider?: string;
   contextTokens?: number;
   authProfileOverride?: string;
+  agentRuntimeOverride?: string;
+  agentHarnessId?: string;
 };
 
 type EmbeddedAgentArgs = {
@@ -234,9 +236,11 @@ describe("generateVoiceResponse", () => {
       modelProvider: "old-provider",
       contextTokens: 123,
       authProfileOverride: "old-auth-profile",
+      agentRuntimeOverride: "codex",
+      agentHarnessId: "codex",
     };
     const voiceConfig = VoiceCallConfigSchema.parse({
-      responseModel: "openai/gpt-4.1-nano",
+      responseModel: "anthropic/claude-sonnet-4-6",
       responseTimeoutMs: 5000,
     });
 
@@ -252,8 +256,10 @@ describe("generateVoiceResponse", () => {
 
     expect(result.text).toBe("Pinned model works.");
     const pinnedSessionEntry = sessionStore["voice:15550001111"];
-    expect(pinnedSessionEntry?.providerOverride).toBe("openai");
-    expect(pinnedSessionEntry?.modelOverride).toBe("gpt-4.1-nano");
+    expect(pinnedSessionEntry?.providerOverride).toBe("anthropic");
+    expect(pinnedSessionEntry?.agentRuntimeOverride).toBeUndefined();
+    expect(pinnedSessionEntry?.agentHarnessId).toBeUndefined();
+    expect(pinnedSessionEntry?.modelOverride).toBe("claude-sonnet-4-6");
     expect(pinnedSessionEntry?.modelOverrideSource).toBe("auto");
     expect(pinnedSessionEntry?.model).toBeUndefined();
     expect(pinnedSessionEntry?.modelProvider).toBeUndefined();
@@ -270,8 +276,8 @@ describe("generateVoiceResponse", () => {
     });
     expect((patchSessionEntryCall[0] as { update?: unknown }).update).toBeTypeOf("function");
     const args = requireEmbeddedAgentArgs(runEmbeddedAgent);
-    expect(args.provider).toBe("openai");
-    expect(args.model).toBe("gpt-4.1-nano");
+    expect(args.provider).toBe("anthropic");
+    expect(args.model).toBe("claude-sonnet-4-6");
     expect(args.sessionKey).toBe("voice:15550001111");
   });
 

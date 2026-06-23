@@ -57,6 +57,9 @@ async function persistDiscordModelPickerOverride(params: {
           isDefault: params.isDefault,
         },
         markLiveSwitchPending: true,
+        cfg: params.cfg,
+        agentId: params.route.agentId,
+        sessionKey: params.route.sessionKey,
       }).updated || persisted;
     const runtime = params.runtime?.trim();
     if (runtime && runtime !== "auto" && runtime !== "default") {

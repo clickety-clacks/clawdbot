@@ -2727,6 +2727,9 @@ export const registerTelegramHandlers = ({
                     model: selection.model,
                     isDefault: isDefaultSelection,
                   },
+                  cfg: runtimeCfg,
+                  agentId: sessionState.agentId,
+                  sessionKey,
                 });
               });
             } catch (err) {

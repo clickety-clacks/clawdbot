@@ -36,6 +36,7 @@ async function applyResetFixture(params: {
   const fixture = createResetFixture(params.sessionEntry);
   await applyResetModelOverride({
     cfg: fixture.cfg,
+    agentId: "main",
     resetTriggered: params.resetTriggered,
     bodyStripped: "minimax summarize",
     sessionCtx: fixture.sessionCtx,
@@ -75,6 +76,21 @@ describe("applyResetModelOverride", () => {
     expect(sessionEntry.authProfileOverride).toBeUndefined();
     expect(sessionEntry.authProfileOverrideSource).toBeUndefined();
     expect(sessionEntry.authProfileOverrideCompactionCount).toBeUndefined();
+  });
+
+  it("clears stale runtime pins when reset applies a cross-runtime model", async () => {
+    const { sessionEntry } = await applyResetFixture({
+      resetTriggered: true,
+      sessionEntry: {
+        agentRuntimeOverride: "codex",
+        agentHarnessId: "codex",
+      },
+    });
+
+    expect(sessionEntry.providerOverride).toBe("minimax");
+    expect(sessionEntry.modelOverride).toBe("m2.7");
+    expect(sessionEntry.agentRuntimeOverride).toBeUndefined();
+    expect(sessionEntry.agentHarnessId).toBeUndefined();
   });
 
   it("skips when resetTriggered is false", async () => {

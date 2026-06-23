@@ -1,6 +1,7 @@
 /** Model selection state for reply runs, including catalog and override handling. */
 import {
   hasLegacyAutoFallbackWithoutOrigin,
+  hasSessionAutoModelFallbackProvenance,
   resolveAgentConfig,
 } from "../../agents/agent-scope.js";
 import { clearSessionAuthProfileOverride } from "../../agents/auth-profiles/session-override.js";
@@ -32,6 +33,7 @@ import {
 import type { SessionEntry } from "../../config/sessions/types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { applyModelOverrideToSessionEntry } from "../../sessions/model-overrides.js";
+import { resolveSessionModelSelection } from "../../sessions/model-selection-resolver.js";
 import { createLazyImportLoader } from "../../shared/lazy-promise.js";
 import type { ThinkLevel } from "./directives.js";
 export {
@@ -161,8 +163,24 @@ export async function createModelSelectionState(params: {
     defaultModel,
   } = params;
 
-  let provider = params.provider;
-  let model = params.model;
+  const autoFallbackModelState =
+    sessionEntry?.modelOverrideSource === "auto" ||
+    hasSessionAutoModelFallbackProvenance(sessionEntry);
+  const persistedSelection =
+    params.hasModelDirective ||
+    params.skipStoredModelOverride === true ||
+    params.hasResolvedHeartbeatModelOverride === true ||
+    autoFallbackModelState
+      ? null
+      : resolveSessionModelSelection({
+          cfg,
+          entry: sessionEntry,
+          agentId: params.agentId,
+          sessionKey,
+          fallback: { provider: defaultProvider, model: defaultModel },
+        });
+  let provider = persistedSelection?.provider ?? params.provider;
+  let model = persistedSelection?.model ?? params.model;
   const primaryProvider = params.primaryProvider ?? defaultProvider;
   const primaryModel = params.primaryModel ?? defaultModel;
 
@@ -290,6 +308,9 @@ export async function createModelSelectionState(params: {
         entry: sessionEntry,
         selection: { provider: primaryProvider, model: primaryModel, isDefault: true },
         preserveAuthProfileOverride: staleDirectStoredOverride,
+        cfg,
+        agentId: params.agentId,
+        sessionKey,
       });
       if (updated) {
         sessionStore[sessionKey] = sessionEntry;

@@ -31,6 +31,7 @@ import {
   resolveAgentIdFromSessionKey,
 } from "../../routing/session-key.js";
 import { applyModelOverrideToSessionEntry } from "../../sessions/model-overrides.js";
+import { resolveSessionDefaultModelSelection } from "../../sessions/model-selection-resolver.js";
 import { createLazyImportLoader } from "../../shared/lazy-promise.js";
 import type { BuildStatusTextParams } from "../../status/status-text.types.js";
 import { buildTaskStatusSnapshotForRelatedSessionKeyForOwner } from "../../tasks/task-owner-access.js";
@@ -48,7 +49,6 @@ import { loadModelCatalog } from "../model-catalog.js";
 import {
   buildModelAliasIndex,
   modelKey,
-  resolveDefaultModelForAgent,
   resolveModelRefFromString,
   resolveThinkingDefaultWithRuntimeCatalog,
 } from "../model-selection.js";
@@ -414,6 +414,7 @@ async function resolveModelOverride(params: {
   raw: string;
   sessionEntry?: SessionEntry;
   agentId: string;
+  sessionKey: string;
 }): Promise<
   | { kind: "reset" }
   | {
@@ -428,9 +429,10 @@ async function resolveModelOverride(params: {
     return { kind: "reset" };
   }
 
-  const configDefault = resolveDefaultModelForAgent({
+  const configDefault = resolveSessionDefaultModelSelection({
     cfg: params.cfg,
     agentId: params.agentId,
+    sessionKey: params.sessionKey,
   });
   const currentProvider = params.sessionEntry?.providerOverride?.trim() || configDefault.provider;
   const currentModel = params.sessionEntry?.modelOverride?.trim() || configDefault.model;
@@ -764,7 +766,11 @@ export function createSessionStatusTool(opts?: {
         throw new Error(access.error);
       }
 
-      const configured = resolveDefaultModelForAgent({ cfg, agentId });
+      const configured = resolveSessionDefaultModelSelection({
+        cfg,
+        agentId,
+        sessionKey: resolved.key,
+      });
       const modelRaw = readStringParam(params, "model");
       let changedModel = false;
       if (typeof modelRaw === "string") {
@@ -773,6 +779,7 @@ export function createSessionStatusTool(opts?: {
           raw: modelRaw,
           sessionEntry: resolved.entry,
           agentId,
+          sessionKey: resolved.key,
         });
         const nextEntry: SessionEntry = { ...resolved.entry };
         const applied = applyModelOverrideToSessionEntry({
@@ -790,6 +797,9 @@ export function createSessionStatusTool(opts?: {
                   isDefault: selection.isDefault,
                 },
           markLiveSwitchPending: true,
+          cfg,
+          agentId,
+          sessionKey: resolved.key,
         });
         if (applied.updated) {
           const persistedEntry = nextEntry.sessionId.trim()
@@ -846,6 +856,7 @@ export function createSessionStatusTool(opts?: {
             resolved.entry,
             agentId,
             `${configured.provider}/${configured.model}`,
+            { sessionKey: resolved.key },
           );
       const hasExplicitModelOverride = Boolean(
         !activeModelIdentity &&

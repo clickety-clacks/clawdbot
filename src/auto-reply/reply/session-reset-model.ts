@@ -107,6 +107,8 @@ function buildSelectionFromExplicit(params: {
 }
 
 function applySelectionToSession(params: {
+  cfg: OpenClawConfig;
+  agentId?: string;
   selection: ModelDirectiveSelection;
   sessionEntry?: SessionEntry;
   sessionStore?: Record<string, SessionEntry>;
@@ -120,6 +122,9 @@ function applySelectionToSession(params: {
   const { updated } = applyModelOverrideToSessionEntry({
     entry: sessionEntry,
     selection,
+    cfg: params.cfg,
+    agentId: params.agentId,
+    sessionKey,
   });
   if (!updated) {
     return;
@@ -248,6 +253,8 @@ export async function applyResetModelOverride(params: {
   params.sessionCtx.BodyForCommands = cleanedBody;
 
   applySelectionToSession({
+    cfg: params.cfg,
+    agentId: params.agentId,
     selection,
     sessionEntry: params.sessionEntry,
     sessionStore: params.sessionStore,

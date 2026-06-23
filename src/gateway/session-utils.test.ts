@@ -1873,6 +1873,36 @@ describe("resolveSessionModelRef", () => {
 
     expect(resolved).toEqual({ provider: "anthropic", model: "claude-sonnet-4-6" });
   });
+
+  test("uses inherited subagent default for empty subagent status projections", () => {
+    const cfg = {
+      agents: {
+        defaults: {
+          model: { primary: "anthropic/claude-sonnet-4-6" },
+          models: {
+            "synthetic/hf:moonshotai/Kimi-K2.5": { alias: "kimi" },
+          },
+          subagents: { model: "kimi" },
+        },
+        list: [{ id: "kimi" }],
+      },
+    } as OpenClawConfig;
+
+    const resolved = resolveSessionModelRef(
+      cfg,
+      {
+        sessionId: "subagent-empty",
+        updatedAt: Date.now(),
+      },
+      "kimi",
+      { sessionKey: "agent:kimi:subagent:child" },
+    );
+
+    expect(resolved).toEqual({
+      provider: "synthetic",
+      model: "hf:moonshotai/Kimi-K2.5",
+    });
+  });
 });
 
 describe("listSessionsFromStore selected model display", () => {

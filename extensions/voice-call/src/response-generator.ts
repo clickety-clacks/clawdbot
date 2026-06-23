@@ -280,6 +280,9 @@ export async function generateVoiceResponse(
               entry: next,
               selection: { provider, model },
               selectionSource: "auto",
+              cfg,
+              agentId,
+              sessionKey: resolvedSessionKey,
             });
           }
           return next;

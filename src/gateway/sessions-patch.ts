@@ -17,12 +17,7 @@ import {
 } from "../agents/inherited-tool-deny.js";
 import type { ModelCatalogEntry } from "../agents/model-catalog.js";
 import { splitTrailingAuthProfile } from "../agents/model-ref-profile.js";
-import {
-  resolveAllowedModelRef,
-  resolveDefaultModelForAgent,
-  resolveModelRefFromString,
-  resolveSubagentConfiguredModelSelection,
-} from "../agents/model-selection.js";
+import { resolveAllowedModelRef } from "../agents/model-selection.js";
 import { resolveProviderIdForAuth } from "../agents/provider-auth-aliases.js";
 import { normalizeGroupActivation } from "../auto-reply/group-activation.js";
 import {
@@ -51,6 +46,7 @@ import {
   parseVerboseOverride,
 } from "../sessions/level-overrides.js";
 import { applyModelOverrideToSessionEntry } from "../sessions/model-overrides.js";
+import { resolveSessionDefaultModelSelection } from "../sessions/model-selection-resolver.js";
 import { normalizeSendPolicy } from "../sessions/send-policy.js";
 import { parseSessionLabel } from "../sessions/session-label.js";
 
@@ -146,17 +142,11 @@ export async function applySessionsPatchToStore(params: {
   const sessionAgentId = normalizeAgentId(
     params.agentId ?? parsedAgent?.agentId ?? resolveDefaultAgentId(cfg),
   );
-  const resolvedDefault = resolveDefaultModelForAgent({ cfg, agentId: sessionAgentId });
-  const subagentModelHint = isSubagentSessionKey(storeKey)
-    ? resolveSubagentConfiguredModelSelection({ cfg, agentId: sessionAgentId })
-    : undefined;
-  const inheritedDefaultRef = subagentModelHint
-    ? resolveModelRefFromString({
-        cfg,
-        raw: subagentModelHint,
-        defaultProvider: resolvedDefault.provider,
-      })?.ref
-    : undefined;
+  const resolvedDefault = resolveSessionDefaultModelSelection({
+    cfg,
+    agentId: sessionAgentId,
+    sessionKey: storeKey,
+  });
   let loadedModelCatalog: ModelCatalogEntry[] | undefined;
   const loadModelCatalogForPatch = async () => {
     if (loadedModelCatalog) {
@@ -571,15 +561,14 @@ export async function applySessionsPatchToStore(params: {
         catalog,
         raw: modelWithoutProfile,
         defaultProvider: resolvedDefault.provider,
-        defaultModel: subagentModelHint ?? resolvedDefault.model,
+        defaultModel: `${resolvedDefault.provider}/${resolvedDefault.model}`,
       });
       if ("error" in resolved) {
         return invalid(resolved.error);
       }
-      const defaultProvider = inheritedDefaultRef?.provider ?? resolvedDefault.provider;
-      const defaultModel = inheritedDefaultRef?.model ?? subagentModelHint ?? resolvedDefault.model;
       const isDefault =
-        resolved.ref.provider === defaultProvider && resolved.ref.model === defaultModel;
+        resolved.ref.provider === resolvedDefault.provider &&
+        resolved.ref.model === resolvedDefault.model;
       applyModelOverrideToSessionEntry({
         entry: next,
         selection: {

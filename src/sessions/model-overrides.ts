@@ -196,6 +196,9 @@ export function repairProviderWrappedModelOverride(params: {
   entry: SessionEntry;
   defaultProvider: string;
   defaultModel?: string;
+  cfg?: OpenClawConfig;
+  agentId?: string;
+  sessionKey?: string;
 }): { updated: boolean } {
   const overrideProvider = normalizeOptionalString(params.entry.providerOverride);
   const overrideModel = normalizeOptionalString(params.entry.modelOverride);
@@ -216,6 +219,9 @@ export function repairProviderWrappedModelOverride(params: {
           runtimeProvider === params.defaultProvider && runtimeModel === params.defaultModel,
       },
       selectionSource: params.entry.modelOverrideSource === "auto" ? "auto" : "user",
+      cfg: params.cfg,
+      agentId: params.agentId,
+      sessionKey: params.sessionKey,
     });
   }
 
@@ -227,6 +233,9 @@ export function repairProviderWrappedModelOverride(params: {
         model: params.defaultModel,
         isDefault: true,
       },
+      cfg: params.cfg,
+      agentId: params.agentId,
+      sessionKey: params.sessionKey,
     });
   }
 

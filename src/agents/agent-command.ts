@@ -1325,6 +1325,9 @@ async function agentCommandInternal(
         const { updated } = applyModelOverrideToSessionEntry({
           entry,
           selection: { provider: defaultProvider, model: defaultModel, isDefault: true },
+          cfg,
+          agentId: sessionAgentId,
+          sessionKey,
         });
         if (updated) {
           storedModelOverrideSource = undefined;
@@ -1340,6 +1343,9 @@ async function agentCommandInternal(
         entry,
         defaultProvider,
         defaultModel,
+        cfg,
+        agentId: sessionAgentId,
+        sessionKey,
       });
       if (repaired.updated) {
         await persistSessionEntry({
@@ -1363,6 +1369,9 @@ async function agentCommandInternal(
           const { updated } = applyModelOverrideToSessionEntry({
             entry,
             selection: { provider: defaultProvider, model: defaultModel, isDefault: true },
+            cfg,
+            agentId: sessionAgentId,
+            sessionKey,
           });
           if (updated) {
             await persistSessionEntry({

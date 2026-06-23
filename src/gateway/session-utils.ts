@@ -37,7 +37,6 @@ import {
   parseModelRef,
   resolveConfiguredModelRef,
   resolveDefaultModelForAgent,
-  resolvePersistedSelectedModelRef,
   resolveThinkingDefault,
 } from "../agents/model-selection.js";
 import {
@@ -80,6 +79,7 @@ import {
   normalizeMainKey,
   parseAgentSessionKey,
 } from "../routing/session-key.js";
+import { resolveSessionModelSelection } from "../sessions/model-selection-resolver.js";
 import { isAcpSessionKey, isCronRunSessionKey } from "../sessions/session-key-utils.js";
 import {
   AVATAR_MAX_BYTES,
@@ -745,6 +745,7 @@ function resolveSessionSelectedModelRef(params: {
   cfg: OpenClawConfig;
   entry?: SessionEntry;
   agentId: string;
+  sessionKey?: string;
   rowContext?: SessionListRowContext;
   allowPluginNormalization?: boolean;
 }): ReturnType<typeof resolveSessionModelRef> | null {
@@ -758,10 +759,12 @@ function resolveSessionSelectedModelRef(params: {
   if (!params.rowContext) {
     return resolveSessionModelRef(params.cfg, params.entry, params.agentId, {
       allowPluginNormalization: params.allowPluginNormalization,
+      sessionKey: params.sessionKey,
     });
   }
   const key = [
     normalizeAgentId(params.agentId),
+    params.sessionKey ?? "",
     override.providerOverride ?? "",
     override.modelOverride,
   ].join("\0");
@@ -771,6 +774,7 @@ function resolveSessionSelectedModelRef(params: {
   }
   const selected = resolveSessionModelRef(params.cfg, params.entry, params.agentId, {
     allowPluginNormalization: params.allowPluginNormalization,
+    sessionKey: params.sessionKey,
   });
   params.rowContext.selectedModelByOverrideRef.set(key, selected);
   return selected;
@@ -1682,51 +1686,16 @@ export function resolveSessionModelRef(
     | SessionEntry
     | Pick<SessionEntry, "model" | "modelProvider" | "modelOverride" | "providerOverride">,
   agentId?: string,
-  options?: { allowPluginNormalization?: boolean },
+  options?: { allowPluginNormalization?: boolean; sessionKey?: string },
 ): { provider: string; model: string } {
-  const normalizedOverride = normalizeStoredOverrideModel({
-    providerOverride: entry?.providerOverride,
-    modelOverride: entry?.modelOverride,
-  });
-  if (normalizedOverride.providerOverride && normalizedOverride.modelOverride) {
-    return resolvePersistedSelectedModelRef({
-      defaultProvider: normalizedOverride.providerOverride,
-      overrideProvider: normalizedOverride.providerOverride,
-      overrideModel: normalizedOverride.modelOverride,
-      allowPluginNormalization: options?.allowPluginNormalization,
-    })!;
-  }
-  const runtimeProvider = normalizeOptionalString(entry?.modelProvider);
-  const runtimeModel = normalizeOptionalString(entry?.model);
-  if (runtimeProvider && runtimeModel) {
-    return { provider: runtimeProvider, model: runtimeModel };
-  }
-
-  const resolved = agentId
-    ? resolveDefaultModelForAgent({
-        cfg,
-        agentId,
-        allowPluginNormalization: options?.allowPluginNormalization,
-      })
-    : resolveConfiguredModelRef({
-        cfg,
-        defaultProvider: DEFAULT_PROVIDER,
-        defaultModel: DEFAULT_MODEL,
-        allowPluginNormalization: options?.allowPluginNormalization,
-      });
-
-  const persisted = resolvePersistedSelectedModelRef({
-    defaultProvider: resolved.provider || DEFAULT_PROVIDER,
-    runtimeProvider,
-    runtimeModel,
-    overrideProvider: normalizedOverride.providerOverride,
-    overrideModel: normalizedOverride.modelOverride,
+  const selection = resolveSessionModelSelection({
+    cfg,
+    entry,
+    agentId,
+    sessionKey: options?.sessionKey,
     allowPluginNormalization: options?.allowPluginNormalization,
   });
-  if (persisted) {
-    return persisted;
-  }
-  return resolved;
+  return { provider: selection.provider, model: selection.model };
 }
 
 export async function resolveGatewayModelSupportsImages(params: {
@@ -1809,7 +1778,7 @@ export function resolveSessionModelIdentityRef(
     | Pick<SessionEntry, "model" | "modelProvider" | "modelOverride" | "providerOverride">,
   agentId?: string,
   fallbackModelRef?: string,
-  options?: { allowPluginNormalization?: boolean },
+  options?: { allowPluginNormalization?: boolean; sessionKey?: string },
 ): { provider?: string; model: string } {
   const runtimeModel = entry?.model?.trim();
   const runtimeProvider = entry?.modelProvider?.trim();
@@ -1854,6 +1823,7 @@ export function resolveSessionModelIdentityRef(
   }
   const resolved = resolveSessionModelRef(cfg, entry, agentId, {
     allowPluginNormalization: options?.allowPluginNormalization,
+    sessionKey: options?.sessionKey,
   });
   return { provider: resolved.provider, model: resolved.model };
 }
@@ -2027,6 +1997,7 @@ export function buildGatewaySessionRow(params: {
     cfg,
     entry,
     agentId: sessionAgentId,
+    sessionKey: key,
     rowContext,
     allowPluginNormalization: !lightweight,
   });
@@ -2035,7 +2006,7 @@ export function buildGatewaySessionRow(params: {
     entry,
     sessionAgentId,
     subagentRun?.model,
-    { allowPluginNormalization: !lightweight },
+    { allowPluginNormalization: !lightweight, sessionKey: key },
   );
   const runtimeModelPresent =
     Boolean(entry?.model?.trim()) || Boolean(entry?.modelProvider?.trim());
@@ -2351,6 +2322,7 @@ function resolveSessionListSearchModelFields(params: {
     cfg: params.cfg,
     entry: params.entry,
     agentId,
+    sessionKey: params.key,
     rowContext: params.rowContext,
     allowPluginNormalization: false,
   });
@@ -2359,7 +2331,7 @@ function resolveSessionListSearchModelFields(params: {
     params.entry,
     agentId,
     subagentRun?.model,
-    { allowPluginNormalization: false },
+    { allowPluginNormalization: false, sessionKey: params.key },
   );
   const modelIdentity = {
     provider: resolvedModel.provider,
