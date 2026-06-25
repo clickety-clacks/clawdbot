@@ -13,6 +13,10 @@ import type { ImageContent } from "@earendil-works/pi-ai";
 import type { Database as SqliteDatabase, Statement as SqliteStatement } from "better-sqlite3";
 import BetterSqlite3 from "better-sqlite3";
 import jwt from "jsonwebtoken";
+import {
+  runChannelInboundEvent,
+  type PreparedInboundReply,
+} from "openclaw/plugin-sdk/channel-inbound";
 import { loadGatewayTlsRuntime } from "openclaw/plugin-sdk/gateway-runtime";
 import { type Dispatcher } from "undici";
 import WebSocket, { WebSocketServer } from "ws";
@@ -25,9 +29,9 @@ import {
   detectMime,
   dispatchInboundMessage,
   enqueueAnnounce,
-  finalizeInboundContext,
   getDefaultLocalRoots,
   hasAlphaChannel,
+  inferToolMetaFromArgs,
   isLoopbackHost,
   isPrivateOrLoopbackHost,
   loadWebMedia,
@@ -39,6 +43,7 @@ import {
   optimizeImageToPng,
   parseAgentSessionKey,
   rawDataToString,
+  redactToolPayloadText,
   recordInboundSession,
   resolveAgentIdentity,
   resolveAgentIdFromSessionKey,
@@ -52,12 +57,13 @@ import {
   resolveModelAuthMode,
   resolveSessionStoreEntry,
   resolvePinnedHostname,
-  readCodexAppServerFastMode,
-  setCodexAppServerFastMode,
+  readCodexConversationFastMode,
+  setCodexConversationFastMode,
   updateSessionStore,
   applySessionsPatchToStore,
   buildAllowedModelSet,
   loadModelCatalog,
+  type CodexConversationFastModeStatus,
   type ModelCatalogEntry,
   type PinnedHostname,
   type ReplyPayload,
@@ -91,13 +97,20 @@ import type {
 import { ClientMessageError, HttpError } from "./errors.js";
 import { callClawlineGatewayAgent } from "./gateway-alert-runtime.js";
 import { createAssetHandlers } from "./http-assets.js";
-import {
-  resolveClawlineMessageReferenceContexts,
-  type ClawlineMessageReference,
-  type ClawlineTranscriptMessageRecord,
-} from "./message-reference-context.js";
+import { buildClawlineInboundContext } from "./inbound-context.js";
+import { resolveClawlineMessageReferenceContexts } from "./message-reference-context.js";
 import { runWithClawlineOutboundCorrelation } from "./outbound.js";
-import { createPerUserTaskQueue } from "./per-user-task-queue.js";
+import { createClawlineProviderLaneQueue, createPerUserTaskQueue } from "./per-user-task-queue.js";
+import {
+  classifyDuplicatePromptTurnRetry,
+  createPromptTurnAdmissionFacts,
+  isPromptTurnTerminalState,
+  reconstructPromptTurnAdmissionFacts,
+  resolveQueuedPromptTurnStart,
+  transitionPromptTurnState,
+  type PromptTurnAdmissionFacts,
+  type PromptTurnState,
+} from "./prompt-turn-state.js";
 import { SlidingWindowRateLimiter } from "./rate-limiter.js";
 import {
   type ClawlineResponsePrefixContext,
@@ -138,12 +151,21 @@ type PtyProcess = {
   onExit(callback: (event: { exitCode?: number }) => void): void;
 };
 
-function isClientPayload(value: unknown): value is ClientPayload {
-  return !!value && typeof value === "object" && !Array.isArray(value);
+async function readClawlineCodexConversationFastMode(params: {
+  sessionFile: string;
+}): Promise<CodexConversationFastModeStatus> {
+  return await readCodexConversationFastMode(params);
 }
 
-function normalizeReferenceString(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+async function setClawlineCodexConversationFastMode(params: {
+  sessionFile: string;
+  enabled: boolean;
+}): Promise<void> {
+  await setCodexConversationFastMode(params);
+}
+
+function isClientPayload(value: unknown): value is ClientPayload {
+  return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
 type TerminalTmuxBackend = {
@@ -471,6 +493,23 @@ function parseClientFeatures(payload: unknown): Set<string> {
   return out;
 }
 
+function parseClientIdentity(payload: unknown): { clientId?: string; clientName?: string } {
+  if (!payload || typeof payload !== "object") {
+    return {};
+  }
+  const record = payload as { client?: unknown };
+  if (!record.client || typeof record.client !== "object") {
+    return {};
+  }
+  const clientRecord = record.client as { id?: unknown; name?: unknown };
+  const clientId = typeof clientRecord.id === "string" ? clientRecord.id.trim() : "";
+  const clientName = typeof clientRecord.name === "string" ? clientRecord.name.trim() : "";
+  return {
+    ...(clientId ? { clientId } : {}),
+    ...(clientName ? { clientName } : {}),
+  };
+}
+
 function parseAdoptedSessionKeys(payload: unknown): string[] {
   if (!payload || typeof payload !== "object") {
     return [];
@@ -592,21 +631,55 @@ function sanitizeLabel(label?: string): string | undefined {
   return truncateUtf8(stripped, 64);
 }
 
+function sanitizeAgentProgressString(value: string): string | undefined {
+  const stripped = stripControlChars(value).trim();
+  if (!stripped) {
+    return undefined;
+  }
+  const redacted = redactToolPayloadText(stripped).trim();
+  return redacted ? redacted : undefined;
+}
+
+function sanitizeAgentProgressValue(value: unknown): AgentProgressValue | undefined {
+  if (typeof value === "string") {
+    return sanitizeAgentProgressString(value);
+  }
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : undefined;
+  }
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    const sanitized: AgentProgressValue[] = value
+      .map((entry) => sanitizeAgentProgressValue(entry))
+      .filter((entry): entry is AgentProgressValue => entry !== undefined);
+    return sanitized.length > 0 ? sanitized : undefined;
+  }
+  if (value === null) {
+    return null;
+  }
+  if (typeof value === "object") {
+    const sanitized: { [key: string]: AgentProgressValue } = {};
+    for (const [key, entry] of Object.entries(value)) {
+      const sanitizedEntry = sanitizeAgentProgressValue(entry);
+      if (sanitizedEntry !== undefined) {
+        sanitized[key] = sanitizedEntry;
+      }
+    }
+    return Object.keys(sanitized).length > 0 ? sanitized : undefined;
+  }
+  return undefined;
+}
+
 function compactAgentProgressItem(input: AgentProgressItem): AgentProgressItem {
   const event: AgentProgressItem = {};
-  const assign = (key: keyof AgentProgressItem, value: string | undefined) => {
-    const sanitized = sanitizeLabel(value);
-    if (sanitized) {
+  for (const [key, value] of Object.entries(input)) {
+    const sanitized = sanitizeAgentProgressValue(value);
+    if (sanitized !== undefined) {
       event[key] = sanitized;
     }
-  };
-  assign("kind", input.kind);
-  assign("phase", input.phase);
-  assign("status", input.status);
-  assign("title", input.title);
-  assign("name", input.name);
-  assign("summary", input.summary);
-  assign("progressText", input.progressText);
+  }
   return event;
 }
 
@@ -1262,8 +1335,13 @@ type Session = {
   /** Global DM session key (shared operator session; admin-only). */
   globalSessionKey: string;
   peerId: string;
+  clientId?: string;
+  clientName?: string;
   claimedName?: string;
   deviceInfo?: DeviceInfo;
+  remoteAddress?: string;
+  origin?: string;
+  userAgent?: string;
   replayInProgress: boolean;
   replayDeliveredMessageIds: Set<string>;
   replayBufferedMessages: ServerMessage[];
@@ -1299,9 +1377,20 @@ type ServerMessage = {
   clientMessageId?: string;
   replyToMessageId?: string;
   replyToClientMessageId?: string;
+  promptTurnState?: PromptTurnState;
+  promptTurnCorrelationId?: string;
+  promptTurnError?: string;
 };
 
-type AgentProgressItem = {
+type AgentProgressValue =
+  | string
+  | number
+  | boolean
+  | null
+  | AgentProgressValue[]
+  | { [key: string]: AgentProgressValue };
+
+type AgentProgressItem = Record<string, AgentProgressValue | undefined> & {
   kind?: string;
   phase?: string;
   status?: string;
@@ -1347,7 +1436,9 @@ type TrackableSessionApiEntry = {
 
 type SessionStatusActiveRun = {
   runId: string;
+  correlationId?: string;
   messageId: string;
+  deviceId?: string;
   sessionKey: string;
   agentSessionId: string | null;
   startedAt: number;
@@ -1931,6 +2022,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     resolveIdentityName(resolveAgentIdFromSessionKey(sessionKey));
   const activeSessionRuns = new Map<string, SessionStatusActiveRun>();
   const sessionRuntimeStatusSnapshots = new Map<string, SessionStatusRuntimeSnapshot>();
+  const queuedPromptTurnsBySession = new Map<string, PromptTurnAdmissionFacts[]>();
+  const startingPromptTurnsBySession = new Map<string, PromptTurnAdmissionFacts>();
+  const scheduledPromptTurnCountsBySession = new Map<string, number>();
 
   type SessionInfo = {
     dmScope: string;
@@ -2101,7 +2195,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   let insertMessageStmt!: SqliteStatement;
   let selectMessageStmt!: SqliteStatement;
   let updateMessageStreamingStmt!: SqliteStatement;
+  let updateMessageFailedStmt!: SqliteStatement;
+  let updateMessagePromptTurnStmt!: SqliteStatement;
+  let updatePromptCancelRequestedStmt!: SqliteStatement;
   let updateActiveMessagesStreamingByDeviceStmt!: SqliteStatement;
+  let recoverIncompletePromptTurnsBySessionStmt!: SqliteStatement;
   let insertMessageAssetStmt!: SqliteStatement;
   let insertAssetStmt!: SqliteStatement;
   let selectAssetStmt!: SqliteStatement;
@@ -2110,9 +2208,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   let selectEventsTailStmt!: SqliteStatement;
   let selectEventsTailBySessionStmt!: SqliteStatement;
   let selectEventsAfterBySessionStmt!: SqliteStatement;
-  let selectEventsBySessionStmt!: SqliteStatement;
   let selectEventByIdStmt!: SqliteStatement;
   let selectEventPayloadForUserStmt!: SqliteStatement;
+  let selectEventPayloadForUserClientIdStmt!: SqliteStatement;
   let selectStreamSessionsByUserStmt!: SqliteStatement;
   let selectStreamSessionByKeyStmt!: SqliteStatement;
   let selectStreamMaxOrderStmt!: SqliteStatement;
@@ -2637,6 +2735,20 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     if (!tableHasColumn("events", "sessionKey")) {
       database.exec(`ALTER TABLE events ADD COLUMN sessionKey TEXT`);
     }
+    if (!tableHasColumn("messages", "promptTurnState")) {
+      database.exec(`ALTER TABLE messages ADD COLUMN promptTurnState TEXT`);
+    }
+    if (!tableHasColumn("messages", "promptTurnCorrelationId")) {
+      database.exec(`ALTER TABLE messages ADD COLUMN promptTurnCorrelationId TEXT`);
+    }
+    if (!tableHasColumn("messages", "promptTurnCancelRequested")) {
+      database.exec(
+        `ALTER TABLE messages ADD COLUMN promptTurnCancelRequested INTEGER NOT NULL DEFAULT 0`,
+      );
+    }
+    if (!tableHasColumn("messages", "promptTurnError")) {
+      database.exec(`ALTER TABLE messages ADD COLUMN promptTurnError TEXT`);
+    }
 
     database.exec(`
       CREATE TABLE IF NOT EXISTS stream_sessions (
@@ -3004,6 +3116,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         timestamp INTEGER NOT NULL,
         streaming INTEGER NOT NULL,
         ackSent INTEGER NOT NULL DEFAULT 0,
+        promptTurnState TEXT,
+        promptTurnCorrelationId TEXT,
+        promptTurnCancelRequested INTEGER NOT NULL DEFAULT 0,
+        promptTurnError TEXT,
         PRIMARY KEY (deviceId, clientId)
       );
       CREATE INDEX IF NOT EXISTS idx_messages_userId ON messages(userId);
@@ -3045,17 +3161,64 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ${MessageStreamingState.Active}, 0)`,
     );
     selectMessageStmt = newDb.prepare(
-      `SELECT deviceId, userId, clientId, serverEventId, serverSequence, content, contentHash, attachmentsHash, timestamp, streaming, ackSent
-       FROM messages WHERE deviceId = ? AND clientId = ?`,
+      `SELECT messages.deviceId, messages.userId, messages.clientId, messages.serverEventId,
+              messages.serverSequence, messages.content, messages.contentHash,
+              messages.attachmentsHash, messages.timestamp, messages.streaming,
+              messages.ackSent, messages.promptTurnState,
+              messages.promptTurnCorrelationId, messages.promptTurnCancelRequested,
+              messages.promptTurnError, events.sessionKey AS eventSessionKey
+       FROM messages
+       LEFT JOIN events ON events.id = messages.serverEventId
+       WHERE messages.deviceId = ? AND messages.clientId = ?`,
     );
     updateMessageStreamingStmt = newDb.prepare(
       `UPDATE messages SET streaming = ? WHERE deviceId = ? AND clientId = ?`,
+    );
+    updateMessageFailedStmt = newDb.prepare(
+      `UPDATE messages
+       SET streaming = ?, promptTurnState = 'failed', promptTurnError = ?
+       WHERE deviceId = ? AND clientId = ?`,
+    );
+    updateMessagePromptTurnStmt = newDb.prepare(
+      `UPDATE messages
+       SET streaming = ?, promptTurnState = ?, promptTurnCorrelationId = ?, promptTurnError = CASE WHEN ? IS NULL THEN promptTurnError ELSE ? END
+       WHERE deviceId = ? AND clientId = ?`,
+    );
+    updatePromptCancelRequestedStmt = newDb.prepare(
+      `UPDATE messages
+       SET promptTurnCancelRequested = ?
+       WHERE deviceId = ? AND clientId = ?`,
     );
     updateActiveMessagesStreamingByDeviceStmt = newDb.prepare(
       `UPDATE messages
        SET streaming = ?
        WHERE deviceId = ? AND streaming IN (${MessageStreamingState.Active}, ${MessageStreamingState.Queued})`,
     );
+    recoverIncompletePromptTurnsBySessionStmt = newDb.prepare(
+      `UPDATE messages
+       SET streaming = ?, promptTurnState = 'failed', promptTurnError = 'clawline.promptTurn.recoveredAfterReconnect'
+       WHERE userId = ?
+         AND serverEventId IN (
+           SELECT id FROM events WHERE userId = ? AND sessionKey = ? AND eventType = 'message'
+         )
+         AND (
+           promptTurnState IN ('accepted', 'queued', 'running')
+           OR (promptTurnState IS NULL AND streaming IN (${MessageStreamingState.Active}, ${MessageStreamingState.Queued}))
+         )`,
+    );
+    const reconciled = newDb
+      .prepare(
+        `UPDATE messages
+         SET streaming = ?, promptTurnState = 'failed', promptTurnError = 'clawline.promptTurn.recoveredAfterRestart'
+         WHERE promptTurnState IN ('accepted', 'queued', 'running')
+            OR (promptTurnState IS NULL AND streaming IN (${MessageStreamingState.Active}, ${MessageStreamingState.Queued}))`,
+      )
+      .run(MessageStreamingState.Failed);
+    if (reconciled.changes > 0) {
+      logger.warn?.("[clawline] prompt_turn_recovered_incomplete_after_startup", {
+        recoveredCount: reconciled.changes,
+      });
+    }
     insertMessageAssetStmt = newDb.prepare(
       `INSERT INTO message_assets (deviceId, clientId, assetId) VALUES (?, ?, ?)`,
     );
@@ -3301,28 +3464,37 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     );
 
     selectEventsTailStmt = newDb.prepare(
-      `SELECT id, payloadJson
+      `SELECT events.id, events.payloadJson,
+              messages.streaming AS messageStreaming,
+              messages.promptTurnState AS promptTurnState,
+              messages.promptTurnCorrelationId AS promptTurnCorrelationId,
+              messages.promptTurnError AS promptTurnError
        FROM events
-       WHERE userId = ? AND eventType = 'message'
-       ORDER BY sequence DESC LIMIT ?`,
+       LEFT JOIN messages ON messages.serverEventId = events.id
+       WHERE events.userId = ? AND events.eventType = 'message'
+       ORDER BY events.sequence DESC LIMIT ?`,
     );
     selectEventsTailBySessionStmt = newDb.prepare(
-      `SELECT id, payloadJson, sequence, timestamp
+      `SELECT events.id, events.payloadJson, events.sequence, events.timestamp,
+              messages.streaming AS messageStreaming,
+              messages.promptTurnState AS promptTurnState,
+              messages.promptTurnCorrelationId AS promptTurnCorrelationId,
+              messages.promptTurnError AS promptTurnError
        FROM events
-       WHERE userId = ? AND eventType = 'message' AND sessionKey = ?
-       ORDER BY sequence DESC LIMIT ?`,
-    );
-    selectEventsBySessionStmt = newDb.prepare(
-      `SELECT id, payloadJson, sequence, timestamp
-       FROM events
-       WHERE userId = ? AND eventType = 'message' AND sessionKey = ?
-       ORDER BY sequence ASC`,
+       LEFT JOIN messages ON messages.serverEventId = events.id
+       WHERE events.userId = ? AND events.eventType = 'message' AND events.sessionKey = ?
+       ORDER BY events.sequence DESC LIMIT ?`,
     );
     selectEventsAfterBySessionStmt = newDb.prepare(
-      `SELECT id, payloadJson, sequence, timestamp
+      `SELECT events.id, events.payloadJson, events.sequence, events.timestamp,
+              messages.streaming AS messageStreaming,
+              messages.promptTurnState AS promptTurnState,
+              messages.promptTurnCorrelationId AS promptTurnCorrelationId,
+              messages.promptTurnError AS promptTurnError
        FROM events
-       WHERE userId = ? AND eventType = 'message' AND sessionKey = ? AND sequence > ?
-       ORDER BY sequence DESC LIMIT ?`,
+       LEFT JOIN messages ON messages.serverEventId = events.id
+       WHERE events.userId = ? AND events.eventType = 'message' AND events.sessionKey = ? AND events.sequence > ?
+       ORDER BY events.sequence DESC LIMIT ?`,
     );
     selectEventByIdStmt = newDb.prepare(
       `SELECT id, userId, sessionKey, sequence, timestamp
@@ -3331,6 +3503,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     );
     selectEventPayloadForUserStmt = newDb.prepare(
       `SELECT payloadJson FROM events WHERE userId = ? AND id = ? AND eventType = 'message'`,
+    );
+    selectEventPayloadForUserClientIdStmt = newDb.prepare(
+      `SELECT events.payloadJson
+       FROM messages
+       JOIN events ON events.id = messages.serverEventId
+       WHERE messages.userId = ? AND messages.clientId = ? AND events.eventType = 'message'`,
     );
     insertEventTx = newDb.transaction(
       (
@@ -3763,7 +3941,53 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     return { images, failureMarkers };
   }
 
-  type EventRow = { id: string; payloadJson: string; sequence?: number; timestamp?: number };
+  function buildInboundMediaFactsFromAttachments(
+    attachments: NormalizedAttachment[],
+    messageId: string,
+  ) {
+    const media: Array<{
+      path?: string;
+      contentType?: string;
+      kind?: "image" | "video" | "audio" | "document" | "unknown";
+      messageId: string;
+    }> = [];
+    for (const attachment of attachments) {
+      if (attachment.type === "asset") {
+        const asset = selectAssetStmt.get(attachment.assetId) as { mimeType: string } | undefined;
+        const contentType =
+          typeof asset?.mimeType === "string" && asset.mimeType.trim()
+            ? asset.mimeType.trim().toLowerCase()
+            : undefined;
+        media.push({
+          path: path.join(assetsDir, attachment.assetId),
+          contentType,
+          kind: mediaKindFromMime(contentType) ?? "unknown",
+          messageId,
+        });
+        continue;
+      }
+      if (attachment.type === "image" && attachment.assetId) {
+        media.push({
+          path: path.join(assetsDir, attachment.assetId),
+          contentType: attachment.mimeType,
+          kind: "image",
+          messageId,
+        });
+      }
+    }
+    return media;
+  }
+
+  type EventRow = {
+    id: string;
+    payloadJson: string;
+    sequence?: number;
+    timestamp?: number;
+    messageStreaming?: number | null;
+    promptTurnState?: string | null;
+    promptTurnCorrelationId?: string | null;
+    promptTurnError?: string | null;
+  };
 
   const logHttpRequest = (event: string, info?: Record<string, unknown>) => {
     if (info) {
@@ -4811,9 +5035,16 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const faceSpeakDedupe = new Map<string, number>();
   const sessionsByDevice = new Map<string, Session>();
   const userSessions = new Map<string, Set<Session>>();
+  const promptTurnAdmissions = new Map<string, PromptTurnAdmissionFacts>();
+  const AWAITED_BROADCAST_SEND_TIMEOUT_MS = 2_000;
   const perUserTaskQueue = createPerUserTaskQueue({
     onTaskError: (err) => {
       logger.warn?.(`per_user_task_failed: ${formatError(err)}`);
+    },
+  });
+  const providerLaneQueue = createClawlineProviderLaneQueue({
+    onTaskError: (err) => {
+      logger.warn?.(`clawline_provider_lane_task_failed: ${formatError(err)}`);
     },
   });
   const pairRateLimiter = new SlidingWindowRateLimiter(config.pairing.maxRequestsPerMinute, 60_000);
@@ -5027,6 +5258,326 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     opts?: { streamKey?: string },
   ): Promise<T> {
     return perUserTaskQueue.run({ userId, streamKey: opts?.streamKey }, task);
+  }
+
+  function runPromptAdmissionTask<T>(
+    userId: string,
+    streamKey: string,
+    task: () => Promise<T>,
+  ): Promise<T> {
+    return providerLaneQueue.runPromptAdmission({ userId, streamKey }, task);
+  }
+
+  function runPromptTurnTask<T>(
+    userId: string,
+    streamKey: string,
+    task: () => Promise<T>,
+  ): Promise<T> {
+    const normalizedSessionKey = normalizeSessionKey(streamKey);
+    scheduledPromptTurnCountsBySession.set(
+      normalizedSessionKey,
+      (scheduledPromptTurnCountsBySession.get(normalizedSessionKey) ?? 0) + 1,
+    );
+    return providerLaneQueue.runPromptTurn({ userId, streamKey }, task).finally(() => {
+      const nextCount = (scheduledPromptTurnCountsBySession.get(normalizedSessionKey) ?? 1) - 1;
+      if (nextCount > 0) {
+        scheduledPromptTurnCountsBySession.set(normalizedSessionKey, nextCount);
+      } else {
+        scheduledPromptTurnCountsBySession.delete(normalizedSessionKey);
+      }
+    });
+  }
+
+  type ClawlineDispatchResult = Awaited<ReturnType<typeof dispatchInboundMessage>>;
+  type ClawlinePreparedRecordOptions = PreparedInboundReply<ClawlineDispatchResult>["record"];
+
+  async function runClawlineChannelTurn(params: {
+    channel: string;
+    accountId?: string;
+    routeSessionKey: string;
+    ctxPayload: ReturnType<typeof buildClawlineInboundContext>;
+    messageId: string;
+    rawText: string;
+    record?: ClawlinePreparedRecordOptions;
+    logContext?: Record<string, unknown>;
+    onPreDispatchFailure?: (err: unknown) => void | Promise<void>;
+    runDispatch: () => Promise<ClawlineDispatchResult>;
+  }) {
+    const result = await runChannelInboundEvent({
+      channel: params.channel,
+      accountId: params.accountId,
+      raw: params,
+      log: (turnEvent) => {
+        logger.info?.("[clawline] channel_turn", {
+          ...turnEvent,
+          ...params.logContext,
+        });
+      },
+      adapter: {
+        ingest: (raw) => ({
+          id: raw.messageId,
+          rawText: raw.rawText,
+          textForAgent: raw.ctxPayload.Body,
+        }),
+        classify: () => ({
+          kind: "message",
+          canStartAgentTurn: true,
+          requiresImmediateAck: false,
+        }),
+        preflight: () => ({
+          admission: { kind: "dispatch", reason: "clawline-admitted" },
+        }),
+        // Clawline keeps its socket, SQLite, and buffered reply delivery in its
+        // existing dispatcher; the channel kernel now owns the turn lifecycle.
+        resolveTurn: () => ({
+          channel: params.channel,
+          accountId: params.accountId,
+          routeSessionKey: params.routeSessionKey,
+          storePath: sessionStorePath,
+          ctxPayload: params.ctxPayload,
+          recordInboundSession,
+          record: params.record,
+          admission: { kind: "dispatch", reason: "clawline-prepared-dispatch" },
+          messageId: params.messageId,
+          onPreDispatchFailure: params.onPreDispatchFailure,
+          runDispatch: params.runDispatch,
+        }),
+        onFinalize: (turnResult) => {
+          logger.info?.("[clawline] channel_turn_finalize", {
+            ...params.logContext,
+            messageId: params.messageId,
+            routeSessionKey: turnResult.routeSessionKey,
+            admission: turnResult.admission.kind,
+            dispatched: turnResult.dispatched,
+          });
+        },
+      },
+    });
+    if (!result.dispatched) {
+      throw new Error(
+        `Clawline channel turn did not dispatch: ${result.admission.reason ?? result.admission.kind}`,
+      );
+    }
+    return result;
+  }
+
+  function promptTurnDedupeKey(deviceId: string, clientMessageId: string) {
+    return `${deviceId}::${clientMessageId}`;
+  }
+
+  function promptTurnStateFromMessageRow(row: {
+    streaming: number;
+    promptTurnState?: string | null;
+  }): PromptTurnState {
+    const promptTurnState = row.promptTurnState ?? "";
+    switch (promptTurnState) {
+      case "accepted":
+      case "queued":
+      case "running":
+      case "delivered":
+      case "canceled":
+      case "failed":
+        return promptTurnState;
+    }
+    const streaming = row.streaming as MessageStreamingState;
+    switch (streaming) {
+      case MessageStreamingState.Finalized:
+        return "delivered";
+      case MessageStreamingState.Failed:
+        return "failed";
+      case MessageStreamingState.Queued:
+        return "queued";
+      default:
+        return "running";
+    }
+  }
+
+  function projectPromptTurnStateOntoReplayEvent(
+    event: ServerMessage,
+    row: EventRow,
+  ): ServerMessage {
+    if (event.role !== "user" || typeof event.clientMessageId !== "string") {
+      return event;
+    }
+    if (typeof row.messageStreaming !== "number" && typeof row.promptTurnState !== "string") {
+      return event;
+    }
+    const state = promptTurnStateFromMessageRow({
+      streaming:
+        typeof row.messageStreaming === "number"
+          ? row.messageStreaming
+          : event.streaming
+            ? MessageStreamingState.Active
+            : MessageStreamingState.Finalized,
+      promptTurnState: row.promptTurnState,
+    });
+    return {
+      ...event,
+      streaming: state === "accepted" || state === "queued" || state === "running",
+      promptTurnState: state,
+      promptTurnCorrelationId: row.promptTurnCorrelationId ?? undefined,
+      promptTurnError:
+        state === "failed" ? (row.promptTurnError ?? "clawline.promptTurn.failed") : undefined,
+    };
+  }
+
+  function recoverIncompletePromptTurnsForReconnect(userId: string, sessionKey: string) {
+    const normalizedSessionKey = normalizeSessionKey(sessionKey);
+    if (
+      activeSessionRuns.has(normalizedSessionKey) ||
+      startingPromptTurnsBySession.has(normalizedSessionKey) ||
+      (queuedPromptTurnsBySession.get(normalizedSessionKey)?.length ?? 0) > 0
+    ) {
+      return;
+    }
+    const recovered = recoverIncompletePromptTurnsBySessionStmt.run(
+      MessageStreamingState.Failed,
+      userId,
+      userId,
+      normalizedSessionKey,
+    );
+    if (recovered.changes > 0) {
+      logger.warn?.("[clawline] prompt_turn_recovered_incomplete_after_reconnect", {
+        userId,
+        sessionKey: normalizedSessionKey,
+        recoveredCount: recovered.changes,
+      });
+    }
+  }
+
+  function hasPromptTurnRuntimeBlocker(sessionKey: string): boolean {
+    const normalizedSessionKey = normalizeSessionKey(sessionKey);
+    return (
+      activeSessionRuns.has(normalizedSessionKey) ||
+      startingPromptTurnsBySession.has(normalizedSessionKey) ||
+      (queuedPromptTurnsBySession.get(normalizedSessionKey)?.length ?? 0) > 0 ||
+      (scheduledPromptTurnCountsBySession.get(normalizedSessionKey) ?? 0) > 0
+    );
+  }
+
+  function rememberPromptTurnAdmission(facts: PromptTurnAdmissionFacts) {
+    promptTurnAdmissions.set(promptTurnDedupeKey(facts.deviceId, facts.clientMessageId), facts);
+  }
+
+  function persistPromptTurnAdmission(facts: PromptTurnAdmissionFacts, error?: string) {
+    const streaming =
+      facts.state === "failed"
+        ? MessageStreamingState.Failed
+        : facts.state === "delivered" || facts.state === "canceled"
+          ? MessageStreamingState.Finalized
+          : facts.state === "queued"
+            ? MessageStreamingState.Queued
+            : MessageStreamingState.Active;
+    updateMessagePromptTurnStmt.run(
+      streaming,
+      facts.state,
+      facts.correlationId,
+      error ?? null,
+      error ?? null,
+      facts.deviceId,
+      facts.clientMessageId,
+    );
+    rememberPromptTurnAdmission(facts);
+    if (facts.state === "queued") {
+      const sessionKey = normalizeSessionKey(facts.streamKey);
+      const queued = queuedPromptTurnsBySession.get(sessionKey) ?? [];
+      if (!queued.some((entry) => entry.correlationId === facts.correlationId)) {
+        queued.push(facts);
+      }
+      queuedPromptTurnsBySession.set(sessionKey, queued);
+    } else {
+      const sessionKey = normalizeSessionKey(facts.streamKey);
+      const queued = queuedPromptTurnsBySession.get(sessionKey);
+      if (queued) {
+        const nextQueued = queued.filter((entry) => entry.correlationId !== facts.correlationId);
+        if (nextQueued.length > 0) {
+          queuedPromptTurnsBySession.set(sessionKey, nextQueued);
+        } else {
+          queuedPromptTurnsBySession.delete(sessionKey);
+        }
+      }
+    }
+  }
+
+  function broadcastPromptTurnState(params: {
+    userId: string;
+    sessionKey: string;
+    facts: PromptTurnAdmissionFacts;
+    error?: string;
+  }) {
+    const normalizedKey = normalizeSessionKey(params.sessionKey);
+    const sessions = userSessions.get(params.userId);
+    if (!sessions || sessions.size === 0) {
+      return;
+    }
+    const terminalState = isPromptTurnTerminalState(params.facts.state)
+      ? params.facts.state
+      : undefined;
+    for (const target of sessions) {
+      if (target.revoked || isDenylisted(target.deviceId)) {
+        continue;
+      }
+      const keys = resolveSubscribedSessionKeys(target);
+      if (!keys.some((key) => normalizeSessionKey(key) === normalizedKey)) {
+        continue;
+      }
+      void sendJson(target.socket, {
+        type: "event",
+        event: "prompt_turn_state",
+        payload: {
+          messageId: params.facts.clientMessageId,
+          sessionKey: params.sessionKey,
+          state: params.facts.state,
+          terminalState,
+          correlationId: params.facts.correlationId,
+          clawlineMessageRowId: params.facts.clawlineMessageRowId,
+          error:
+            terminalState === "failed" ? (params.error ?? "clawline.promptTurn.failed") : undefined,
+        },
+      });
+    }
+  }
+
+  function transitionPromptTurnAdmission(
+    facts: PromptTurnAdmissionFacts,
+    next: PromptTurnState,
+    logContext: Record<string, unknown>,
+  ) {
+    const previous = facts.state;
+    try {
+      facts.state = transitionPromptTurnState(facts.state, next);
+    } catch (err) {
+      logger.warn?.("[clawline] prompt_turn_transition_invalid", {
+        ...logContext,
+        correlationId: facts.correlationId,
+        previousState: previous,
+        nextState: next,
+        error: formatError(err),
+      });
+      return;
+    }
+    persistPromptTurnAdmission(
+      facts,
+      next === "failed"
+        ? typeof logContext.error === "string"
+          ? logContext.error
+          : "clawline.promptTurn.failed"
+        : undefined,
+    );
+    if (typeof logContext.userId === "string" && typeof logContext.sessionKey === "string") {
+      broadcastPromptTurnState({
+        userId: logContext.userId,
+        sessionKey: logContext.sessionKey,
+        facts,
+        error: typeof logContext.error === "string" ? logContext.error : undefined,
+      });
+    }
+    logger.info?.("[clawline] prompt_turn_transition", {
+      ...logContext,
+      correlationId: facts.correlationId,
+      previousState: previous,
+      nextState: facts.state,
+    });
   }
 
   function enqueueWriteTask<T>(task: () => T | Promise<T>): Promise<T> {
@@ -5694,7 +6245,12 @@ button.deny { background: #9b1c31; color: white; }
     if (!isDenylisted(deviceId)) {
       return false;
     }
-    updateMessageStreamingStmt.run(MessageStreamingState.Failed, deviceId, clientId);
+    updateMessageFailedStmt.run(
+      MessageStreamingState.Failed,
+      "clawline.promptTurn.deviceRevoked",
+      deviceId,
+      clientId,
+    );
     return true;
   }
 
@@ -5761,6 +6317,69 @@ button.deny { background: #9b1c31; color: white; }
       default:
         return `unknown:${String(ws.readyState)}`;
     }
+  }
+
+  function describeBroadcastSend(
+    session: Session,
+    payload: StreamServerMessage,
+    elapsedMs: number,
+  ) {
+    return {
+      sessionId: session.sessionId,
+      deviceId: session.deviceId,
+      userId: session.userId,
+      peerId: session.peerId,
+      clientId: session.clientId ?? null,
+      clientName: session.clientName ?? null,
+      claimedName: session.claimedName ?? null,
+      platform: session.deviceInfo?.platform ?? null,
+      model: session.deviceInfo?.model ?? null,
+      osVersion: session.deviceInfo?.osVersion ?? null,
+      appVersion: session.deviceInfo?.appVersion ?? null,
+      remoteAddress: session.remoteAddress ?? null,
+      origin: session.origin ?? null,
+      userAgent: session.userAgent ?? null,
+      clientFeatures: Array.from(session.clientFeatures).sort(),
+      payloadType: payload.type,
+      sessionKey: "sessionKey" in payload ? payload.sessionKey : null,
+      readyState: socketStateLabel(session.socket),
+      elapsedMs,
+      timeoutMs: AWAITED_BROADCAST_SEND_TIMEOUT_MS,
+    };
+  }
+
+  async function sendStreamEventWithTimeout(
+    session: Session,
+    payload: StreamServerMessage,
+  ): Promise<boolean> {
+    const startedAt = Date.now();
+    let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+    const sendResult = sendJson(session.socket, payload).then((delivered) =>
+      delivered ? "delivered" : "not_delivered",
+    );
+    const timeoutResult = new Promise<"timeout">((resolve) => {
+      timeoutHandle = setTimeout(() => resolve("timeout"), AWAITED_BROADCAST_SEND_TIMEOUT_MS);
+    });
+    const result = await Promise.race([sendResult, timeoutResult]);
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
+    const elapsedMs = Date.now() - startedAt;
+    if (result === "timeout") {
+      logger.warn?.("[clawline] awaited_stream_event_send_timeout", {
+        ...describeBroadcastSend(session, payload, elapsedMs),
+        removalReason: "send_timeout",
+      });
+      return false;
+    }
+    if (result === "not_delivered") {
+      logger.warn?.("[clawline] awaited_stream_event_send_not_delivered", {
+        ...describeBroadcastSend(session, payload, elapsedMs),
+        removalReason: "send_failed_or_socket_not_open",
+      });
+      return false;
+    }
+    return true;
   }
 
   function markAckSent(deviceId: string, clientId: string) {
@@ -5971,7 +6590,7 @@ button.deny { background: #9b1c31; color: white; }
     if (!sessionFile) {
       return { supported: false, enabled: null, reason: "codex_thread_not_attached" };
     }
-    const fastMode = await readCodexAppServerFastMode({ sessionFile });
+    const fastMode = await readClawlineCodexConversationFastMode({ sessionFile });
     if (!fastMode.available) {
       return { supported: false, enabled: null, reason: fastMode.reason };
     }
@@ -6182,7 +6801,12 @@ button.deny { background: #9b1c31; color: white; }
     const activeRun = activeSessionRuns.get(normalizedSessionKey) ?? null;
     const snapshot = sessionRuntimeStatusSnapshots.get(normalizedSessionKey) ?? null;
     const { entry } = loadSessionStoreEntryForKey(sessionKey);
-    const queueDepth = getClawlineFollowupQueueDepth(sessionKey);
+    const promptTurnQueue =
+      queuedPromptTurnsBySession
+        .get(normalizedSessionKey)
+        ?.filter((turn) => turn.state === "queued") ?? [];
+    const queueDepth = getClawlineFollowupQueueDepth(sessionKey) + promptTurnQueue.length;
+    const queuedPromptTurn = promptTurnQueue[0] ?? null;
     const modelStatus = resolveStatusModel(entry, activeRun ?? snapshot, sessionKey);
     const thinkingLevel =
       normalizeStatusString(entry?.thinkingLevel) ??
@@ -6194,7 +6818,9 @@ button.deny { background: #9b1c31; color: white; }
     const codexFastControl =
       resolvedCodexFastControl ?? (await resolveCodexFastControlState(sessionKey, runtimeContext));
     const displayFastMode = isCodexSessionControlRuntime(runtimeContext.runtime)
-      ? (codexFastControl?.enabled ?? null)
+      ? codexFastControl?.supported === true
+        ? (fastMode ?? codexFastControl.enabled)
+        : null
       : fastMode;
     const modelCatalog = await loadSessionControlModelCatalog(sessionKey, runtimeContext);
     const capabilities = sessionControlCapabilitiesForSession(
@@ -6227,6 +6853,7 @@ button.deny { background: #9b1c31; color: white; }
         ? {
             state: "running",
             runId: activeRun.runId,
+            correlationId: activeRun.correlationId,
             messageId: activeRun.messageId,
             startedAt: activeRun.startedAt,
             queueDepth,
@@ -6234,7 +6861,8 @@ button.deny { background: #9b1c31; color: white; }
         : {
             state: queueDepth > 0 ? "queued" : "idle",
             runId: null,
-            messageId: null,
+            correlationId: queuedPromptTurn?.correlationId ?? null,
+            messageId: queuedPromptTurn?.clientMessageId ?? null,
             startedAt: null,
             queueDepth,
           },
@@ -6416,8 +7044,44 @@ button.deny { background: #9b1c31; color: white; }
     sessionKey: string,
     capabilities: ReturnType<typeof sessionControlCapabilitiesForSession>,
   ) {
-    const activeRun = activeSessionRuns.get(normalizeSessionKey(sessionKey)) ?? null;
+    const normalizedSessionKey = normalizeSessionKey(sessionKey);
+    const activeRun = activeSessionRuns.get(normalizedSessionKey) ?? null;
     if (!activeRun) {
+      const startingTurn = startingPromptTurnsBySession.get(normalizedSessionKey) ?? null;
+      if (startingTurn) {
+        updatePromptCancelRequestedStmt.run(1, startingTurn.deviceId, startingTurn.clientMessageId);
+        transitionPromptTurnAdmission(startingTurn, "canceled", {
+          messageId: startingTurn.clientMessageId,
+          sessionKey,
+          userId,
+          deviceId: startingTurn.deviceId,
+        });
+        startingPromptTurnsBySession.delete(normalizedSessionKey);
+        sendSessionControlJson(res, 200, {
+          ok: true,
+          sessionKey,
+          action: "cancel_current_run",
+          status: await buildSessionStatusPayload(userId, sessionKey),
+        });
+        return;
+      }
+      const queuedTurn = queuedPromptTurnsBySession.get(normalizedSessionKey)?.[0] ?? null;
+      if (queuedTurn) {
+        updatePromptCancelRequestedStmt.run(1, queuedTurn.deviceId, queuedTurn.clientMessageId);
+        transitionPromptTurnAdmission(queuedTurn, "canceled", {
+          messageId: queuedTurn.clientMessageId,
+          sessionKey,
+          userId,
+          deviceId: queuedTurn.deviceId,
+        });
+        sendSessionControlJson(res, 200, {
+          ok: true,
+          sessionKey,
+          action: "cancel_current_run",
+          status: await buildSessionStatusPayload(userId, sessionKey),
+        });
+        return;
+      }
       sendSessionControlJson(res, 200, {
         ok: false,
         sessionKey,
@@ -6429,31 +7093,35 @@ button.deny { background: #9b1c31; color: white; }
       return;
     }
     const agentSessionId = resolveActiveRunAgentSessionId(sessionKey, activeRun);
+    activeRun.cancelRequested = true;
+    if (activeRun.deviceId) {
+      updatePromptCancelRequestedStmt.run(1, activeRun.deviceId, activeRun.messageId);
+    }
     if (!agentSessionId) {
-      rejectUnsupportedSessionControl(
-        res,
+      sendSessionControlJson(res, 200, {
+        ok: true,
         sessionKey,
-        "cancel_current_run",
-        "unsupported",
-        "The current Clawline provider dispatch path does not expose a per-session abort seam.",
-        capabilities,
-      );
+        action: "cancel_current_run",
+        status: await buildSessionStatusPayload(userId, sessionKey),
+      });
       return;
     }
     const aborted = abortAgentHarnessRun(agentSessionId);
     if (!aborted) {
-      rejectUnsupportedSessionControl(
-        res,
+      logger.info?.("[clawline] active_run_cancel_latched_without_abort", {
         sessionKey,
-        "cancel_current_run",
-        "unsupported",
-        "The active run is not registered with the provider abort seam.",
-        capabilities,
-      );
+        runId: activeRun.runId,
+        correlationId: activeRun.correlationId,
+        messageId: activeRun.messageId,
+      });
+      sendSessionControlJson(res, 200, {
+        ok: true,
+        sessionKey,
+        action: "cancel_current_run",
+        status: await buildSessionStatusPayload(userId, sessionKey),
+      });
       return;
     }
-    activeRun.cancelRequested = true;
-    activeSessionRuns.delete(normalizeSessionKey(sessionKey));
     sendSessionControlJson(res, 200, {
       ok: true,
       sessionKey,
@@ -6595,7 +7263,11 @@ button.deny { background: #9b1c31; color: white; }
       };
     }
     try {
-      await setCodexAppServerFastMode({ sessionFile, enabled: fastMode });
+      await setClawlineCodexConversationFastMode({ sessionFile, enabled: fastMode });
+      const sessionResult = await applySessionControlPatch(sessionKey, { fastMode });
+      if (!sessionResult.ok) {
+        return sessionResult;
+      }
       return { ok: true, codexFastControl: { supported: true, enabled: fastMode, sessionFile } };
     } catch (err) {
       return {
@@ -6882,6 +7554,23 @@ button.deny { background: #9b1c31; color: white; }
     await broadcastStreamEvent(userId, payload);
   }
 
+  function broadcastStreamTailStateForUserDetached(
+    userId: string,
+    event: ServerMessage,
+    reason: string,
+  ) {
+    void broadcastStreamTailStateForUser(userId, event).catch((err) => {
+      logger.warn?.("[clawline] detached_stream_tail_state_broadcast_failed", {
+        userId,
+        reason,
+        messageId: event.id,
+        sessionKey: event.sessionKey,
+        role: event.role,
+        error: formatError(err),
+      });
+    });
+  }
+
   function loadStreamRowForUser(userId: string, sessionKey: string): StreamSessionRow | null {
     const row = selectStreamSessionByKeyStmt.get(userId, sessionKey) as
       | StreamSessionRow
@@ -6980,7 +7669,9 @@ button.deny { background: #9b1c31; color: white; }
       if (session.replayInProgress) {
         continue;
       }
-      sends.push(sendJson(session.socket, payload).then((delivered) => ({ session, delivered })));
+      sends.push(
+        sendStreamEventWithTimeout(session, payload).then((delivered) => ({ session, delivered })),
+      );
     }
     const results = await Promise.allSettled(sends);
     for (const result of results) {
@@ -7150,173 +7841,6 @@ button.deny { background: #9b1c31; color: white; }
     };
   }
 
-  async function readClawlineTranscriptMessages(
-    sessionFile: string,
-  ): Promise<ClawlineTranscriptMessageRecord[] | null> {
-    try {
-      const raw = await fs.readFile(sessionFile, "utf8");
-      const lines = raw.split(/\r?\n/).filter((line) => line.trim().length > 0);
-      const messages: ClawlineTranscriptMessageRecord[] = [];
-      for (const line of lines) {
-        const parsed = parseClawlineTranscriptMessageRecord(line);
-        if (parsed) {
-          messages.push(parsed);
-        }
-      }
-      return messages;
-    } catch {
-      return null;
-    }
-  }
-
-  function parseClawlineTranscriptMessageRecord(
-    rawJson: string,
-  ): ClawlineTranscriptMessageRecord | null {
-    try {
-      const parsed = JSON.parse(rawJson) as Record<string, unknown>;
-      const message = parsed.message;
-      if (!message || typeof message !== "object" || Array.isArray(message)) {
-        return null;
-      }
-      return {
-        id: typeof parsed.id === "string" ? parsed.id : undefined,
-        clientMessageId:
-          typeof parsed.clientMessageId === "string" ? parsed.clientMessageId : undefined,
-        timestamp: typeof parsed.timestamp === "number" ? parsed.timestamp : undefined,
-        message: {
-          role: (message as Record<string, unknown>).role,
-          content: (message as Record<string, unknown>).content,
-        },
-      };
-    } catch {
-      return null;
-    }
-  }
-
-  function parseClawlineServerEventMessageRecord(
-    rawJson: string,
-  ): ClawlineTranscriptMessageRecord | null {
-    try {
-      const trimmed = String(rawJson)
-        .replace(/\u0000/g, "")
-        .trim();
-      const roleMatch = /"role":"(user|assistant)"/.exec(trimmed);
-      if (!roleMatch) {
-        return null;
-      }
-      const idMatch = /"id":"((?:\\.|[^"\\])*)"/.exec(trimmed);
-      const clientMessageIdMatch =
-        /"clientMessageId":"((?:\\.|[^"\\])*)"/.exec(trimmed) ??
-        /"client_message_id":"((?:\\.|[^"\\])*)"/.exec(trimmed);
-      const timestampMatch = /"timestamp":(\d+)/.exec(trimmed);
-      const contentMatch = /"content":"((?:\\.|[^"\\])*)"/.exec(trimmed);
-      const decodedContent = contentMatch ? JSON.parse(`"${contentMatch[1]}"`) : undefined;
-      return {
-        id: idMatch ? JSON.parse(`"${idMatch[1]}"`) : undefined,
-        clientMessageId: clientMessageIdMatch
-          ? JSON.parse(`"${clientMessageIdMatch[1]}"`)
-          : undefined,
-        timestamp: timestampMatch ? Number(timestampMatch[1]) : undefined,
-        message: {
-          role: roleMatch[1] as "user" | "assistant",
-          content: decodedContent,
-        },
-      };
-    } catch {
-      return null;
-    }
-  }
-
-  async function readClawlineReferenceMessages(
-    referenceSessionKey: string,
-    userId: string,
-  ): Promise<ClawlineTranscriptMessageRecord[] | null> {
-    const referenceSession = loadSessionStoreEntryForKey(referenceSessionKey);
-    const transcriptMessages = referenceSession.entry?.sessionId
-      ? await readClawlineTranscriptMessages(
-          typeof referenceSession.entry.sessionFile === "string" &&
-            referenceSession.entry.sessionFile.trim().length > 0
-            ? referenceSession.entry.sessionFile
-            : resolveClawlineSessionTranscriptPath(
-                referenceSession.entry.sessionId,
-                mainSessionAgentId,
-              ),
-        )
-      : null;
-    const dbMessages = selectEventsBySessionStmt.all(userId, referenceSessionKey) as Array<{
-      id: string;
-      payloadJson: string;
-    }>;
-    const normalizedDbMessages = Array.from(dbMessages);
-    const eventMessages: ClawlineTranscriptMessageRecord[] = [];
-    for (let index = 0; index < normalizedDbMessages.length; index += 1) {
-      const row = normalizedDbMessages[index];
-      const parsed = parseClawlineServerEventMessageRecord(row.payloadJson);
-      if (!parsed) {
-        continue;
-      }
-      eventMessages.push({
-        ...parsed,
-        id: parsed.id ?? row.id,
-      });
-    }
-    if (!transcriptMessages && eventMessages.length === 0) {
-      return null;
-    }
-    const merged = [...(transcriptMessages ?? [])];
-    const seenIds = new Set(
-      merged
-        .map((entry) => normalizeReferenceString(entry.id))
-        .filter((entry): entry is string => Boolean(entry)),
-    );
-    for (const entry of eventMessages) {
-      const entryId = normalizeReferenceString(entry.id);
-      if (entryId && seenIds.has(entryId)) {
-        continue;
-      }
-      if (entryId) {
-        seenIds.add(entryId);
-      }
-      merged.push(entry);
-    }
-    return merged;
-  }
-
-  async function resolveClawlineReferenceMessage(
-    reference: ClawlineMessageReference,
-    userId: string,
-  ): Promise<ClawlineTranscriptMessageRecord | null> {
-    const row = selectEventByIdStmt.get(reference.messageId) as
-      | {
-          id: string;
-          userId: string;
-          sessionKey: string | null;
-        }
-      | undefined;
-    const rowSessionKey = typeof row?.sessionKey === "string" ? row.sessionKey.trim() : "";
-    if (!row || row.userId !== userId || rowSessionKey !== reference.sessionKey) {
-      return null;
-    }
-    const sessionRows = Array.from(
-      selectEventsBySessionStmt.all(userId, reference.sessionKey),
-    ) as Array<{
-      id: string;
-      payloadJson: string;
-    }>;
-    const payloadRow = sessionRows.find((entry) => entry.id === reference.messageId);
-    if (!payloadRow) {
-      return null;
-    }
-    const parsed = parseClawlineServerEventMessageRecord(payloadRow.payloadJson);
-    if (!parsed || parsed.message?.role !== reference.messageRole) {
-      return null;
-    }
-    return {
-      ...parsed,
-      id: parsed.id ?? row.id,
-    };
-  }
-
   type AlertSessionStoreSignature = {
     storePath: string;
     exists: boolean;
@@ -7436,6 +7960,35 @@ button.deny { background: #9b1c31; color: white; }
     }
     const index = await loadAlertFallbackSessionIndex();
     return index.get(normalizeSessionKey(trimmed)) ?? null;
+  }
+
+  async function resolveRegisteredInboundSessionKey(
+    session: Session,
+    sessionKey: string,
+  ): Promise<string | null> {
+    const allowedSessionKeys = session.provisionedSessionKeys?.length
+      ? session.provisionedSessionKeys
+      : [session.sessionKey];
+    const allowedSessionKey = allowedSessionKeys.find((allowedKey) =>
+      sessionKeyEq(allowedKey, sessionKey),
+    );
+    if (allowedSessionKey) {
+      return allowedSessionKey;
+    }
+    if (!session.isAdmin) {
+      return null;
+    }
+    const fallbackSessionKey = await resolveAlertFallbackSessionKey(sessionKey);
+    if (!fallbackSessionKey) {
+      return null;
+    }
+    const { entry } = loadSessionStoreEntryForKey(fallbackSessionKey);
+    const channelLabel =
+      normalizeChannelLabel(entry?.lastChannel) || normalizeChannelLabel(entry?.channel);
+    if (channelLabel === "openclaw" || channelLabel === "clawline") {
+      return null;
+    }
+    return fallbackSessionKey;
   }
 
   async function handleAdoptSessionRequest(req: http.IncomingMessage, res: http.ServerResponse) {
@@ -7986,6 +8539,7 @@ button.deny { background: #9b1c31; color: white; }
       if (!anchor) {
         historyReset = true;
       }
+      recoverIncompletePromptTurnsForReconnect(session.userId, normalizedSessionKey);
       const rowsDesc = (
         anchor
           ? selectEventsAfterBySessionStmt.all(
@@ -8009,9 +8563,14 @@ button.deny { background: #9b1c31; color: white; }
             Boolean(entry.event) && Boolean(entry.row),
         )
         .map(({ event, row }) => {
-          event.attachments = canonicalizeReplayAttachments(event.attachments, logger, event.id);
-          normalizeEventRouting(event);
-          return { event, sequence: row.sequence ?? 0 };
+          const replayEvent = projectPromptTurnStateOntoReplayEvent(event, row);
+          replayEvent.attachments = canonicalizeReplayAttachments(
+            replayEvent.attachments,
+            logger,
+            replayEvent.id,
+          );
+          normalizeEventRouting(replayEvent);
+          return { event: replayEvent, sequence: row.sequence ?? 0 };
         });
       selected.push(...parsed);
     }
@@ -8443,6 +9002,27 @@ button.deny { background: #9b1c31; color: white; }
 
     return {
       emitRunning: (input: AgentProgressItem) => emit("running", input),
+      emitPreModel: () =>
+        emit("running", {
+          kind: "stage",
+          phase: "pre_model",
+          status: "running",
+          title: "Preparing prompt",
+        }),
+      emitModelActive: () =>
+        emit("running", {
+          kind: "model",
+          phase: "active",
+          status: "running",
+          title: "Generating response",
+        }),
+      emitCompletionHandoff: () =>
+        emit("running", {
+          kind: "stage",
+          phase: "completion_handoff",
+          status: "running",
+          title: "Finishing response",
+        }),
       emitDone: () =>
         emit("final", {
           kind: "run",
@@ -8458,19 +9038,36 @@ button.deny { background: #9b1c31; color: white; }
           title: "Agent run failed",
         }),
       replyOptions: {
+        suppressDefaultToolProgressMessages: true,
+        allowProgressCallbacksWhenSourceDeliverySuppressed: true,
         onToolStart: async (payload: {
+          itemId?: string;
+          toolCallId?: string;
           name?: string;
           phase?: string;
+          args?: Record<string, unknown>;
           detailMode?: "explain" | "raw";
         }) => {
+          // Use the shared tool-display formatter for Clawline progress: it derives the
+          // same detail as item events while redacting secrets and without forwarding args.
+          const meta = payload.name
+            ? inferToolMetaFromArgs(payload.name, payload.args, {
+                detailMode: payload.detailMode,
+              })
+            : undefined;
+          const title = payload.name ? (meta ? `${payload.name} ${meta}` : payload.name) : meta;
           emit("running", {
             kind: "tool",
+            itemId: payload.itemId,
+            toolCallId: payload.toolCallId,
             phase: payload.phase,
             name: payload.name,
-            title: payload.name ? `Using ${payload.name}` : "Using tool",
+            meta,
+            title: title ?? "tool",
           });
         },
         onItemEvent: async (payload: {
+          itemId?: string;
           kind?: string;
           title?: string;
           name?: string;
@@ -8478,23 +9075,40 @@ button.deny { background: #9b1c31; color: white; }
           status?: string;
           summary?: string;
           progressText?: string;
+          meta?: string;
+          toolCallId?: string;
+          approvalId?: string;
+          approvalSlug?: string;
         }) => {
           emit("running", {
             kind: payload.kind ?? "item",
+            itemId: payload.itemId,
             phase: payload.phase,
             status: payload.status,
             title: payload.title,
             name: payload.name,
+            meta: payload.meta,
+            toolCallId: payload.toolCallId,
+            approvalId: payload.approvalId,
+            approvalSlug: payload.approvalSlug,
             summary: payload.summary,
             progressText: payload.progressText,
           });
         },
-        onPlanUpdate: async (payload: { phase?: string; title?: string; explanation?: string }) => {
+        onPlanUpdate: async (payload: {
+          phase?: string;
+          title?: string;
+          explanation?: string;
+          steps?: string[];
+          source?: string;
+        }) => {
           emit("running", {
             kind: "plan",
             phase: payload.phase,
             title: payload.title ?? "Plan updated",
             summary: payload.explanation,
+            steps: payload.steps,
+            source: payload.source,
           });
         },
         onApprovalEvent: async (payload: {
@@ -8502,40 +9116,76 @@ button.deny { background: #9b1c31; color: white; }
           kind?: string;
           status?: string;
           title?: string;
+          itemId?: string;
+          toolCallId?: string;
+          approvalId?: string;
+          approvalSlug?: string;
+          command?: string;
+          host?: string;
+          reason?: string;
+          scope?: "turn" | "session";
+          message?: string;
         }) => {
           emit("running", {
             kind: "approval",
+            itemId: payload.itemId,
+            toolCallId: payload.toolCallId,
+            approvalId: payload.approvalId,
+            approvalSlug: payload.approvalSlug,
             phase: payload.phase,
             status: payload.status,
             title: payload.title ?? "Approval requested",
             name: payload.kind,
+            command: payload.command,
+            host: payload.host,
+            reason: payload.reason,
+            scope: payload.scope,
+            message: payload.message,
           });
         },
         onCommandOutput: async (payload: {
+          itemId?: string;
           phase?: string;
           title?: string;
+          toolCallId?: string;
           name?: string;
           status?: string;
+          exitCode?: number | null;
+          durationMs?: number;
         }) => {
           emit("running", {
             kind: "command-output",
+            itemId: payload.itemId,
             phase: payload.phase,
             status: payload.status,
             title: payload.title ?? "Command output",
+            toolCallId: payload.toolCallId,
             name: payload.name,
+            exitCode: payload.exitCode,
+            durationMs: payload.durationMs,
           });
         },
         onPatchSummary: async (payload: {
+          itemId?: string;
           phase?: string;
           title?: string;
+          toolCallId?: string;
           name?: string;
+          added?: string[];
+          modified?: string[];
+          deleted?: string[];
           summary?: string;
         }) => {
           emit("running", {
             kind: "patch",
+            itemId: payload.itemId,
             phase: payload.phase,
             title: payload.title ?? "Patch updated",
+            toolCallId: payload.toolCallId,
             name: payload.name,
+            added: payload.added,
+            modified: payload.modified,
+            deleted: payload.deleted,
             summary: payload.summary,
           });
         },
@@ -8556,6 +9206,470 @@ button.deny { background: #9b1c31; color: white; }
         },
       },
     };
+  }
+
+  async function finalizeClawlinePromptTurn(params: {
+    socket: WebSocket;
+    promptTurnAdmission: PromptTurnAdmissionFacts;
+    activeRun: SessionStatusActiveRun;
+    agentProgress: ReturnType<typeof createAgentProgressEmitter>;
+    messageId: string;
+    sessionKey: string;
+    userId: string;
+    deviceId: string;
+    deliveredCount: number;
+    queuedFinal: boolean;
+    queueDepth: number;
+    dispatchFailed: boolean;
+    dispatchError?: string;
+    logContext?: Record<string, unknown>;
+    cleanup: () => void;
+  }): Promise<"delivered" | "queued" | "canceled" | "failed"> {
+    const wasDelivered = params.queuedFinal || params.deliveredCount > 0;
+    const wasQueued = !wasDelivered && params.queueDepth > 0;
+    const wasTerminalFailure = params.dispatchFailed || (!wasDelivered && !wasQueued);
+    if (wasTerminalFailure && !wasQueued) {
+      if (params.activeRun.cancelRequested) {
+        updateMessageStreamingStmt.run(
+          MessageStreamingState.Finalized,
+          params.deviceId,
+          params.messageId,
+        );
+        transitionPromptTurnAdmission(params.promptTurnAdmission, "canceled", {
+          ...params.logContext,
+          messageId: params.messageId,
+          sessionKey: params.sessionKey,
+          userId: params.userId,
+          deviceId: params.deviceId,
+        });
+        params.agentProgress.emitDone();
+        params.cleanup();
+        return "canceled";
+      }
+      logger.warn?.("[clawline] agent_run_no_delivery", {
+        ...params.logContext,
+        messageId: params.messageId,
+        correlationId: params.promptTurnAdmission.correlationId,
+        sessionKey: params.sessionKey,
+        userId: params.userId,
+        deviceId: params.deviceId,
+        deliveredCount: params.deliveredCount,
+        queuedFinal: params.queuedFinal,
+        queueDepth: params.queueDepth,
+        dispatchFailed: params.dispatchFailed,
+        dispatchError: params.dispatchError,
+      });
+      const terminalError = params.dispatchError ?? "clawline.promptTurn.noDelivery";
+      updateMessageFailedStmt.run(
+        MessageStreamingState.Failed,
+        terminalError,
+        params.deviceId,
+        params.messageId,
+      );
+      const errorSent = await sendJson(params.socket, {
+        type: "error",
+        code: "server_error",
+        message: "Unable to deliver reply",
+        messageId: params.messageId,
+      }).catch(() => false);
+      logger.warn?.("[clawline] agent_run_no_delivery_error_emit", {
+        ...params.logContext,
+        messageId: params.messageId,
+        correlationId: params.promptTurnAdmission.correlationId,
+        sessionKey: params.sessionKey,
+        deviceId: params.deviceId,
+        errorSent,
+      });
+      transitionPromptTurnAdmission(params.promptTurnAdmission, "failed", {
+        ...params.logContext,
+        messageId: params.messageId,
+        sessionKey: params.sessionKey,
+        userId: params.userId,
+        deviceId: params.deviceId,
+        error: terminalError,
+      });
+      params.agentProgress.emitError();
+      params.cleanup();
+      return "failed";
+    }
+
+    updateMessageStreamingStmt.run(
+      wasQueued ? MessageStreamingState.Queued : MessageStreamingState.Finalized,
+      params.deviceId,
+      params.messageId,
+    );
+    transitionPromptTurnAdmission(params.promptTurnAdmission, wasQueued ? "queued" : "delivered", {
+      ...params.logContext,
+      messageId: params.messageId,
+      sessionKey: params.sessionKey,
+      userId: params.userId,
+      deviceId: params.deviceId,
+    });
+    params.agentProgress.emitDone();
+    params.cleanup();
+    return wasQueued ? "queued" : "delivered";
+  }
+
+  type ClawlinePromptTurnRoute = {
+    agentId: string;
+    channel: string;
+    accountId?: string;
+    sessionKey: string;
+  };
+
+  type PreparedClawlinePromptTurnContext = {
+    ctxPayload: ReturnType<typeof buildClawlineInboundContext>;
+    inboundImages: ImageContent[];
+  };
+
+  async function runAdmittedClawlinePromptTurn(params: {
+    socket: WebSocket;
+    promptTurnAdmission: PromptTurnAdmissionFacts;
+    eventId: string;
+    messageId: string;
+    sessionId: string;
+    sessionKey: string;
+    userId: string;
+    deviceId: string;
+    rawContent: string;
+    route: ClawlinePromptTurnRoute;
+    isNativeClawlineTurn: boolean;
+    dispatcher: ReturnType<typeof createReplyDispatcherWithTyping>["dispatcher"];
+    replyOptions: ReturnType<typeof createReplyDispatcherWithTyping>["replyOptions"];
+    markDispatchIdle: ReturnType<typeof createReplyDispatcherWithTyping>["markDispatchIdle"];
+    agentProgress: ReturnType<typeof createAgentProgressEmitter>;
+    prefixContext: ClawlineResponsePrefixContext;
+    setActiveRunForProgress: (activeRun: SessionStatusActiveRun | null) => void;
+    getPersistedAssistantDeliveryCount: () => number;
+    buildContext: () => Promise<PreparedClawlinePromptTurnContext>;
+    record?: ClawlinePreparedRecordOptions;
+    replyResolver: typeof options.replyResolver;
+    logContext?: Record<string, unknown>;
+    markProcessStage?: (stage: string) => void;
+    onAfterDispatchIdle?: () => void;
+  }): Promise<"delivered" | "queued" | "canceled" | "failed" | "skipped-canceled"> {
+    const logContext = params.logContext ?? {};
+    const latestPromptRow = selectMessageStmt.get(params.deviceId, params.messageId) as
+      | {
+          promptTurnCancelRequested?: number | null;
+          promptTurnState?: string | null;
+        }
+      | undefined;
+    if (
+      params.promptTurnAdmission.state === "canceled" ||
+      latestPromptRow?.promptTurnState === "canceled" ||
+      latestPromptRow?.promptTurnCancelRequested === 1
+    ) {
+      updatePromptCancelRequestedStmt.run(1, params.deviceId, params.messageId);
+      if (params.promptTurnAdmission.state === "queued") {
+        transitionPromptTurnAdmission(params.promptTurnAdmission, "canceled", {
+          ...logContext,
+          messageId: params.messageId,
+          sessionKey: params.sessionKey,
+          userId: params.userId,
+          deviceId: params.deviceId,
+        });
+      }
+      logger.info?.("[clawline] prompt_turn_start_skipped_canceled", {
+        ...logContext,
+        messageId: params.messageId,
+        correlationId: params.promptTurnAdmission.correlationId,
+        sessionKey: params.sessionKey,
+        deviceId: params.deviceId,
+      });
+      return "skipped-canceled";
+    }
+    if (params.promptTurnAdmission.state === "queued") {
+      const startOwner = resolveQueuedPromptTurnStart({
+        state: params.promptTurnAdmission.state,
+        cancelRequested: latestPromptRow?.promptTurnCancelRequested === 1,
+      });
+      transitionPromptTurnAdmission(params.promptTurnAdmission, startOwner.state, {
+        ...logContext,
+        messageId: params.messageId,
+        sessionKey: params.sessionKey,
+        userId: params.userId,
+        deviceId: params.deviceId,
+      });
+      if (startOwner.owner === "control") {
+        logger.info?.("[clawline] prompt_turn_start_owned_by_cancel", {
+          ...logContext,
+          messageId: params.messageId,
+          correlationId: params.promptTurnAdmission.correlationId,
+          sessionKey: params.sessionKey,
+          deviceId: params.deviceId,
+        });
+        return "skipped-canceled";
+      }
+      startingPromptTurnsBySession.set(
+        normalizeSessionKey(params.sessionKey),
+        params.promptTurnAdmission,
+      );
+    } else if (params.promptTurnAdmission.state === "accepted") {
+      transitionPromptTurnAdmission(params.promptTurnAdmission, "running", {
+        ...logContext,
+        messageId: params.messageId,
+        sessionKey: params.sessionKey,
+        userId: params.userId,
+        deviceId: params.deviceId,
+      });
+      startingPromptTurnsBySession.set(
+        normalizeSessionKey(params.sessionKey),
+        params.promptTurnAdmission,
+      );
+    }
+    const activeRun: SessionStatusActiveRun = {
+      runId: params.eventId,
+      correlationId: params.promptTurnAdmission.correlationId,
+      messageId: params.messageId,
+      deviceId: params.deviceId,
+      sessionKey: params.sessionKey,
+      agentSessionId: normalizeStatusString(
+        loadSessionStoreEntryForKey(params.sessionKey).entry?.sessionId,
+      ),
+      startedAt: Date.now(),
+      provider: null,
+      model: null,
+      thinkingLevel: null,
+      fastMode: null,
+      cancelRequested: false,
+    };
+    params.setActiveRunForProgress(activeRun);
+    activeSessionRuns.set(normalizeSessionKey(params.sessionKey), activeRun);
+    let prepared: PreparedClawlinePromptTurnContext;
+    try {
+      params.markProcessStage?.("prompt_turn_context_finalize");
+      params.agentProgress.emitPreModel();
+      prepared = await params.buildContext();
+    } catch (err) {
+      startingPromptTurnsBySession.delete(normalizeSessionKey(params.sessionKey));
+      activeSessionRuns.delete(normalizeSessionKey(params.sessionKey));
+      params.setActiveRunForProgress(null);
+      throw err;
+    }
+    startingPromptTurnsBySession.delete(normalizeSessionKey(params.sessionKey));
+    const promptRowAfterContext = selectMessageStmt.get(params.deviceId, params.messageId) as
+      | { promptTurnCancelRequested?: number | null; promptTurnState?: string | null }
+      | undefined;
+    const promptTurnStateAfterContext = params.promptTurnAdmission.state as PromptTurnState;
+    if (
+      activeRun.cancelRequested ||
+      promptTurnStateAfterContext === "canceled" ||
+      promptRowAfterContext?.promptTurnState === "canceled" ||
+      promptRowAfterContext?.promptTurnCancelRequested === 1
+    ) {
+      updateMessageStreamingStmt.run(
+        MessageStreamingState.Finalized,
+        params.deviceId,
+        params.messageId,
+      );
+      if (promptTurnStateAfterContext !== "canceled") {
+        transitionPromptTurnAdmission(params.promptTurnAdmission, "canceled", {
+          ...logContext,
+          messageId: params.messageId,
+          sessionKey: params.sessionKey,
+          userId: params.userId,
+          deviceId: params.deviceId,
+        });
+      }
+      activeSessionRuns.delete(normalizeSessionKey(params.sessionKey));
+      params.setActiveRunForProgress(null);
+      return "canceled";
+    }
+    params.markProcessStage?.("agent_run_start");
+    logger.info?.("[clawline] agent_run_start", {
+      ...logContext,
+      messageId: params.messageId,
+      correlationId: params.promptTurnAdmission.correlationId,
+      sessionId: params.sessionId,
+      sessionKey: params.sessionKey,
+      userId: params.userId,
+      deviceId: params.deviceId,
+    });
+    let queuedFinal = false;
+    let deliveredCount = 0;
+    let dispatchFailed = false;
+    let dispatchError: string | undefined;
+    const dispatchStartedAt = Date.now();
+    const useNativeClawlineSourceDelivery =
+      params.isNativeClawlineTurn && openClawCfg.messages?.visibleReplies === undefined;
+    try {
+      logger.info?.("[clawline] agent_run_phase", {
+        ...logContext,
+        phase: "dispatch_start",
+        messageId: params.messageId,
+        correlationId: params.promptTurnAdmission.correlationId,
+        sessionKey: params.sessionKey,
+        imageCount: prepared.inboundImages.length,
+      });
+      params.markProcessStage?.("run_prepared_inbound_reply");
+      const result = await runClawlineChannelTurn({
+        channel: params.route.channel,
+        accountId: params.route.accountId,
+        routeSessionKey: params.route.sessionKey,
+        ctxPayload: prepared.ctxPayload,
+        messageId: params.messageId,
+        rawText: params.rawContent,
+        record: params.record,
+        logContext: { ...logContext, correlationId: params.promptTurnAdmission.correlationId },
+        onPreDispatchFailure: (err) => {
+          logger.warn?.("[clawline] channel_turn_pre_dispatch_failed", {
+            ...logContext,
+            messageId: params.messageId,
+            correlationId: params.promptTurnAdmission.correlationId,
+            sessionKey: params.sessionKey,
+            error: formatError(err),
+          });
+        },
+        runDispatch: async () =>
+          runWithClawlineOutboundCorrelation(
+            {
+              replyToMessageId: params.eventId,
+              replyToClientMessageId: params.messageId,
+            },
+            async () => {
+              if (activeRun.cancelRequested) {
+                throw new Error("Clawline prompt turn canceled before dispatch");
+              }
+              return dispatchInboundMessage({
+                ctx: prepared.ctxPayload,
+                cfg: openClawCfg,
+                dispatcher: params.dispatcher,
+                replyOptions: {
+                  ...params.replyOptions,
+                  ...params.agentProgress.replyOptions,
+                  ...(useNativeClawlineSourceDelivery
+                    ? { sourceReplyDeliveryMode: "automatic" as const }
+                    : {}),
+                  images: prepared.inboundImages.length > 0 ? prepared.inboundImages : undefined,
+                  onModelSelected: (ctx) => {
+                    params.prefixContext.provider = ctx.provider;
+                    params.prefixContext.model = extractClawlineShortModelName(ctx.model);
+                    params.prefixContext.modelFull = `${ctx.provider}/${ctx.model}`;
+                    params.prefixContext.thinkingLevel = ctx.thinkLevel ?? "off";
+                    params.prefixContext.fastMode = ctx.fastMode;
+                    activeRun.provider = ctx.provider;
+                    activeRun.model = ctx.model;
+                    activeRun.thinkingLevel = ctx.thinkLevel ?? "off";
+                    activeRun.fastMode = ctx.fastMode ?? null;
+                    rememberSessionRuntimeStatus(params.sessionKey, {
+                      provider: ctx.provider,
+                      model: ctx.model,
+                      thinkingLevel: ctx.thinkLevel ?? "off",
+                      fastMode: ctx.fastMode ?? null,
+                    });
+                    params.agentProgress.emitModelActive();
+                  },
+                },
+                replyResolver: params.replyResolver,
+              });
+            },
+          ),
+      });
+      queuedFinal = result.dispatchResult.queuedFinal;
+      const observedReplyDelivery = result.dispatchResult.observedReplyDelivery === true;
+      if (
+        result.dispatchResult.sourceReplyDeliveryMode === "message_tool_only" &&
+        !observedReplyDelivery
+      ) {
+        dispatchError = "clawline.promptTurn.message_tool_missing";
+      }
+      deliveredCount = Math.max(
+        result.dispatchResult.counts.block +
+          result.dispatchResult.counts.tool +
+          result.dispatchResult.counts.final +
+          (observedReplyDelivery ? 1 : 0),
+        params.getPersistedAssistantDeliveryCount(),
+      );
+      logger.info?.("[clawline] agent_run_phase", {
+        ...logContext,
+        phase: "dispatch_return",
+        messageId: params.messageId,
+        correlationId: params.promptTurnAdmission.correlationId,
+        sessionKey: params.sessionKey,
+        queuedFinal,
+        deliveredCount,
+        blockCount: result.dispatchResult.counts.block,
+        toolCount: result.dispatchResult.counts.tool,
+        finalCount: result.dispatchResult.counts.final,
+        elapsedMs: Date.now() - dispatchStartedAt,
+      });
+      params.agentProgress.emitCompletionHandoff();
+    } catch (err) {
+      dispatchFailed = true;
+      dispatchError = formatError(err);
+      deliveredCount = params.getPersistedAssistantDeliveryCount();
+      logger.error?.(`[clawline] dispatch_failed: ${dispatchError}`, {
+        ...logContext,
+        messageId: params.messageId,
+        correlationId: params.promptTurnAdmission.correlationId,
+        sessionKey: params.sessionKey,
+      });
+      queuedFinal = false;
+    }
+    const waitForIdleStartedAt = Date.now();
+    logger.info?.("[clawline] agent_run_phase", {
+      ...logContext,
+      phase: "wait_for_idle_start",
+      messageId: params.messageId,
+      correlationId: params.promptTurnAdmission.correlationId,
+      sessionKey: params.sessionKey,
+    });
+    params.markDispatchIdle();
+    await params.dispatcher.waitForIdle();
+    logger.info?.("[clawline] agent_run_phase", {
+      ...logContext,
+      phase: "wait_for_idle_done",
+      messageId: params.messageId,
+      correlationId: params.promptTurnAdmission.correlationId,
+      sessionKey: params.sessionKey,
+      elapsedMs: Date.now() - waitForIdleStartedAt,
+    });
+    params.onAfterDispatchIdle?.();
+    if (markMessageFailedIfDeviceRevoked(params.deviceId, params.messageId)) {
+      activeSessionRuns.delete(normalizeSessionKey(params.sessionKey));
+      params.setActiveRunForProgress(null);
+      return "failed";
+    }
+
+    const queueDepth = getClawlineFollowupQueueDepth(params.route.sessionKey);
+    const wasDelivered = queuedFinal || deliveredCount > 0;
+    const wasQueued = !wasDelivered && queueDepth > 0;
+    logger.info?.("[clawline] agent_run_end", {
+      ...logContext,
+      messageId: params.messageId,
+      correlationId: params.promptTurnAdmission.correlationId,
+      sessionId: params.sessionId,
+      sessionKey: params.sessionKey,
+      userId: params.userId,
+      deviceId: params.deviceId,
+      deliveredCount,
+      queuedFinal,
+      queueDepth,
+      wasDelivered,
+      wasQueued,
+      dispatchFailed,
+    });
+    return finalizeClawlinePromptTurn({
+      socket: params.socket,
+      promptTurnAdmission: params.promptTurnAdmission,
+      activeRun,
+      agentProgress: params.agentProgress,
+      messageId: params.messageId,
+      sessionKey: params.sessionKey,
+      userId: params.userId,
+      deviceId: params.deviceId,
+      deliveredCount,
+      queuedFinal,
+      queueDepth,
+      dispatchFailed,
+      dispatchError,
+      logContext: { ...logContext, sessionId: params.sessionId },
+      cleanup: () => {
+        activeSessionRuns.delete(normalizeSessionKey(params.sessionKey));
+        params.setActiveRunForProgress(null);
+      },
+    });
   }
 
   async function appendEvent(
@@ -8968,8 +10082,33 @@ button.deny { background: #9b1c31; color: white; }
     };
   };
 
+  async function resolveClawlineVisibleMessageReference(
+    userId: string,
+    llmVisibleMessageId: string,
+  ) {
+    const trimmed = llmVisibleMessageId.trim();
+    if (!trimmed) {
+      return null;
+    }
+    const row = (
+      SERVER_EVENT_ID_REGEX.test(trimmed)
+        ? selectEventPayloadForUserStmt.get(userId, trimmed)
+        : selectEventPayloadForUserClientIdStmt.get(userId, trimmed)
+    ) as { payloadJson: string } | undefined;
+    const parsed = row?.payloadJson ? parseServerMessage(row.payloadJson, logger) : null;
+    if (!parsed) {
+      return null;
+    }
+    return {
+      llmVisibleMessageId: parsed.llmVisibleMessageId ?? parsed.clientMessageId ?? parsed.id,
+      role: parsed.role,
+      preview: parsed.content,
+    };
+  }
+
   async function processClientMessage(session: Session, payload: ClientPayload) {
     let processStage = "start";
+    const promptTurnFailureRef: { current: PromptTurnAdmissionFacts | null } = { current: null };
     const markProcessStage = (stage: string) => {
       processStage = stage;
       logger.info?.(`[clawline] processClientMessage_stage: ${stage}`, {
@@ -9009,22 +10148,19 @@ button.deny { background: #9b1c31; color: white; }
         payloadSessionKey && !normalizedClawlinePayloadSessionKey
           ? normalizeSessionKey(payloadSessionKey)
           : "";
-      const allowedSessionKeys = session.provisionedSessionKeys?.length
-        ? session.provisionedSessionKeys
-        : [session.sessionKey];
       // Legacy clients may omit sessionKey; default to the Main stream session key.
-      const resolvedSessionKey =
+      let resolvedSessionKey =
         normalizedClawlinePayloadSessionKey ||
         normalizedAdoptedPayloadSessionKey ||
         session.sessionKey;
-      if (
-        !allowedSessionKeys.some(
-          (sessionKey) =>
-            normalizeSessionKey(sessionKey) === normalizeSessionKey(resolvedSessionKey),
-        )
-      ) {
+      const registeredSessionKey = await resolveRegisteredInboundSessionKey(
+        session,
+        resolvedSessionKey,
+      );
+      if (!registeredSessionKey) {
         throw new ClientMessageError("stream_not_found", "Stream not found");
       }
+      resolvedSessionKey = registeredSessionKey;
       const inboundTarget = resolveInboundMessageTarget(session, resolvedSessionKey);
       markProcessStage("route_inbound_message");
       logger.info?.("[clawline] inbound message routing", {
@@ -9047,513 +10183,432 @@ button.deny { background: #9b1c31; color: white; }
       }
       const targetUserId = session.userId;
 
-      let runAgentDispatch: (() => Promise<void>) | null = null;
-      markProcessStage("run_per_user_task");
-      await runPerUserTask(
-        session.userId,
-        async () => {
-          if (isDenylisted(session.deviceId)) {
-            throw new ClientMessageError("token_revoked", "Device revoked");
-          }
-          markProcessStage("duplicate_lookup");
-          const existing = selectMessageStmt.get(session.deviceId, messageId) as
-            | {
-                deviceId: string;
-                contentHash: string;
-                attachmentsHash: string;
-                streaming: number;
-                ackSent: number;
-              }
-            | undefined;
-          const incomingHash = sha256(rawContent);
-          if (existing) {
-            if (
-              existing.contentHash !== incomingHash ||
-              existing.attachmentsHash !== attachmentsHash
-            ) {
-              throw new ClientMessageError("invalid_message", "Duplicate mismatch");
+      let runAgentDispatch: (() => Promise<unknown>) | null = null;
+      markProcessStage("run_prompt_admission");
+      await runPromptAdmissionTask(session.userId, resolvedSessionKey, async () => {
+        if (isDenylisted(session.deviceId)) {
+          throw new ClientMessageError("token_revoked", "Device revoked");
+        }
+        markProcessStage("duplicate_lookup");
+        const existing = selectMessageStmt.get(session.deviceId, messageId) as
+          | {
+              deviceId: string;
+              contentHash: string;
+              attachmentsHash: string;
+              streaming: number;
+              ackSent: number;
+              serverEventId: string;
+              eventSessionKey?: string | null;
+              promptTurnState?: string | null;
+              promptTurnCorrelationId?: string | null;
+              promptTurnCancelRequested?: number | null;
             }
-            if (existing.streaming === (MessageStreamingState.Failed as number)) {
-              throw new ClientMessageError("invalid_message", "Message failed");
-            }
-            if (existing.ackSent === 0) {
-              session.socket.send(JSON.stringify({ type: "ack", id: messageId }), (err) => {
-                if (!err) {
-                  markAckSent(session.deviceId, messageId);
-                  return;
-                }
-                logger.warn?.(`[clawline] ack_send_failed: ${formatError(err)}`, {
-                  messageId,
-                  deviceId: session.deviceId,
-                });
-              });
-            } else {
-              session.socket.send(JSON.stringify({ type: "ack", id: messageId }), (err) => {
-                if (err) {
-                  logger.warn?.(`[clawline] duplicate_ack_send_failed: ${formatError(err)}`, {
-                    messageId,
-                    deviceId: session.deviceId,
-                  });
-                }
-              });
-            }
-            return;
-          }
-
-          markProcessStage("resolve_references");
-          const referenceResolution = await resolveClawlineMessageReferenceContexts({
-            references: payload.references,
+          | undefined;
+        const incomingHash = sha256(rawContent);
+        if (existing) {
+          const bridgeFacts =
+            promptTurnAdmissions.get(promptTurnDedupeKey(session.deviceId, messageId)) ??
+            reconstructPromptTurnAdmissionFacts({
+              deviceId: session.deviceId,
+              clientMessageId: messageId,
+              clawlineMessageRowId: existing.serverEventId,
+              streamKey: existing.eventSessionKey ?? resolvedSessionKey,
+              contentHash: existing.contentHash,
+              attachmentsHash: existing.attachmentsHash,
+              state: promptTurnStateFromMessageRow(existing),
+              correlationId: existing.promptTurnCorrelationId ?? undefined,
+            });
+          rememberPromptTurnAdmission(bridgeFacts);
+          const retry = classifyDuplicatePromptTurnRetry(bridgeFacts, {
+            deviceId: session.deviceId,
+            clientMessageId: messageId,
+            contentHash: incomingHash,
+            attachmentsHash,
           });
-          if (!referenceResolution.ok) {
-            throw new ClientMessageError(referenceResolution.code, referenceResolution.message);
-          }
-
-          markProcessStage("message_rate_limit");
-          if (!messageRateLimiter.attempt(session.deviceId)) {
-            throw new ClientMessageError("rate_limited", "Too many messages");
-          }
-
-          markProcessStage("materialize_inline_attachments");
-          const materialized = await materializeInlineAttachments({
-            attachments: attachmentsInfo.attachments,
-            ownerUserId: targetUserId,
+          logger.info?.("[clawline] prompt_turn_duplicate_retry", {
+            messageId,
+            correlationId: bridgeFacts.correlationId,
+            retryKind: retry.kind,
+            retryReason: retry.kind === "reject" ? retry.reason : undefined,
+            state: bridgeFacts.state,
+            sessionKey: resolvedSessionKey,
             deviceId: session.deviceId,
           });
-          markProcessStage("ensure_attachment_ownership");
-          const assetIds = attachmentsInfo.assetIds.concat(materialized.inlineAssetIds);
-          const ownership = await ensureChannelAttachmentOwnership({
-            attachments: materialized.attachments,
-            assetIds,
-            session,
-          });
-          if (isDenylisted(session.deviceId)) {
-            throw new ClientMessageError("token_revoked", "Device revoked");
+          if (
+            existing.contentHash !== incomingHash ||
+            existing.attachmentsHash !== attachmentsHash
+          ) {
+            throw new ClientMessageError("invalid_message", "Duplicate mismatch");
           }
-
-          markProcessStage("persist_user_message");
-          const { event } = await persistUserMessage(
-            session,
-            targetUserId,
-            messageId,
-            rawContent,
-            ownership.attachments,
-            attachmentsHash,
-            ownership.assetIds,
-            resolvedSessionKey,
-          );
-          if (markMessageFailedIfDeviceRevoked(session.deviceId, messageId)) {
-            return;
+          if (existing.streaming === (MessageStreamingState.Failed as number)) {
+            throw new ClientMessageError("invalid_message", "Message failed");
           }
-          markProcessStage("send_ack");
-          await new Promise<void>((resolve) => {
+          if (existing.ackSent === 0) {
             session.socket.send(JSON.stringify({ type: "ack", id: messageId }), (err) => {
               if (!err) {
                 markAckSent(session.deviceId, messageId);
-              } else {
-                logger.warn?.(`[clawline] ack_send_failed: ${formatError(err)}`, {
+                return;
+              }
+              logger.warn?.(`[clawline] ack_send_failed: ${formatError(err)}`, {
+                messageId,
+                deviceId: session.deviceId,
+              });
+            });
+          } else {
+            session.socket.send(JSON.stringify({ type: "ack", id: messageId }), (err) => {
+              if (err) {
+                logger.warn?.(`[clawline] duplicate_ack_send_failed: ${formatError(err)}`, {
                   messageId,
                   deviceId: session.deviceId,
                 });
               }
-              resolve();
             });
-          });
-          markProcessStage("broadcast_user_message");
-          broadcastToSessionKey(resolvedSessionKey, event);
-          await broadcastStreamTailStateForUser(targetUserId, event);
-
-          const attachmentSummary = describeClawlineAttachments(ownership.attachments);
-          let inboundBody = attachmentSummary
-            ? `${rawContent}\n\n${attachmentSummary}`
-            : rawContent;
-          markProcessStage("load_inbound_images");
-          const { images: inboundImages, failureMarkers: inboundImageFailureMarkers } =
-            await materializeInboundAttachmentImages(ownership.attachments, {
-              messageId,
-              sessionKey: resolvedSessionKey,
-              deviceId: session.deviceId,
+          }
+          if (retry.kind === "replay") {
+            void sendJson(session.socket, {
+              type: "event",
+              event: "prompt_turn_state",
+              payload: {
+                messageId,
+                sessionKey: bridgeFacts.streamKey,
+                state: retry.state,
+                classification: retry.classification,
+                terminalState: retry.terminalState,
+                correlationId: retry.correlationId,
+                clawlineMessageRowId: retry.clawlineMessageRowId,
+              },
             });
-          if (inboundImageFailureMarkers.length > 0) {
-            inboundBody = [inboundBody, ...inboundImageFailureMarkers].filter(Boolean).join("\n\n");
           }
+          return;
+        }
 
-          markProcessStage("build_delivery_context");
-          const routeSessionKey = resolvedSessionKey;
-          const route = {
-            agentId: inboundTarget.routeAgentId,
-            channel: inboundTarget.channelLabel,
-            accountId: inboundTarget.routeAccountId,
-            sessionKey: routeSessionKey,
-            mainSessionKey,
-          };
-          const peerId = session.peerId;
-          const groupSystemPrompt = adapterOverrides.systemPrompt?.trim() || undefined;
-          const ctxPayload = finalizeInboundContext({
-            Body: inboundBody,
-            RawBody: rawContent,
-            CommandBody: rawContent,
-            From: `${inboundTarget.channelLabel}:${peerId}`,
-            To: inboundTarget.contextTo,
-            SessionKey: route.sessionKey,
-            AccountId: route.accountId,
-            MessageSid: messageId,
-            ChatType: "direct",
-            SenderName: session.claimedName ?? session.deviceInfo?.model ?? peerId,
-            SenderId: session.userId,
-            Provider: inboundTarget.channelLabel,
-            Surface: inboundTarget.channelLabel,
-            NativeChannelId: inboundTarget.originatingTo,
-            OriginatingChannel: inboundTarget.originatingChannel,
-            OriginatingTo: inboundTarget.originatingTo,
-            GroupSystemPrompt: groupSystemPrompt,
-            CommandAuthorized: true,
+        markProcessStage("resolve_references");
+        const referenceResolution = await resolveClawlineMessageReferenceContexts({
+          references: payload.references,
+          resolveVisibleMessage: (llmVisibleMessageId) =>
+            resolveClawlineVisibleMessageReference(session.userId, llmVisibleMessageId),
+        });
+        if (!referenceResolution.ok) {
+          throw new ClientMessageError(referenceResolution.code, referenceResolution.message);
+        }
+
+        markProcessStage("message_rate_limit");
+        if (!messageRateLimiter.attempt(session.deviceId)) {
+          throw new ClientMessageError("rate_limited", "Too many messages");
+        }
+
+        markProcessStage("materialize_inline_attachments");
+        const materialized = await materializeInlineAttachments({
+          attachments: attachmentsInfo.attachments,
+          ownerUserId: targetUserId,
+          deviceId: session.deviceId,
+        });
+        markProcessStage("ensure_attachment_ownership");
+        const assetIds = attachmentsInfo.assetIds.concat(materialized.inlineAssetIds);
+        const ownership = await ensureChannelAttachmentOwnership({
+          attachments: materialized.attachments,
+          assetIds,
+          session,
+        });
+        if (isDenylisted(session.deviceId)) {
+          throw new ClientMessageError("token_revoked", "Device revoked");
+        }
+
+        markProcessStage("persist_user_message");
+        const { event } = await persistUserMessage(
+          session,
+          targetUserId,
+          messageId,
+          rawContent,
+          ownership.attachments,
+          attachmentsHash,
+          ownership.assetIds,
+          resolvedSessionKey,
+        );
+        if (markMessageFailedIfDeviceRevoked(session.deviceId, messageId)) {
+          return;
+        }
+        const promptTurnAdmission = createPromptTurnAdmissionFacts({
+          deviceId: session.deviceId,
+          clientMessageId: messageId,
+          clawlineMessageRowId: event.id,
+          streamKey: resolvedSessionKey,
+          contentHash: incomingHash,
+          attachmentsHash,
+        });
+        promptTurnFailureRef.current = promptTurnAdmission;
+        persistPromptTurnAdmission(promptTurnAdmission);
+        logger.info?.("[clawline] prompt_turn_admitted", {
+          messageId,
+          correlationId: promptTurnAdmission.correlationId,
+          state: promptTurnAdmission.state,
+          sessionKey: resolvedSessionKey,
+          userId: session.userId,
+          deviceId: session.deviceId,
+        });
+        markProcessStage("send_ack");
+        await new Promise<void>((resolve) => {
+          session.socket.send(JSON.stringify({ type: "ack", id: messageId }), (err) => {
+            if (!err) {
+              markAckSent(session.deviceId, messageId);
+            } else {
+              logger.warn?.(`[clawline] ack_send_failed: ${formatError(err)}`, {
+                messageId,
+                deviceId: session.deviceId,
+              });
+            }
+            resolve();
           });
-          if (referenceResolution.contexts.length > 0) {
-            ctxPayload.UntrustedStructuredContext = [
-              ...(Array.isArray(ctxPayload.UntrustedStructuredContext)
-                ? ctxPayload.UntrustedStructuredContext
-                : []),
-              ...referenceResolution.contexts,
-            ];
-          }
-          markProcessStage("record_inbound_session");
-          await recordInboundSession({
-            storePath: sessionStorePath,
+        });
+        markProcessStage("broadcast_user_message");
+        broadcastToSessionKey(resolvedSessionKey, event);
+        broadcastStreamTailStateForUserDetached(targetUserId, event, "prompt_admission");
+
+        markProcessStage("prepare_turn_route");
+        const routeSessionKey = resolvedSessionKey;
+        const route = {
+          agentId: inboundTarget.routeAgentId,
+          channel: inboundTarget.channelLabel,
+          accountId: inboundTarget.routeAccountId,
+          sessionKey: routeSessionKey,
+          mainSessionKey,
+        };
+        const peerId = session.peerId;
+        const groupSystemPrompt = adapterOverrides.systemPrompt?.trim() || undefined;
+
+        const fallbackText = adapterOverrides.responseFallback?.trim() ?? "";
+        const prefixContext: ClawlineResponsePrefixContext = {
+          identityName: resolveIdentityName(route.agentId),
+        };
+
+        // Track activity state for typing indicator
+        let activitySignaled = false;
+        let activeRunForProgress: SessionStatusActiveRun | null = null;
+        let persistedAssistantDeliveryCount = 0;
+        const sendActivitySignal = async (isActive: boolean) => {
+          logger.info?.("[clawline] activity_signal", {
+            isActive,
+            messageId,
             sessionKey: route.sessionKey,
-            ctx: ctxPayload,
-            updateLastRoute: inboundTarget.updateLastRoute,
-            onRecordError: (err) => {
-              logger.warn?.(`[clawline] failed recording inbound session: ${formatError(err)}`);
-            },
           });
-
-          const fallbackText = adapterOverrides.responseFallback?.trim() ?? "";
-          const prefixContext: ClawlineResponsePrefixContext = {
-            identityName: resolveIdentityName(route.agentId),
-          };
-
-          // Track activity state for typing indicator
-          let activitySignaled = false;
-          let activeRunForProgress: SessionStatusActiveRun | null = null;
-          const sendActivitySignal = async (isActive: boolean) => {
-            logger.info?.("[clawline] activity_signal", {
+          await sendJson(session.socket, {
+            type: "event",
+            event: "activity",
+            payload: {
               isActive,
               messageId,
               sessionKey: route.sessionKey,
-            });
-            await sendJson(session.socket, {
-              type: "event",
-              event: "activity",
-              payload: {
-                isActive,
-                messageId,
-                sessionKey: route.sessionKey,
-              },
-            }).catch(() => {});
-          };
-          const agentProgress = createAgentProgressEmitter({
-            sessionKey: resolvedSessionKey,
-            messageId,
-            getActiveRun: () => activeRunForProgress,
-          });
-
-          markProcessStage("create_reply_dispatcher");
-          const { dispatcher, replyOptions, markDispatchIdle } = createReplyDispatcherWithTyping({
-            responsePrefix: resolveEffectiveMessagesConfig(openClawCfg, route.agentId)
-              .responsePrefix,
-            responsePrefixContextProvider: () => prefixContext,
-            humanDelay: resolveHumanDelayConfig(openClawCfg, route.agentId),
-            deliver: async (replyPayload) => {
-              const deliverStartedAt = Date.now();
-              logger.info?.("[clawline] agent_run_phase", {
-                phase: "deliver_start",
-                messageId,
-                sessionKey: resolvedSessionKey,
-                hasText: Boolean(replyPayload.text?.trim()),
-                mediaUrlCount: replyPayload.mediaUrls?.length ?? (replyPayload.mediaUrl ? 1 : 0),
-              });
-              // Stop activity signal when first content arrives (streaming begins)
-              if (activitySignaled) {
-                activitySignaled = false;
-                void sendActivitySignal(false);
-              }
-              const mediaUrls = replyPayload.mediaUrls?.length
-                ? replyPayload.mediaUrls
-                : replyPayload.mediaUrl
-                  ? [replyPayload.mediaUrl]
-                  : [];
-              let attachments: NormalizedAttachment[] = [];
-              let mediaFailed = false;
-              if (mediaUrls.length > 0) {
-                try {
-                  const materialized = await materializeOutboundMediaUrls({
-                    mediaUrls,
-                    agentId: route.agentId,
-                    ownerUserId: targetUserId,
-                    uploaderDeviceId: session.deviceId,
-                  });
-                  attachments = materialized.attachments;
-                  mediaFailed = attachments.length === 0 || materialized.failedMediaCount > 0;
-                } catch (err) {
-                  mediaFailed = true;
-                  logger.warn?.(`[clawline] reply_media_attachment_failed: ${formatError(err)}`);
-                }
-              }
-              const assistantText = buildAssistantTextFromMediaOutcome({
-                payload: replyPayload,
-                fallback: fallbackText,
-                attachments,
-                mediaFailed,
-              });
-              if (assistantText === null) {
-                return;
-              }
-              if (markMessageFailedIfDeviceRevoked(session.deviceId, messageId)) {
-                return;
-              }
-              const assistantEvent = await persistAssistantMessage(
-                targetUserId,
-                assistantText,
-                route.sessionKey,
-                attachments,
-                {
-                  preserveOpaqueSessionKey: inboundTarget.kind === "adopted",
-                  replyToMessageId: event.id,
-                  replyToClientMessageId: messageId,
-                },
-              );
-              broadcastToSessionKey(resolvedSessionKey, assistantEvent);
-              await broadcastStreamTailStateForUser(targetUserId, assistantEvent);
-              logger.info?.("[clawline] agent_run_phase", {
-                phase: "deliver_done",
-                messageId,
-                sessionKey: resolvedSessionKey,
-                assistantTextLength: assistantText.length,
-                attachmentCount: attachments.length,
-                elapsedMs: Date.now() - deliverStartedAt,
-              });
             },
-            onError: (err, info) => {
-              logger.error?.("[clawline] reply_delivery_failed", {
-                kind: info.kind,
-                error: err instanceof Error ? err.message : String(err),
-              });
-            },
-            onReplyStart: async () => {
-              // Signal that processing has started (for typing indicator)
-              if (!activitySignaled) {
-                activitySignaled = true;
-                await sendActivitySignal(true);
-              }
-            },
-          });
+          }).catch(() => {});
+        };
+        const agentProgress = createAgentProgressEmitter({
+          sessionKey: resolvedSessionKey,
+          messageId,
+          getActiveRun: () => activeRunForProgress,
+        });
 
-          markProcessStage("prepare_agent_run");
-          runAgentDispatch = async () => {
-            markProcessStage("agent_run_start");
-            logger.info?.("[clawline] agent_run_start", {
-              messageId,
-              sessionId: session.sessionId,
-              sessionKey: resolvedSessionKey,
-              userId: session.userId,
-              deviceId: session.deviceId,
-            });
-            const activeRun: SessionStatusActiveRun = {
-              runId: event.id,
-              messageId,
-              sessionKey: resolvedSessionKey,
-              agentSessionId: normalizeStatusString(
-                loadSessionStoreEntryForKey(resolvedSessionKey).entry?.sessionId,
-              ),
-              startedAt: Date.now(),
-              provider: null,
-              model: null,
-              thinkingLevel: null,
-              fastMode: null,
-              cancelRequested: false,
-            };
-            activeRunForProgress = activeRun;
-            activeSessionRuns.set(normalizeSessionKey(resolvedSessionKey), activeRun);
-
-            let queuedFinal = false;
-            let deliveredCount = 0;
-            const dispatchStartedAt = Date.now();
-            try {
-              logger.info?.("[clawline] agent_run_phase", {
-                phase: "dispatch_start",
-                messageId,
-                sessionKey: resolvedSessionKey,
-                imageCount: inboundImages.length,
-              });
-              const result = await runWithClawlineOutboundCorrelation(
-                {
-                  replyToMessageId: event.id,
-                  replyToClientMessageId: messageId,
-                },
-                () =>
-                  dispatchInboundMessage({
-                    ctx: ctxPayload,
-                    cfg: openClawCfg,
-                    dispatcher,
-                    replyOptions: {
-                      ...replyOptions,
-                      ...agentProgress.replyOptions,
-                      images: inboundImages.length > 0 ? inboundImages : undefined,
-                      onModelSelected: (ctx) => {
-                        prefixContext.provider = ctx.provider;
-                        prefixContext.model = extractClawlineShortModelName(ctx.model);
-                        prefixContext.modelFull = `${ctx.provider}/${ctx.model}`;
-                        prefixContext.thinkingLevel = ctx.thinkLevel ?? "off";
-                        prefixContext.fastMode = ctx.fastMode;
-                        activeRun.provider = ctx.provider;
-                        activeRun.model = ctx.model;
-                        activeRun.thinkingLevel = ctx.thinkLevel ?? "off";
-                        activeRun.fastMode = ctx.fastMode ?? null;
-                        rememberSessionRuntimeStatus(resolvedSessionKey, {
-                          provider: ctx.provider,
-                          model: ctx.model,
-                          thinkingLevel: ctx.thinkLevel ?? "off",
-                          fastMode: ctx.fastMode ?? null,
-                        });
-                      },
-                    },
-                    replyResolver: options.replyResolver,
-                  }),
-              );
-              queuedFinal = result.queuedFinal;
-              // Count all delivered content (streaming blocks, tool results, and final replies)
-              deliveredCount = result.counts.block + result.counts.tool + result.counts.final;
-              logger.info?.("[clawline] agent_run_phase", {
-                phase: "dispatch_return",
-                messageId,
-                sessionKey: resolvedSessionKey,
-                queuedFinal,
-                deliveredCount,
-                blockCount: result.counts.block,
-                toolCount: result.counts.tool,
-                finalCount: result.counts.final,
-                elapsedMs: Date.now() - dispatchStartedAt,
-              });
-            } catch (err) {
-              logger.error?.(`[clawline] dispatch_failed: ${formatError(err)}`);
-              queuedFinal = false;
-            }
-            const waitForIdleStartedAt = Date.now();
+        markProcessStage("create_reply_dispatcher");
+        const { dispatcher, replyOptions, markDispatchIdle } = createReplyDispatcherWithTyping({
+          responsePrefix: resolveEffectiveMessagesConfig(openClawCfg, route.agentId).responsePrefix,
+          responsePrefixContextProvider: () => prefixContext,
+          humanDelay: resolveHumanDelayConfig(openClawCfg, route.agentId),
+          deliver: async (replyPayload) => {
+            const deliverStartedAt = Date.now();
             logger.info?.("[clawline] agent_run_phase", {
-              phase: "wait_for_idle_start",
+              phase: "deliver_start",
               messageId,
               sessionKey: resolvedSessionKey,
+              hasText: Boolean(replyPayload.text?.trim()),
+              mediaUrlCount: replyPayload.mediaUrls?.length ?? (replyPayload.mediaUrl ? 1 : 0),
             });
-            markDispatchIdle();
-            await dispatcher.waitForIdle();
-            logger.info?.("[clawline] agent_run_phase", {
-              phase: "wait_for_idle_done",
-              messageId,
-              sessionKey: resolvedSessionKey,
-              elapsedMs: Date.now() - waitForIdleStartedAt,
-            });
-
-            // Always send activity=false when done
+            // Stop activity signal when first content arrives (streaming begins)
             if (activitySignaled) {
               activitySignaled = false;
               void sendActivitySignal(false);
             }
-            if (markMessageFailedIfDeviceRevoked(session.deviceId, messageId)) {
-              activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
-              activeRunForProgress = null;
-              return;
-            }
-
-            // Check if message was successfully handled:
-            // 1. queuedFinal = true means a final reply was sent
-            // 2. deliveredCount > 0 means content was streamed (blocks/tools)
-            // 3. queueDepth > 0 means message was queued for later processing
-            const queueKey = route.sessionKey;
-            const queueDepth = getClawlineFollowupQueueDepth(queueKey);
-            const wasDelivered = queuedFinal || deliveredCount > 0;
-            const wasQueued = !wasDelivered && queueDepth > 0;
-
-            logger.info?.("[clawline] agent_run_end", {
-              messageId,
-              sessionId: session.sessionId,
-              sessionKey: resolvedSessionKey,
-              userId: session.userId,
-              deviceId: session.deviceId,
-              deliveredCount,
-              queuedFinal,
-              queueDepth,
-              wasDelivered,
-              wasQueued,
-            });
-
-            if (!wasDelivered && !wasQueued) {
-              if (activeRun.cancelRequested) {
-                updateMessageStreamingStmt.run(
-                  MessageStreamingState.Finalized,
-                  session.deviceId,
-                  messageId,
-                );
-                agentProgress.emitDone();
-                activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
-                activeRunForProgress = null;
-                return;
+            const mediaUrls = replyPayload.mediaUrls?.length
+              ? replyPayload.mediaUrls
+              : replyPayload.mediaUrl
+                ? [replyPayload.mediaUrl]
+                : [];
+            let attachments: NormalizedAttachment[] = [];
+            let mediaFailed = false;
+            if (mediaUrls.length > 0) {
+              try {
+                const materialized = await materializeOutboundMediaUrls({
+                  mediaUrls,
+                  agentId: route.agentId,
+                  ownerUserId: targetUserId,
+                  uploaderDeviceId: session.deviceId,
+                });
+                attachments = materialized.attachments;
+                mediaFailed = attachments.length === 0 || materialized.failedMediaCount > 0;
+              } catch (err) {
+                mediaFailed = true;
+                logger.warn?.(`[clawline] reply_media_attachment_failed: ${formatError(err)}`);
               }
-              logger.warn?.("[clawline] agent_run_no_delivery", {
-                messageId,
-                sessionId: session.sessionId,
-                sessionKey: resolvedSessionKey,
-                userId: session.userId,
-                deviceId: session.deviceId,
-                deliveredCount,
-                queuedFinal,
-                queueDepth,
-              });
-              updateMessageStreamingStmt.run(
-                MessageStreamingState.Failed,
-                session.deviceId,
-                messageId,
-              );
-              const errorSent = await sendJson(session.socket, {
-                type: "error",
-                code: "server_error",
-                message: "Unable to deliver reply",
-                messageId,
-              }).catch(() => false);
-              logger.warn?.("[clawline] agent_run_no_delivery_error_emit", {
-                messageId,
-                sessionKey: resolvedSessionKey,
-                deviceId: session.deviceId,
-                errorSent,
-              });
-              agentProgress.emitError();
-              activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
-              activeRunForProgress = null;
+            }
+            const assistantText = buildAssistantTextFromMediaOutcome({
+              payload: replyPayload,
+              fallback: fallbackText,
+              attachments,
+              mediaFailed,
+            });
+            if (assistantText === null) {
               return;
             }
-
-            // Message was either delivered or queued successfully
-            updateMessageStreamingStmt.run(
-              wasQueued ? MessageStreamingState.Queued : MessageStreamingState.Finalized,
-              session.deviceId,
-              messageId,
+            if (markMessageFailedIfDeviceRevoked(session.deviceId, messageId)) {
+              return;
+            }
+            const assistantEvent = await persistAssistantMessage(
+              targetUserId,
+              assistantText,
+              route.sessionKey,
+              attachments,
+              {
+                preserveOpaqueSessionKey: inboundTarget.kind === "adopted",
+                replyToMessageId: event.id,
+                replyToClientMessageId: messageId,
+              },
             );
-            agentProgress.emitDone();
-            activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
-            activeRunForProgress = null;
-          };
-          markProcessStage("dispatch_agent_run");
-          await runAgentDispatch();
-          runAgentDispatch = null;
-        },
-        { streamKey: resolvedSessionKey },
-      );
-      const dispatchAgentRun = runAgentDispatch as (() => Promise<void>) | null;
+            persistedAssistantDeliveryCount += 1;
+            broadcastToSessionKey(resolvedSessionKey, assistantEvent);
+            await broadcastStreamTailStateForUser(targetUserId, assistantEvent);
+            logger.info?.("[clawline] agent_run_phase", {
+              phase: "deliver_done",
+              messageId,
+              sessionKey: resolvedSessionKey,
+              assistantTextLength: assistantText.length,
+              attachmentCount: attachments.length,
+              elapsedMs: Date.now() - deliverStartedAt,
+            });
+          },
+          onError: (err, info) => {
+            logger.error?.("[clawline] reply_delivery_failed", {
+              kind: info.kind,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          },
+          onReplyStart: async () => {
+            // Signal that processing has started (for typing indicator)
+            if (!activitySignaled) {
+              activitySignaled = true;
+              await sendActivitySignal(true);
+            }
+          },
+        });
+
+        markProcessStage("prepare_agent_run");
+        runAgentDispatch = () =>
+          runAdmittedClawlinePromptTurn({
+            socket: session.socket,
+            promptTurnAdmission,
+            eventId: event.id,
+            messageId,
+            sessionId: session.sessionId,
+            sessionKey: resolvedSessionKey,
+            userId: session.userId,
+            deviceId: session.deviceId,
+            rawContent,
+            route,
+            isNativeClawlineTurn: inboundTarget.kind === "clawline",
+            dispatcher,
+            replyOptions,
+            markDispatchIdle,
+            agentProgress,
+            prefixContext,
+            setActiveRunForProgress: (activeRun) => {
+              activeRunForProgress = activeRun;
+            },
+            getPersistedAssistantDeliveryCount: () => persistedAssistantDeliveryCount,
+            buildContext: async () => {
+              const attachmentSummary = describeClawlineAttachments(ownership.attachments);
+              let inboundBody = attachmentSummary
+                ? `${rawContent}\n\n${attachmentSummary}`
+                : rawContent;
+              const materializedInboundImages = await materializeInboundAttachmentImages(
+                ownership.attachments,
+                {
+                  messageId,
+                  sessionKey: resolvedSessionKey,
+                  deviceId: session.deviceId,
+                  correlationId: promptTurnAdmission.correlationId,
+                },
+              );
+              if (materializedInboundImages.failureMarkers.length > 0) {
+                inboundBody = [inboundBody, ...materializedInboundImages.failureMarkers]
+                  .filter(Boolean)
+                  .join("\n\n");
+              }
+              return {
+                inboundImages: materializedInboundImages.images,
+                ctxPayload: buildClawlineInboundContext({
+                  channel: inboundTarget.channelLabel,
+                  accountId: route.accountId,
+                  agentId: route.agentId,
+                  sessionKey: route.sessionKey,
+                  mainSessionKey: route.mainSessionKey,
+                  messageId,
+                  rawBody: rawContent,
+                  body: inboundBody,
+                  commandBody: rawContent,
+                  fromPeerId: peerId,
+                  to: inboundTarget.contextTo,
+                  senderId: session.userId,
+                  senderName: session.claimedName ?? session.deviceInfo?.model ?? peerId,
+                  provider: inboundTarget.channelLabel,
+                  surface: inboundTarget.channelLabel,
+                  nativeChannelId: inboundTarget.originatingTo,
+                  originatingChannel: inboundTarget.originatingChannel,
+                  originatingTo: inboundTarget.originatingTo,
+                  groupSystemPrompt,
+                  media: buildInboundMediaFactsFromAttachments(ownership.attachments, messageId),
+                  referenceContexts: referenceResolution.contexts,
+                }),
+              };
+            },
+            record: {
+              updateLastRoute: inboundTarget.updateLastRoute,
+              onRecordError: (err) => {
+                logger.warn?.(`[clawline] failed recording inbound session: ${formatError(err)}`);
+              },
+            },
+            replyResolver: options.replyResolver,
+            markProcessStage,
+            onAfterDispatchIdle: () => {
+              if (activitySignaled) {
+                activitySignaled = false;
+                void sendActivitySignal(false);
+              }
+            },
+          });
+        if (hasPromptTurnRuntimeBlocker(resolvedSessionKey)) {
+          transitionPromptTurnAdmission(promptTurnAdmission, "queued", {
+            messageId,
+            sessionKey: resolvedSessionKey,
+            userId: session.userId,
+            deviceId: session.deviceId,
+          });
+        }
+      });
+      const dispatchAgentRun = runAgentDispatch as (() => Promise<unknown>) | null;
       if (!dispatchAgentRun) {
         return;
       }
       markProcessStage("dispatch_agent_run");
-      await dispatchAgentRun();
+      await runPromptTurnTask(session.userId, resolvedSessionKey, dispatchAgentRun);
     } catch (err) {
+      const promptTurnForFailure = promptTurnFailureRef.current;
+      if (promptTurnForFailure && !isPromptTurnTerminalState(promptTurnForFailure.state)) {
+        transitionPromptTurnAdmission(promptTurnForFailure, "failed", {
+          messageId: promptTurnForFailure.clientMessageId,
+          sessionKey: promptTurnForFailure.streamKey,
+          userId: session.userId,
+          deviceId: promptTurnForFailure.deviceId,
+          error: formatError(err),
+          processStage,
+        });
+      }
       if (err instanceof ClientMessageError) {
         await sendJson(session.socket, {
           type: "error",
@@ -9590,6 +10645,7 @@ button.deny { background: #9b1c31; color: white; }
   }
 
   async function processInteractiveCallback(session: Session, payload: ClientPayload) {
+    const promptTurnFailureRef: { current: PromptTurnAdmissionFacts | null } = { current: null };
     try {
       const sourceMessageId = typeof payload.messageId === "string" ? payload.messageId.trim() : "";
       if (!sourceMessageId) {
@@ -9642,7 +10698,7 @@ button.deny { background: #9b1c31; color: white; }
         resolvedSessionKey = session.sessionKey;
       }
 
-      let streamSuffix: "main" | "dm" | "global" = "main";
+      let streamSuffix: string;
       if (sessionKeyEq(resolvedSessionKey, session.personalSessionKey)) {
         streamSuffix = "main";
       } else if (
@@ -9652,6 +10708,13 @@ button.deny { background: #9b1c31; color: white; }
         streamSuffix = "dm";
       } else if (sessionKeyEq(resolvedSessionKey, session.globalSessionKey)) {
         streamSuffix = "global";
+      } else {
+        const parsed = parseClawlineUserSessionKey(resolvedSessionKey);
+        const normalizedUserId = sanitizeUserId(session.userId).toLowerCase();
+        if (!parsed || parsed.userId !== normalizedUserId) {
+          throw new ClientMessageError("stream_not_found", "Stream not found");
+        }
+        streamSuffix = parsed.streamSuffix;
       }
       if (streamSuffix === "global" && !session.isAdmin) {
         throw new ClientMessageError("forbidden", "Admin channel requires admin access");
@@ -9688,9 +10751,9 @@ button.deny { background: #9b1c31; color: white; }
       const attachmentsHash = hashAttachments(attachments);
       const assetIds: string[] = [];
 
-      let runAgentDispatch: (() => Promise<void>) | null = null;
-      await runPerUserTask(
-        session.userId,
+      let runAgentDispatch: (() => Promise<unknown>) | null = null;
+      await providerLaneQueue.runPromptAdmission(
+        { userId: session.userId, streamKey: resolvedSessionKey },
         async () => {
           if (isDenylisted(session.deviceId)) {
             throw new ClientMessageError("token_revoked", "Device revoked");
@@ -9717,21 +10780,17 @@ button.deny { background: #9b1c31; color: white; }
           if (markMessageFailedIfDeviceRevoked(session.deviceId, clientId)) {
             return;
           }
+          const promptTurnAdmission = createPromptTurnAdmissionFacts({
+            deviceId: session.deviceId,
+            clientMessageId: clientId,
+            clawlineMessageRowId: event.id,
+            streamKey: resolvedSessionKey,
+            contentHash: sha256(rawContent),
+            attachmentsHash,
+          });
+          promptTurnFailureRef.current = promptTurnAdmission;
+          persistPromptTurnAdmission(promptTurnAdmission);
           broadcastToSessionKey(resolvedSessionKey, event);
-
-          const attachmentSummary = describeClawlineAttachments(attachments);
-          let inboundBody = attachmentSummary
-            ? `${rawContent}\n\n${attachmentSummary}`
-            : rawContent;
-          const { images: inboundImages, failureMarkers: inboundImageFailureMarkers } =
-            await materializeInboundAttachmentImages(attachments, {
-              messageId: clientId,
-              sessionKey: resolvedSessionKey,
-              deviceId: session.deviceId,
-            });
-          if (inboundImageFailureMarkers.length > 0) {
-            inboundBody = [inboundBody, ...inboundImageFailureMarkers].filter(Boolean).join("\n\n");
-          }
 
           const channelLabel = "clawline";
           const routeSessionKey = resolvedSessionKey;
@@ -9746,26 +10805,6 @@ button.deny { background: #9b1c31; color: white; }
 
           const deliveryTarget = ClawlineDeliveryTarget.fromParts(session.userId, streamSuffix);
           const groupSystemPrompt = adapterOverrides.systemPrompt?.trim() || undefined;
-          const ctxPayload = finalizeInboundContext({
-            Body: inboundBody,
-            RawBody: rawContent,
-            CommandBody: rawContent,
-            From: `${channelLabel}:${peerId}`,
-            To: `device:${session.deviceId}`,
-            SessionKey: route.sessionKey,
-            AccountId: route.accountId,
-            MessageSid: clientId,
-            ChatType: "direct",
-            SenderName: session.claimedName ?? session.deviceInfo?.model ?? peerId,
-            SenderId: session.userId,
-            Provider: "clawline",
-            Surface: channelLabel,
-            NativeChannelId: deliveryTarget.toString(),
-            OriginatingChannel: channelLabel,
-            OriginatingTo: deliveryTarget.toString(),
-            GroupSystemPrompt: groupSystemPrompt,
-            CommandAuthorized: true,
-          });
           const updateLastRoute =
             streamSuffix === "dm" && session.dmScope !== "main"
               ? {
@@ -9776,16 +10815,6 @@ button.deny { background: #9b1c31; color: white; }
                   accountId: route.accountId,
                 }
               : undefined;
-          await recordInboundSession({
-            storePath: sessionStorePath,
-            sessionKey: route.sessionKey,
-            ctx: ctxPayload,
-            updateLastRoute,
-            onRecordError: (err) => {
-              logger.warn?.(`[clawline] failed recording inbound session: ${formatError(err)}`);
-            },
-          });
-
           const fallbackText = adapterOverrides.responseFallback?.trim() ?? "";
           const prefixContext: ClawlineResponsePrefixContext = {
             identityName: resolveIdentityName(route.agentId),
@@ -9794,6 +10823,7 @@ button.deny { background: #9b1c31; color: white; }
           // Track activity state for typing indicator
           let activitySignaled = false;
           let activeRunForProgress: SessionStatusActiveRun | null = null;
+          let persistedAssistantDeliveryCount = 0;
           const sendActivitySignal = async (isActive: boolean) => {
             logger.info?.("[clawline] activity_signal", {
               isActive,
@@ -9881,6 +10911,7 @@ button.deny { background: #9b1c31; color: white; }
                   replyToClientMessageId: clientId,
                 },
               );
+              persistedAssistantDeliveryCount += 1;
               broadcastToSessionKey(resolvedSessionKey, assistantEvent);
               await broadcastStreamTailStateForUser(targetUserId, assistantEvent);
               logger.info?.("[clawline] agent_run_phase", {
@@ -9909,199 +10940,117 @@ button.deny { background: #9b1c31; color: white; }
             },
           });
 
-          runAgentDispatch = async () => {
-            logger.info?.("[clawline] agent_run_start", {
+          runAgentDispatch = () =>
+            runAdmittedClawlinePromptTurn({
+              socket: session.socket,
+              promptTurnAdmission,
+              eventId: event.id,
               messageId: clientId,
               sessionId: session.sessionId,
               sessionKey: resolvedSessionKey,
               userId: session.userId,
               deviceId: session.deviceId,
-              sourceMessageId,
-              interactiveAction: action,
-            });
-            const activeRun: SessionStatusActiveRun = {
-              runId: event.id,
-              messageId: clientId,
-              sessionKey: resolvedSessionKey,
-              agentSessionId: normalizeStatusString(
-                loadSessionStoreEntryForKey(resolvedSessionKey).entry?.sessionId,
-              ),
-              startedAt: Date.now(),
-              provider: null,
-              model: null,
-              thinkingLevel: null,
-              fastMode: null,
-              cancelRequested: false,
-            };
-            activeRunForProgress = activeRun;
-            activeSessionRuns.set(normalizeSessionKey(resolvedSessionKey), activeRun);
-
-            let queuedFinal = false;
-            let deliveredCount = 0;
-            const dispatchStartedAt = Date.now();
-            try {
-              logger.info?.("[clawline] agent_run_phase", {
-                phase: "dispatch_start",
-                messageId: clientId,
-                sessionKey: resolvedSessionKey,
-                imageCount: inboundImages.length,
-                sourceMessageId,
-                interactiveAction: action,
-              });
-              const result = await runWithClawlineOutboundCorrelation(
-                {
-                  replyToMessageId: event.id,
-                  replyToClientMessageId: clientId,
-                },
-                () =>
-                  dispatchInboundMessage({
-                    ctx: ctxPayload,
-                    cfg: openClawCfg,
-                    dispatcher,
-                    replyOptions: {
-                      ...replyOptions,
-                      ...agentProgress.replyOptions,
-                      images: inboundImages.length > 0 ? inboundImages : undefined,
-                      onModelSelected: (ctx) => {
-                        prefixContext.provider = ctx.provider;
-                        prefixContext.model = extractClawlineShortModelName(ctx.model);
-                        prefixContext.modelFull = `${ctx.provider}/${ctx.model}`;
-                        prefixContext.thinkingLevel = ctx.thinkLevel ?? "off";
-                        prefixContext.fastMode = ctx.fastMode;
-                        activeRun.provider = ctx.provider;
-                        activeRun.model = ctx.model;
-                        activeRun.thinkingLevel = ctx.thinkLevel ?? "off";
-                        activeRun.fastMode = ctx.fastMode ?? null;
-                        rememberSessionRuntimeStatus(resolvedSessionKey, {
-                          provider: ctx.provider,
-                          model: ctx.model,
-                          thinkingLevel: ctx.thinkLevel ?? "off",
-                          fastMode: ctx.fastMode ?? null,
-                        });
-                      },
-                    },
-                    replyResolver: options.replyResolver,
-                  }),
-              );
-              queuedFinal = result.queuedFinal;
-              // Count all delivered content (streaming blocks, tool results, and final replies)
-              deliveredCount = result.counts.block + result.counts.tool + result.counts.final;
-              logger.info?.("[clawline] agent_run_phase", {
-                phase: "dispatch_return",
-                messageId: clientId,
-                sessionKey: resolvedSessionKey,
-                queuedFinal,
-                deliveredCount,
-                blockCount: result.counts.block,
-                toolCount: result.counts.tool,
-                finalCount: result.counts.final,
-                elapsedMs: Date.now() - dispatchStartedAt,
-                sourceMessageId,
-                interactiveAction: action,
-              });
-            } catch (err) {
-              logger.error?.(`[clawline] dispatch_failed: ${formatError(err)}`);
-              queuedFinal = false;
-            }
-            const waitForIdleStartedAt = Date.now();
-            logger.info?.("[clawline] agent_run_phase", {
-              phase: "wait_for_idle_start",
-              messageId: clientId,
-              sessionKey: resolvedSessionKey,
-              sourceMessageId,
-              interactiveAction: action,
-            });
-            markDispatchIdle();
-            await dispatcher.waitForIdle();
-            logger.info?.("[clawline] agent_run_phase", {
-              phase: "wait_for_idle_done",
-              messageId: clientId,
-              sessionKey: resolvedSessionKey,
-              elapsedMs: Date.now() - waitForIdleStartedAt,
-              sourceMessageId,
-              interactiveAction: action,
-            });
-
-            // Always send activity=false when done
-            if (activitySignaled) {
-              activitySignaled = false;
-              void sendActivitySignal(false);
-            }
-            if (markMessageFailedIfDeviceRevoked(session.deviceId, clientId)) {
-              activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
-              activeRunForProgress = null;
-              return;
-            }
-
-            const queueKey = route.sessionKey;
-            const queueDepth = getClawlineFollowupQueueDepth(queueKey);
-            const wasDelivered = queuedFinal || deliveredCount > 0;
-            const wasQueued = !wasDelivered && queueDepth > 0;
-
-            logger.info?.("[clawline] agent_run_end", {
-              messageId: clientId,
-              sessionId: session.sessionId,
-              sessionKey: resolvedSessionKey,
-              userId: session.userId,
-              deviceId: session.deviceId,
-              deliveredCount,
-              queuedFinal,
-              queueDepth,
-              wasDelivered,
-              wasQueued,
-              sourceMessageId,
-              interactiveAction: action,
-            });
-
-            if (!wasDelivered && !wasQueued) {
-              if (activeRun.cancelRequested) {
-                updateMessageStreamingStmt.run(
-                  MessageStreamingState.Finalized,
-                  session.deviceId,
-                  clientId,
+              rawContent,
+              route,
+              isNativeClawlineTurn: true,
+              dispatcher,
+              replyOptions,
+              markDispatchIdle,
+              agentProgress,
+              prefixContext,
+              setActiveRunForProgress: (activeRun) => {
+                activeRunForProgress = activeRun;
+              },
+              getPersistedAssistantDeliveryCount: () => persistedAssistantDeliveryCount,
+              buildContext: async () => {
+                const attachmentSummary = describeClawlineAttachments(attachments);
+                let inboundBody = attachmentSummary
+                  ? `${rawContent}\n\n${attachmentSummary}`
+                  : rawContent;
+                const materializedInboundImages = await materializeInboundAttachmentImages(
+                  attachments,
+                  {
+                    messageId: clientId,
+                    sessionKey: resolvedSessionKey,
+                    deviceId: session.deviceId,
+                    correlationId: promptTurnAdmission.correlationId,
+                  },
                 );
-                agentProgress.emitDone();
-                activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
-                activeRunForProgress = null;
-                return;
-              }
-              updateMessageStreamingStmt.run(
-                MessageStreamingState.Failed,
-                session.deviceId,
-                clientId,
-              );
-              await sendJson(session.socket, {
-                type: "error",
-                code: "server_error",
-                message: "Unable to deliver reply",
-                messageId: clientId,
-              }).catch(() => {});
-              agentProgress.emitError();
-              activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
-              activeRunForProgress = null;
-              return;
-            }
-
-            updateMessageStreamingStmt.run(
-              wasQueued ? MessageStreamingState.Queued : MessageStreamingState.Finalized,
-              session.deviceId,
-              clientId,
-            );
-            agentProgress.emitDone();
-            activeSessionRuns.delete(normalizeSessionKey(resolvedSessionKey));
-            activeRunForProgress = null;
-          };
-          await runAgentDispatch();
-          runAgentDispatch = null;
+                if (materializedInboundImages.failureMarkers.length > 0) {
+                  inboundBody = [inboundBody, ...materializedInboundImages.failureMarkers]
+                    .filter(Boolean)
+                    .join("\n\n");
+                }
+                return {
+                  inboundImages: materializedInboundImages.images,
+                  ctxPayload: buildClawlineInboundContext({
+                    channel: channelLabel,
+                    accountId: route.accountId,
+                    agentId: route.agentId,
+                    sessionKey: route.sessionKey,
+                    mainSessionKey: route.mainSessionKey,
+                    messageId: clientId,
+                    rawBody: rawContent,
+                    body: inboundBody,
+                    commandBody: rawContent,
+                    fromPeerId: peerId,
+                    to: `device:${session.deviceId}`,
+                    senderId: session.userId,
+                    senderName: session.claimedName ?? session.deviceInfo?.model ?? peerId,
+                    provider: "clawline",
+                    surface: channelLabel,
+                    nativeChannelId: deliveryTarget.toString(),
+                    originatingChannel: channelLabel,
+                    originatingTo: deliveryTarget.toString(),
+                    groupSystemPrompt,
+                    media: buildInboundMediaFactsFromAttachments(attachments, clientId),
+                  }),
+                };
+              },
+              record: {
+                updateLastRoute,
+                onRecordError: (err) => {
+                  logger.warn?.(`[clawline] failed recording inbound session: ${formatError(err)}`);
+                },
+              },
+              logContext: {
+                sourceMessageId,
+                interactiveAction: action,
+              },
+              replyResolver: options.replyResolver,
+              onAfterDispatchIdle: () => {
+                if (activitySignaled) {
+                  activitySignaled = false;
+                  void sendActivitySignal(false);
+                }
+              },
+            });
+          if (hasPromptTurnRuntimeBlocker(resolvedSessionKey)) {
+            transitionPromptTurnAdmission(promptTurnAdmission, "queued", {
+              messageId: clientId,
+              sessionKey: resolvedSessionKey,
+              userId: session.userId,
+              deviceId: session.deviceId,
+            });
+          }
         },
-        { streamKey: resolvedSessionKey },
       );
-      const dispatchAgentRun = runAgentDispatch as (() => Promise<void>) | null;
+      const dispatchAgentRun = runAgentDispatch as (() => Promise<unknown>) | null;
       if (!dispatchAgentRun) {
         return;
       }
-      await dispatchAgentRun();
+      await runPromptTurnTask(session.userId, resolvedSessionKey, dispatchAgentRun);
     } catch (err) {
+      const promptTurnForFailure = promptTurnFailureRef.current;
+      if (promptTurnForFailure && !isPromptTurnTerminalState(promptTurnForFailure.state)) {
+        transitionPromptTurnAdmission(promptTurnForFailure, "failed", {
+          messageId: promptTurnForFailure.clientMessageId,
+          sessionKey: promptTurnForFailure.streamKey,
+          userId: session.userId,
+          deviceId: promptTurnForFailure.deviceId,
+          error: formatError(err),
+        });
+      }
       if (err instanceof ClientMessageError) {
         await sendJson(session.socket, {
           type: "error",
@@ -10327,7 +11276,7 @@ button.deny { background: #9b1c31; color: white; }
           await handlePairRequest(ws, payload);
           break;
         case "auth":
-          await handleAuth(ws, payload);
+          await handleAuth(ws, payload, req);
           break;
         case "message":
           await handleAuthedMessage(ws, payload);
@@ -11061,7 +12010,7 @@ button.deny { background: #9b1c31; color: white; }
     );
   }
 
-  async function handleAuth(ws: WebSocket, payload: ClientPayload) {
+  async function handleAuth(ws: WebSocket, payload: ClientPayload, req?: http.IncomingMessage) {
     if (payload.protocolVersion !== PROTOCOL_VERSION) {
       await sendJson(ws, {
         type: "error",
@@ -11120,6 +12069,9 @@ button.deny { background: #9b1c31; color: white; }
     }
     const peerId = derivePeerId(entry);
     const clientFeatures = parseClientFeatures(payload);
+    const clientIdentity = parseClientIdentity(payload);
+    const originHeader = req?.headers?.origin;
+    const userAgentHeader = req?.headers?.["user-agent"];
     const clientAdoptedSessionKeys = entry.isAdmin ? parseAdoptedSessionKeys(payload) : [];
     const storedAdoptedSessionKeys = entry.isAdmin
       ? readAdoptedSessionKeysForUser(entry.userId)
@@ -11148,8 +12100,12 @@ button.deny { background: #9b1c31; color: white; }
       dmSessionKey: "",
       globalSessionKey: "",
       peerId,
+      ...clientIdentity,
       claimedName: entry.claimedName,
       deviceInfo: entry.deviceInfo,
+      remoteAddress: req?.socket?.remoteAddress,
+      origin: Array.isArray(originHeader) ? originHeader[0] : originHeader,
+      userAgent: Array.isArray(userAgentHeader) ? userAgentHeader[0] : userAgentHeader,
       replayInProgress: true,
       replayDeliveredMessageIds: new Set(),
       replayBufferedMessages: [],
@@ -11438,7 +12394,7 @@ button.deny { background: #9b1c31; color: white; }
       await closeWithTimeout((cb) => wss.close(cb), "wss");
       await closeWithTimeout((cb) => terminalWss.close(cb), "terminalWss");
       await closeWithTimeout((cb) => httpServer.close(cb), "httpServer");
-      await perUserTaskQueue.drain();
+      await Promise.allSettled([perUserTaskQueue.drain(), providerLaneQueue.drain()]);
       await writeQueue.catch(() => {});
       disposeDatabaseResources();
       started = false;

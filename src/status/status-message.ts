@@ -1,15 +1,24 @@
+// Status message helpers read and format stored status messages.
 import fs from "node:fs";
+import {
+  normalizeLowercaseStringOrEmpty,
+  normalizeOptionalLowercaseString,
+  normalizeOptionalString,
+} from "@openclaw/normalization-core/string-coerce";
 import { resolveContextTokensForModel } from "../agents/context.js";
 import { DEFAULT_CONTEXT_TOKENS, DEFAULT_MODEL, DEFAULT_PROVIDER } from "../agents/defaults.js";
+import { resolveExtraParams } from "../agents/embedded-agent-runner/extra-params.js";
 import { resolveModelAuthMode } from "../agents/model-auth.js";
-import { areRuntimeModelRefsEquivalent } from "../agents/model-runtime-aliases.js";
+import {
+  areRuntimeModelRefsEquivalent,
+  shouldPreferActiveRuntimeAliasAuthLabel,
+} from "../agents/model-runtime-aliases.js";
 import {
   buildModelAliasIndex,
   resolveConfiguredModelRef,
   resolveModelRefFromString,
 } from "../agents/model-selection.js";
 import { resolveOpenAITextVerbosity } from "../agents/openai-text-verbosity.js";
-import { resolveExtraParams } from "../agents/pi-embedded-runner/extra-params.js";
 import { resolveSandboxRuntimeStatus } from "../agents/sandbox.js";
 import {
   formatProviderModelRef,
@@ -43,11 +52,6 @@ import {
 } from "../media-understanding/runner.entries.js";
 import type { MediaUnderstandingDecision } from "../media-understanding/types.js";
 import { resolveAgentIdFromSessionKey } from "../routing/session-key.js";
-import {
-  normalizeLowercaseStringOrEmpty,
-  normalizeOptionalLowercaseString,
-  normalizeOptionalString,
-} from "../shared/string-coerce.js";
 import { resolveStatusTtsSnapshot } from "../tts/status-config.js";
 import {
   estimateUsageCost,
@@ -144,7 +148,7 @@ function resolveConfiguredTextVerbosity(params: {
 }): "low" | "medium" | "high" | undefined {
   const provider = params.provider?.trim();
   const model = params.model?.trim();
-  if (!provider || !model || (provider !== "openai" && provider !== "openai-codex")) {
+  if (!provider || !model || provider !== "openai") {
     return undefined;
   }
   return resolveOpenAITextVerbosity(
@@ -213,6 +217,36 @@ const formatTokens = (total: number | null | undefined, contextTokens: number | 
   return `${totalLabel}/${ctxLabel}${pct !== null ? ` (${pct}%)` : ""}`;
 };
 
+const formatEstimatedContextBudgetTokens = (
+  status: SessionEntry["contextBudgetStatus"] | undefined,
+  contextTokens: number | null | undefined,
+) => {
+  if (!status || status.source !== "pre-prompt-estimate") {
+    return null;
+  }
+  const estimatedPromptTokens =
+    typeof status.estimatedPromptTokens === "number" &&
+    Number.isFinite(status.estimatedPromptTokens) &&
+    status.estimatedPromptTokens >= 0
+      ? Math.floor(status.estimatedPromptTokens)
+      : undefined;
+  if (estimatedPromptTokens === undefined) {
+    return null;
+  }
+  const ctx =
+    typeof contextTokens === "number" && Number.isFinite(contextTokens) && contextTokens > 0
+      ? contextTokens
+      : typeof status.contextTokenBudget === "number" &&
+          Number.isFinite(status.contextTokenBudget) &&
+          status.contextTokenBudget > 0
+        ? status.contextTokenBudget
+        : undefined;
+  const pct = ctx ? Math.min(999, Math.round((estimatedPromptTokens / ctx) * 100)) : null;
+  const totalLabel = formatTokenCount(estimatedPromptTokens);
+  const ctxLabel = ctx ? formatTokenCount(ctx) : "?";
+  return `~${totalLabel}/${ctxLabel}${pct !== null ? ` (${pct}% est)` : " (est)"}`;
+};
+
 export const formatContextUsageShort = (
   total: number | null | undefined,
   contextTokens: number | null | undefined,
@@ -259,6 +293,7 @@ const readUsageFromSessionLog = (
       cacheWrite: number;
       promptTokens: number;
       total: number;
+      totalTokensFresh: boolean;
       model?: string;
     }
   | undefined => {
@@ -316,6 +351,7 @@ const readUsageFromSessionLog = (
       cacheWrite,
       promptTokens,
       total,
+      totalTokensFresh: snapshot.totalTokensFresh === true,
       model,
     };
   } catch {
@@ -552,6 +588,7 @@ export function buildStatusMessage(args: StatusArgs): string {
   const initialFallbackState = resolveActiveFallbackState({
     selectedModelRef: modelRefs.selected.label || "unknown",
     activeModelRef: modelRefs.active.label || "unknown",
+    config: args.config,
     state: entry,
   });
   let activeProvider = modelRefs.active.provider;
@@ -596,15 +633,13 @@ export function buildStatusMessage(args: StatusArgs): string {
   let cacheRead = entry?.cacheRead;
   let cacheWrite = entry?.cacheWrite;
   const freshTotalTokens = resolveFreshSessionTotalTokens(entry);
+  // Undefined freshness is legacy, not stale: keep persisted totals for /status,
+  // but let a fresh transcript prompt snapshot replace them when available.
   const allowTranscriptContextUsage = entry?.totalTokensFresh !== false;
-  let totalTokens =
-    freshTotalTokens ??
-    (entry?.totalTokensFresh === false
-      ? undefined
-      : (entry?.totalTokens ?? (entry?.inputTokens ?? 0) + (entry?.outputTokens ?? 0)));
+  let totalTokens = freshTotalTokens;
 
-  // Prefer prompt-size tokens from the session transcript when it looks larger
-  // (cached prompt tokens are often missing from agent meta/store).
+  // Explicitly stale session/cache usage can still hydrate Tokens/Cache lines
+  // but must not become Context.
   if (args.includeTranscriptUsage) {
     const logUsage = readUsageFromSessionLog(
       entry?.sessionId,
@@ -614,10 +649,17 @@ export function buildStatusMessage(args: StatusArgs): string {
       args.sessionStorePath,
     );
     if (logUsage) {
-      const candidate = logUsage.promptTokens || logUsage.total;
+      const candidate = logUsage.totalTokensFresh
+        ? logUsage.promptTokens || logUsage.total
+        : undefined;
       if (
         allowTranscriptContextUsage &&
-        (!totalTokens || totalTokens === 0 || candidate > totalTokens)
+        candidate !== undefined &&
+        candidate > 0 &&
+        (entry?.totalTokensFresh !== true ||
+          !totalTokens ||
+          totalTokens === 0 ||
+          candidate > totalTokens)
       ) {
         totalTokens = candidate;
       }
@@ -822,11 +864,16 @@ export function buildStatusMessage(args: StatusArgs): string {
     ? (args.groupActivation ?? entry?.groupActivation ?? "mention")
     : undefined;
 
+  const contextUsageLabel =
+    totalTokens == null || totalTokens === 0
+      ? (formatEstimatedContextBudgetTokens(entry?.contextBudgetStatus, contextTokens) ??
+        formatTokens(totalTokens, contextTokens ?? null))
+      : formatTokens(totalTokens, contextTokens ?? null);
   const contextLine = [
-    `Context: ${formatTokens(totalTokens, contextTokens ?? null)}`,
+    `Context: ${contextUsageLabel}`,
     `🧹 Compactions: ${entry?.compactionCount ?? 0}`,
   ]
-    .filter(Boolean)
+    .filter((line): line is string => Boolean(line))
     .join(" · ");
 
   const queueMode = args.queue?.mode ?? "unknown";
@@ -877,6 +924,7 @@ export function buildStatusMessage(args: StatusArgs): string {
   const runtimeAliasModelEquivalent = areRuntimeModelRefsEquivalent(
     selectedModelLabel,
     activeModelLabel,
+    { config: args.config },
   );
   const selectedAuthMode =
     normalizeAuthMode(args.modelAuth) ?? resolveModelAuthMode(selectedProvider, args.config);
@@ -890,38 +938,46 @@ export function buildStatusMessage(args: StatusArgs): string {
     activeAuthMode && activeAuthMode !== "unknown"
       ? (args.activeModelAuth ?? activeAuthMode)
       : undefined;
-  const selectedAuthLabelValue =
-    rawSelectedAuthLabelValue ?? (runtimeAliasModelEquivalent ? activeAuthLabelValue : undefined);
+  const preferActiveAuthLabel = shouldPreferActiveRuntimeAliasAuthLabel({
+    runtimeAliasModelEquivalent,
+    selectedAuthLabel: rawSelectedAuthLabelValue,
+    activeAuthLabel: activeAuthLabelValue,
+  });
+  const selectedAuthLabelValue = preferActiveAuthLabel
+    ? activeAuthLabelValue
+    : (rawSelectedAuthLabelValue ??
+      (runtimeAliasModelEquivalent ? activeAuthLabelValue : undefined));
   const fallbackState = resolveActiveFallbackState({
     selectedModelRef: selectedModelLabel,
     activeModelRef: activeModelLabel,
+    config: args.config,
     state: entry,
   });
-  const effectiveCostAuthMode = fallbackState.active
-    ? activeAuthMode
-    : (selectedAuthMode ?? activeAuthMode);
-  const showCost = effectiveCostAuthMode === "api-key" || effectiveCostAuthMode === "mixed";
-  const hasUsage = typeof inputTokens === "number" || typeof outputTokens === "number";
-  const costConfig =
-    showCost && hasUsage
-      ? resolveModelCostConfig({
-          provider: activeProvider,
-          model: activeModel,
-          config: args.config,
-          allowPluginNormalization: false,
-        })
-      : undefined;
-  const cost =
-    showCost && hasUsage
-      ? estimateUsageCost({
-          usage: {
-            input: inputTokens ?? undefined,
-            output: outputTokens ?? undefined,
-          },
-          cost: costConfig,
-        })
-      : undefined;
-  const costLabel = showCost && hasUsage ? formatUsd(cost) : undefined;
+  const hasUsage =
+    typeof inputTokens === "number" ||
+    typeof outputTokens === "number" ||
+    typeof cacheRead === "number" ||
+    typeof cacheWrite === "number";
+  const costConfig = hasUsage
+    ? resolveModelCostConfig({
+        provider: activeProvider,
+        model: activeModel,
+        config: args.config,
+        allowPluginNormalization: false,
+      })
+    : undefined;
+  const cost = hasUsage
+    ? estimateUsageCost({
+        usage: {
+          input: inputTokens ?? undefined,
+          output: outputTokens ?? undefined,
+          cacheRead: cacheRead ?? undefined,
+          cacheWrite: cacheWrite ?? undefined,
+        },
+        cost: costConfig,
+      })
+    : undefined;
+  const costLabel = hasUsage ? formatUsd(cost) : undefined;
 
   const selectedAuthLabel = selectedAuthLabelValue ? ` · 🔑 ${selectedAuthLabelValue}` : "";
   const modelNote = channelModelNote ? ` · ${channelModelNote}` : "";
@@ -931,7 +987,9 @@ export function buildStatusMessage(args: StatusArgs): string {
     sessionHasPersistedModelSelection &&
     configuredDefaultModelLabel &&
     selectedModelLabel !== configuredDefaultModelLabel &&
-    !areRuntimeModelRefsEquivalent(selectedModelLabel, configuredDefaultModelLabel);
+    !areRuntimeModelRefsEquivalent(selectedModelLabel, configuredDefaultModelLabel, {
+      config: args.config,
+    });
   const modelLines = configDefaultDiffersFromSession
     ? [
         `🧠 Configured default: ${configuredDefaultModelLabel}`,
@@ -947,7 +1005,7 @@ export function buildStatusMessage(args: StatusArgs): string {
   const configuredFallbacks = (() => {
     const modelConfig = args.agent?.model;
     if (typeof modelConfig === "object" && modelConfig && Array.isArray(modelConfig.fallbacks)) {
-      return modelConfig.fallbacks;
+      return sessionHasPersistedModelSelection ? undefined : modelConfig.fallbacks;
     }
     return undefined;
   })();
@@ -991,6 +1049,6 @@ export function buildStatusMessage(args: StatusArgs): string {
     voiceLine,
     activationLine,
   ]
-    .filter(Boolean)
+    .filter((line): line is string => Boolean(line))
     .join("\n");
 }

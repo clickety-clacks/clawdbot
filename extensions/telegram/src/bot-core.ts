@@ -1,3 +1,4 @@
+// Telegram plugin module implements bot core behavior.
 import {
   resolveChannelGroupPolicy,
   resolveChannelGroupRequireMention,
@@ -27,12 +28,19 @@ import type { TelegramBotDeps } from "./bot-deps.js";
 import { registerTelegramHandlers } from "./bot-handlers.runtime.js";
 import { createTelegramMessageProcessor } from "./bot-message.js";
 import { registerTelegramNativeCommands } from "./bot-native-commands.js";
+import {
+  getTelegramSpooledReplayDeferredParticipant,
+  isTelegramSpooledReplayUpdate,
+  runWithTelegramUpdateProcessingFrame,
+  TelegramSpooledReplayProcessingError,
+} from "./bot-processing-outcome.js";
 import { createTelegramUpdateTracker } from "./bot-update-tracker.js";
 import type { TelegramUpdateKeyContext } from "./bot-updates.js";
 import { resolveDefaultAgentId } from "./bot.agent.runtime.js";
 import { apiThrottler, Bot, sequentialize, type ApiClientOptions } from "./bot.runtime.js";
 import type { TelegramBotOptions } from "./bot.types.js";
 import { buildTelegramGroupPeerId, resolveTelegramStreamMode } from "./bot/helpers.js";
+import { setTelegramCallbackQueryAnswerPromise } from "./callback-query-answer-state.js";
 import {
   asTelegramClientFetch,
   createTelegramClientFetch,
@@ -42,6 +50,7 @@ import {
 } from "./client-fetch.js";
 import { resolveTelegramTransport } from "./fetch.js";
 import { stringifyTelegramRawUpdateForLog } from "./raw-update-log.js";
+import { TELEGRAM_RICH_TEXT_LIMIT } from "./rich-message.js";
 import { createTelegramSendChatActionHandler } from "./sendchataction-401-backoff.js";
 import { getTelegramSequentialKey } from "./sequential-key.js";
 import { createTelegramThreadBindingManager } from "./thread-bindings.js";
@@ -55,6 +64,19 @@ export function resolveTelegramScopedGroupConfig(
   chatId: string | number,
   messageThreadId?: number,
 ) {
+  const resolveTopicConfig = <T extends object>(
+    scopedConfig: { topics?: Record<string, T | undefined> } | undefined,
+  ): T | undefined => {
+    if (!scopedConfig || messageThreadId == null) {
+      return undefined;
+    }
+    const defaultConfig = scopedConfig.topics?.["*"];
+    const exactConfig = scopedConfig.topics?.[String(messageThreadId)];
+    if (defaultConfig && exactConfig) {
+      return { ...defaultConfig, ...exactConfig };
+    }
+    return exactConfig ?? defaultConfig;
+  };
   const groups = telegramCfg.groups;
   const direct = telegramCfg.direct;
   const chatIdStr = String(chatId);
@@ -62,18 +84,12 @@ export function resolveTelegramScopedGroupConfig(
 
   if (isDm) {
     const groupConfig = direct?.[chatIdStr] ?? direct?.["*"];
-    const topicConfig =
-      groupConfig && messageThreadId != null
-        ? groupConfig.topics?.[String(messageThreadId)]
-        : undefined;
+    const topicConfig = resolveTopicConfig(groupConfig);
     return { groupConfig, topicConfig };
   }
 
   const groupConfig = groups?.[chatIdStr] ?? groups?.["*"];
-  const topicConfig =
-    groupConfig && messageThreadId != null
-      ? groupConfig.topics?.[String(messageThreadId)]
-      : undefined;
+  const topicConfig = resolveTopicConfig(groupConfig);
   return { groupConfig, topicConfig };
 }
 
@@ -203,13 +219,49 @@ export function createTelegramBotCore(
     if (!begin.accepted) {
       return;
     }
-    let completed = false;
     try {
-      await next();
-      completed = true;
-    } finally {
-      updateTracker.finishUpdate(begin.update, { completed });
+      const { result } = await runWithTelegramUpdateProcessingFrame(async () => {
+        await next();
+      });
+      const deferredWork = getTelegramSpooledReplayDeferredParticipant();
+      if (deferredWork) {
+        void deferredWork.task
+          .then((deferredResult) => {
+            updateTracker.finishUpdate(begin.update, {
+              completed: deferredResult.kind !== "failed-retryable",
+            });
+          })
+          .catch(() => {
+            updateTracker.finishUpdate(begin.update, { completed: false });
+          });
+        return;
+      }
+      if (result?.kind === "failed-retryable") {
+        if (isTelegramSpooledReplayUpdate(ctx.update)) {
+          throw new TelegramSpooledReplayProcessingError(result.error);
+        }
+        updateTracker.finishUpdate(begin.update, { completed: true });
+        return;
+      }
+      updateTracker.finishUpdate(begin.update, { completed: true });
+    } catch (error) {
+      updateTracker.finishUpdate(begin.update, { completed: false });
+      throw error;
     }
+  });
+
+  // Answer callback queries immediately before sequentialize queues them behind
+  // agent turns for the same chat/topic. Telegram has a ~15s server-side timeout
+  // for answerCallbackQuery; if an agent turn is already processing, sequentialize
+  // delays the answer beyond that window and the user sees a stuck loading spinner.
+  bot.use(async (ctx, next) => {
+    const callback = ctx.callbackQuery;
+    if (callback) {
+      const answerPromise = bot.api.answerCallbackQuery(callback.id);
+      setTelegramCallbackQueryAnswerPromise(ctx, answerPromise);
+      void answerPromise.catch(() => {});
+    }
+    await next();
   });
 
   bot.use(botRuntime.sequentialize(getTelegramSequentialKey));
@@ -238,7 +290,12 @@ export function createTelegramBotCore(
       DEFAULT_GROUP_HISTORY_LIMIT,
   );
   const groupHistories = new Map<string, HistoryEntry[]>();
-  const textLimit = resolveTextChunkLimit(cfg, "telegram", account.accountId);
+  const textLimit = Math.min(
+    resolveTextChunkLimit(cfg, "telegram", account.accountId, {
+      fallbackLimit: TELEGRAM_RICH_TEXT_LIMIT,
+    }),
+    TELEGRAM_RICH_TEXT_LIMIT,
+  );
   const dmPolicy = telegramCfg.dmPolicy ?? "pairing";
   const allowFrom = opts.allowFrom ?? telegramCfg.allowFrom;
   const groupAllowFrom =

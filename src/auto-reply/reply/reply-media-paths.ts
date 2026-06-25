@@ -1,4 +1,6 @@
+// Resolves media paths from reply payloads into runtime attachment metadata.
 import path from "node:path";
+import { isPassThroughRemoteMediaSource } from "@openclaw/media-core/media-source-url";
 import { resolveSendableOutboundReplyParts } from "openclaw/plugin-sdk/reply-payload";
 import { resolveSessionAgentId } from "../../agents/agent-scope.js";
 import { resolvePathFromInput, toRelativeWorkspacePath } from "../../agents/path-policy.js";
@@ -11,17 +13,18 @@ import { ensureSandboxWorkspaceForSession } from "../../agents/sandbox.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { logVerbose } from "../../globals.js";
 import { resolveChannelAccountMediaMaxMb } from "../../media/configured-max-bytes.js";
-import { isPassThroughRemoteMediaSource } from "../../media/media-source-url.js";
 import { resolveOutboundAttachmentFromUrl } from "../../media/outbound-attachment.js";
 import { resolveAgentScopedOutboundMediaAccess } from "../../media/read-capability.js";
 import { MEDIA_MAX_BYTES } from "../../media/store.js";
-import { appendReplyMediaFailureWarning } from "../reply-payload.js";
+import { appendReplyMediaFailureWarning, copyReplyPayloadMetadata } from "../reply-payload.js";
 import type { ReplyPayload } from "../types.js";
 
 const FILE_URL_RE = /^file:\/\//i;
 const WINDOWS_DRIVE_RE = /^[a-zA-Z]:[\\/]/;
 const SCHEME_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
 const HAS_FILE_EXT_RE = /\.\w{1,10}$/;
+const MEDIA_DIRECTIVE_PREFIX_RE = /^MEDIA:/i;
+const WORKSPACE_ALIAS_RE = /^[/\\]workspace(?:[/\\]|$)/i;
 
 function isLikelyLocalMediaSource(media: string): boolean {
   return (
@@ -41,6 +44,10 @@ function getPayloadMediaList(payload: ReplyPayload): string[] {
   return resolveSendableOutboundReplyParts(payload).mediaUrls;
 }
 
+function stripMediaDirective(media: string): string {
+  return media.replace(MEDIA_DIRECTIVE_PREFIX_RE, "").trim();
+}
+
 function resolveReplyMediaMaxBytes(params: {
   cfg: OpenClawConfig;
   channel?: string;
@@ -51,30 +58,6 @@ function resolveReplyMediaMaxBytes(params: {
   return typeof limitMb === "number" && Number.isFinite(limitMb) && limitMb > 0
     ? Math.floor(limitMb * 1024 * 1024)
     : MEDIA_MAX_BYTES;
-}
-
-function resolveWorkspaceAliasMediaSource(media: string, workspaceDir: string): string | null {
-  if (media === "/workspace") {
-    return workspaceDir;
-  }
-  if (media.startsWith("/workspace/")) {
-    const relativeWorkspacePath = toRelativeWorkspacePath(
-      workspaceDir,
-      media.slice("/workspace/".length),
-      {
-        cwd: workspaceDir,
-      },
-    );
-    return resolvePathFromInput(relativeWorkspacePath, workspaceDir);
-  }
-  return null;
-}
-
-function stripMediaDirective(media: string): string {
-  if (/^media:\/\//i.test(media)) {
-    return media;
-  }
-  return media.replace(/^\s*MEDIA\s*:\s*/i, "").trim();
 }
 
 export function createReplyMediaPathNormalizer(params: {
@@ -153,7 +136,7 @@ export function createReplyMediaPathNormalizer(params: {
       mediaAccess: resolveMediaAccessForSource(media),
     })
       .then((saved) => saved.path)
-      .catch((err) => {
+      .catch((err: unknown) => {
         persistedMediaBySource.delete(media);
         throw err;
       });
@@ -168,6 +151,28 @@ export function createReplyMediaPathNormalizer(params: {
     return resolvePathFromInput(relativeWorkspacePath, params.workspaceDir);
   };
 
+  const resolveWorkspaceAliasMediaSource = (media: string): string | undefined => {
+    if (!WORKSPACE_ALIAS_RE.test(media)) {
+      return undefined;
+    }
+    const withoutAlias = media.replace(WORKSPACE_ALIAS_RE, "");
+    const relativeWorkspacePath = toRelativeWorkspacePath(params.workspaceDir, withoutAlias, {
+      cwd: params.workspaceDir,
+    });
+    return resolvePathFromInput(relativeWorkspacePath, params.workspaceDir);
+  };
+
+  const resolveAbsoluteWorkspaceMedia = (media: string): string | undefined => {
+    if (FILE_URL_RE.test(media) || (!path.isAbsolute(media) && !WINDOWS_DRIVE_RE.test(media))) {
+      return undefined;
+    }
+    try {
+      return resolveWorkspaceRelativeMedia(media);
+    } catch {
+      return undefined;
+    }
+  };
+
   const normalizeMediaSource = async (raw: string): Promise<string> => {
     const media = stripMediaDirective(raw.trim());
     if (!media) {
@@ -177,9 +182,13 @@ export function createReplyMediaPathNormalizer(params: {
     if (isPassThroughRemoteMediaSource(media)) {
       return media;
     }
-    const workspaceAliasMedia = resolveWorkspaceAliasMediaSource(media, params.workspaceDir);
+    const workspaceAliasMedia = resolveWorkspaceAliasMediaSource(media);
     if (workspaceAliasMedia) {
       return await persistLocalReplyMedia(workspaceAliasMedia);
+    }
+    const absoluteWorkspaceMedia = resolveAbsoluteWorkspaceMedia(media);
+    if (absoluteWorkspaceMedia) {
+      return await persistLocalReplyMedia(absoluteWorkspaceMedia);
     }
     const isRelativeLocalMedia =
       isLikelyLocalMediaSource(media) &&
@@ -251,20 +260,20 @@ export function createReplyMediaPathNormalizer(params: {
         : appendReplyMediaFailureWarning(payload.text);
 
     if (normalizedMedia.length === 0) {
-      return {
+      return copyReplyPayloadMetadata(payload, {
         ...payload,
         text,
         mediaUrl: undefined,
         mediaUrls: undefined,
-      };
+      });
     }
 
-    return {
+    return copyReplyPayloadMetadata(payload, {
       ...payload,
       text,
       mediaUrl: normalizedMedia[0],
       mediaUrls: normalizedMedia,
-    };
+    });
   };
 }
 

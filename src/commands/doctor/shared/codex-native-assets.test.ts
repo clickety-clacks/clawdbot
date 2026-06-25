@@ -1,3 +1,4 @@
+// Codex native asset tests cover doctor detection of native Codex asset state.
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -123,7 +124,7 @@ describe("collectCodexNativeAssetInfoNotes", () => {
         "- Personal Codex CLI assets were found, but native Codex-mode OpenClaw agents use isolated per-agent Codex homes.",
         `- Sources: ${codexHome} and ${path.join(root, ".agents", "skills")} (1 skill, 0 plugins, 0 config files, 0 hook files).`,
         "- These assets will not be loaded by the Codex app-server child unless you intentionally promote them.",
-        "- Run `openclaw migrate plan codex` to inventory them. Applying that migration copies skills into the current OpenClaw agent workspace; Codex plugins, hooks, and config stay manual-review only.",
+        "- If the Codex plugin is not installed, run `openclaw plugins install npm:@openclaw/codex` first. Then run `openclaw migrate plan codex` to inventory them. Applying that migration copies skills into the current OpenClaw agent workspace; Codex plugins, hooks, and config stay manual-review only.",
       ].join("\n"),
     ]);
   });

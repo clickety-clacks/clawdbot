@@ -24,7 +24,7 @@ const repairShortTermPromotionArtifacts = vi.hoisted(() => vi.fn());
 const noteWorkspaceMemoryHealth = vi.hoisted(() => vi.fn(async () => undefined));
 const maybeRepairWorkspaceMemoryHealth = vi.hoisted(() => vi.fn(async () => undefined));
 
-vi.mock("../terminal/note.js", () => ({
+vi.mock("../../packages/terminal-core/src/note.js", () => ({
   note,
 }));
 
@@ -135,6 +135,7 @@ function resetMemoryRecallMocks() {
   repairShortTermPromotionArtifacts.mockResolvedValue({
     changed: false,
     removedInvalidEntries: 0,
+    removedOverflowEntries: 0,
     rewroteStore: false,
     removedStaleLock: false,
   });
@@ -174,10 +175,11 @@ describe("noteMemorySearchHealth", () => {
     hasAnyAuthProfileStoreSource.mockReturnValue(true);
     getActiveMemorySearchManager.mockReset();
     resolveActiveMemoryBackendConfig.mockReset();
-    resolveActiveMemoryBackendConfig.mockImplementation(({ cfg }: { cfg: OpenClawConfig }) =>
-      cfg.memory?.backend === "qmd"
-        ? { backend: "qmd", qmd: cfg.memory.qmd ?? {} }
-        : { backend: "builtin" },
+    resolveActiveMemoryBackendConfig.mockImplementation(
+      ({ cfg: cfgLocal }: { cfg: OpenClawConfig }) =>
+        cfgLocal.memory?.backend === "qmd"
+          ? { backend: "qmd", qmd: cfgLocal.memory.qmd ?? {} }
+          : { backend: "builtin" },
     );
     getActiveMemorySearchManager.mockResolvedValue({
       manager: {
@@ -190,7 +192,7 @@ describe("noteMemorySearchHealth", () => {
     resetMemoryRecallMocks();
   });
 
-  it("does not warn when local provider is set with no explicit modelPath (default model fallback)", async () => {
+  it("warns when local provider is set but readiness was not confirmed", async () => {
     resolveMemorySearchConfig.mockReturnValue({
       provider: "local",
       local: {},
@@ -199,7 +201,10 @@ describe("noteMemorySearchHealth", () => {
 
     await noteMemorySearchHealth(cfg, {});
 
-    expect(note).not.toHaveBeenCalled();
+    expect(note).toHaveBeenCalledTimes(1);
+    const message = firstNoteMessage();
+    expect(message).toContain('Memory search provider is set to "local"');
+    expect(message).toContain("openclaw plugins install @openclaw/llama-cpp-provider");
   });
 
   it("warns when local provider with default model but gateway probe reports not ready", async () => {
@@ -215,7 +220,7 @@ describe("noteMemorySearchHealth", () => {
 
     expect(note).toHaveBeenCalledTimes(1);
     const message = firstNoteMessage();
-    expect(message).toContain("gateway reports local embeddings are not ready");
+    expect(message).toContain("local embeddings are not confirmed ready");
     expect(message).toContain("node-llama-cpp not installed");
   });
 
@@ -233,7 +238,7 @@ describe("noteMemorySearchHealth", () => {
     expect(note).not.toHaveBeenCalled();
   });
 
-  it("does not treat an inconclusive gateway timeout as local embeddings not ready", async () => {
+  it("warns when local provider readiness probe is inconclusive", async () => {
     resolveMemorySearchConfig.mockReturnValue({
       provider: "local",
       local: {},
@@ -248,10 +253,13 @@ describe("noteMemorySearchHealth", () => {
       },
     });
 
-    expect(note).not.toHaveBeenCalled();
+    expect(note).toHaveBeenCalledTimes(1);
+    const message = firstNoteMessage();
+    expect(message).toContain("local embeddings are not confirmed ready");
+    expect(message).toContain("gateway timeout after 8000ms");
   });
 
-  it("does not warn when local provider has an explicit hf: modelPath", async () => {
+  it("warns when local provider has an explicit hf: modelPath but readiness was not confirmed", async () => {
     resolveMemorySearchConfig.mockReturnValue({
       provider: "local",
       local: { modelPath: "hf:some-org/some-model-GGUF/model.gguf" },
@@ -260,7 +268,8 @@ describe("noteMemorySearchHealth", () => {
 
     await noteMemorySearchHealth(cfg, {});
 
-    expect(note).not.toHaveBeenCalled();
+    expect(note).toHaveBeenCalledTimes(1);
+    expect(firstNoteMessage()).toContain("a local model path is configured");
   });
 
   it("does not emit provider guidance when no memory runtime is active", async () => {
@@ -607,6 +616,22 @@ describe("noteMemorySearchHealth", () => {
     expect(resolveApiKeyForProvider).not.toHaveBeenCalled();
   });
 
+  it("does not warn for openai-compatible when gateway probe is ready without CLI API key", async () => {
+    resolveMemorySearchConfig.mockReturnValue({
+      provider: "openai-compatible",
+      model: "text-embedding-bge-m3",
+      local: {},
+      remote: { baseUrl: "http://127.0.0.1:1234/v1" },
+    });
+
+    await noteMemorySearchHealth(cfg, {
+      gatewayMemoryProbe: { checked: true, ready: true },
+    });
+
+    expect(note).not.toHaveBeenCalled();
+    expect(resolveApiKeyForProvider).not.toHaveBeenCalled();
+  });
+
   it("warns for ollama when gateway probe reports embeddings are not ready", async () => {
     resolveMemorySearchConfig.mockReturnValue({
       provider: "ollama",
@@ -673,6 +698,117 @@ describe("noteMemorySearchHealth", () => {
     expect(note).not.toHaveBeenCalled();
   });
 
+  it("does not warn when key-optional provider (openai-compatible) probe was skipped (skipped: true)", async () => {
+    resolveMemorySearchConfig.mockReturnValue({
+      provider: "openai-compatible",
+      model: "text-embedding-bge-m3",
+      local: {},
+      remote: { baseUrl: "http://127.0.0.1:1234/v1" },
+    });
+
+    await noteMemorySearchHealth(cfg, {
+      gatewayMemoryProbe: { checked: false, ready: false, skipped: true },
+    });
+
+    expect(note).not.toHaveBeenCalled();
+    expect(resolveApiKeyForProvider).not.toHaveBeenCalled();
+  });
+
+  it("warns when openai-compatible is missing its required baseUrl even if probe was skipped", async () => {
+    resolveMemorySearchConfig.mockReturnValue({
+      provider: "openai-compatible",
+      local: {},
+      remote: {},
+    });
+
+    await noteMemorySearchHealth(cfg, {
+      gatewayMemoryProbe: { checked: false, ready: false, skipped: true },
+    });
+
+    const message = firstNoteMessage();
+    expect(message).toContain('provider is set to "openai-compatible"');
+    expect(message).toContain("remote.baseUrl");
+    expect(message).toContain("openclaw config set");
+    expect(resolveApiKeyForProvider).not.toHaveBeenCalled();
+  });
+
+  it("warns when openai-compatible is missing its required model even if probe was skipped", async () => {
+    resolveMemorySearchConfig.mockReturnValue({
+      provider: "openai-compatible",
+      model: "   ",
+      local: {},
+      remote: { baseUrl: "http://127.0.0.1:1234/v1" },
+    });
+
+    await noteMemorySearchHealth(cfg, {
+      gatewayMemoryProbe: { checked: false, ready: false, skipped: true },
+    });
+
+    const message = firstNoteMessage();
+    expect(message).toContain('provider is set to "openai-compatible"');
+    expect(message).toContain("memorySearch.model");
+    expect(message).toContain("openclaw config set");
+    expect(resolveApiKeyForProvider).not.toHaveBeenCalled();
+  });
+
+  it("does not warn for baseUrl-only OpenAI-compatible custom providers when probe was skipped", async () => {
+    const customCfg = {
+      models: {
+        providers: {
+          localEmbeddings: {
+            baseUrl: "http://127.0.0.1:1234/v1",
+            models: [],
+          },
+        },
+      },
+    } as unknown as OpenClawConfig;
+    resolveMemorySearchConfig.mockReturnValue({
+      provider: "localEmbeddings",
+      model: "text-embedding-bge-m3",
+      local: {},
+      remote: {},
+    });
+
+    await noteMemorySearchHealth(customCfg, {
+      gatewayMemoryProbe: { checked: false, ready: false, skipped: true },
+    });
+
+    expect(note).not.toHaveBeenCalled();
+    expect(resolveApiKeyForProvider).not.toHaveBeenCalled();
+  });
+
+  it("does not treat built-in OpenAI as key-optional just because models.providers.openai has baseUrl", async () => {
+    const openaiCfg = {
+      models: {
+        providers: {
+          openai: {
+            baseUrl: "http://127.0.0.1:1234/v1",
+            models: [],
+          },
+        },
+      },
+    } as unknown as OpenClawConfig;
+    resolveMemorySearchConfig.mockReturnValue({
+      provider: "openai",
+      model: "text-embedding-3-small",
+      local: {},
+      remote: {},
+    });
+
+    await noteMemorySearchHealth(openaiCfg, {
+      gatewayMemoryProbe: { checked: false, ready: false, skipped: true },
+    });
+
+    const message = firstNoteMessage();
+    expect(message).toContain('provider is set to "openai"');
+    expect(message).toContain("OPENAI_API_KEY");
+    expect(resolveApiKeyForProvider).toHaveBeenCalledWith({
+      provider: "openai",
+      cfg: openaiCfg,
+      agentDir: "/tmp/agent-default",
+    });
+  });
+
   it("warns for key-optional provider (lmstudio) when gateway probe timed out", async () => {
     // A gateway timeout sets checked: false but skipped: false/absent. This is a
     // real diagnostic signal — embeddings may be unavailable — so we should warn.
@@ -732,7 +868,7 @@ describe("noteMemorySearchHealth", () => {
     expect(message).not.toContain("openclaw auth add --provider");
   });
 
-  it("warns in auto mode when no local modelPath and no API keys are configured", async () => {
+  it("warns for legacy auto mode as OpenAI when no API key is configured", async () => {
     resolveMemorySearchConfig.mockReturnValue({
       provider: "auto",
       local: {},
@@ -741,16 +877,14 @@ describe("noteMemorySearchHealth", () => {
 
     await noteMemorySearchHealth(cfg);
 
-    // In auto mode, canAutoSelectLocal requires an explicit local file path.
-    // DEFAULT_LOCAL_MODEL fallback does NOT apply to auto — only to explicit
-    // provider: "local". So with no local file and no API keys, warn.
     expect(note).toHaveBeenCalledTimes(1);
     const message = firstNoteMessage();
-    expect(message).toContain("needs at least one embedding provider");
+    expect(message).toContain('provider is set to "openai"');
+    expect(message).toContain("OPENAI_API_KEY");
     expect(message).toContain("openclaw configure --section model");
   });
 
-  it("does not probe unrelated embedding providers in auto mode", async () => {
+  it("does not probe unrelated embedding providers for legacy auto mode", async () => {
     resolveMemorySearchConfig.mockReturnValue({
       provider: "auto",
       local: {},
@@ -765,17 +899,10 @@ describe("noteMemorySearchHealth", () => {
     expect(note).toHaveBeenCalledTimes(1);
     const providerCalls = resolveApiKeyForProvider.mock.calls as Array<[{ provider: string }]>;
     const providersChecked = providerCalls.map(([arg]) => arg.provider);
-    expect(providersChecked).toEqual([
-      "github-copilot",
-      "openai",
-      "google",
-      "voyage",
-      "mistral",
-      "amazon-bedrock",
-    ]);
+    expect(providersChecked).toEqual(["openai"]);
   });
 
-  it("skips auth-profile probing in auto mode when no auth store exists", async () => {
+  it("skips auth-profile probing for legacy auto mode when no auth store exists", async () => {
     hasAnyAuthProfileStoreSource.mockReturnValue(false);
     resolveMemorySearchConfig.mockReturnValue({
       provider: "auto",
@@ -787,7 +914,7 @@ describe("noteMemorySearchHealth", () => {
 
     const providerCalls = resolveApiKeyForProvider.mock.calls as Array<[{ provider: string }]>;
     const providersChecked = providerCalls.map(([arg]) => arg.provider);
-    expect(providersChecked).toEqual(["amazon-bedrock"]);
+    expect(providersChecked).toEqual([]);
   });
 
   it("uses runtime-derived env var hints for explicit providers", async () => {
@@ -804,7 +931,7 @@ describe("noteMemorySearchHealth", () => {
     expect(message).toContain('provider is set to "gemini"');
   });
 
-  it("uses runtime-derived env var hints in auto mode", async () => {
+  it("uses OpenAI env var hints for legacy auto mode", async () => {
     resolveMemorySearchConfig.mockReturnValue({
       provider: "auto",
       local: {},
@@ -814,6 +941,7 @@ describe("noteMemorySearchHealth", () => {
     await noteMemorySearchHealth(cfg);
 
     const message = firstNoteMessage();
+    expect(message).toContain('provider is set to "openai"');
     expect(message).toContain("OPENAI_API_KEY");
   });
 
@@ -922,6 +1050,7 @@ describe("memory recall doctor integration", () => {
     repairShortTermPromotionArtifacts.mockResolvedValueOnce({
       changed: true,
       removedInvalidEntries: 1,
+      removedOverflowEntries: 0,
       rewroteStore: true,
       removedStaleLock: true,
     });

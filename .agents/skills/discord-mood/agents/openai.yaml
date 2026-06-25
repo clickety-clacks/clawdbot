@@ -1,0 +1,4 @@
+interface:
+  display_name: "Discord Mood"
+  short_description: "Summarize Discord release mood with quotes"
+  default_prompt: "Use $discord-mood to sync Discrawl, quote representative Discord feedback without URLs by default, summarize release or beta mood, and verify referenced GitHub issue/PR state."

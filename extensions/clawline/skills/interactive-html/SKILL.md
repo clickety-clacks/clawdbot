@@ -1,15 +1,19 @@
 ---
 name: interactive-html
-description: Send interactive HTML bubbles on Clawline via `message` tool `sendAttachment`. Use for yes/no and multiple-choice prompts so users can tap instead of typing.
+description: Send interactive HTML bubbles on Clawline via `message.sendAttachment`. Use for interactive prompts, dashboards, and reports that should render as widgets instead of raw HTML or plain text.
 metadata: { "openclaw": { "skillKey": "interactive-html" } }
 ---
 
 # Interactive HTML Bubbles (Clawline)
 
-Use interactive HTML bubbles for Clawline when asking choice-style questions.
+Use interactive HTML bubbles for Clawline when the user should see an inline widget instead of raw
+HTML or plain text.
 
-- Use this for yes/no, multiple-choice, verification pickers, and batch forms.
+- Use this for yes/no, multiple-choice, verification pickers, batch forms, dashboards, and report widgets.
 - When interactive HTML is available, do not ask users to type plain-text choices.
+- For Clawline dashboard or report delivery, use this skill and the transport contract below. Do not
+  send raw HTML, markdown-only summaries, or plain-text report dumps when an inline widget is the
+  expected deliverable.
 
 ## Transport Contract
 

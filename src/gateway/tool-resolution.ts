@@ -1,11 +1,12 @@
+// Gateway-scoped tool resolution for HTTP and loopback tool surfaces.
 import { resolveAgentWorkspaceDir, resolveDefaultAgentId } from "../agents/agent-scope.js";
-import { createOpenClawTools } from "../agents/openclaw-tools.js";
 import {
   resolveEffectiveToolPolicy,
   resolveGroupToolPolicy,
   resolveInheritedToolPolicyForSession,
   resolveSubagentToolPolicyForSession,
-} from "../agents/pi-tools.policy.js";
+} from "../agents/agent-tools.policy.js";
+import { createOpenClawTools } from "../agents/openclaw-tools.js";
 import {
   isSubagentEnvelopeSession,
   resolveSubagentCapabilityStore,
@@ -28,16 +29,26 @@ import type { InboundEventKind } from "../channels/inbound-event/kind.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { logWarn } from "../logger.js";
 import { getPluginToolMeta } from "../plugins/tools.js";
-import { DEFAULT_GATEWAY_HTTP_TOOL_DENY } from "../security/dangerous-tools.js";
+import {
+  DEFAULT_GATEWAY_HTTP_TOOL_DENY,
+  GATEWAY_OWNER_ONLY_CORE_TOOLS,
+} from "../security/dangerous-tools.js";
 
 type GatewayScopedToolSurface = "http" | "loopback";
 
+/** Resolve the tools visible to a gateway caller after agent, channel, and surface policy. */
 export function resolveGatewayScopedTools(params: {
   cfg: OpenClawConfig;
   sessionKey: string;
   messageProvider?: string;
+  currentChannelId?: string;
+  currentThreadTs?: string;
+  currentMessageId?: string | number;
+  currentInboundAudio?: boolean;
   accountId?: string;
   inboundEventKind?: InboundEventKind;
+  sourceReplyDeliveryMode?: SourceReplyDeliveryMode;
+  requireExplicitMessageTarget?: boolean;
   agentTo?: string;
   agentThreadId?: string;
   senderIsOwner?: boolean;
@@ -62,8 +73,12 @@ export function resolveGatewayScopedTools(params: {
   const profilePolicy = resolveToolProfilePolicy(profile);
   const providerProfilePolicy = resolveToolProfilePolicy(providerProfile);
   const gatewayRequestedTools = params.gatewayRequestedTools ?? [];
+  const messageProvider = params.messageProvider?.trim().toLowerCase();
   const sourceReplyDeliveryMode: SourceReplyDeliveryMode | undefined =
-    params.inboundEventKind === "room_event" ? "message_tool_only" : undefined;
+    params.sourceReplyDeliveryMode ??
+    (params.inboundEventKind === "room_event" && messageProvider !== "webchat"
+      ? "message_tool_only"
+      : undefined);
   const runtimeAlsoAllow = sourceReplyDeliveryMode === "message_tool_only" ? ["message"] : [];
   const profilePolicyWithAlsoAllow = mergeAlsoAllowPolicy(profilePolicy, [
     ...(profileAlsoAllow ?? []),
@@ -102,6 +117,11 @@ export function resolveGatewayScopedTools(params: {
     surface === "http"
       ? DEFAULT_GATEWAY_HTTP_TOOL_DENY.filter((name) => !gatewayToolsCfg?.allow?.includes(name))
       : [];
+  const ownerOnlyGatewayDeny =
+    params.senderIsOwner === false || (surface === "http" && params.senderIsOwner !== true)
+      ? [...GATEWAY_OWNER_ONLY_CORE_TOOLS]
+      : [];
+  // HTTP callers start with additional surface denies because they cross auth only.
   const workspaceDir = resolveAgentWorkspaceDir(
     params.cfg,
     agentId ?? resolveDefaultAgentId(params.cfg),
@@ -117,8 +137,8 @@ export function resolveGatewayScopedTools(params: {
     subagentPolicy,
     inheritedToolPolicy,
     defaultGatewayDeny.length > 0 ? { deny: defaultGatewayDeny } : undefined,
+    ownerOnlyGatewayDeny.length > 0 ? { deny: ownerOnlyGatewayDeny } : undefined,
     Array.isArray(gatewayToolsCfg?.deny) ? { deny: gatewayToolsCfg.deny } : undefined,
-    excludedToolNames.length > 0 ? { deny: excludedToolNames } : undefined,
   ]);
   const inheritedToolDenylist = [...explicitDenylist];
   // Passed by reference to sessions_spawn and populated after the final policy
@@ -145,6 +165,11 @@ export function resolveGatewayScopedTools(params: {
     sourceReplyDeliveryMode,
     agentTo: params.agentTo,
     agentThreadId: params.agentThreadId,
+    currentChannelId: params.currentChannelId ?? params.agentTo,
+    currentThreadTs: params.currentThreadTs ?? params.agentThreadId,
+    currentMessageId: params.currentMessageId,
+    currentInboundAudio: params.currentInboundAudio,
+    requireExplicitMessageTarget: params.requireExplicitMessageTarget,
     senderIsOwner: params.senderIsOwner,
     allowGatewaySubagentBinding: params.allowGatewaySubagentBinding,
     allowMediaInvokeCommands: params.allowMediaInvokeCommands,
@@ -195,6 +220,7 @@ export function resolveGatewayScopedTools(params: {
 
   const gatewayDenySet = new Set([
     ...defaultGatewayDeny,
+    ...ownerOnlyGatewayDeny,
     ...(Array.isArray(gatewayToolsCfg?.deny) ? gatewayToolsCfg.deny : []),
     ...excludedToolNames,
   ]);

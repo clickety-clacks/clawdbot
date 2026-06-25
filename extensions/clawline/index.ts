@@ -38,6 +38,7 @@ export default defineBundledChannelEntry({
           } catch (err) {
             logger.error?.(`clawline service failed to start: ${String(err)}`);
             serviceHandle = null;
+            throw err;
           } finally {
             serviceStart = null;
           }

@@ -11,7 +11,7 @@ import {
   setSetupChannelEnabled,
 } from "openclaw/plugin-sdk/setup";
 
-const DOCS_PATH = "/providers/clawline";
+const DOCS_PATH = "/channels/clawline";
 const DEFAULT_PORT = 18800;
 const DEFAULT_BIND = "127.0.0.1";
 const DEFAULT_ORIGINS = ["null"];
@@ -52,7 +52,7 @@ export const clawlineSetupWizard: ChannelSetupWizard = {
         configured
           ? `Listening on ${bindAddress}:${port}`
           : `Default listen address ${DEFAULT_BIND}:${DEFAULT_PORT}`,
-        `Docs: ${formatDocsLink(DOCS_PATH, "providers/clawline")}`,
+        `Docs: ${formatDocsLink(DOCS_PATH, "channels/clawline")}`,
       ];
     },
   }),
@@ -62,7 +62,7 @@ export const clawlineSetupWizard: ChannelSetupWizard = {
       "Clawline is a local-device channel managed by the gateway host.",
       "Enable it here, then set optional network/media/server fields in config if needed.",
       "Re-adding Clawline regenerates the CLU secret and restarts the gateway so the new secret is live.",
-      `Docs: ${formatDocsLink(DOCS_PATH, "providers/clawline")}`,
+      `Docs: ${formatDocsLink(DOCS_PATH, "channels/clawline")}`,
     ],
   },
   credentials: [],

@@ -1,9 +1,13 @@
+// Transcript tests cover session transcript persistence and formatting.
 import fs from "node:fs";
-import { describe, expect, it, vi } from "vitest";
+import os from "node:os";
+import path from "node:path";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { repairToolUseResultPairing } from "../../agents/session-transcript-repair.js";
 import * as transcriptEvents from "../../sessions/transcript-events.js";
 import type { SessionTranscriptUpdate } from "../../sessions/transcript-events.js";
 import { resolveSessionTranscriptPathInDir } from "./paths.js";
+import { updateSessionStoreEntry } from "./store.js";
 import { useTempSessionsFixture } from "./test-helpers.js";
 import { appendSessionTranscriptMessage } from "./transcript-append.js";
 import {
@@ -18,12 +22,38 @@ import {
 } from "./transcript.js";
 
 describe("appendAssistantMessageToSessionTranscript", () => {
+  beforeAll(async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "transcript-warm-"));
+    try {
+      const sessionsDir = path.join(tempDir, "agents", "main", "sessions");
+      fs.mkdirSync(sessionsDir, { recursive: true });
+      const storePath = path.join(sessionsDir, "sessions.json");
+      fs.writeFileSync(
+        storePath,
+        JSON.stringify({ warm: { sessionId: "warm-session", chatType: "direct" } }),
+        "utf-8",
+      );
+      await appendAssistantMessageToSessionTranscript({
+        sessionKey: "warm",
+        text: "warm",
+        storePath,
+      });
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   const fixture = useTempSessionsFixture("transcript-test-");
   const sessionId = "test-session-id";
   const sessionKey = "test-session";
   type ExactAssistantMessage = Parameters<
     typeof appendExactAssistantMessageToSessionTranscript
   >[0]["message"];
+  type BeforeMessageWriteParams = Parameters<
+    NonNullable<
+      Parameters<typeof appendExactAssistantMessageToSessionTranscript>[0]["beforeMessageWrite"]
+    >
+  >[0];
   type TranscriptRepairMessage = Parameters<typeof repairToolUseResultPairing>[0][number];
   type TranscriptUpdateEmitterSpy = {
     mock: {
@@ -111,6 +141,121 @@ describe("appendAssistantMessageToSessionTranscript", () => {
       expect(messageLine.message.role).toBe("assistant");
       expect(messageLine.message.content[0].type).toBe("text");
       expect(messageLine.message.content[0].text).toBe("Hello from delivery mirror!");
+    }
+  });
+
+  it("advances the session registry marker after managed transcript appends", async () => {
+    const updatedAt = Date.parse("2026-05-18T09:00:00.000Z");
+    const appendedAt = Date.parse("2026-05-18T09:05:00.000Z");
+    const sessionFile = "managed-marker.jsonl";
+    fs.writeFileSync(
+      fixture.storePath(),
+      JSON.stringify({
+        [sessionKey]: {
+          sessionId,
+          sessionFile,
+          updatedAt,
+          status: "done",
+        },
+      }),
+      "utf-8",
+    );
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(appendedAt);
+    try {
+      const result = await appendAssistantMessageToSessionTranscript({
+        sessionKey,
+        text: "Hello with registry marker",
+        storePath: fixture.storePath(),
+      });
+
+      expect(result.ok).toBe(true);
+      const store = JSON.parse(fs.readFileSync(fixture.storePath(), "utf-8")) as Record<
+        string,
+        { updatedAt?: number; status?: string }
+      >;
+      expect(store[sessionKey]?.updatedAt).toBe(appendedAt);
+      expect(store[sessionKey]?.status).toBe("done");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not advance the registry marker for duplicate delivery mirror replays", async () => {
+    const updatedAt = Date.parse("2026-05-18T10:00:00.000Z");
+    const firstAppendAt = Date.parse("2026-05-18T10:05:00.000Z");
+    const duplicateReplayAt = Date.parse("2026-05-18T10:10:00.000Z");
+    const sessionFile = "duplicate-marker.jsonl";
+    fs.writeFileSync(
+      fixture.storePath(),
+      JSON.stringify({
+        [sessionKey]: {
+          sessionId,
+          sessionFile,
+          updatedAt,
+          status: "done",
+        },
+      }),
+      "utf-8",
+    );
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(firstAppendAt);
+      const first = await appendAssistantMessageToSessionTranscript({
+        sessionKey,
+        text: "Replay-safe marker",
+        storePath: fixture.storePath(),
+      });
+      expect(first.ok).toBe(true);
+
+      vi.setSystemTime(duplicateReplayAt);
+      const duplicate = await appendAssistantMessageToSessionTranscript({
+        sessionKey,
+        text: "Replay-safe marker",
+        storePath: fixture.storePath(),
+      });
+      expect(duplicate.ok).toBe(true);
+
+      const store = JSON.parse(fs.readFileSync(fixture.storePath(), "utf-8")) as Record<
+        string,
+        { updatedAt?: number }
+      >;
+      expect(store[sessionKey]?.updatedAt).toBe(firstAppendAt);
+      if (first.ok && duplicate.ok) {
+        expect(duplicate.messageId).toBe(first.messageId);
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("uses spawned cwd when creating a missing transcript header", async () => {
+    const taskCwd = path.join(fixture.sessionsDir(), "task-repo");
+    fs.mkdirSync(taskCwd, { recursive: true });
+    fs.writeFileSync(
+      fixture.storePath(),
+      JSON.stringify({
+        [sessionKey]: {
+          sessionId,
+          chatType: "direct",
+          channel: "discord",
+          spawnedCwd: taskCwd,
+        },
+      }),
+      "utf-8",
+    );
+
+    const result = await appendAssistantMessageToSessionTranscript({
+      sessionKey,
+      text: "Hello from task cwd!",
+      storePath: fixture.storePath(),
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const [headerLine] = fs.readFileSync(result.sessionFile, "utf-8").trim().split("\n");
+      const header = JSON.parse(headerLine ?? "{}") as { cwd?: string };
+      expect(header.cwd).toBe(taskCwd);
     }
   });
 
@@ -322,6 +467,46 @@ describe("appendAssistantMessageToSessionTranscript", () => {
     }
   });
 
+  it("idempotently appends identified channel finals while preserving repeated replies", async () => {
+    writeTranscriptStore();
+
+    const first = await appendAssistantMessageToSessionTranscript({
+      sessionKey,
+      text: "Repeated command reply",
+      storePath: fixture.storePath(),
+      idempotencyKey: "channel-final:message-1:0",
+      deliveryMirror: { kind: "channel-final", sourceMessageId: "message-1" },
+    });
+    const replay = await appendAssistantMessageToSessionTranscript({
+      sessionKey,
+      text: "Repeated command reply",
+      storePath: fixture.storePath(),
+      idempotencyKey: "channel-final:message-1:0",
+      deliveryMirror: { kind: "channel-final", sourceMessageId: "message-1" },
+    });
+    const nextTurn = await appendAssistantMessageToSessionTranscript({
+      sessionKey,
+      text: "Repeated command reply",
+      storePath: fixture.storePath(),
+      idempotencyKey: "channel-final:message-2:0",
+      deliveryMirror: { kind: "channel-final", sourceMessageId: "message-2" },
+    });
+
+    expect(first.ok).toBe(true);
+    expect(replay.ok).toBe(true);
+    expect(nextTurn.ok).toBe(true);
+    if (first.ok && replay.ok && nextTurn.ok) {
+      expect(replay.messageId).toBe(first.messageId);
+      expect(nextTurn.messageId).not.toBe(first.messageId);
+      const lines = fs.readFileSync(first.sessionFile, "utf-8").trim().split("\n");
+      expect(lines).toHaveLength(3);
+      expect(JSON.parse(lines[1]).message.openclawDeliveryMirror).toEqual({
+        kind: "channel-final",
+        sourceMessageId: "message-1",
+      });
+    }
+  });
+
   it("dedupes against the latest assistant even when a large user entry follows it", async () => {
     writeTranscriptStore();
 
@@ -339,7 +524,7 @@ describe("appendAssistantMessageToSessionTranscript", () => {
     const sessionFile = resolveSessionTranscriptPathInDir(sessionId, fixture.sessionsDir());
     await appendSessionTranscriptMessage({
       transcriptPath: sessionFile,
-      message: { role: "user", content: "x".repeat(5 * 1024 * 1024) },
+      message: { role: "user", content: "x".repeat(128 * 1024) },
     });
 
     const latestAssistantText = await readLatestAssistantTextFromSessionTranscript(sessionFile);
@@ -713,6 +898,218 @@ describe("appendAssistantMessageToSessionTranscript", () => {
     }
   });
 
+  it("applies before_message_write after idempotency checks and preserves the key", async () => {
+    writeTranscriptStore();
+    const beforeMessageWrite = vi.fn(({ message }: BeforeMessageWriteParams) => ({
+      ...message,
+      content: [{ type: "text" as const, text: "[redacted by hook]" }],
+    }));
+    const append = () =>
+      appendExactAssistantMessageToSessionTranscript({
+        sessionKey,
+        storePath: fixture.storePath(),
+        idempotencyKey: "cli-assistant:redacted",
+        beforeMessageWrite,
+        message: createExactAssistantMessage({ text: "secret output" }),
+      });
+
+    const first = await append();
+    const replay = await append();
+
+    expect(first.ok).toBe(true);
+    expect(replay.ok).toBe(true);
+    expect(beforeMessageWrite).toHaveBeenCalledOnce();
+    if (!first.ok) {
+      throw new Error("expected assistant append to succeed");
+    }
+    const messages = fs
+      .readFileSync(first.sessionFile, "utf-8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { message?: ExactAssistantMessage })
+      .flatMap((entry) => (entry.message ? [entry.message] : []));
+    expect(messages).toEqual([
+      expect.objectContaining({
+        role: "assistant",
+        content: [{ type: "text", text: "[redacted by hook]" }],
+        idempotencyKey: "cli-assistant:redacted",
+      }),
+    ]);
+  });
+
+  it("dedupes unkeyed delivery mirrors after before_message_write rewrites", async () => {
+    writeTranscriptStore();
+    const beforeMessageWrite = vi.fn(({ message }: BeforeMessageWriteParams) => ({
+      ...message,
+      content: [{ type: "text" as const, text: "[redacted by hook]" }],
+    }));
+    const append = () =>
+      appendAssistantMessageToSessionTranscript({
+        sessionKey,
+        storePath: fixture.storePath(),
+        text: "secret output",
+        beforeMessageWrite,
+      });
+
+    const first = await append();
+    const replay = await append();
+
+    expect(first.ok).toBe(true);
+    expect(replay.ok).toBe(true);
+    expect(beforeMessageWrite).toHaveBeenCalledTimes(2);
+    if (!first.ok) {
+      throw new Error("expected delivery mirror append to succeed");
+    }
+    const messages = fs
+      .readFileSync(first.sessionFile, "utf-8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { message?: ExactAssistantMessage })
+      .flatMap((entry) => (entry.message ? [entry.message] : []));
+    expect(messages).toEqual([
+      expect.objectContaining({
+        role: "assistant",
+        content: [{ type: "text", text: "[redacted by hook]" }],
+      }),
+    ]);
+  });
+
+  it("reports assistant messages blocked by before_message_write", async () => {
+    writeTranscriptStore();
+
+    const result = await appendExactAssistantMessageToSessionTranscript({
+      agentId: "main",
+      sessionKey,
+      storePath: fixture.storePath(),
+      idempotencyKey: "cli-assistant:blocked",
+      beforeMessageWrite: vi.fn(() => null),
+      message: createExactAssistantMessage({ text: "secret output" }),
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      code: "blocked",
+    });
+  });
+
+  it("rejects assistant output after the session key is rebound", async () => {
+    fs.writeFileSync(
+      fixture.storePath(),
+      JSON.stringify({
+        [sessionKey]: {
+          sessionId: "replacement-session",
+          chatType: "direct",
+        },
+      }),
+      "utf-8",
+    );
+
+    const result = await appendExactAssistantMessageToSessionTranscript({
+      sessionKey,
+      expectedSessionId: sessionId,
+      storePath: fixture.storePath(),
+      message: createExactAssistantMessage({ text: "late output" }),
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      code: "session-rebound",
+    });
+    expect(
+      fs.existsSync(
+        resolveSessionTranscriptPathInDir("replacement-session", fixture.sessionsDir()),
+      ),
+    ).toBe(false);
+  });
+
+  it("rejects a concurrent session rebind before the assistant append", async () => {
+    writeTranscriptStore();
+    let releaseReset = () => {};
+    const resetGate = new Promise<void>((resolve) => {
+      releaseReset = resolve;
+    });
+    let markResetStarted = () => {};
+    const resetStarted = new Promise<void>((resolve) => {
+      markResetStarted = resolve;
+    });
+    const replacementSessionFile = resolveSessionTranscriptPathInDir(
+      "replacement-session",
+      fixture.sessionsDir(),
+    );
+    const reset = updateSessionStoreEntry({
+      storePath: fixture.storePath(),
+      sessionKey,
+      update: async () => {
+        markResetStarted();
+        await resetGate;
+        return {
+          sessionId: "replacement-session",
+          sessionFile: replacementSessionFile,
+        };
+      },
+    });
+    await resetStarted;
+
+    const append = appendExactAssistantMessageToSessionTranscript({
+      sessionKey,
+      expectedSessionId: sessionId,
+      storePath: fixture.storePath(),
+      message: createExactAssistantMessage({ text: "late output" }),
+    });
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
+    releaseReset();
+
+    await reset;
+    const result = await append;
+    expect(result).toMatchObject({
+      ok: false,
+      code: "session-rebound",
+    });
+    expect(fs.existsSync(replacementSessionFile)).toBe(false);
+  });
+
+  it("dedupes concurrent exact assistant appends by idempotency key", async () => {
+    writeTranscriptStore();
+    const idempotencyKey = "mirror:concurrent-assistant";
+
+    const results = await Promise.all(
+      Array.from({ length: 8 }, () =>
+        appendExactAssistantMessageToSessionTranscript({
+          sessionKey,
+          storePath: fixture.storePath(),
+          idempotencyKey,
+          updateMode: "none",
+          message: createExactAssistantMessage({
+            text: "Mirrored reply",
+            provider: "openclaw",
+            model: "delivery-mirror",
+          }),
+        }),
+      ),
+    );
+
+    expect(results.every((result) => result.ok)).toBe(true);
+    const messageIds = results.map((result) => (result.ok ? result.messageId : ""));
+    expect(new Set(messageIds).size).toBe(1);
+
+    const firstOk = results.find((result) => result.ok);
+    if (!firstOk?.ok) {
+      throw new Error("expected exact assistant append to succeed");
+    }
+    const records = fs
+      .readFileSync(firstOk.sessionFile, "utf-8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { message?: { role?: string; idempotencyKey?: string } })
+      .filter(
+        (record) =>
+          record.message?.role === "assistant" && record.message.idempotencyKey === idempotencyKey,
+      );
+    expect(records).toHaveLength(1);
+  });
+
   it("can emit file-only transcript refresh events for exact assistant appends", async () => {
     writeTranscriptStore();
     const emitSpy = vi.spyOn(transcriptEvents, "emitSessionTranscriptUpdate");
@@ -792,6 +1189,89 @@ describe("appendAssistantMessageToSessionTranscript", () => {
     for (let index = 1; index < records.length; index += 1) {
       expect(records[index]?.parentId).toBe(records[index - 1]?.id);
     }
+  });
+
+  it("requires explicit idempotency scanning for direct transcript appends", async () => {
+    const uncheckedSessionFile = resolveSessionTranscriptPathInDir(
+      "unchecked-idempotency-session",
+      fixture.sessionsDir(),
+    );
+    const checkedSessionFile = resolveSessionTranscriptPathInDir(
+      "checked-idempotency-session",
+      fixture.sessionsDir(),
+    );
+    const message = {
+      role: "assistant",
+      content: "fresh keyed append",
+      idempotencyKey: "fresh-key",
+    };
+
+    await appendSessionTranscriptMessage({
+      transcriptPath: uncheckedSessionFile,
+      message,
+    });
+    const uncheckedSecondAppend = await appendSessionTranscriptMessage({
+      transcriptPath: uncheckedSessionFile,
+      message,
+    });
+
+    const checkedFirstAppend = await appendSessionTranscriptMessage({
+      transcriptPath: checkedSessionFile,
+      message,
+      idempotencyLookup: "scan",
+    });
+    const checkedSecondAppend = await appendSessionTranscriptMessage({
+      transcriptPath: checkedSessionFile,
+      message,
+      idempotencyLookup: "scan",
+    });
+
+    const countMessages = (sessionFile: string) =>
+      fs
+        .readFileSync(sessionFile, "utf-8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { type?: string })
+        .filter((record) => record.type === "message").length;
+
+    expect(uncheckedSecondAppend.appended).toBe(true);
+    expect(countMessages(uncheckedSessionFile)).toBe(2);
+    expect(checkedSecondAppend.appended).toBe(false);
+    expect(checkedSecondAppend.messageId).toBe(checkedFirstAppend.messageId);
+    expect(countMessages(checkedSessionFile)).toBe(1);
+  });
+
+  it("falls back instead of throwing for out-of-range append timestamps", async () => {
+    const sessionFile = resolveSessionTranscriptPathInDir(
+      "invalid-now-transcript-session",
+      fixture.sessionsDir(),
+    );
+    const dateNowSpy = vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-05-30T12:00:00Z"));
+
+    try {
+      await appendSessionTranscriptMessage({
+        transcriptPath: sessionFile,
+        message: { role: "user", content: "bad clock append" },
+        now: 8_640_000_000_000_001,
+      });
+    } finally {
+      dateNowSpy.mockRestore();
+    }
+
+    const message = fs
+      .readFileSync(sessionFile, "utf-8")
+      .trim()
+      .split("\n")
+      .map(
+        (line) =>
+          JSON.parse(line) as {
+            type?: string;
+            timestamp?: string;
+          },
+      )
+      .find((record) => record.type === "message");
+
+    expect(message?.timestamp).toBe("2026-05-30T12:00:00.000Z");
   });
 
   it("redacts structured message content before transcript persistence", async () => {

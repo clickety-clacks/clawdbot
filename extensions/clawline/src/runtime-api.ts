@@ -1,6 +1,6 @@
 // Clawline runtime files should import shared helpers from this barrel rather than
 // reaching into repo internals directly. This barrel is intentionally limited to
-// public `openclaw/plugin-sdk/*` subpaths.
+// public `openclaw/plugin-sdk/*` subpaths and package-owned runtime APIs.
 
 export {
   buildAllowedModelSet,
@@ -18,6 +18,7 @@ export {
 export type { ModelCatalogEntry } from "openclaw/plugin-sdk/agent-runtime";
 export {
   abortAgentHarnessRun,
+  inferToolMetaFromArgs,
   resolveActiveAgentHarnessRunSessionId,
 } from "openclaw/plugin-sdk/agent-harness-runtime";
 export type { OpenClawConfig } from "openclaw/plugin-sdk/core";
@@ -62,16 +63,18 @@ export {
   optimizeImageToJpeg,
   optimizeImageToPng,
 } from "openclaw/plugin-sdk/web-media";
+export { redactToolPayloadText } from "openclaw/plugin-sdk/logging-core";
 export { isPrivateOrLoopbackHost } from "openclaw/plugin-sdk/ssrf-runtime";
-export {
-  readCodexAppServerFastMode,
-  setCodexAppServerFastMode,
-} from "openclaw/plugin-sdk/codex-app-server-control";
 export {
   DEFAULT_ACCOUNT_ID,
   parseAgentSessionKey,
   resolveAgentIdFromSessionKey,
 } from "openclaw/plugin-sdk/routing";
+export {
+  readCodexConversationFastMode,
+  setCodexConversationFastMode,
+  type CodexConversationFastModeStatus,
+} from "@openclaw/codex/runtime-api.js";
 
 // Remaining gaps after T187:
 // - Clawline runtime production code no longer reaches into repo `src/**`.

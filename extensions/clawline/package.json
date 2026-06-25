@@ -1,9 +1,10 @@
 {
   "name": "@openclaw/clawline",
-  "version": "2026.5.4",
+  "version": "2026.6.8",
   "description": "OpenClaw Clawline channel plugin",
   "type": "module",
   "dependencies": {
+    "@openclaw/codex": "workspace:*",
     "@lydell/node-pty": "1.2.0-beta.12",
     "@sinclair/typebox": "0.34.49",
     "better-sqlite3": "12.6.2",
@@ -20,7 +21,7 @@
     "openclaw": "workspace:*"
   },
   "peerDependencies": {
-    "openclaw": ">=2026.5.4"
+    "openclaw": ">=2026.6.8"
   },
   "peerDependenciesMeta": {
     "openclaw": {
@@ -39,6 +40,9 @@
       "docsPath": "/channels/clawline",
       "docsLabel": "clawline",
       "blurb": "first-party local gateway; enable via config/onboarding.",
+      "aliases": [
+        "clawline-dm"
+      ],
       "order": 900
     },
     "install": {
@@ -48,10 +52,10 @@
       "minHostVersion": ">=2026.5.4"
     },
     "compat": {
-      "pluginApi": ">=2026.5.4"
+      "pluginApi": ">=2026.6.8"
     },
     "build": {
-      "openclawVersion": "2026.5.4"
+      "openclawVersion": "2026.6.8"
     }
   }
 }

@@ -1,3 +1,4 @@
+// Qa Lab tests cover scenario catalog plugin behavior.
 import { describe, expect, it } from "vitest";
 import { QA_AGENTIC_PARITY_SCENARIO_IDS } from "./agentic-parity.js";
 import {
@@ -33,10 +34,12 @@ describe("qa scenario catalog", () => {
       pack.scenarios
         .filter((scenario) => scenario.execution?.kind !== "flow")
         .map((scenario) => scenario.id),
-    ).toStrictEqual([]);
+    ).toStrictEqual(["control-ui-chat-flow-playwright"]);
     expect(
-      pack.scenarios.filter((scenario) => (scenario.execution.flow?.steps.length ?? 0) > 0),
-    ).not.toStrictEqual([]);
+      pack.scenarios
+        .filter((scenario) => scenario.execution.kind === "flow")
+        .every((scenario) => (scenario.execution.flow?.steps.length ?? 0) > 0),
+    ).toBe(true);
     expect(
       pack.scenarios
         .filter((scenario) => !(scenario.coverage?.primary.length ?? 0))
@@ -90,6 +93,11 @@ describe("qa scenario catalog", () => {
     expect(fallbackConfig?.gracefulFallbackAny as string[] | undefined).toContain(
       "will not reveal",
     );
+    const fallbackFlow = JSON.stringify(
+      readQaScenarioById("memory-failure-fallback").execution.flow,
+    );
+    expect(fallbackFlow).toContain("liveTurnTimeoutMs(env, 180000)");
+    expect(fallbackFlow).toContain('"replacePaths":["tools.deny"]');
     expect(bundledSkill.title).toBe("Bundled plugin skill runtime");
     expect(bundledSkillConfig?.pluginId).toBe("open-prose");
     expect(bundledSkillConfig?.expectedSkillName).toBe("prose");
@@ -101,6 +109,18 @@ describe("qa scenario catalog", () => {
     const scenario = readQaScenarioById("control-ui-qa-channel-image-roundtrip");
 
     expect(scenario.gatewayRuntime?.forwardHostHome).toBe(true);
+  });
+
+  it("loads native test execution scenarios from markdown", () => {
+    const scenario = readQaScenarioById("control-ui-chat-flow-playwright");
+
+    expect(scenario.execution.kind).toBe("playwright");
+    if (scenario.execution.kind !== "playwright") {
+      throw new Error(`expected Playwright scenario, got ${scenario.execution.kind}`);
+    }
+    expect(scenario.execution.path).toBe("ui/src/ui/e2e/chat-flow.e2e.test.ts");
+    expect(scenario.execution.flow).toBeUndefined();
+    expect(scenario.coverage?.primary).toContain("ui.control");
   });
 
   it("loads runtime parity tier metadata for first-hour and soak lanes", () => {
@@ -121,10 +141,12 @@ describe("qa scenario catalog", () => {
     const messageTool = readQaScenarioById("runtime-tool-message-tool");
     const tavilySearch = readQaScenarioById("runtime-tool-tavily-search");
     const webSearch = readQaScenarioById("runtime-tool-web-search");
+    const imageGenerate = readQaScenarioById("runtime-tool-image-generate");
 
     expect(applyPatch.runtimeParityTier).toBe("standard");
     expect(messageTool.runtimeParityTier).toBe("optional");
     expect(tavilySearch.runtimeParityTier).toBe("optional");
+    expect(imageGenerate.runtimeParityTier).toBe("optional");
     expect(readQaScenarioExecutionConfig(applyPatch.id)).toMatchObject({
       toolName: "apply_patch",
       toolCoverage: {
@@ -151,10 +173,19 @@ describe("qa scenario catalog", () => {
       },
     });
     expect(readQaScenarioExecutionConfig(webSearch.id)).not.toHaveProperty("knownHarnessGap");
+    expect(readQaScenarioExecutionConfig(imageGenerate.id)).toMatchObject({
+      toolName: "image_generate",
+      toolCoverage: {
+        bucket: "openclaw-dynamic-integration",
+        expectedLayer: "openclaw-dynamic",
+        capabilityLayer: "openclaw-dynamic-direct",
+        required: false,
+      },
+    });
   });
 
-  it("loads the Codex Pi-shaped Read vocabulary live parity canary", () => {
-    const scenario = readQaScenarioById("codex-pi-shaped-read-vocabulary");
+  it("loads the Codex legacy Read vocabulary live parity canary", () => {
+    const scenario = readQaScenarioById("codex-legacy-read-tool-vocabulary");
     const config = readQaScenarioExecutionConfig(scenario.id) as
       | {
           runtimeParityComparison?: string;
@@ -164,11 +195,11 @@ describe("qa scenario catalog", () => {
         }
       | undefined;
 
-    expect(scenario.sourcePath).toBe("qa/scenarios/runtime/codex-pi-shaped-read-vocabulary.md");
+    expect(scenario.sourcePath).toBe("qa/scenarios/runtime/codex-legacy-read-tool-vocabulary.md");
     expect(scenario.runtimeParityTier).toBe("live-only");
     expect(config?.runtimeParityComparison).toBe("codex-native-workspace");
-    expect(config?.fixtureFile).toBe("PI_SHAPED_READ_FIXTURE.txt");
-    expect(config?.expectedMarker).toBe("PI_SHAPED_READ_OK");
+    expect(config?.fixtureFile).toBe("LEGACY_READ_TOOL_FIXTURE.txt");
+    expect(config?.expectedMarker).toBe("LEGACY_READ_TOOL_OK");
     expect(config?.unavailableNeedles).toContain("not in my available tool surface");
   });
 
@@ -194,6 +225,18 @@ describe("qa scenario catalog", () => {
     expect(readQaScenarioById("long-context-progress-watchdog").sourcePath).toBe(
       "qa/scenarios/runtime/long-context-progress-watchdog.md",
     );
+    expect(
+      JSON.stringify(readQaScenarioById("gateway-restart-inflight-run").execution.flow),
+    ).toContain("EmbeddedAttemptSessionTakeoverError");
+    expect(
+      JSON.stringify(readQaScenarioById("gateway-restart-inflight-run").execution.flow),
+    ).toContain("AbortError");
+    expect(
+      JSON.stringify(readQaScenarioById("gateway-restart-inflight-run").execution.flow),
+    ).toContain("This operation was aborted");
+    expect(
+      JSON.stringify(readQaScenarioById("gateway-restart-inflight-run").execution.flow),
+    ).toContain("liveTurnTimeoutMs(env, 180000)");
     expect(readQaScenarioExecutionConfig("long-context-progress-watchdog")).toMatchObject({
       requiredProviderMode: "live-frontier",
       harnessRuntime: "codex",
@@ -214,7 +257,7 @@ describe("qa scenario catalog", () => {
 
     expect(scenario.sourcePath).toBe("qa/scenarios/runtime/qa-bus-tool-trace-visibility.md");
     expect(scenario.coverage?.primary).toContain("harness.tool-trace-visibility");
-    expect(scenario.coverage?.secondary).toContain("runtime.qa-bus");
+    expect(scenario.coverage?.secondary ?? []).toStrictEqual(["runtime.qa-bus", "tools.trace"]);
     expect(config?.expectedToolName).toBe("exec");
     expect(config?.expectedRedaction).toBe("[redacted]");
     expect(config?.searchQuery).toBe("exec");
@@ -268,12 +311,7 @@ describe("qa scenario catalog", () => {
       pluginRelation: "older",
     });
     expect(readQaScenarioExecutionConfig("auth-profile-doctor-migration-safety")).toMatchObject({
-      matrixCells: [
-        "oauth-only",
-        "mixed-no-pin",
-        "mixed-defaults-pi-pin",
-        "mixed-main-agent-pi-pin",
-      ],
+      matrixCells: ["oauth-only", "mixed-no-pin"],
     });
   });
 
@@ -312,8 +350,8 @@ describe("qa scenario catalog", () => {
     const scenario = readQaScenarioById("gpt55-thinking-visibility-switch");
     const config = readQaScenarioExecutionConfig("gpt55-thinking-visibility-switch") as
       | {
-          requiredLiveProvider?: string;
-          requiredLiveModel?: string;
+          requiredProvider?: string;
+          requiredModel?: string;
           offDirective?: string;
           maxDirective?: string;
           reasoningDirective?: string;
@@ -321,16 +359,15 @@ describe("qa scenario catalog", () => {
       | undefined;
 
     expect(scenario.sourcePath).toBe("qa/scenarios/models/gpt55-thinking-visibility-switch.md");
-    expect(config?.requiredLiveProvider).toBe("openai");
-    expect(config?.requiredLiveModel).toBe("gpt-5.5");
+    expect(config?.requiredProvider).toBe("openai");
+    expect(config?.requiredModel).toBe("gpt-5.5");
     expect(config?.offDirective).toBe("/think off");
     expect(config?.maxDirective).toBe("/think medium");
     expect(config?.reasoningDirective).toBe("/reasoning on");
     expect(scenario.execution.flow?.steps.map((step) => step.name)).toEqual([
       "enables reasoning display and disables thinking",
       "switches to medium thinking",
-      "verifies medium thinking emits visible reasoning",
-      "verifies medium thinking completes the answer",
+      "verifies medium thinking reaches the provider",
     ]);
   });
 
@@ -391,10 +428,22 @@ describe("qa scenario catalog", () => {
       "kitchen-sink-realtime-voice-provider",
     );
     expect(config?.expectedAdversarialDiagnostics).toContain(
-      "only bundled plugins can register agent tool result middleware",
+      "agent tool result middleware must be a function",
+    );
+    expect(config?.expectedAdversarialDiagnostics).toContain(
+      "trusted tool policy registration requires id, description, and evaluate()",
     );
     expect(config?.expectedAdversarialDiagnostics).toContain(
       "control UI descriptor registration requires id, surface, label, and valid optional fields",
+    );
+    expect(config?.expectedAdversarialDiagnostics).toContain(
+      "hosted media resolver registration missing resolver",
+    );
+    expect(config?.expectedAdversarialDiagnostics).toContain(
+      "plugin must declare contracts.embeddingProviders for adapter: kitchen-sink-embedding-provider",
+    );
+    expect(config?.expectedAdversarialDiagnostics).toContain(
+      "model catalog provider registration missing provider",
     );
     expect(
       config?.expectedAdversarialDiagnostics?.every((entry) => typeof entry === "string"),

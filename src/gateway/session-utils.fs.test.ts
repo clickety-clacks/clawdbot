@@ -1,7 +1,9 @@
+// Session filesystem utility tests cover transcript reading, usage extraction,
+// preview rows, message counts, title fields, and archive candidate resolution.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { SessionManager } from "openclaw/plugin-sdk/agent-sessions";
 import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import { estimateStringChars, estimateTokensFromChars } from "../utils/cjk-chars.js";
 import { createToolSummaryPreviewTranscriptLines } from "./session-preview.test-helpers.js";
@@ -77,6 +79,17 @@ function writeTranscript(tmpDir: string, sessionId: string, lines: unknown[]): s
   return transcriptPath;
 }
 
+function writeResetArchive(
+  tmpDir: string,
+  sessionId: string,
+  timestamp: string,
+  lines: unknown[],
+): string {
+  const archivePath = path.join(tmpDir, `${sessionId}.jsonl.reset.${timestamp}`);
+  fs.writeFileSync(archivePath, lines.map((line) => JSON.stringify(line)).join("\n"), "utf-8");
+  return archivePath;
+}
+
 function appendBlockedUserMessageWithSessionManager(params: {
   sessionFile: string;
   originalText?: string;
@@ -85,6 +98,18 @@ function appendBlockedUserMessageWithSessionManager(params: {
   idempotencyKey?: string;
 }): string {
   const sessionManager = SessionManager.open(params.sessionFile, path.dirname(params.sessionFile));
+  return appendBlockedUserMessage(sessionManager, params);
+}
+
+function appendBlockedUserMessage(
+  sessionManager: SessionManager,
+  params: {
+    originalText?: string;
+    redactedText: string;
+    pluginId: string;
+    idempotencyKey?: string;
+  },
+): string {
   const messageId = sessionManager.appendMessage({
     role: "user",
     content: [{ type: "text", text: params.redactedText }],
@@ -97,7 +122,7 @@ function appendBlockedUserMessageWithSessionManager(params: {
       },
     },
   } as Parameters<typeof sessionManager.appendMessage>[0]);
-  (sessionManager as unknown as { _rewriteFile?: () => void })["_rewriteFile"]?.();
+  (sessionManager as unknown as { rewriteFile?: () => void }).rewriteFile?.();
   return messageId;
 }
 
@@ -449,6 +474,51 @@ describe("readSessionMessages", () => {
     expectMessageFields(out[1], { role: "assistant", content: "latest", openclaw: { seq: 4 } });
   });
 
+  test("returns no recent messages for non-finite maxMessages", async () => {
+    const sessionId = "test-session-recent-non-finite-max-messages";
+    writeTranscript(tmpDir, sessionId, [
+      { type: "session", version: 1, id: sessionId },
+      { message: { role: "user", content: "old" } },
+      { message: { role: "assistant", content: "latest" } },
+    ]);
+
+    expect(
+      readRecentSessionMessages(sessionId, storePath, undefined, {
+        maxMessages: Number.NaN,
+        maxBytes: 1024,
+      }),
+    ).toEqual([]);
+    await expect(
+      readRecentSessionMessagesAsync(sessionId, storePath, undefined, {
+        maxMessages: Number.POSITIVE_INFINITY,
+        maxBytes: 1024,
+      }),
+    ).resolves.toEqual([]);
+  });
+
+  test("uses the default recent byte cap for non-finite maxBytes", async () => {
+    const sessionId = "test-session-recent-non-finite-max-bytes";
+    writeTranscript(tmpDir, sessionId, [
+      { type: "session", version: 1, id: sessionId },
+      { message: { role: "user", content: "old" } },
+      { message: { role: "assistant", content: "latest" } },
+    ]);
+
+    const syncOut = readRecentSessionMessages(sessionId, storePath, undefined, {
+      maxMessages: 1,
+      maxBytes: Number.NaN,
+    });
+    const asyncOut = await readRecentSessionMessagesAsync(sessionId, storePath, undefined, {
+      maxMessages: 1,
+      maxBytes: Number.POSITIVE_INFINITY,
+    });
+
+    expect(syncOut).toHaveLength(1);
+    expectMessageFields(syncOut[0], { role: "assistant", content: "latest" });
+    expect(asyncOut).toHaveLength(1);
+    expectMessageFields(asyncOut[0], { role: "assistant", content: "latest" });
+  });
+
   test("bounds recent-message reads for large append-only transcripts", () => {
     const sessionId = "test-session-recent-large";
     const transcriptPath = path.join(tmpDir, `${sessionId}.jsonl`);
@@ -531,6 +601,30 @@ describe("readSessionMessages", () => {
     } finally {
       readFileSpy.mockRestore();
     }
+  });
+
+  test("forwards the outer JSONL record timestamp to __openclaw.recordTimestampMs (#85648)", async () => {
+    const sessionId = "test-session-record-timestamp";
+    const t1 = "2026-05-16T16:00:31.000Z";
+    const t2 = "2026-05-23T04:02:33.000Z";
+    writeTranscript(tmpDir, sessionId, [
+      { type: "session", version: 1, id: sessionId },
+      { timestamp: t1, message: { role: "user", content: "old turn" } },
+      { timestamp: t2, message: { role: "assistant", content: "fresh turn" } },
+    ]);
+    const result = await readRecentSessionMessagesAsync(sessionId, storePath, undefined, {
+      maxMessages: 5,
+      maxBytes: 2048,
+    });
+    expect(result).toHaveLength(2);
+    expectMessageFields(result[0], {
+      content: "old turn",
+      openclaw: { recordTimestampMs: Date.parse(t1) },
+    });
+    expectMessageFields(result[1], {
+      content: "fresh turn",
+      openclaw: { recordTimestampMs: Date.parse(t2) },
+    });
   });
 
   test("honors byte caps for async recent-message reads", async () => {
@@ -697,6 +791,277 @@ describe("readSessionMessages", () => {
       sessionManagerOpenSpy.mockRestore();
       readFileSpy.mockRestore();
     }
+  });
+
+  test("falls back to the latest reset archive when the active transcript is missing", async () => {
+    const sessionId = "test-session-reset-archive-fallback";
+    writeResetArchive(tmpDir, sessionId, "2026-02-16T22-26-33.000Z", [
+      { type: "session", version: 1, id: sessionId },
+      { message: { role: "assistant", content: "older archive" } },
+    ]);
+    writeResetArchive(tmpDir, sessionId, "2026-02-16T22-26-34.000Z", [
+      { type: "session", version: 1, id: sessionId },
+      { message: { role: "user", content: "restored prompt" } },
+      { message: { role: "assistant", content: "restored archive" } },
+    ]);
+    clearSessionTranscriptIndexCache();
+
+    const fullMessages = await readSessionMessagesAsync(sessionId, storePath, undefined, {
+      mode: "full",
+      reason: "test reset archive fallback",
+      allowResetArchiveFallback: true,
+    });
+    expect(fullMessages.map((message) => (message as { content?: unknown }).content)).toEqual([
+      "restored prompt",
+      "restored archive",
+    ]);
+    await expect(readSessionMessageCountAsync(sessionId, storePath)).resolves.toBe(0);
+
+    const recent = await readRecentSessionMessagesWithStatsAsync(sessionId, storePath, undefined, {
+      maxMessages: 1,
+      maxBytes: 2048,
+      allowResetArchiveFallback: true,
+    });
+    expect(recent.totalMessages).toBe(2);
+    expect(recent.messages).toHaveLength(1);
+    expectMessageFields(recent.messages[0], {
+      role: "assistant",
+      content: "restored archive",
+      openclaw: { seq: 2 },
+    });
+  });
+
+  test("uses the active transcript if it appears during reset archive discovery", async () => {
+    const sessionId = "test-session-reset-archive-active-race";
+    writeResetArchive(tmpDir, sessionId, "2026-02-16T22-26-34.000Z", [
+      { type: "session", version: 1, id: sessionId },
+      { message: { role: "assistant", content: "stale archive" } },
+    ]);
+    clearSessionTranscriptIndexCache();
+
+    const originalReaddir = fs.promises.readdir.bind(fs.promises);
+    let wroteActiveTranscript = false;
+    const readdirSpy = vi.spyOn(fs.promises, "readdir").mockImplementation((async (
+      ...args: unknown[]
+    ) => {
+      const result = await (originalReaddir as (...readdirArgs: unknown[]) => Promise<unknown>)(
+        ...args,
+      );
+      if (!wroteActiveTranscript) {
+        wroteActiveTranscript = true;
+        writeTranscript(tmpDir, sessionId, [
+          { type: "session", version: 1, id: sessionId },
+          { message: { role: "assistant", content: "active transcript" } },
+        ]);
+        clearSessionTranscriptIndexCache();
+      }
+      return result;
+    }) as typeof fs.promises.readdir);
+
+    try {
+      const fullMessages = await readSessionMessagesAsync(sessionId, storePath, undefined, {
+        mode: "full",
+        reason: "test active transcript race",
+        allowResetArchiveFallback: true,
+      });
+
+      expect(readdirSpy).toHaveBeenCalled();
+      expect(fullMessages.map((message) => (message as { content?: unknown }).content)).toEqual([
+        "active transcript",
+      ]);
+    } finally {
+      readdirSpy.mockRestore();
+    }
+  });
+
+  test("caches reset archive discovery for repeated missing-active reads", async () => {
+    const sessionId = "test-session-reset-archive-cache";
+    writeResetArchive(tmpDir, sessionId, "2026-02-16T22-26-34.000Z", [
+      { type: "session", version: 1, id: sessionId },
+      { message: { role: "assistant", content: "cached archive" } },
+    ]);
+    clearSessionTranscriptIndexCache();
+
+    const readdirSpy = vi.spyOn(fs.promises, "readdir");
+    try {
+      const firstMessages = await readSessionMessagesAsync(sessionId, storePath, undefined, {
+        mode: "full",
+        reason: "test first cached archive read",
+        allowResetArchiveFallback: true,
+      });
+      const readdirCallsAfterFirstRead = readdirSpy.mock.calls.length;
+
+      const secondMessages = await readSessionMessagesAsync(sessionId, storePath, undefined, {
+        mode: "full",
+        reason: "test second cached archive read",
+        allowResetArchiveFallback: true,
+      });
+
+      expect(readdirCallsAfterFirstRead).toBeGreaterThan(0);
+      expect(readdirSpy.mock.calls).toHaveLength(readdirCallsAfterFirstRead);
+      expect(firstMessages.map((message) => (message as { content?: unknown }).content)).toEqual([
+        "cached archive",
+      ]);
+      expect(secondMessages.map((message) => (message as { content?: unknown }).content)).toEqual([
+        "cached archive",
+      ]);
+    } finally {
+      readdirSpy.mockRestore();
+    }
+  });
+
+  test("chooses the newest reset archive across candidate roots", async () => {
+    const sessionId = "test-session-reset-archive-cross-root";
+    writeResetArchive(tmpDir, sessionId, "2026-02-16T22-26-33.000Z", [
+      { type: "session", version: 1, id: sessionId },
+      { message: { role: "assistant", content: "older store archive" } },
+    ]);
+    const legacySessionsDir = path.join(tmpDir, ".openclaw", "sessions");
+    fs.mkdirSync(legacySessionsDir, { recursive: true });
+    writeResetArchive(legacySessionsDir, sessionId, "2026-02-16T22-26-34.000Z", [
+      { type: "session", version: 1, id: sessionId },
+      { message: { role: "assistant", content: "newer legacy archive" } },
+    ]);
+    clearSessionTranscriptIndexCache();
+    vi.stubEnv("OPENCLAW_HOME", tmpDir);
+    try {
+      const fullMessages = await readSessionMessagesAsync(sessionId, storePath, undefined, {
+        mode: "full",
+        reason: "test cross-root reset archive fallback",
+        allowResetArchiveFallback: true,
+      });
+
+      expect(fullMessages.map((message) => (message as { content?: unknown }).content)).toEqual([
+        "newer legacy archive",
+      ]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  test("does not use stale generated session archives for reset archive fallback", async () => {
+    const sessionId = "00000000-0000-4000-8000-000000000001";
+    const staleSessionId = "00000000-0000-4000-8000-000000000002";
+    const staleSessionFile = path.join(tmpDir, `${staleSessionId}.jsonl`);
+    writeResetArchive(tmpDir, staleSessionId, "2026-02-16T22-26-35.000Z", [
+      { type: "session", version: 1, id: staleSessionId },
+      { message: { role: "assistant", content: "wrong stale archive" } },
+    ]);
+    writeResetArchive(tmpDir, sessionId, "2026-02-16T22-26-34.000Z", [
+      { type: "session", version: 1, id: sessionId },
+      { message: { role: "assistant", content: "current archive" } },
+    ]);
+    clearSessionTranscriptIndexCache();
+
+    const fullMessages = await readSessionMessagesAsync(sessionId, storePath, staleSessionFile, {
+      mode: "full",
+      reason: "test stale archive fallback rejection",
+      allowResetArchiveFallback: true,
+    });
+
+    expect(fullMessages.map((message) => (message as { content?: unknown }).content)).toEqual([
+      "current archive",
+    ]);
+  });
+
+  test("accepts stale generated session archives when the header matches the current session", async () => {
+    const sessionId = "00000000-0000-4000-8000-000000000006";
+    const staleSessionId = "00000000-0000-4000-8000-000000000007";
+    const staleSessionFile = `${staleSessionId}.jsonl`;
+    writeResetArchive(tmpDir, staleSessionId, "2026-02-16T22-26-35.000Z", [
+      { type: "session", version: 1, id: sessionId },
+      { message: { role: "assistant", content: "valid stale-name archive" } },
+    ]);
+    clearSessionTranscriptIndexCache();
+
+    const fullMessages = await readSessionMessagesAsync(sessionId, storePath, staleSessionFile, {
+      mode: "full",
+      reason: "test stale generated archive header recovery",
+      allowResetArchiveFallback: true,
+    });
+
+    expect(fullMessages.map((message) => (message as { content?: unknown }).content)).toEqual([
+      "valid stale-name archive",
+    ]);
+  });
+
+  test("preserves explicit transcript variant priority for reset archive fallback", async () => {
+    const sessionId = "00000000-0000-4000-8000-000000000003";
+    const topicSessionFile = "custom-topic-alpha.jsonl";
+    writeResetArchive(tmpDir, sessionId, "2026-02-16T22-26-35.000Z", [
+      { type: "session", version: 1, id: sessionId },
+      { message: { role: "assistant", content: "newer canonical archive" } },
+    ]);
+    writeResetArchive(tmpDir, "custom-topic-alpha", "2026-02-16T22-26-34.000Z", [
+      { type: "session", version: 1, id: sessionId },
+      { message: { role: "assistant", content: "preferred topic archive" } },
+    ]);
+    clearSessionTranscriptIndexCache();
+
+    const fullMessages = await readSessionMessagesAsync(sessionId, storePath, topicSessionFile, {
+      mode: "full",
+      reason: "test explicit archive variant priority",
+      allowResetArchiveFallback: true,
+    });
+
+    expect(fullMessages.map((message) => (message as { content?: unknown }).content)).toEqual([
+      "preferred topic archive",
+    ]);
+  });
+
+  test("rejects custom reset archives from a previous session id", async () => {
+    const sessionId = "00000000-0000-4000-8000-000000000004";
+    const previousSessionId = "00000000-0000-4000-8000-000000000005";
+    const sessionFile = "shared-topic.jsonl";
+    writeResetArchive(tmpDir, "shared-topic", "2026-02-16T22-26-36.000Z", [
+      { type: "session", version: 1, id: previousSessionId },
+      { message: { role: "assistant", content: "previous session archive" } },
+    ]);
+    clearSessionTranscriptIndexCache();
+
+    const fullMessages = await readSessionMessagesAsync(sessionId, storePath, sessionFile, {
+      mode: "full",
+      reason: "test previous custom archive rejection",
+      allowResetArchiveFallback: true,
+    });
+    expect(fullMessages).toEqual([]);
+
+    const recent = await readRecentSessionMessagesWithStatsAsync(
+      sessionId,
+      storePath,
+      sessionFile,
+      {
+        maxMessages: 1,
+        maxBytes: 2048,
+        allowResetArchiveFallback: true,
+      },
+    );
+    expect(recent).toEqual({ messages: [], totalMessages: 0 });
+  });
+
+  test("uses the newest custom reset archive whose header matches the session", async () => {
+    const sessionId = "00000000-0000-4000-8000-000000000008";
+    const previousSessionId = "00000000-0000-4000-8000-000000000009";
+    const sessionFile = "shared-topic-valid-latest.jsonl";
+    writeResetArchive(tmpDir, "shared-topic-valid-latest", "2026-02-16T22-26-35.000Z", [
+      { type: "session", version: 1, id: sessionId },
+      { message: { role: "assistant", content: "older valid archive" } },
+    ]);
+    writeResetArchive(tmpDir, "shared-topic-valid-latest", "2026-02-16T22-26-36.000Z", [
+      { type: "session", version: 1, id: previousSessionId },
+      { message: { role: "assistant", content: "newer invalid archive" } },
+    ]);
+    clearSessionTranscriptIndexCache();
+
+    const fullMessages = await readSessionMessagesAsync(sessionId, storePath, sessionFile, {
+      mode: "full",
+      reason: "test newest valid custom archive",
+      allowResetArchiveFallback: true,
+    });
+
+    expect(fullMessages.map((message) => (message as { content?: unknown }).content)).toEqual([
+      "older valid archive",
+    ]);
   });
 
   test("keeps async active branch rows when imported parent links are incomplete", async () => {
@@ -1223,14 +1588,12 @@ describe("readSessionMessages", () => {
       "utf-8",
     );
 
-    appendBlockedUserMessageWithSessionManager({
-      sessionFile,
+    appendBlockedUserMessage(sessionManager, {
       originalText: "[hitl:block] first",
       redactedText: "Blocked by HITL test hook.",
       pluginId: "hitl-test-hooks",
     });
-    appendBlockedUserMessageWithSessionManager({
-      sessionFile,
+    appendBlockedUserMessage(sessionManager, {
       originalText: "[hitl:block] second",
       redactedText: "Blocked again by HITL test hook.",
       pluginId: "hitl-test-hooks",
@@ -1980,6 +2343,75 @@ describe("oversized transcript line guards", () => {
     );
 
     expectUsageFields(usage, { modelProvider: "test-provider" });
+  });
+
+  test("oversized line metadata extraction preserves id and parentId", async () => {
+    const sessionId = "test-oversized-metadata-extract";
+    const transcriptPath = path.join(tmpDir, `${sessionId}.jsonl`);
+    const timestamp = "2026-05-16T16:00:33.000Z";
+    const oversizedContent = "w".repeat(300 * 1024);
+    const lines = [
+      JSON.stringify({ type: "session", version: 3, id: sessionId }),
+      JSON.stringify({
+        type: "message",
+        id: "root-msg",
+        parentId: null,
+        message: { role: "user", content: "root" },
+      }),
+      JSON.stringify({
+        type: "message",
+        timestamp,
+        id: "oversized-child",
+        parentId: "root-msg",
+        message: { role: "assistant", content: oversizedContent },
+      }),
+    ];
+    fs.writeFileSync(transcriptPath, `${lines.join("\n")}\n`, "utf-8");
+
+    const out = await readRecentSessionMessagesAsync(sessionId, storePath, undefined, {
+      maxMessages: 10,
+    });
+
+    // The oversized line's id and parentId are extracted by regex from the
+    // prefix bytes. parentId drives active-tree selection; id is attached
+    // to the __openclaw metadata. Both must be correct for the record to
+    // appear in the right position.
+    expect(out).toHaveLength(2); // root-msg + oversized-child
+    const oversized = out[1] as Record<string, unknown>;
+    expect(oversized.role).toBe("assistant");
+    // id is preserved in __openclaw transcript metadata
+    const meta = (oversized as Record<string, Record<string, unknown>>)["__openclaw"];
+    expect(meta?.id).toBe("oversized-child");
+    expect(meta?.recordTimestampMs).toBe(Date.parse(timestamp));
+    // parentId extraction is proven by the record being included:
+    // if parentId was not extracted, the tree would orphan this node.
+
+    // The oversized content must NOT appear in the output.
+    const serialized = JSON.stringify(out);
+    expect(serialized).not.toContain(oversizedContent);
+  });
+
+  test("readSessionMessagesAsync keeps id-less oversized message placeholders", async () => {
+    const sessionId = "test-oversized-idless-async";
+    const transcriptPath = path.join(tmpDir, `${sessionId}.jsonl`);
+    const oversizedContent = "w".repeat(300 * 1024);
+    fs.writeFileSync(
+      transcriptPath,
+      `${JSON.stringify({
+        message: { role: "assistant", content: oversizedContent },
+      })}\n`,
+      "utf-8",
+    );
+
+    const out = await readSessionMessagesAsync(sessionId, storePath, undefined, {
+      mode: "full",
+      reason: "test",
+    });
+
+    expect(out).toHaveLength(1);
+    const serialized = JSON.stringify(out);
+    expect(serialized).toContain("[chat.history omitted: message too large]");
+    expect(serialized).not.toContain(oversizedContent);
   });
 
   test("readSessionTitleFieldsFromTranscriptAsync delegates to bounded sync reader", async () => {

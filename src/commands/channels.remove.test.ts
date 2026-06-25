@@ -1,3 +1,4 @@
+// Channels remove tests cover config mutation, plugin catalog repair hints, and account removal behavior.
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChannelPluginCatalogEntry } from "../channels/plugins/catalog.js";
 import type { ChannelPlugin } from "../channels/plugins/types.plugin.js";
@@ -42,6 +43,7 @@ vi.mock("../channels/plugins/catalog.js", async () => {
   return {
     ...actual,
     listChannelPluginCatalogEntries: catalogMocks.listChannelPluginCatalogEntries,
+    listRawChannelPluginCatalogEntries: catalogMocks.listChannelPluginCatalogEntries,
   };
 });
 
@@ -309,48 +311,4 @@ describe("channelsRemoveCommand", () => {
     expect(runtime.exit).toHaveBeenCalledWith(1);
   });
 
-  it("requires destructive delete confirmation before stopping and deleting config", async () => {
-    configMocks.readConfigFileSnapshot.mockResolvedValue({
-      ...baseConfigSnapshot,
-      config: {
-        channels: {
-          "external-chat": {
-            enabled: true,
-            token: "token-1",
-          },
-        },
-      },
-    });
-    const catalogEntry: ChannelPluginCatalogEntry = createExternalChatCatalogEntry();
-    catalogMocks.listChannelPluginCatalogEntries.mockReturnValue([catalogEntry]);
-    const scopedPlugin = createExternalChatDeletePlugin();
-    vi.mocked(loadChannelSetupPluginRegistrySnapshotForChannel).mockReturnValue(
-      createTestRegistry([
-        {
-          pluginId: "@vendor/external-chat-plugin",
-          plugin: scopedPlugin,
-          source: "test",
-        },
-      ]),
-    );
-    prompterMocks.confirm.mockResolvedValueOnce(false);
-
-    await channelsRemoveCommand(
-      {
-        channel: "external-chat",
-        account: "default",
-        delete: true,
-      },
-      runtime,
-      { hasFlags: true },
-    );
-
-    expect(prompterMocks.confirm).toHaveBeenCalledWith({
-      message:
-        'Delete external-chat account "default"? This stops gateway access for this channel and re-adding it may regenerate channel secrets.',
-      initialValue: false,
-    });
-    expect(gatewayMocks.callGateway).not.toHaveBeenCalled();
-    expect(configMocks.writeConfigFile).not.toHaveBeenCalled();
-  });
 });

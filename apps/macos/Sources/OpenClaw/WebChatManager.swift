@@ -51,7 +51,12 @@ final class WebChatManager {
             self.windowController = nil
             self.windowSessionKey = nil
         }
-        let controller = WebChatSwiftUIWindowController(sessionKey: sessionKey, presentation: .window)
+        let controller = WebChatSwiftUIWindowController(
+            sessionKey: sessionKey,
+            presentation: .window,
+            onSessionChanged: { [weak self] nextSessionKey in
+                self?.recordWindowSessionKey(nextSessionKey)
+            })
         controller.onVisibilityChanged = { [weak self] visible in
             self?.onPanelVisibilityChanged?(visible)
         }
@@ -79,7 +84,10 @@ final class WebChatManager {
 
         let controller = WebChatSwiftUIWindowController(
             sessionKey: sessionKey,
-            presentation: .panel(anchorProvider: anchorProvider))
+            presentation: .panel(anchorProvider: anchorProvider),
+            onSessionChanged: { [weak self] nextSessionKey in
+                self?.recordPanelSessionKey(nextSessionKey)
+            })
         controller.onClosed = { [weak self] in
             self?.panelHidden()
         }
@@ -95,6 +103,20 @@ final class WebChatManager {
     func recordActiveSessionKey(_ sessionKey: String) {
         let trimmed = sessionKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        self.currentChatSessionKey = trimmed
+    }
+
+    private func recordWindowSessionKey(_ sessionKey: String) {
+        let trimmed = sessionKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        self.windowSessionKey = trimmed
+        self.currentChatSessionKey = trimmed
+    }
+
+    private func recordPanelSessionKey(_ sessionKey: String) {
+        let trimmed = sessionKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        self.panelSessionKey = trimmed
         self.currentChatSessionKey = trimmed
     }
 

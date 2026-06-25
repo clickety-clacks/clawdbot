@@ -1,10 +1,27 @@
+// Session patch applier for gateway session metadata and model/runtime overrides.
 import { randomUUID } from "node:crypto";
+import {
+  normalizeOptionalLowercaseString,
+  normalizeOptionalString,
+} from "@openclaw/normalization-core/string-coerce";
+import {
+  ErrorCodes,
+  type ErrorShape,
+  errorShape,
+  type SessionsPatchParams,
+} from "../../packages/gateway-protocol/src/index.js";
+import {
+  isDefaultAgentRuntimeId,
+  normalizeOptionalAgentRuntimeId,
+} from "../agents/agent-runtime-id.js";
+import { resolveModelAgentRuntimeMetadata } from "../agents/agent-runtime-metadata.js";
 import { resolveDefaultAgentId } from "../agents/agent-scope.js";
 import {
   normalizeInheritedToolAllowlist,
   normalizeInheritedToolDenylist,
 } from "../agents/inherited-tool-deny.js";
 import type { ModelCatalogEntry } from "../agents/model-catalog.js";
+import { splitTrailingAuthProfile } from "../agents/model-ref-profile.js";
 import {
   resolveAllowedModelRef,
   resolveDefaultModelForAgent,
@@ -40,16 +57,6 @@ import {
 import { applyModelOverrideToSessionEntry } from "../sessions/model-overrides.js";
 import { normalizeSendPolicy } from "../sessions/send-policy.js";
 import { parseSessionLabel } from "../sessions/session-label.js";
-import {
-  normalizeOptionalLowercaseString,
-  normalizeOptionalString,
-} from "../shared/string-coerce.js";
-import {
-  ErrorCodes,
-  type ErrorShape,
-  errorShape,
-  type SessionsPatchParams,
-} from "./protocol/index.js";
 
 function invalid(message: string): { ok: false; error: ErrorShape } {
   return { ok: false, error: errorShape(ErrorCodes.INVALID_REQUEST, message) };
@@ -128,17 +135,59 @@ function normalizeSubagentControlScope(raw: string): "children" | "none" | undef
   return undefined;
 }
 
+function clearIncompatibleSessionRuntimeOverride(params: {
+  entry: SessionEntry;
+  cfg: OpenClawConfig;
+  agentId: string;
+  sessionKey: string;
+  provider: string;
+  model: string;
+}): void {
+  const runtimeOverride = normalizeOptionalAgentRuntimeId(params.entry.agentRuntimeOverride);
+  const harnessId = normalizeOptionalAgentRuntimeId(params.entry.agentHarnessId);
+  if (!runtimeOverride && !harnessId) {
+    return;
+  }
+
+  const selectedRuntime = resolveModelAgentRuntimeMetadata({
+    cfg: params.cfg,
+    agentId: params.agentId,
+    sessionKey: params.sessionKey,
+    provider: params.provider,
+    model: params.model,
+  });
+  const selectedExplicitRuntime =
+    selectedRuntime.source === "model" || selectedRuntime.source === "provider"
+      ? normalizeOptionalAgentRuntimeId(selectedRuntime.id)
+      : undefined;
+  const preservesRuntime =
+    selectedExplicitRuntime && !isDefaultAgentRuntimeId(selectedExplicitRuntime);
+  if (preservesRuntime && runtimeOverride === selectedExplicitRuntime) {
+    if (harnessId && harnessId !== selectedExplicitRuntime) {
+      delete params.entry.agentHarnessId;
+    }
+    return;
+  }
+
+  delete params.entry.agentRuntimeOverride;
+  delete params.entry.agentHarnessId;
+}
+
+/** Apply a validated gateway session patch to an in-memory session store entry. */
 export async function applySessionsPatchToStore(params: {
   cfg: OpenClawConfig;
   store: Record<string, SessionEntry>;
   storeKey: string;
+  agentId?: string;
   patch: SessionsPatchParams;
   loadGatewayModelCatalog?: () => Promise<ModelCatalogEntry[]>;
 }): Promise<{ ok: true; entry: SessionEntry } | { ok: false; error: ErrorShape }> {
   const { cfg, store, storeKey, patch } = params;
   const now = Date.now();
   const parsedAgent = parseAgentSessionKey(storeKey);
-  const sessionAgentId = normalizeAgentId(parsedAgent?.agentId ?? resolveDefaultAgentId(cfg));
+  const sessionAgentId = normalizeAgentId(
+    params.agentId ?? parsedAgent?.agentId ?? resolveDefaultAgentId(cfg),
+  );
   const resolvedDefault = resolveDefaultModelForAgent({ cfg, agentId: sessionAgentId });
   const subagentModelHint = isSubagentSessionKey(storeKey)
     ? resolveSubagentConfiguredModelSelection({ cfg, agentId: sessionAgentId })
@@ -157,6 +206,7 @@ export async function applySessionsPatchToStore(params: {
   };
 
   const existing = store[storeKey];
+  // Existing entries without session ids are placeholder aliases; assigning an id makes them real.
   const next: SessionEntry = existing?.sessionId
     ? {
         ...existing,
@@ -212,6 +262,27 @@ export async function applySessionsPatchToStore(params: {
         return invalid("spawnedWorkspaceDir cannot be changed once set");
       }
       next.spawnedWorkspaceDir = trimmed;
+    }
+  }
+
+  if ("spawnedCwd" in patch) {
+    const raw = patch.spawnedCwd;
+    if (raw === null) {
+      if (existing?.spawnedCwd) {
+        return invalid("spawnedCwd cannot be cleared once set");
+      }
+    } else if (raw !== undefined) {
+      if (!supportsSpawnLineage(storeKey)) {
+        return invalid("spawnedCwd is only supported for subagent:* or acp:* sessions");
+      }
+      const trimmed = normalizeOptionalString(raw) ?? "";
+      if (!trimmed) {
+        return invalid("invalid spawnedCwd: empty");
+      }
+      if (existing?.spawnedCwd && existing.spawnedCwd !== trimmed) {
+        return invalid("spawnedCwd cannot be changed once set");
+      }
+      next.spawnedCwd = trimmed;
     }
   }
 
@@ -505,8 +576,16 @@ export async function applySessionsPatchToStore(params: {
           entry: next,
           provider: resolvedDefault.provider,
         }),
-        markLiveSwitchPending: true,
       });
+      clearIncompatibleSessionRuntimeOverride({
+        entry: next,
+        cfg,
+        agentId: sessionAgentId,
+        sessionKey: storeKey,
+        provider: resolvedDefault.provider,
+        model: resolvedDefault.model,
+      });
+      delete next.liveModelSwitchPending;
     } else if (raw !== undefined) {
       const trimmed = normalizeOptionalString(raw) ?? "";
       if (!trimmed) {
@@ -525,10 +604,12 @@ export async function applySessionsPatchToStore(params: {
           error: errorShape(ErrorCodes.UNAVAILABLE, "model catalog unavailable"),
         };
       }
+      const { model: modelWithoutProfile, profile: trailingProfile } =
+        splitTrailingAuthProfile(trimmed);
       const resolved = resolveAllowedModelRef({
         cfg,
         catalog,
-        raw: trimmed,
+        raw: modelWithoutProfile,
         defaultProvider: resolvedDefault.provider,
         defaultModel: subagentModelHint ?? resolvedDefault.model,
       });
@@ -545,6 +626,7 @@ export async function applySessionsPatchToStore(params: {
           model: resolved.ref.model,
           isDefault,
         },
+        profileOverride: trailingProfile || undefined,
         preserveAuthProfileOverride: shouldPreserveSessionAuthProfileOverride({
           cfg,
           currentProvider: next.providerOverride ?? next.modelProvider ?? resolvedDefault.provider,
@@ -552,6 +634,14 @@ export async function applySessionsPatchToStore(params: {
           provider: resolved.ref.provider,
         }),
         markLiveSwitchPending: true,
+      });
+      clearIncompatibleSessionRuntimeOverride({
+        entry: next,
+        cfg,
+        agentId: sessionAgentId,
+        sessionKey: storeKey,
+        provider: resolved.ref.provider,
+        model: resolved.ref.model,
       });
     }
   }

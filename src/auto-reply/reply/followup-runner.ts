@@ -1,4 +1,6 @@
+/** Runs queued follow-up agent turns and routes their delivery payloads. */
 import crypto from "node:crypto";
+import { readStringValue } from "@openclaw/normalization-core/string-coerce";
 import { hasOutboundReplyContent } from "openclaw/plugin-sdk/reply-payload";
 import {
   clearAutoFallbackPrimaryProbeSelection,
@@ -9,26 +11,47 @@ import { resolveBootstrapWarningSignaturesSeen } from "../../agents/bootstrap-bu
 import { getCliSessionBinding } from "../../agents/cli-session.js";
 import { resolveContextTokensForModel } from "../../agents/context.js";
 import { DEFAULT_CONTEXT_TOKENS } from "../../agents/defaults.js";
+import { runEmbeddedAgent } from "../../agents/embedded-agent.js";
 import { ensureSelectedAgentHarnessPlugin } from "../../agents/harness/runtime-plugin.js";
 import { runWithModelFallback } from "../../agents/model-fallback.js";
 import { resolveCliRuntimeExecutionProvider } from "../../agents/model-runtime-aliases.js";
 import { isCliProvider } from "../../agents/model-selection-cli.js";
-import { runEmbeddedPiAgent } from "../../agents/pi-embedded.js";
+import {
+  isAgentRunRestartAbortReason,
+  resolveAgentRunAbortLifecycleFields,
+} from "../../agents/run-termination.js";
 import {
   buildAgentRuntimeDeliveryPlan,
   buildAgentRuntimeOutcomePlan,
 } from "../../agents/runtime-plan/build.js";
 import { updateSessionStore, type SessionEntry } from "../../config/sessions.js";
+import { readSessionEntry } from "../../config/sessions/store-load.js";
 import type { TypingMode } from "../../config/types.js";
 import { logVerbose } from "../../globals.js";
-import { emitAgentEvent, registerAgentRunContext } from "../../infra/agent-events.js";
+import {
+  captureAgentRunLifecycleGeneration,
+  clearAgentRunContext,
+  emitAgentEvent,
+  getAgentEventLifecycleGeneration,
+  registerAgentRunContext,
+} from "../../infra/agent-events.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import { defaultRuntime } from "../../runtime.js";
-import { readStringValue } from "../../shared/string-coerce.js";
+import { shouldPreserveUserFacingSessionStateForInputProvenance } from "../../sessions/input-provenance.js";
 import { isInternalMessageChannel } from "../../utils/message-channel.js";
-import type { GetReplyOptions, ReplyPayload } from "../types.js";
-import { runCliAgentWithLifecycle } from "./agent-runner-cli-dispatch.js";
 import {
+  getReplyPayloadMetadata,
+  markReplyPayloadForSourceSuppressionDelivery,
+} from "../reply-payload.js";
+import type { GetReplyOptions, ReplyPayload } from "../types.js";
+import {
+  clearDroppedCliSessionBinding,
+  createCliToolSummaryTracker,
+  keepCliSessionBindingOnlyWhenReused,
+  runCliAgentWithLifecycle,
+} from "./agent-runner-cli-dispatch.js";
+import {
+  buildPreflightCompactionFailureText,
   resolveRunAfterAutoFallbackPrimaryProbeRecheck,
   resolveSessionRuntimeOverrideForProvider,
 } from "./agent-runner-execution.js";
@@ -39,21 +62,31 @@ import {
   resolveModelFallbackOptions,
   resolveRunAuthProfile,
 } from "./agent-runner-utils.js";
+import {
+  createCompactionHookNoticePayload,
+  createCompactionNoticePayload,
+  readCompactionHookMessages,
+  shouldNotifyUserAboutCompaction,
+  type CompactionNoticePhase,
+} from "./compaction-notice.js";
 import { resolveFollowupDeliveryPayloads } from "./followup-delivery.js";
 import { resolveOriginMessageProvider } from "./origin-routing.js";
 import {
   completeFollowupRunLifecycle,
+  FollowupRunDeferredError,
   isFollowupRunAborted,
   refreshQueuedFollowupSession,
   type FollowupRun,
 } from "./queue.js";
-import { createReplyOperation } from "./reply-run-registry.js";
+import type { ReplyDispatchKind } from "./reply-dispatcher.types.js";
+import type { ReplyOperation } from "./reply-run-registry.js";
+import { admitReplyTurn } from "./reply-turn-admission.js";
 import { isRoutableChannel, routeReply } from "./route-reply.js";
 import { incrementRunCompactionCount, persistRunSessionUsage } from "./session-run-accounting.js";
 import { createTypingSignaler } from "./typing-mode.js";
 import type { TypingController } from "./typing.js";
 
-type EmbeddedAgentRunResult = Awaited<ReturnType<typeof runEmbeddedPiAgent>>;
+type EmbeddedAgentRunResult = Awaited<ReturnType<typeof runEmbeddedAgent>>;
 
 type FollowupAgentEvent = { stream: string; data: Record<string, unknown> };
 
@@ -67,12 +100,45 @@ function filterStringArray(value: unknown): string[] | undefined {
     : undefined;
 }
 
+function hasFailedFollowupProgressEvent(evt: FollowupAgentEvent): boolean {
+  if (evt.stream !== "item" && evt.stream !== "command_output") {
+    return false;
+  }
+  const phase = readStringValue(evt.data.phase);
+  const status = readStringValue(evt.data.status);
+  return (
+    phase === "error" ||
+    status === "failed" ||
+    status === "error" ||
+    (typeof evt.data.exitCode === "number" && evt.data.exitCode !== 0)
+  );
+}
+
+function canForwardFailedFollowupProgressEvent(
+  evt: FollowupAgentEvent,
+  opts?: GetReplyOptions,
+): boolean {
+  if (evt.stream === "command_output") {
+    return typeof opts?.onCommandOutput === "function";
+  }
+  if (evt.stream !== "item") {
+    return false;
+  }
+  if (evt.data.suppressChannelProgress === true && Boolean(opts?.onToolStart)) {
+    return false;
+  }
+  return typeof opts?.onItemEvent === "function";
+}
+
 async function forwardFollowupProgressEvent(params: {
   evt: FollowupAgentEvent;
   opts?: GetReplyOptions;
   detailMode?: "explain" | "raw";
   emitChannelProgress?: boolean;
   onCompactionComplete?: () => void;
+  notifyUserAboutCompaction?: boolean;
+  currentMessageId?: string;
+  onCompactionNoticePayload?: (payload: ReplyPayload) => Promise<void> | void;
 }) {
   const { evt, opts } = params;
   const emitChannelProgress = params.emitChannelProgress !== false;
@@ -85,6 +151,8 @@ async function forwardFollowupProgressEvent(params: {
     const name = readStringValue(evt.data.name);
     if (phase === "start" || phase === "update") {
       await opts?.onToolStart?.({
+        itemId: readStringValue(evt.data.itemId),
+        toolCallId: readStringValue(evt.data.toolCallId),
         name,
         phase,
         args:
@@ -111,6 +179,7 @@ async function forwardFollowupProgressEvent(params: {
       summary: readStringValue(evt.data.summary),
       progressText: readStringValue(evt.data.progressText),
       meta: readStringValue(evt.data.meta),
+      toolCallId: readStringValue(evt.data.toolCallId),
       approvalId: readStringValue(evt.data.approvalId),
       approvalSlug: readStringValue(evt.data.approvalSlug),
     });
@@ -178,16 +247,46 @@ async function forwardFollowupProgressEvent(params: {
 
   if (evt.stream === "compaction") {
     const phase = readStringValue(evt.data.phase) ?? "";
-    if (phase === "start") {
+    const hookMessages = readCompactionHookMessages(evt.data.messages);
+    const sendCompactionUserNotices = async (noticePhase: "start" | "end" | "incomplete") => {
+      const hookPayload = createCompactionHookNoticePayload({
+        messages: hookMessages,
+        currentMessageId: params.currentMessageId,
+      });
+      if (hookPayload) {
+        await params.onCompactionNoticePayload?.(hookPayload);
+      }
+      if (params.notifyUserAboutCompaction === true) {
+        await params.onCompactionNoticePayload?.(
+          createCompactionNoticePayload({
+            phase: noticePhase,
+            currentMessageId: params.currentMessageId,
+          }),
+        );
+      }
+    };
+    if (phase === "start" && emitChannelProgress) {
       await opts?.onCompactionStart?.();
+    }
+    if (phase === "start") {
+      await sendCompactionUserNotices("start");
     }
     if (phase === "end" && evt.data?.completed === true) {
       params.onCompactionComplete?.();
-      await opts?.onCompactionEnd?.();
+      if (emitChannelProgress) {
+        await opts?.onCompactionEnd?.();
+      }
+      if (evt.data?.willRetry === true) {
+        return;
+      }
+      await sendCompactionUserNotices("end");
+    } else if (phase === "end") {
+      await sendCompactionUserNotices("incomplete");
     }
   }
 }
 
+/** Creates the function that drains one queued follow-up run. */
 export function createFollowupRunner(params: {
   opts?: GetReplyOptions;
   typing: TypingController;
@@ -230,7 +329,7 @@ export function createFollowupRunner(params: {
     payloads: ReplyPayload[],
     queued: FollowupRun,
     resolvedRun: { provider: string; modelId: string },
-    options: { mirror?: boolean } = {},
+    options: { kind?: ReplyDispatchKind; mirror?: boolean; runId?: string } = {},
   ) => {
     // Check if we should route to originating channel.
     const { originatingChannel, originatingTo } = queued;
@@ -262,6 +361,16 @@ export function createFollowupRunner(params: {
 
     let crossChannelRouteFailureNeedsNotice = false;
     let routedAnyCrossChannelPayloadToOrigin = false;
+    const replyKind = options.kind ?? "final";
+    const sendDispatcherPayload = async (payload: ReplyPayload) => {
+      if (!opts?.onBlockReply) {
+        return;
+      }
+      if (deliveryPlan.isSilentPayload(payload)) {
+        return;
+      }
+      await opts.onBlockReply(payload);
+    };
     for (const payload of sendablePayloads) {
       const providerRoute = deliveryPlan.resolveFollowupRoute({
         payload,
@@ -290,6 +399,10 @@ export function createFollowupRunner(params: {
 
       // Route to originating channel if set, otherwise fall back to dispatcher.
       if (deliveryRoute === "origin" && isRoutableChannel(originatingChannel) && originatingTo) {
+        const payloadMetadata = getReplyPayloadMetadata(payload);
+        const hasTranscriptOwner =
+          payloadMetadata?.assistantMessageIndex !== undefined ||
+          payloadMetadata?.assistantTranscriptOwned === true;
         const result = await routeReply({
           payload,
           channel: originatingChannel,
@@ -302,7 +415,9 @@ export function createFollowupRunner(params: {
           requesterSenderE164: queued.run.senderE164,
           threadId: queued.originatingThreadId,
           cfg: runtimeConfig,
-          mirror: options.mirror,
+          mirror: hasTranscriptOwner ? false : options.mirror,
+          replyKind,
+          runId: options.runId,
         });
         if (!result.ok) {
           const errorMsg = result.error ?? "unknown error";
@@ -315,7 +430,7 @@ export function createFollowupRunner(params: {
           });
           if (opts?.onBlockReply) {
             if (origin && origin === provider) {
-              await opts.onBlockReply(payload);
+              await sendDispatcherPayload(payload);
             } else {
               crossChannelRouteFailureNeedsNotice = true;
             }
@@ -333,8 +448,8 @@ export function createFollowupRunner(params: {
             routedAnyCrossChannelPayloadToOrigin = true;
           }
         }
-      } else if (deliveryRoute === "dispatcher" && opts?.onBlockReply) {
-        await opts.onBlockReply(payload);
+      } else if (deliveryRoute === "dispatcher") {
+        await sendDispatcherPayload(payload);
       }
     }
     if (
@@ -342,7 +457,7 @@ export function createFollowupRunner(params: {
       !routedAnyCrossChannelPayloadToOrigin &&
       opts?.onBlockReply
     ) {
-      await opts.onBlockReply({
+      await sendDispatcherPayload({
         text:
           "Follow-up completed, but OpenClaw could not deliver it to the originating " +
           "channel. The reply content was not forwarded to this channel to avoid " +
@@ -364,7 +479,8 @@ export function createFollowupRunner(params: {
       .filter((end): end is () => void => typeof end === "function");
     const queuedImages = queued.images ?? opts?.images;
     const queuedImageOrder = queued.imageOrder ?? opts?.imageOrder;
-    let replyOperation: ReturnType<typeof createReplyOperation> | undefined;
+    let replyOperation: ReplyOperation | undefined;
+    let deferred = false;
 
     try {
       queued.run.config = await resolveQueuedReplyExecutionConfig(queued.run.config, {
@@ -391,17 +507,50 @@ export function createFollowupRunner(params: {
       if (run !== effectiveQueued.run) {
         effectiveQueued = { ...effectiveQueued, run };
       }
-      const shouldEmitVerboseProgress = () => run.verboseLevel !== "off";
-      const shouldSuppressDefaultToolProgressMessages = () =>
-        opts?.suppressDefaultToolProgressMessages === true && !shouldEmitVerboseProgress();
+      const resolveCurrentVerboseLevel = () => {
+        if (replySessionKey && storePath) {
+          try {
+            const level = readSessionEntry(storePath, replySessionKey)?.verboseLevel;
+            if (typeof level === "string" && level.trim()) {
+              return level;
+            }
+          } catch {
+            // Keep queued delivery resilient to transient session-store reads.
+          }
+        }
+        const liveEntryLevel = replySessionKey
+          ? sessionStore?.[replySessionKey]?.verboseLevel
+          : undefined;
+        return liveEntryLevel ?? activeSessionEntry?.verboseLevel ?? run.verboseLevel;
+      };
+      const shouldEmitVerboseProgress = () => {
+        const verboseLevel = resolveCurrentVerboseLevel();
+        return verboseLevel === "on" || verboseLevel === "full";
+      };
+      const shouldSuppressDefaultToolProgressMessages = () => !shouldEmitVerboseProgress();
       const shouldEmitToolResultProgress = () =>
         shouldEmitVerboseProgress() && !shouldSuppressDefaultToolProgressMessages();
       const shouldEmitToolOutputProgress = () =>
-        run.verboseLevel === "full" && !shouldSuppressDefaultToolProgressMessages();
+        resolveCurrentVerboseLevel() === "full" && !shouldSuppressDefaultToolProgressMessages();
+      let observedVisibleToolErrorProgress = false;
+      const markVisibleToolErrorProgress = () => {
+        if (resolveCurrentVerboseLevel() === "on" && shouldEmitToolResultProgress()) {
+          observedVisibleToolErrorProgress = true;
+        }
+      };
+      const shouldSuppressToolErrorWarnings = () => {
+        if (opts?.suppressToolErrorWarnings !== undefined) {
+          return opts.suppressToolErrorWarnings;
+        }
+        if (!shouldEmitVerboseProgress()) {
+          return false;
+        }
+        return observedVisibleToolErrorProgress ? true : undefined;
+      };
       let progressDeliveryChain: Promise<void> = Promise.resolve();
       const pendingProgressDeliveries = new Set<Promise<void>>();
       const enqueueProgressDelivery = (deliver: () => Promise<void>) => {
-        progressDeliveryChain = progressDeliveryChain.then(deliver).catch((err) => {
+        progressDeliveryChain = progressDeliveryChain.then(deliver).catch((err: unknown) => {
           logVerbose(`followup queue: progress delivery failed: ${formatErrorMessage(err)}`);
         });
         const task = progressDeliveryChain.finally(() => {
@@ -415,12 +564,39 @@ export function createFollowupRunner(params: {
           await Promise.all(pendingProgressDeliveries);
         }
       };
-      replyOperation = createReplyOperation({
+      const admission = await admitReplyTurn({
         sessionId: run.sessionId,
         sessionKey: replySessionKey ?? "",
+        kind: "queued_followup",
         resetTriggered: false,
+        routeThreadId: queued.originatingThreadId,
         upstreamAbortSignal: queued.abortSignal,
       });
+      if (admission.status === "skipped") {
+        if (admission.reason === "active-run") {
+          deferred = true;
+          throw new FollowupRunDeferredError("Follow-up reply lane is still active");
+        }
+        return;
+      }
+      replyOperation = admission.operation;
+      if (replyOperation.sessionId !== run.sessionId) {
+        run = { ...run, sessionId: replyOperation.sessionId };
+        effectiveQueued = { ...effectiveQueued, run };
+        const admittedSessionEntry = replySessionKey
+          ? (sessionStore?.[replySessionKey] ??
+            (storePath
+              ? (readSessionEntry(storePath, replySessionKey) as SessionEntry | undefined)
+              : undefined))
+          : undefined;
+        if (admittedSessionEntry?.sessionId === replyOperation.sessionId) {
+          activeSessionEntry = admittedSessionEntry;
+          if (admittedSessionEntry.sessionFile) {
+            run = { ...run, sessionFile: admittedSessionEntry.sessionFile };
+            effectiveQueued = { ...effectiveQueued, run };
+          }
+        }
+      }
       const runId = crypto.randomUUID();
       const shouldSurfaceToControlUi = isInternalMessageChannel(
         resolveOriginMessageProvider({
@@ -428,32 +604,115 @@ export function createFollowupRunner(params: {
           provider: run.messageProvider,
         }),
       );
+      let autoCompactionCount = 0;
+      let runResult: Awaited<ReturnType<typeof runEmbeddedAgent>>;
+      let fallbackProvider = run.provider;
+      let fallbackModel = run.model;
+      const resolveFollowupCurrentMessageId = () =>
+        run.inputProvenance?.kind === "internal_system" &&
+        run.inputProvenance.sourceTool === "restart-sentinel"
+          ? queued.originatingReplyToId
+          : queued.messageId;
+      const compactionNoticeReplyToId = resolveFollowupCurrentMessageId();
+      const sendCompactionNoticePayload = async (
+        payload: ReplyPayload,
+        resolvedRun: { provider: string; modelId: string } = {
+          provider: fallbackProvider,
+          modelId: fallbackModel,
+        },
+      ) => {
+        const noticePayloads = resolveFollowupDeliveryPayloads({
+          cfg: runtimeConfig,
+          payloads: [payload],
+          messageProvider: run.messageProvider,
+          originatingAccountId: queued.originatingAccountId ?? run.agentAccountId,
+          originatingChannel: queued.originatingChannel,
+          originatingChatType: queued.originatingChatType,
+          originatingTo: queued.originatingTo,
+        });
+        if (noticePayloads.length === 0) {
+          return;
+        }
+        await sendFollowupPayloads(noticePayloads, effectiveQueued, resolvedRun, {
+          kind: "block",
+          mirror: false,
+          runId,
+        });
+      };
+      const notifyPreflightCompaction = shouldNotifyUserAboutCompaction(runtimeConfig)
+        ? async (phase: CompactionNoticePhase) => {
+            await sendCompactionNoticePayload(
+              createCompactionNoticePayload({
+                phase,
+                currentMessageId: compactionNoticeReplyToId,
+              }),
+            );
+          }
+        : undefined;
+      let lifecycleGeneration = captureAgentRunLifecycleGeneration(runId);
       if (run.sessionKey) {
         registerAgentRunContext(runId, {
           sessionKey: run.sessionKey,
+          ...(run.sessionId ? { sessionId: run.sessionId } : {}),
+          lifecycleGeneration,
           verboseLevel: run.verboseLevel,
           isControlUiVisible: shouldSurfaceToControlUi,
         });
       }
-      let autoCompactionCount = 0;
-      let runResult: Awaited<ReturnType<typeof runEmbeddedPiAgent>>;
-      let fallbackProvider = run.provider;
-      let fallbackModel = run.model;
-      activeSessionEntry = await runPreflightCompactionIfNeeded({
-        cfg: runtimeConfig,
-        followupRun: effectiveQueued,
-        promptForEstimate: queued.prompt,
-        defaultModel,
-        agentCfgContextTokens,
-        sessionEntry: activeSessionEntry,
-        sessionStore,
-        sessionKey: replySessionKey,
-        storePath,
-        isHeartbeat: opts?.isHeartbeat === true,
-        replyOperation,
-      });
+      try {
+        activeSessionEntry = await runPreflightCompactionIfNeeded({
+          cfg: runtimeConfig,
+          followupRun: effectiveQueued,
+          promptForEstimate: queued.prompt,
+          defaultModel,
+          agentCfgContextTokens,
+          sessionEntry: activeSessionEntry,
+          sessionStore,
+          sessionKey: replySessionKey,
+          storePath,
+          isHeartbeat: opts?.isHeartbeat === true,
+          replyOperation,
+          onCompactionNotice: notifyPreflightCompaction,
+        });
+      } catch (err) {
+        clearAgentRunContext(runId, lifecycleGeneration);
+        const message = formatErrorMessage(err);
+        replyOperation.fail("run_failed", err);
+        const preflightCompactionFailureText = buildPreflightCompactionFailureText(message, {
+          includeDetails: run.verboseLevel === "on" || run.verboseLevel === "full",
+        });
+        if (preflightCompactionFailureText) {
+          await sendFollowupPayloads(
+            [
+              markReplyPayloadForSourceSuppressionDelivery({
+                text: preflightCompactionFailureText,
+              }),
+            ],
+            effectiveQueued,
+            { provider: fallbackProvider, modelId: fallbackModel },
+          );
+          return;
+        }
+        throw err;
+      }
+      if (run.sessionKey) {
+        const owningSessionId =
+          activeSessionEntry?.sessionId === run.sessionId
+            ? activeSessionEntry.sessionId
+            : run.sessionId;
+        registerAgentRunContext(runId, {
+          sessionKey: run.sessionKey,
+          ...(owningSessionId ? { sessionId: owningSessionId } : {}),
+          lifecycleGeneration,
+          verboseLevel: run.verboseLevel,
+          isControlUiVisible: shouldSurfaceToControlUi,
+        });
+      }
       let bootstrapPromptWarningSignaturesSeen = resolveBootstrapWarningSignaturesSeen(
         activeSessionEntry?.systemPromptReport,
+      );
+      const preserveUserFacingSessionState = shouldPreserveUserFacingSessionStateForInputProvenance(
+        queued.run.inputProvenance,
       );
       const resolveRunForFallbackCandidate = (
         provider: string,
@@ -487,6 +746,9 @@ export function createFollowupRunner(params: {
         provider: string;
         model: string;
       }): Promise<void> => {
+        if (preserveUserFacingSessionState) {
+          return;
+        }
         const probe = run.autoFallbackPrimaryProbe;
         if (!probe) {
           return;
@@ -522,6 +784,7 @@ export function createFollowupRunner(params: {
       fallbackProvider = run.provider;
       fallbackModel = run.model;
       replyOperation.setPhase("running");
+      const runAbortSignal = replyOperation.abortSignal;
       let pendingDeferredCliTerminal:
         | {
             provider: string;
@@ -537,10 +800,13 @@ export function createFollowupRunner(params: {
           ...resolveModelFallbackOptions(run, runtimeConfig),
           cfg: runtimeConfig,
           runId,
+          sessionId: run.sessionId,
+          abortSignal: runAbortSignal,
           resolveAgentHarnessRuntimeOverride: (provider) =>
             resolveSessionRuntimeOverrideForProvider({
               provider,
               entry: activeSessionEntry,
+              cfg: runtimeConfig,
             }),
           prepareAgentHarnessRuntime: async ({ provider, model, agentHarnessRuntimeOverride }) => {
             await ensureSelectedAgentHarnessPlugin({
@@ -575,41 +841,116 @@ export function createFollowupRunner(params: {
             const sessionRuntimeOverride = resolveSessionRuntimeOverrideForProvider({
               provider,
               entry: activeSessionEntry,
+              cfg: runtimeConfig,
             });
             const cliExecutionProvider =
-              sessionRuntimeOverride === "pi"
-                ? provider
-                : ((sessionRuntimeOverride && isCliProvider(sessionRuntimeOverride, runtimeConfig)
-                    ? sessionRuntimeOverride
-                    : undefined) ??
-                  resolveCliRuntimeExecutionProvider({
-                    provider,
-                    cfg: runtimeConfig,
-                    agentId: run.agentId,
-                    modelId: model,
-                    authProfileId: selectedAuthProfile.authProfileId,
-                  }) ??
-                  provider);
+              (sessionRuntimeOverride && isCliProvider(sessionRuntimeOverride, runtimeConfig)
+                ? sessionRuntimeOverride
+                : undefined) ??
+              resolveCliRuntimeExecutionProvider({
+                provider,
+                cfg: runtimeConfig,
+                agentId: run.agentId,
+                modelId: model,
+                authProfileId: selectedAuthProfile.authProfileId,
+              }) ??
+              provider;
             let attemptCompactionCount = 0;
+            const userTurnTranscriptRecorder =
+              effectiveQueued.userTurnTranscriptRecorder ?? opts?.userTurnTranscriptRecorder;
+            const notifyUserMessagePersisted = () => {
+              queuedUserMessagePersistedAcrossFallback = true;
+            };
+            // Shared by the embedded onToolResult callback and the CLI tool
+            // summary tracker so both runners deliver identical durable summaries.
+            const deliverFollowupToolSummary = (payload: ReplyPayload) =>
+              enqueueProgressDelivery(async () => {
+                if (
+                  run.sourceReplyDeliveryMode === "message_tool_only" &&
+                  !shouldEmitToolResultProgress()
+                ) {
+                  return;
+                }
+                await sendFollowupPayloads(
+                  [payload],
+                  effectiveQueued,
+                  {
+                    provider,
+                    modelId: model,
+                  },
+                  { kind: "tool", mirror: false, runId },
+                );
+                if (payload.isError === true) {
+                  markVisibleToolErrorProgress();
+                }
+              });
             try {
               if (isCliProvider(cliExecutionProvider, runtimeConfig)) {
-                const isRoomEventCliRun = queued.currentInboundEventKind === "room_event";
-                const cliSessionBinding = isRoomEventCliRun
-                  ? undefined
-                  : getCliSessionBinding(activeSessionEntry, cliExecutionProvider);
+                const cliSessionBinding = getCliSessionBinding(
+                  activeSessionEntry,
+                  cliExecutionProvider,
+                );
                 const cliLifecycleStartedAt = Date.now();
+                let droppedCliSessionReplacement = false;
                 pendingDeferredCliTerminal = {
                   provider,
                   model,
                   startedAt: cliLifecycleStartedAt,
                 };
+                const followupCurrentMessageId = resolveFollowupCurrentMessageId();
+                const cliToolSummaryTracker = createCliToolSummaryTracker({
+                  detailMode: toolProgressDetail,
+                  shouldEmitToolResult: shouldEmitToolResultProgress,
+                  shouldEmitToolOutput: shouldEmitToolOutputProgress,
+                  deliver: deliverFollowupToolSummary,
+                });
                 const result = await runCliAgentWithLifecycle({
                   runId,
+                  lifecycleGeneration,
                   provider: cliExecutionProvider,
                   startedAt: cliLifecycleStartedAt,
                   emitLifecycleTerminal: false,
                   onAgentRunStart: () => opts?.onAgentRunStart?.(runId),
                   suppressAssistantBridge: run.silentExpected,
+                  onToolEvent: async (payload) => {
+                    await cliToolSummaryTracker.noteToolEvent(payload);
+                    if (payload.phase === "result") {
+                      return;
+                    }
+                    await forwardFollowupProgressEvent({
+                      evt: {
+                        stream: "tool",
+                        data: { name: payload.name, phase: payload.phase, args: payload.args },
+                      },
+                      opts,
+                      detailMode: toolProgressDetail,
+                      emitChannelProgress: shouldEmitToolResultProgress(),
+                    });
+                  },
+                  onCommentaryText:
+                    opts?.commentaryProgressEnabled === true && opts.onItemEvent
+                      ? async ({ text, itemId }) => {
+                          await forwardFollowupProgressEvent({
+                            evt: {
+                              stream: "item",
+                              data: { kind: "preamble", progressText: text, itemId },
+                            },
+                            opts,
+                            detailMode: toolProgressDetail,
+                          });
+                        }
+                      : undefined,
+                  transformResult:
+                    queued.currentInboundEventKind === "room_event"
+                      ? (resultLocal) =>
+                          keepCliSessionBindingOnlyWhenReused({
+                            result: resultLocal,
+                            existingSessionId: cliSessionBinding?.sessionId,
+                            onDroppedReplacement: () => {
+                              droppedCliSessionReplacement = true;
+                            },
+                          })
+                      : undefined,
                   runParams: {
                     replyOperation,
                     sessionId: run.sessionId,
@@ -618,10 +959,19 @@ export function createFollowupRunner(params: {
                     trigger: opts?.isHeartbeat === true ? "heartbeat" : "user",
                     sessionFile: run.sessionFile,
                     workspaceDir: run.workspaceDir,
+                    cwd: run.cwd,
                     config: runtimeConfig,
                     prompt: queued.prompt,
                     transcriptPrompt: queued.transcriptPrompt,
+                    suppressNextUserMessagePersistence: suppressQueuedUserPersistenceForCandidate,
+                    userTurnTranscriptRecorder,
+                    onUserMessagePersisted: notifyUserMessagePersisted,
+                    persistAssistantTranscript:
+                      queued.currentInboundEventKind !== "room_event" &&
+                      run.suppressTranscriptOnlyAssistantPersistence !== true,
+                    storePath,
                     currentInboundEventKind: queued.currentInboundEventKind,
+                    currentInboundAudio: queued.currentInboundAudio,
                     currentInboundContext: queued.currentInboundContext,
                     inputProvenance: run.inputProvenance,
                     provider: cliExecutionProvider,
@@ -631,10 +981,12 @@ export function createFollowupRunner(params: {
                     }),
                     thinkLevel: run.thinkLevel,
                     timeoutMs: run.timeoutMs,
+                    runTimeoutOverrideMs: run.runTimeoutOverrideMs,
                     runId,
                     extraSystemPrompt: run.extraSystemPrompt,
                     sourceReplyDeliveryMode: run.sourceReplyDeliveryMode,
                     silentReplyPromptMode: run.silentReplyPromptMode,
+                    allowEmptyAssistantReplyAsSilent: run.allowEmptyAssistantReplyAsSilent,
                     extraSystemPromptStatic: run.extraSystemPromptStatic,
                     ownerNumbers: run.ownerNumbers,
                     cliSessionId: cliSessionBinding?.sessionId,
@@ -652,36 +1004,38 @@ export function createFollowupRunner(params: {
                       originatingChannel: queued.originatingChannel,
                       provider: run.messageProvider,
                     }),
+                    currentChannelId: queued.originatingTo,
+                    currentThreadTs:
+                      queued.originatingThreadId != null
+                        ? String(queued.originatingThreadId)
+                        : undefined,
+                    currentMessageId: followupCurrentMessageId,
                     agentAccountId: run.agentAccountId,
+                    senderId: run.senderId,
+                    senderIsOwner: run.senderIsOwner,
                     disableTools: opts?.disableTools,
-                    abortSignal: queued.abortSignal,
+                    abortSignal: runAbortSignal,
                   },
-                  transformResult: (rawResult) =>
-                    isRoomEventCliRun && rawResult.meta.agentMeta
-                      ? (() => {
-                          const { cliSessionBinding: _cliSessionBinding, ...agentMeta } =
-                            rawResult.meta.agentMeta;
-                          return {
-                            ...rawResult,
-                            meta: {
-                              ...rawResult.meta,
-                              agentMeta: {
-                                ...agentMeta,
-                                sessionId: "",
-                              },
-                            },
-                          };
-                        })()
-                      : rawResult,
                 });
+                if (droppedCliSessionReplacement) {
+                  await clearDroppedCliSessionBinding({
+                    provider: cliExecutionProvider,
+                    sessionKey: replySessionKey,
+                    sessionStore,
+                    storePath,
+                    activeSessionEntry,
+                  });
+                }
                 bootstrapPromptWarningSignaturesSeen = resolveBootstrapWarningSignaturesSeen(
                   result.meta?.systemPromptReport,
                 );
                 return result;
               }
               pendingDeferredCliTerminal = undefined;
-              const result = await runEmbeddedPiAgent({
+              const followupCurrentMessageId = resolveFollowupCurrentMessageId();
+              const result = await runEmbeddedAgent({
                 allowGatewaySubagentBinding: true,
+                lifecycleGeneration,
                 replyOperation,
                 sessionId: run.sessionId,
                 sessionKey: run.sessionKey,
@@ -689,6 +1043,7 @@ export function createFollowupRunner(params: {
                 trigger: "user",
                 messageChannel: queued.originatingChannel ?? undefined,
                 messageProvider: run.messageProvider,
+                chatType: run.chatType,
                 agentAccountId: run.agentAccountId,
                 messageTo: queued.originatingTo,
                 messageThreadId: queued.originatingThreadId,
@@ -697,6 +1052,7 @@ export function createFollowupRunner(params: {
                   queued.originatingThreadId != null
                     ? String(queued.originatingThreadId)
                     : undefined,
+                currentMessageId: followupCurrentMessageId,
                 groupId: run.groupId,
                 groupChannel: run.groupChannel,
                 groupSpace: run.groupSpace,
@@ -707,20 +1063,21 @@ export function createFollowupRunner(params: {
                 sessionFile: run.sessionFile,
                 agentDir: run.agentDir,
                 workspaceDir: run.workspaceDir,
+                cwd: run.cwd,
                 config: runtimeConfig,
                 skillsSnapshot: run.skillsSnapshot,
                 prompt: queued.prompt,
                 transcriptPrompt: queued.transcriptPrompt,
+                userTurnTranscriptRecorder,
                 currentInboundEventKind: queued.currentInboundEventKind,
+                currentInboundAudio: queued.currentInboundAudio,
                 currentInboundContext: queued.currentInboundContext,
                 extraSystemPrompt: run.extraSystemPrompt,
                 silentReplyPromptMode: run.silentReplyPromptMode,
                 sourceReplyDeliveryMode: run.sourceReplyDeliveryMode,
                 forceMessageTool: run.sourceReplyDeliveryMode === "message_tool_only",
                 suppressNextUserMessagePersistence: suppressQueuedUserPersistenceForCandidate,
-                onUserMessagePersisted: () => {
-                  queuedUserMessagePersistedAcrossFallback = true;
-                },
+                onUserMessagePersisted: notifyUserMessagePersisted,
                 suppressTranscriptOnlyAssistantPersistence:
                   run.suppressTranscriptOnlyAssistantPersistence,
                 suppressAssistantErrorPersistence: suppressAssistantErrorPersistenceForCandidate,
@@ -736,12 +1093,18 @@ export function createFollowupRunner(params: {
                 thinkLevel: run.thinkLevel,
                 verboseLevel: run.verboseLevel,
                 reasoningLevel: run.reasoningLevel,
-                suppressToolErrorWarnings: opts?.suppressToolErrorWarnings,
+                suppressToolErrorWarnings: shouldSuppressToolErrorWarnings,
                 execOverrides: run.execOverrides,
                 bashElevated: run.bashElevated,
                 timeoutMs: run.timeoutMs,
+                runTimeoutOverrideMs: run.runTimeoutOverrideMs,
                 runId,
-                abortSignal: queued.abortSignal,
+                abortSignal: runAbortSignal,
+                onExecutionStarted: (info) => {
+                  if (info?.lifecycleGeneration) {
+                    lifecycleGeneration = info.lifecycleGeneration;
+                  }
+                },
                 images: queuedImages,
                 imageOrder: queuedImageOrder,
                 allowTransientCooldownProbe: runOptions?.allowTransientCooldownProbe,
@@ -754,24 +1117,7 @@ export function createFollowupRunner(params: {
                 toolProgressDetail,
                 shouldEmitToolResult: shouldEmitToolResultProgress,
                 shouldEmitToolOutput: shouldEmitToolOutputProgress,
-                onToolResult: (payload) =>
-                  enqueueProgressDelivery(async () => {
-                    if (
-                      run.sourceReplyDeliveryMode === "message_tool_only" &&
-                      run.verboseLevel === "off"
-                    ) {
-                      return;
-                    }
-                    await sendFollowupPayloads(
-                      [payload],
-                      effectiveQueued,
-                      {
-                        provider,
-                        modelId: model,
-                      },
-                      { mirror: false },
-                    );
-                  }),
+                onToolResult: deliverFollowupToolSummary,
                 onAgentEvent: (evt) =>
                   enqueueProgressDelivery(async () => {
                     await forwardFollowupProgressEvent({
@@ -782,7 +1128,17 @@ export function createFollowupRunner(params: {
                       onCompactionComplete: () => {
                         attemptCompactionCount += 1;
                       },
+                      notifyUserAboutCompaction: shouldNotifyUserAboutCompaction(runtimeConfig),
+                      currentMessageId: compactionNoticeReplyToId,
+                      onCompactionNoticePayload: (payload) =>
+                        sendCompactionNoticePayload(payload, { provider, modelId: model }),
                     });
+                    if (
+                      hasFailedFollowupProgressEvent(evt) &&
+                      canForwardFailedFollowupProgressEvent(evt, opts)
+                    ) {
+                      markVisibleToolErrorProgress();
+                    }
                   }),
               });
               bootstrapPromptWarningSignaturesSeen = resolveBootstrapWarningSignaturesSeen(
@@ -802,6 +1158,9 @@ export function createFollowupRunner(params: {
         runResult = fallbackResult.result;
         fallbackProvider = fallbackResult.provider;
         fallbackModel = fallbackResult.model;
+        if (isAgentRunRestartAbortReason(runAbortSignal.reason)) {
+          throw runAbortSignal.reason;
+        }
         if (
           pendingDeferredCliTerminal &&
           pendingDeferredCliTerminal.provider === fallbackProvider &&
@@ -809,11 +1168,13 @@ export function createFollowupRunner(params: {
         ) {
           emitAgentEvent({
             runId,
+            lifecycleGeneration,
             stream: "lifecycle",
             data: {
               phase: "end",
               startedAt: pendingDeferredCliTerminal.startedAt,
               endedAt: Date.now(),
+              ...resolveAgentRunAbortLifecycleFields(runAbortSignal),
             },
           });
         }
@@ -828,15 +1189,20 @@ export function createFollowupRunner(params: {
         if (pendingDeferredCliTerminal) {
           emitAgentEvent({
             runId,
+            lifecycleGeneration,
             stream: "lifecycle",
             data: {
               phase: "error",
               startedAt: pendingDeferredCliTerminal.startedAt,
               endedAt: Date.now(),
               error: message,
+              ...resolveAgentRunAbortLifecycleFields(runAbortSignal),
             },
           });
           pendingDeferredCliTerminal = undefined;
+        }
+        if (lifecycleGeneration !== getAgentEventLifecycleGeneration()) {
+          clearAgentRunContext(runId, lifecycleGeneration);
         }
         await drainProgressDeliveries();
         defaultRuntime.error?.(`Followup agent failed before reply: ${message}`);
@@ -850,6 +1216,7 @@ export function createFollowupRunner(params: {
       const modelUsed = runResult.meta?.agentMeta?.model ?? fallbackModel ?? defaultModel;
       const providerUsed =
         runResult.meta?.agentMeta?.provider ?? fallbackProvider ?? queued.run.provider;
+      const usedCliProvider = isCliProvider(providerUsed, runtimeConfig);
       const contextTokensUsed =
         resolveContextTokensForModel({
           cfg: queued.run.config,
@@ -867,13 +1234,17 @@ export function createFollowupRunner(params: {
           cfg: runtimeConfig,
           usage,
           lastCallUsage: runResult.meta?.agentMeta?.lastCallUsage,
+          compactionTokensAfter: runResult.meta?.agentMeta?.compactionTokensAfter,
           promptTokens,
           isHeartbeat: opts?.isHeartbeat === true,
+          preserveUserFacingSessionModelState: preserveUserFacingSessionState,
           modelUsed,
           providerUsed,
           contextTokensUsed,
           systemPromptReport: runResult.meta?.systemPromptReport,
           cliSessionBinding: runResult.meta?.agentMeta?.cliSessionBinding,
+          clearCliSessionBinding:
+            usedCliProvider && runResult.meta?.agentMeta?.clearCliSessionBinding === true,
           logLabel: "followup",
         });
       }
@@ -928,7 +1299,7 @@ export function createFollowupRunner(params: {
             });
           }
         }
-        if (run.verboseLevel && run.verboseLevel !== "off") {
+        if (shouldEmitVerboseProgress()) {
           const suffix = typeof count === "number" ? ` (count ${count})` : "";
           deliveryPayloads = [
             {
@@ -946,10 +1317,15 @@ export function createFollowupRunner(params: {
         return;
       }
 
-      await sendFollowupPayloads(deliveryPayloads, effectiveQueued, {
-        provider: providerUsed,
-        modelId: modelUsed,
-      });
+      await sendFollowupPayloads(
+        deliveryPayloads,
+        effectiveQueued,
+        {
+          provider: providerUsed,
+          modelId: modelUsed,
+        },
+        { runId },
+      );
     } finally {
       for (const end of endDeliveryCorrelations.toReversed()) {
         try {
@@ -960,7 +1336,9 @@ export function createFollowupRunner(params: {
           );
         }
       }
-      completeFollowupRunLifecycle(queued);
+      if (!deferred) {
+        completeFollowupRunLifecycle(queued);
+      }
       replyOperation?.complete();
       // Both signals are required for the typing controller to clean up.
       // The main inbound dispatch path calls markDispatchIdle() from the

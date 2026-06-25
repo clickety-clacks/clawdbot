@@ -1,10 +1,13 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+// Cron shared tests cover shared cron CLI parsing, display, and error helpers.
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CronJob } from "../../cron/types.js";
 import type { RuntimeEnv } from "../../runtime.js";
 import {
   coerceCronDeliveryPreviews,
   getCronChannelOptions,
+  parseAt,
   parseCronToolsAllow,
+  parseDurationMs,
   printCronList,
 } from "./shared.js";
 
@@ -29,6 +32,10 @@ function createRuntimeLogCapture(): { logs: string[]; runtime: RuntimeEnv } {
 function expectLogsToInclude(logs: readonly string[], text: string): void {
   expect(logs.join("\n")).toContain(text);
 }
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 function createBaseJob(overrides: Partial<CronJob>): CronJob {
   const now = Date.now();
@@ -231,6 +238,34 @@ describe("printCronList", () => {
   });
 });
 
+describe("parseAt", () => {
+  it("accepts leading plus relative durations for cron add --at", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-25T00:00:00.000Z"));
+
+    expect(parseAt("+30m")).toBe("2026-05-25T00:30:00.000Z");
+    expect(parseAt("30m")).toBe("2026-05-25T00:30:00.000Z");
+  });
+
+  it("rejects out-of-range epoch milliseconds", () => {
+    expect(parseAt(String(Number.MAX_SAFE_INTEGER))).toBeNull();
+  });
+
+  it("rejects relative durations outside the Date range", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-25T00:00:00.000Z"));
+
+    expect(parseAt("+999999999999999999d")).toBeNull();
+  });
+
+  it("rejects relative durations when the current clock is at the Date boundary", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(8_640_000_000_000_000));
+
+    expect(parseAt("+1m")).toBeNull();
+  });
+});
+
 describe("getCronChannelOptions", () => {
   it("falls back to a generic channel placeholder when no plugins are loaded", () => {
     hoisted.listChannelPluginsMock.mockReturnValue([]);
@@ -278,5 +313,28 @@ describe("coerceCronDeliveryPreviews", () => {
         },
       }).size,
     ).toBe(0);
+  });
+});
+
+describe("parseDurationMs", () => {
+  it("parses valid positive durations", () => {
+    expect(parseDurationMs("500ms")).toBe(500);
+    expect(parseDurationMs("30s")).toBe(30_000);
+    expect(parseDurationMs("1.5h")).toBe(5_400_000);
+    expect(parseDurationMs("1d")).toBe(86_400_000);
+  });
+
+  it("rejects non-positive and malformed durations", () => {
+    expect(parseDurationMs("0s")).toBeNull();
+    expect(parseDurationMs("-5s")).toBeNull();
+    expect(parseDurationMs("abc")).toBeNull();
+    expect(parseDurationMs("")).toBeNull();
+  });
+
+  it("rejects durations that overflow to a non-finite millisecond value (#83906)", () => {
+    // A finite mantissa can still overflow once multiplied by a large unit factor.
+    expect(parseDurationMs(`1${"0".repeat(302)}d`)).toBeNull();
+    // A large-but-finite result is still accepted.
+    expect(parseDurationMs(`9${"0".repeat(15)}ms`)).toBe(9_000_000_000_000_000);
   });
 });

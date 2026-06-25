@@ -1,3 +1,4 @@
+/** Shared registration types that make up the in-memory plugin registry. */
 import type { AgentHarness } from "../agents/harness/types.js";
 import type { ChannelPlugin } from "../channels/plugins/types.plugin.js";
 import type { GatewayMethodDescriptor } from "../gateway/methods/descriptor.js";
@@ -37,6 +38,7 @@ import type {
   CliBackendPlugin,
   ImageGenerationProviderPlugin,
   MediaUnderstandingProviderPlugin,
+  TranscriptSourceProvider,
   MusicGenerationProviderPlugin,
   OpenClawPluginChannelRegistration,
   OpenClawPluginCliCommandDescriptor,
@@ -69,6 +71,7 @@ import type {
   UnifiedModelCatalogProviderPlugin,
 } from "./types.js";
 
+/** Agent tool factory registered by one plugin runtime. */
 export type PluginToolRegistration = {
   pluginId: string;
   pluginName?: string;
@@ -91,6 +94,7 @@ export type PluginCliRegistration = {
   rootDir?: string;
 };
 
+/** Gateway HTTP route registered by a plugin runtime. */
 export type PluginHttpRouteRegistration = {
   pluginId?: string;
   path: string;
@@ -182,6 +186,8 @@ export type PluginRealtimeVoiceProviderRegistration =
   PluginOwnedProviderRegistration<RealtimeVoiceProviderPlugin>;
 export type PluginMediaUnderstandingProviderRegistration =
   PluginOwnedProviderRegistration<MediaUnderstandingProviderPlugin>;
+export type PluginTranscriptsSourceProviderRegistration =
+  PluginOwnedProviderRegistration<TranscriptSourceProvider>;
 export type PluginImageGenerationProviderRegistration =
   PluginOwnedProviderRegistration<ImageGenerationProviderPlugin>;
 export type PluginVideoGenerationProviderRegistration =
@@ -300,6 +306,7 @@ export type PluginTrustedToolPolicyRegistryRegistration = {
   pluginId: string;
   pluginName?: string;
   policy: PluginTrustedToolPolicyRegistration;
+  origin?: PluginRecord["origin"];
   source: string;
   rootDir?: string;
 };
@@ -399,6 +406,7 @@ export type PluginRecord = {
   realtimeTranscriptionProviderIds: string[];
   realtimeVoiceProviderIds: string[];
   mediaUnderstandingProviderIds: string[];
+  transcriptSourceProviderIds: string[];
   imageGenerationProviderIds: string[];
   videoGenerationProviderIds: string[];
   musicGenerationProviderIds: string[];
@@ -438,6 +446,7 @@ export type PluginRegistry = {
   realtimeTranscriptionProviders: PluginRealtimeTranscriptionProviderRegistration[];
   realtimeVoiceProviders: PluginRealtimeVoiceProviderRegistration[];
   mediaUnderstandingProviders: PluginMediaUnderstandingProviderRegistration[];
+  transcriptSourceProviders: PluginTranscriptsSourceProviderRegistration[];
   imageGenerationProviders: PluginImageGenerationProviderRegistration[];
   videoGenerationProviders: PluginVideoGenerationProviderRegistration[];
   musicGenerationProviders: PluginMusicGenerationProviderRegistration[];
