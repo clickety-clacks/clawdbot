@@ -35,6 +35,7 @@ import { filterContainerGenericHints } from "./shared.js";
 
 type DaemonLifecycleOptions = {
   json?: boolean;
+  silent?: boolean;
   force?: boolean;
   wait?: string;
   restartIntent?: GatewayRestartIntent;
@@ -190,7 +191,12 @@ export async function runServiceUninstall(params: {
   assertNotLoadedAfterUninstall: boolean;
 }) {
   const json = Boolean(params.opts?.json);
-  const { stdout, emit, fail } = createDaemonActionContext({ action: "uninstall", json });
+  const silent = Boolean(params.opts?.silent);
+  const { stdout, emit, fail } = createDaemonActionContext({
+    action: "uninstall",
+    json,
+    silent,
+  });
 
   if (resolveIsNixMode(process.env)) {
     fail("Nix mode detected; service uninstall is disabled.");
@@ -249,7 +255,8 @@ export async function runServiceStart(params: {
   repairLoadedService?: (ctx: ServiceStartRepairContext) => Promise<ServiceRecoveryResult | null>;
 }) {
   const json = Boolean(params.opts?.json);
-  const { stdout, emit, fail } = createDaemonActionContext({ action: "start", json });
+  const silent = Boolean(params.opts?.silent);
+  const { stdout, emit, fail } = createDaemonActionContext({ action: "start", json, silent });
   const loaded = await resolveServiceLoadedOrFail({
     serviceNoun: params.serviceNoun,
     service: params.service,
@@ -378,7 +385,8 @@ export async function runServiceStop(params: {
   stopWhenNotLoaded?: boolean;
 }) {
   const json = Boolean(params.opts?.json);
-  const { stdout, emit, fail } = createDaemonActionContext({ action: "stop", json });
+  const silent = Boolean(params.opts?.silent);
+  const { stdout, emit, fail } = createDaemonActionContext({ action: "stop", json, silent });
 
   const loaded = await resolveServiceLoadedOrFail({
     serviceNoun: params.serviceNoun,
@@ -470,7 +478,12 @@ export async function runServiceRestart(params: {
   onNotLoaded?: (ctx: ServiceRecoveryContext) => Promise<ServiceRecoveryResult | null>;
 }): Promise<boolean> {
   const json = Boolean(params.opts?.json);
-  const { stdout, emit, fail } = createDaemonActionContext({ action: "restart", json });
+  const silent = Boolean(params.opts?.silent);
+  const { stdout, emit, fail } = createDaemonActionContext({
+    action: "restart",
+    json,
+    silent,
+  });
   const warnings: string[] = [];
   const restartIntent = params.opts?.restartIntent;
   let handledRecovery: ServiceRecoveryResult | null = null;

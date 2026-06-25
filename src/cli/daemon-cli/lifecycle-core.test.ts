@@ -383,6 +383,25 @@ describe("runServiceRestart token drift", () => {
     expect(payload.message).toContain("unmanaged process");
   });
 
+  it("suppresses daemon JSON when a JSON lifecycle action is silent", async () => {
+    service.isLoaded.mockResolvedValue(false);
+
+    const result = await runServiceRestart({
+      serviceNoun: "Gateway",
+      service,
+      renderStartHints: () => [],
+      opts: { json: true, silent: true },
+      onNotLoaded: async () => ({
+        result: "restarted",
+        message: "Gateway restart signal sent to unmanaged process on port 18789: 4200.",
+      }),
+      postRestartCheck: async () => {},
+    });
+
+    expect(result).toBe(true);
+    expect(runtimeLogs).toEqual([]);
+  });
+
   it("emits loaded restart state when launchd repair handles a not-loaded restart", async () => {
     const postRestartCheck = vi.fn(async () => {});
     service.isLoaded.mockResolvedValue(false);

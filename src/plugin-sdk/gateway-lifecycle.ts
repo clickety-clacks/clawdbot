@@ -24,11 +24,11 @@ function gatewayStopConfirmed(status: DaemonStatus): boolean {
 }
 
 export async function restartGatewayServiceAfterChannelConfigWrite(): Promise<boolean> {
-  return await runDaemonRestart({ json: true });
+  return await runDaemonRestart({ json: true, silent: true });
 }
 
 export async function stopGatewayServiceBeforeChannelConfigDelete(): Promise<boolean> {
-  await runDaemonStop({ json: true });
+  await runDaemonStop({ json: true, silent: true });
   const status = await gatherDaemonStatus({
     rpc: {},
     probe: true,

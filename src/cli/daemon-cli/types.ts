@@ -31,6 +31,7 @@ export type DaemonInstallOptions = {
 /** Options shared by service start/stop/restart/uninstall commands. */
 export type DaemonLifecycleOptions = {
   json?: boolean;
+  silent?: boolean;
   force?: boolean;
   safe?: boolean;
   skipDeferral?: boolean;

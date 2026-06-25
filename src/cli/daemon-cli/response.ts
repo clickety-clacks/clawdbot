@@ -107,16 +107,20 @@ export function createNullWriter(): Writable {
 }
 
 /** Create stdout/warning/emit/fail helpers for one daemon lifecycle action. */
-export function createDaemonActionContext(params: { action: DaemonAction; json: boolean }): {
+export function createDaemonActionContext(params: {
+  action: DaemonAction;
+  json: boolean;
+  silent?: boolean;
+}): {
   stdout: Writable;
   warnings: string[];
   emit: (payload: Omit<DaemonActionResponse, "action">) => void;
   fail: (message: string, hints?: string[]) => void;
 } {
   const warnings: string[] = [];
-  const stdout = params.json ? createNullWriter() : process.stdout;
+  const stdout = params.json || params.silent ? createNullWriter() : process.stdout;
   const emit = (payload: Omit<DaemonActionResponse, "action">) => {
-    if (!params.json) {
+    if (!params.json || params.silent) {
       return;
     }
     emitDaemonActionJson({
@@ -128,12 +132,14 @@ export function createDaemonActionContext(params: { action: DaemonAction; json: 
   };
   const fail = (message: string, hints?: string[]) => {
     if (params.json) {
-      emit({
-        ok: false,
-        error: message,
-        hints,
-      });
-    } else {
+      if (!params.silent) {
+        emit({
+          ok: false,
+          error: message,
+          hints,
+        });
+      }
+    } else if (!params.silent) {
       defaultRuntime.error(message);
       if (hints?.length) {
         for (const hint of hints) {
