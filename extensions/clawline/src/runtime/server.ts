@@ -2037,6 +2037,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const scheduledPromptTurnCountsBySession = new Map<string, number>();
   const pendingAlertPromptTurnCountsBySession = new Map<string, number>();
   const scheduledAlertPromptTurnsByIdempotencyKey = new Map<string, number>();
+  const admittedAlertPromptTurnsByIdempotencyKey = new Map<string, PromptTurnAdmissionFacts>();
 
   type SessionInfo = {
     dmScope: string;
@@ -4512,9 +4513,19 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     for (const item of items) {
       const droppedRunId = item.announceId?.trim();
       if (droppedRunId) {
-        scheduledAlertPromptTurnsByIdempotencyKey.delete(
-          resolveAlertDedupeKey(item.sessionKey, droppedRunId),
-        );
+        const droppedDedupeKey = resolveAlertDedupeKey(item.sessionKey, droppedRunId);
+        scheduledAlertPromptTurnsByIdempotencyKey.delete(droppedDedupeKey);
+        const admitted = admittedAlertPromptTurnsByIdempotencyKey.get(droppedDedupeKey);
+        if (admitted && !isPromptTurnTerminalState(admitted.state)) {
+          transitionPromptTurnAdmission(admitted, "failed", {
+            messageId: admitted.clientMessageId,
+            sessionKey: item.sessionKey,
+            userId: resolveAlertPromptTurnQueueUserId(item.sessionKey),
+            deviceId: admitted.deviceId,
+            error: "clawline.alertPromptTurn.dropped",
+          });
+        }
+        admittedAlertPromptTurnsByIdempotencyKey.delete(droppedDedupeKey);
       }
       clearPendingAlertPromptTurn(item.sessionKey);
     }
@@ -5012,12 +5023,45 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         send: async (item) => {
           const targetSessionKey = item.sessionKey;
           const targetQueueUserId = resolveAlertPromptTurnQueueUserId(targetSessionKey);
+          const correlatedRunId = item.announceId?.trim() || alert.idempotencyKey;
+          const admissionKey = resolveAlertDedupeKey(targetSessionKey, correlatedRunId);
+          let admittedPromptTurn = admittedAlertPromptTurnsByIdempotencyKey.get(admissionKey);
+          if (!admittedPromptTurn && shouldDurablyAdmitAlertPromptTurn(targetSessionKey)) {
+            const durableAttachments =
+              canonicalizeReplayAttachments(item.attachments, logger) ?? [];
+            const durableAssetIds = durableAttachments.flatMap((attachment) =>
+              attachment.type === "asset" ? [attachment.assetId] : [],
+            );
+            const admitted = await admitAlertPromptTurn({
+              attachments: durableAttachments,
+              assetIds: durableAssetIds,
+              content: item.prompt,
+              idempotencyKey: correlatedRunId,
+              sessionKey: targetSessionKey,
+              targetUserId: targetQueueUserId,
+            });
+            transitionPromptTurnAdmission(admitted.promptTurnAdmission, "queued", {
+              messageId: admitted.promptTurnAdmission.clientMessageId,
+              sessionKey: targetSessionKey,
+              userId: targetQueueUserId,
+              deviceId: admitted.promptTurnAdmission.deviceId,
+            });
+            admittedPromptTurn = admitted.promptTurnAdmission;
+            admittedAlertPromptTurnsByIdempotencyKey.set(admissionKey, admittedPromptTurn);
+          }
           await runPromptTurnTask(targetQueueUserId, targetSessionKey, async () => {
-            const correlatedRunId = item.announceId?.trim() || alert.idempotencyKey;
             const correlatedPhaseBase = {
               sessionKey: targetSessionKey,
               runId: correlatedRunId,
             };
+            if (admittedPromptTurn && admittedPromptTurn.state === "queued") {
+              transitionPromptTurnAdmission(admittedPromptTurn, "running", {
+                messageId: admittedPromptTurn.clientMessageId,
+                sessionKey: targetSessionKey,
+                userId: targetQueueUserId,
+                deviceId: admittedPromptTurn.deviceId,
+              });
+            }
             logAlertRunPhase("wake-dispatched", correlatedPhaseBase);
             logAlertRunPhase("agent-run-start", correlatedPhaseBase);
             try {
@@ -5047,21 +5091,46 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
                 ...correlatedPhaseBase,
                 payloadCount,
               });
+              if (admittedPromptTurn && !isPromptTurnTerminalState(admittedPromptTurn.state)) {
+                transitionPromptTurnAdmission(admittedPromptTurn, "delivered", {
+                  messageId: admittedPromptTurn.clientMessageId,
+                  sessionKey: targetSessionKey,
+                  userId: targetQueueUserId,
+                  deviceId: admittedPromptTurn.deviceId,
+                });
+              }
             } catch (err) {
               logAlertRunPhase("agent-run-end", {
                 ...correlatedPhaseBase,
                 status: "error",
                 error: formatError(err),
               });
+              if (admittedPromptTurn?.state === "running") {
+                transitionPromptTurnAdmission(admittedPromptTurn, "queued", {
+                  messageId: admittedPromptTurn.clientMessageId,
+                  sessionKey: targetSessionKey,
+                  userId: targetQueueUserId,
+                  deviceId: admittedPromptTurn.deviceId,
+                  error: formatError(err),
+                });
+              }
               throw err;
             }
           });
         },
         onDrop: clearDroppedAlertIdempotencyKeys,
-        onSent: (item) => clearPendingAlertPromptTurn(item.sessionKey),
+        onSent: (item) => {
+          if (item.announceId) {
+            admittedAlertPromptTurnsByIdempotencyKey.delete(
+              resolveAlertDedupeKey(item.sessionKey, item.announceId),
+            );
+          }
+          clearPendingAlertPromptTurn(item.sessionKey);
+        },
       });
       if (!queued) {
         scheduledAlertPromptTurnsByIdempotencyKey.delete(alertDedupeKey);
+        admittedAlertPromptTurnsByIdempotencyKey.delete(alertDedupeKey);
         logAlertRunPhase("dropped", phaseBase);
         logger.warn?.(
           `[clawline] alert_wake_result outcome=dropped sessionKey=${resolvedSessionKey}`,
@@ -9982,6 +10051,96 @@ button.deny { background: #9b1c31; color: white; }
     };
     await appendEvent(event, targetUserId, undefined, options);
     return event;
+  }
+
+  async function admitAlertPromptTurn(params: {
+    attachments: NormalizedAttachment[];
+    assetIds: string[];
+    content: string;
+    idempotencyKey: string;
+    sessionKey: string;
+    targetUserId: string;
+  }): Promise<{ event: ServerMessage; promptTurnAdmission: PromptTurnAdmissionFacts }> {
+    const deviceId = "clawline-alert";
+    const clientMessageId = `c_alert_${sha256(`${params.sessionKey}\0${params.idempotencyKey}`).slice(0, 24)}_${randomUUID().replaceAll("-", "").slice(0, 16)}`;
+    const contentHash = sha256(params.content);
+    const attachmentsHash = hashAttachments(params.attachments);
+    const timestamp = nowMs();
+    const event: ServerMessage = {
+      type: "message",
+      id: generateServerMessageId(),
+      role: "user",
+      content: params.content,
+      timestamp,
+      streaming: true,
+      deviceId,
+      clientMessageId,
+      sessionKey: params.sessionKey,
+      attachments: params.attachments.length > 0 ? params.attachments : undefined,
+    };
+    await enqueueWriteTask(() => {
+      const streams = ensureStreamSessionsForUser({
+        userId: params.targetUserId,
+        isAdmin: allowlist.entries.some(
+          (entry) =>
+            entry.isAdmin &&
+            sanitizeUserId(entry.userId).toLowerCase() ===
+              sanitizeUserId(params.targetUserId).toLowerCase(),
+        ),
+      });
+      if (!streams.some((stream) => sessionKeyEq(stream.sessionKey, params.sessionKey))) {
+        throw new Error("stream_not_found");
+      }
+      syncUserSessionSubscriptions(params.targetUserId, streams);
+      const payloadJson = JSON.stringify(event);
+      const sequenceRow = sequenceStatement.get(params.targetUserId) as { sequence: number };
+      insertEventStmt.run(
+        event.id,
+        params.targetUserId,
+        sequenceRow.sequence,
+        deviceId,
+        payloadJson,
+        Buffer.byteLength(payloadJson, "utf8"),
+        timestamp,
+        "message",
+        params.sessionKey,
+      );
+      insertMessageStmt.run(
+        deviceId,
+        params.targetUserId,
+        clientMessageId,
+        event.id,
+        sequenceRow.sequence,
+        params.content,
+        contentHash,
+        attachmentsHash,
+        timestamp,
+      );
+      for (const assetId of params.assetIds) {
+        const asset = selectAssetStmt.get(assetId) as { assetId: string } | undefined;
+        if (asset) {
+          insertMessageAssetStmt.run(deviceId, clientMessageId, assetId);
+        }
+      }
+    });
+    const promptTurnAdmission = createPromptTurnAdmissionFacts({
+      deviceId,
+      clientMessageId,
+      clawlineMessageRowId: event.id,
+      streamKey: params.sessionKey,
+      contentHash,
+      attachmentsHash,
+    });
+    persistPromptTurnAdmission(promptTurnAdmission);
+    broadcastToSessionKey(params.sessionKey, event);
+    broadcastStreamTailStateForUserDetached(params.targetUserId, event, "alert_prompt_admission");
+    return { event, promptTurnAdmission };
+  }
+
+  function shouldDurablyAdmitAlertPromptTurn(sessionKey: string): boolean {
+    return (
+      sessionKeyEq(sessionKey, mainSessionKey) || parseClawlineUserSessionKey(sessionKey) !== null
+    );
   }
 
   async function sendOutboundMessage(

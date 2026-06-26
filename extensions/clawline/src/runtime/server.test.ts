@@ -6831,6 +6831,72 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("persists alert prompt input before gateway delivery can fail", async () => {
+    const entry = createAllowlistEntry();
+    const ctx = await setupTestServer([entry]);
+    const authHeader = await createAuthHeader(ctx, entry);
+    gatewayCallMock.mockRejectedValueOnce(new Error("compaction failed"));
+    try {
+      const response = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: authHeader },
+        body: JSON.stringify({
+          idempotencyKey: "delayed-alert-persist",
+          message: "T1442 delayed alert persisted",
+          source: "codex",
+          sessionKey: "agent:main:clawline:flynn:main",
+          attachments: [
+            {
+              type: "image",
+              mimeType: "image/png",
+              data: "aGVsbG8=",
+            },
+          ],
+        }),
+      });
+      expect(response.status).toBe(200);
+      expect(enqueueAnnounceMock).toHaveBeenCalledTimes(1);
+      await expect(sendQueuedAnnounce(0)).rejects.toThrow("compaction failed");
+
+      const db = new BetterSqlite3(path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite"));
+      try {
+        const row = db
+          .prepare(
+            `SELECT messages.content, messages.promptTurnState, events.sessionKey, events.payloadJson
+               FROM messages
+               JOIN events ON events.id = messages.serverEventId
+              WHERE messages.content LIKE ?
+              LIMIT 1`,
+          )
+          .get("%T1442 delayed alert persisted%") as
+          | { content: string; promptTurnState: string; sessionKey: string; payloadJson: string }
+          | undefined;
+        expect(row).toEqual(
+          expect.objectContaining({
+            content: expect.stringContaining("T1442 delayed alert persisted"),
+            promptTurnState: "queued",
+            sessionKey: "agent:main:clawline:flynn:main",
+          }),
+        );
+        expect(row?.content).toContain("[OpenClaw alert]");
+        expect(row?.content).toContain("Source: codex");
+        expect(JSON.parse(row?.payloadJson ?? "{}")).toMatchObject({
+          attachments: [
+            {
+              type: "image",
+              mimeType: "image/png",
+              data: "aGVsbG8=",
+            },
+          ],
+        });
+      } finally {
+        db.close();
+      }
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("serializes busy main-session alert prompt turns on the admin prompt lane", async () => {
     const entry = createAllowlistEntry({ isAdmin: true });
     const ctx = await setupTestServer([entry]);
