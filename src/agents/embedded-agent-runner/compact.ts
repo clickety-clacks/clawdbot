@@ -71,6 +71,7 @@ import {
   resolveChannelMessageToolHints,
   resolveChannelReactionGuidance,
 } from "../channel-tools.js";
+import { invalidateCodexCliCredentialCache } from "../cli-credentials.js";
 import {
   hasMeaningfulConversationContent,
   isRealConversationMessage,
@@ -448,6 +449,19 @@ function fallbackFailureToCompactionResult(err: unknown): EmbeddedAgentCompactRe
     compacted: false,
     reason,
   };
+}
+
+function isOpenAICodexProvider(provider: string): boolean {
+  return provider === "openai" || provider === "codex";
+}
+
+function isInvalidatedCachedOpenAICredentialError(err: unknown): boolean {
+  const message = formatErrorMessage(err).toLowerCase();
+  return (
+    message.includes("401") &&
+    message.includes("authentication token has been invalidated") &&
+    message.includes("cached=true")
+  );
 }
 
 /**
@@ -1625,6 +1639,30 @@ async function compactEmbeddedAgentSessionDirectOnce(
       reason: formatErrorMessage(err),
       safeguardCancelReason: consumeCompactionSafeguardCancelReason(compactionSessionManager),
     });
+    const canRetryInvalidatedCodexCredential =
+      trigger !== "manual" &&
+      attempt < 2 &&
+      (isOpenAICodexProvider(provider) || isOpenAICodexProvider(runtimeProvider)) &&
+      isInvalidatedCachedOpenAICredentialError(err);
+    if (canRetryInvalidatedCodexCredential) {
+      invalidateCodexCliCredentialCache();
+      log.warn(
+        `[compaction] invalidated cached OpenAI/Codex credential for ${provider}/${modelId}; ` +
+          `cleared Codex CLI credential cache and retrying once`,
+        {
+          sessionKey: params.sessionKey,
+          sessionId: params.sessionId,
+          trigger,
+          attempt,
+          nextAttempt: attempt + 1,
+        },
+      );
+      return await compactEmbeddedAgentSessionDirectOnce({
+        ...params,
+        attempt: attempt + 1,
+        maxAttempts: Math.max(maxAttempts, 2),
+      });
+    }
     return fail(reason, err);
   } finally {
     if (!checkpointSnapshotRetained) {

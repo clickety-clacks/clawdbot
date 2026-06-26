@@ -165,6 +165,7 @@ export const resolveEmbeddedAgentStreamFnMock: Mock<
   (params?: unknown) => MockEmbeddedAgentStreamFn
 > = vi.fn((_params?: unknown) => vi.fn());
 export const registerProviderStreamForModelMock: Mock<(params?: unknown) => unknown> = vi.fn();
+export const invalidateCodexCliCredentialCacheMock = vi.fn();
 export const applyExtraParamsToAgentMock = vi.fn(() => ({ effectiveExtraParams: {} }));
 export const resolveAgentTransportOverrideMock: Mock<(params?: unknown) => string | undefined> =
   vi.fn(() => undefined);
@@ -340,6 +341,7 @@ export function resetCompactSessionStateMocks(): void {
   rotateTranscriptAfterCompactionMock.mockResolvedValue({ rotated: false });
   enqueueCommandInLaneMock.mockReset();
   enqueueCommandInLaneMock.mockImplementation((_lane: unknown, task: () => unknown) => task());
+  invalidateCodexCliCredentialCacheMock.mockReset();
   listRegisteredPluginAgentPromptGuidanceMock.mockReset();
   listRegisteredPluginAgentPromptGuidanceMock.mockImplementation((params?: { surface?: string }) =>
     params?.surface === "subagent"
@@ -431,6 +433,10 @@ export async function loadCompactHooksHarness(): Promise<{
 
   vi.doMock("../runtime-plugins.js", () => ({
     ensureRuntimePluginsLoaded,
+  }));
+
+  vi.doMock("../cli-credentials.js", () => ({
+    invalidateCodexCliCredentialCache: invalidateCodexCliCredentialCacheMock,
   }));
 
   vi.doMock("../../plugins/current-plugin-metadata-snapshot.js", () => ({

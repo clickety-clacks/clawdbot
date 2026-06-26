@@ -48,6 +48,11 @@ export function resetCliCredentialCachesForTest(): void {
   geminiCliCache = null;
 }
 
+/** Clears cached Codex CLI credentials so the next read observes current CLI auth storage. */
+export function invalidateCodexCliCredentialCache(): void {
+  codexCliCache = null;
+}
+
 /** Credential shape parsed from Claude Code CLI storage. */
 export type ClaudeCliCredential =
   | {

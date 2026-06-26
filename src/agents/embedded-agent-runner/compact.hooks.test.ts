@@ -15,6 +15,7 @@ import {
   getMemorySearchManagerMock,
   guardSessionManagerMock,
   hookRunner,
+  invalidateCodexCliCredentialCacheMock,
   listRegisteredPluginAgentPromptGuidanceMock,
   loadCompactHooksHarness,
   maybeCompactAgentHarnessSessionMock,
@@ -1029,6 +1030,56 @@ describe("compactEmbeddedAgentSessionDirect hooks", () => {
       code: "rate_limit_exceeded",
       rawError: "primary compaction rate limited",
     });
+  });
+
+  it("clears cached Codex credentials and retries non-manual OpenAI compaction once after token invalidation", async () => {
+    resolveModelMock.mockImplementation((provider = "openai", modelId = "fake") => ({
+      model: { provider, api: "responses", id: modelId, input: [] },
+      error: null,
+      authStorage: { setRuntimeApiKey: vi.fn() },
+      modelRegistry: {},
+    }));
+    sessionCompactImpl
+      .mockRejectedValueOnce(
+        Object.assign(
+          new Error(
+            "Summarization failed: 401 Your authentication token has been invalidated cached=true",
+          ),
+          { status: 401 },
+        ),
+      )
+      .mockResolvedValueOnce({
+        summary: "retried summary",
+        firstKeptEntryId: "entry-2",
+        tokensBefore: 120,
+        details: { ok: true },
+      });
+
+    const result = await compactEmbeddedAgentSessionDirect({
+      sessionId: "session-1",
+      sessionKey: TEST_SESSION_KEY,
+      sessionFile: "/tmp/session.jsonl",
+      workspaceDir: "/tmp/workspace",
+      trigger: "budget",
+      provider: "openai",
+      model: "gpt-primary",
+      config: {
+        agents: {
+          defaults: {
+            compaction: {
+              model: "openai/gpt-primary",
+            },
+          },
+        },
+      } as never,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.compacted).toBe(true);
+    expect(result.result?.summary).toBe("retried summary");
+    expect(sessionCompactImpl).toHaveBeenCalledTimes(2);
+    expect(resolveModelMock).toHaveBeenCalledTimes(2);
+    expect(invalidateCodexCliCredentialCacheMock).toHaveBeenCalledOnce();
   });
 
   it("emits internal + plugin compaction hooks with counts", async () => {
