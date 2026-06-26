@@ -60,6 +60,7 @@ vi.mock("../runtime-api.js", async () => {
 
 vi.mock("./gateway-alert-runtime.js", () => ({
   callClawlineGatewayAgent: (...args: unknown[]) => gatewayCallMock(...args),
+  callClawlineGatewaySessionSend: (...args: unknown[]) => gatewayCallMock(...args),
 }));
 
 const sendMessageMock = vi.fn();
@@ -6284,7 +6285,7 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
-  it("handles alert endpoint by waking gateway", async () => {
+  it("handles alert endpoint through sessions.send-class gateway admission", async () => {
     const entry = createAllowlistEntry();
     const ctx = await setupTestServer([entry]);
     const authHeader = await createAuthHeader(ctx, entry);
@@ -6305,10 +6306,8 @@ describe.sequential("clawline provider server", () => {
       expect(gatewayCallMock).toHaveBeenCalledWith(
         expect.objectContaining({
           request: expect.objectContaining({
-            sessionKey: "agent:main:main",
+            sessionKey: "agent:main:clawline:flynn:main",
             message: withMainAlertReplyRequirement(withAlertProvenance("Check on Flynn")),
-            channel: "clawline",
-            to: "agent:main:main",
           }),
         }),
       );
@@ -6317,7 +6316,7 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
-  it("forwards alert attachments through the wake queue to the gateway", async () => {
+  it("forwards alert attachments through sessions.send-class admission", async () => {
     const entry = createAllowlistEntry();
     const ctx = await setupTestServer([entry]);
     const authHeader = await createAuthHeader(ctx, entry);
@@ -6399,18 +6398,20 @@ describe.sequential("clawline provider server", () => {
         .map(([message]) => String(message))
         .filter((message) => message.startsWith("[clawline] alert_run_phase "));
       expect(alertLogs).toEqual([
-        expect.stringContaining("phase=queued sessionKey=agent:main:main runId=alert-replied-main"),
         expect.stringContaining(
-          "phase=wake-dispatched sessionKey=agent:main:main runId=alert-replied-main",
+          "phase=queued sessionKey=agent:main:clawline:flynn:main runId=alert-replied-main",
         ),
         expect.stringContaining(
-          "phase=agent-run-start sessionKey=agent:main:main runId=alert-replied-main",
+          "phase=wake-dispatched sessionKey=agent:main:clawline:flynn:main runId=alert-replied-main",
         ),
         expect.stringContaining(
-          "phase=agent-run-end sessionKey=agent:main:main runId=alert-replied-main payloadCount=1 status=ok",
+          "phase=agent-run-start sessionKey=agent:main:clawline:flynn:main runId=alert-replied-main",
         ),
         expect.stringContaining(
-          "phase=replied sessionKey=agent:main:main runId=alert-replied-main payloadCount=1",
+          "phase=agent-run-end sessionKey=agent:main:clawline:flynn:main runId=alert-replied-main payloadCount=1 status=ok",
+        ),
+        expect.stringContaining(
+          "phase=replied sessionKey=agent:main:clawline:flynn:main runId=alert-replied-main payloadCount=1",
         ),
       ]);
     } finally {
@@ -6418,7 +6419,7 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
-  it("logs correlated alert phases for no-reply stream alerts", async () => {
+  it("logs correlated alert phases for completed sessions.send alert turns without payloads", async () => {
     const entry = createAllowlistEntry();
     const info = vi.fn();
     const ctx = await setupTestServer([entry], {
@@ -6429,11 +6430,8 @@ describe.sequential("clawline provider server", () => {
     });
     const authHeader = await createAuthHeader(ctx, entry);
     gatewayCallMock.mockResolvedValueOnce({
-      runId: "ignored",
+      runId: "alert-no-reply-stream",
       status: "ok",
-      result: {
-        payloads: [],
-      },
     });
     try {
       const response = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
@@ -6492,7 +6490,7 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
-  it("routes alerts to personal session keys with explicit channel/to", async () => {
+  it("routes alerts to personal session keys through sessions.send-class admission", async () => {
     const entry = createAllowlistEntry();
     const ctx = await setupTestServer([entry]);
     const authHeader = await createAuthHeader(ctx, entry);
@@ -6515,8 +6513,6 @@ describe.sequential("clawline provider server", () => {
             request: expect.objectContaining({
               sessionKey: "agent:main:clawline:flynn:main",
               message: withAlertProvenance("Check personal channel"),
-              channel: "clawline",
-              to: "agent:main:clawline:flynn:main",
             }),
           }),
         );
@@ -6563,8 +6559,6 @@ describe.sequential("clawline provider server", () => {
           expect.objectContaining({
             request: expect.objectContaining({
               sessionKey: streamSessionKey,
-              channel: "clawline",
-              to: streamSessionKey,
             }),
           }),
         );
@@ -6617,7 +6611,6 @@ describe.sequential("clawline provider server", () => {
       expect(gatewayCallMock.mock.calls.map((call) => call[0]?.request?.sessionKey)).toEqual(
         streamKeys,
       );
-      expect(gatewayCallMock.mock.calls.map((call) => call[0]?.request?.to)).toEqual(streamKeys);
     } finally {
       ws.terminate();
       await ctx.cleanup();
@@ -6668,8 +6661,6 @@ describe.sequential("clawline provider server", () => {
           expect.objectContaining({
             request: expect.objectContaining({
               sessionKey: globalSessionKey,
-              channel: "clawline",
-              to: globalSessionKey,
             }),
           }),
         );
@@ -6746,9 +6737,7 @@ describe.sequential("clawline provider server", () => {
         expect(gatewayCallMock).toHaveBeenCalledWith(
           expect.objectContaining({
             request: expect.objectContaining({
-              sessionKey: "agent:main:main",
-              channel: "clawline",
-              to: "agent:main:main",
+              sessionKey: "agent:main:clawline:flynn:main",
             }),
           }),
         );
@@ -7077,8 +7066,23 @@ describe.sequential("clawline provider server", () => {
     const entry = createAllowlistEntry();
     const ctx = await setupTestServer([entry]);
     const authHeader = await createAuthHeader(ctx, entry);
+    const authToken = await createAuthToken(ctx, entry);
+    const { ws } = await authenticateDevice(ctx.port, entry.deviceId, authToken);
     try {
-      for (const sessionKey of ["agent:main:clawline:flynn:main", "agent:main:main"]) {
+      const createResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: authHeader },
+        body: JSON.stringify({
+          displayName: "Alerts",
+          idempotencyKey: `alert-scope-${randomUUID()}`,
+        }),
+      });
+      expect(createResponse.status).toBe(201);
+      const created = (await createResponse.json()) as { stream?: { sessionKey?: string } };
+      const streamSessionKey = created.stream?.sessionKey;
+      expect(typeof streamSessionKey).toBe("string");
+
+      for (const sessionKey of ["agent:main:clawline:flynn:main", streamSessionKey]) {
         const response = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
           method: "POST",
           headers: { "Content-Type": "application/json", Authorization: authHeader },
@@ -7099,7 +7103,7 @@ describe.sequential("clawline provider server", () => {
       });
       expect(gatewayCallMock.mock.calls.map((call) => call[0]?.request?.sessionKey)).toEqual([
         "agent:main:clawline:flynn:main",
-        "agent:main:main",
+        streamSessionKey,
       ]);
       const gatewayIdempotencyKeys = gatewayCallMock.mock.calls.map(
         (call) => call[0]?.request?.idempotencyKey,
@@ -7110,6 +7114,7 @@ describe.sequential("clawline provider server", () => {
       ]);
       expect(new Set(gatewayIdempotencyKeys).size).toBe(2);
     } finally {
+      ws.terminate();
       await ctx.cleanup();
     }
   });

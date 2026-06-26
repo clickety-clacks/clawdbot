@@ -95,7 +95,10 @@ import type {
   StreamTailStateServerMessage,
 } from "./domain.js";
 import { ClientMessageError, HttpError } from "./errors.js";
-import { callClawlineGatewayAgent } from "./gateway-alert-runtime.js";
+import {
+  callClawlineGatewayAgent,
+  callClawlineGatewaySessionSend,
+} from "./gateway-alert-runtime.js";
 import { createAssetHandlers } from "./http-assets.js";
 import { buildClawlineInboundContext } from "./inbound-context.js";
 import { resolveClawlineMessageReferenceContexts } from "./message-reference-context.js";
@@ -4319,7 +4322,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       if (payload.noOverlay !== true) {
         text = await applyAlertInstructions(text);
       }
-      text = applyMainSessionAlertRequirement(text, alertResolvedKey);
+      text = applyMainSessionAlertRequirement(
+        text,
+        alertResolvedKey,
+        isDefaultOrMainAlertSessionKey(payload.sessionKey),
+      );
       const idempotencyKey = resolveAlertIdempotencyKey({
         idempotencyKey: payload.idempotencyKey,
         message: text,
@@ -4814,8 +4821,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     return combined;
   }
 
-  function applyMainSessionAlertRequirement(text: string, sessionKey: string): string {
-    if (!sessionKeyEq(sessionKey, mainSessionKey)) {
+  function applyMainSessionAlertRequirement(
+    text: string,
+    sessionKey: string,
+    forceMainRequirement = false,
+  ): string {
+    if (!forceMainRequirement && !sessionKeyEq(sessionKey, mainSessionKey)) {
       return text;
     }
     const combined = `${text}\n\n${MAIN_SESSION_ALERT_REPLY_TEXT}`;
@@ -4869,8 +4880,28 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     }
   }
 
+  function isDefaultOrMainAlertSessionKey(rawSessionKey?: string): boolean {
+    const trimmed = rawSessionKey?.trim();
+    return !trimmed || sessionKeyEq(trimmed, mainSessionKey);
+  }
+
+  function resolveDefaultAlertSessionKey(): string {
+    const adminEntry = allowlist.entries.find((entry) => entry.isAdmin);
+    if (!adminEntry) {
+      return mainSessionKey;
+    }
+    return buildClawlinePersonalSessionKey(
+      mainSessionAgentId,
+      sanitizeUserId(adminEntry.userId).toLowerCase(),
+    );
+  }
+
   function resolveAlertSessionKey(rawSessionKey?: string): string {
-    return rawSessionKey?.trim() || mainSessionKey;
+    const trimmed = rawSessionKey?.trim();
+    if (!trimmed || sessionKeyEq(trimmed, mainSessionKey)) {
+      return resolveDefaultAlertSessionKey();
+    }
+    return trimmed;
   }
 
   function logAlertRunPhase(
@@ -4912,7 +4943,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         };
       }
     ).result?.payloads;
-    return Array.isArray(payloads) ? payloads.length : 0;
+    if (Array.isArray(payloads)) {
+      return payloads.length;
+    }
+    return 0;
   }
 
   async function resolveValidatedAlertSessionKey(rawSessionKey?: string): Promise<string> {
@@ -5065,14 +5099,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             logAlertRunPhase("wake-dispatched", correlatedPhaseBase);
             logAlertRunPhase("agent-run-start", correlatedPhaseBase);
             try {
-              const result = await callClawlineGatewayAgent({
+              const result = await callClawlineGatewaySessionSend({
                 token: gatewayToken,
                 request: {
                   sessionKey: targetSessionKey,
                   message: item.prompt,
-                  channel: "clawline",
-                  to: targetSessionKey,
-                  deliver: true,
                   attachments: item.attachments,
                   idempotencyKey: resolveGatewayAlertIdempotencyKey(
                     targetSessionKey,
