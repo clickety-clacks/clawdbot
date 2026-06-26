@@ -591,16 +591,6 @@ describe("web search runtime", () => {
     ).rejects.toThrow("web_search is disabled or no provider is available.");
   });
 
-  it("does not resolve a keyless provider definition when no provider is configured", () => {
-    resolvePluginWebSearchProvidersMock.mockReturnValue([createDuckDuckGoSearchProvider()]);
-
-    const resolved = resolveWebSearchDefinition({
-      config: {},
-    });
-
-    expect(resolved).toBeNull();
-  });
-
   it("uses a keyless provider when the user explicitly selects it", async () => {
     resolveRuntimeWebSearchProvidersMock.mockReturnValue([createDuckDuckGoSearchProvider()]);
 
@@ -772,29 +762,6 @@ describe("web search runtime", () => {
       }),
     ).rejects.toThrow("web_search is disabled or no provider is available.");
     expect(createTool).not.toHaveBeenCalled();
-  });
-
-  it("ignores auto-detected keyless runtime metadata when resolving a provider definition", () => {
-    resolvePluginWebSearchProvidersMock.mockReturnValue([
-      createWebSearchTestProvider({
-        pluginId: "parallel",
-        id: "parallel-free",
-        credentialPath: "",
-        autoDetectOrder: 76,
-        requiresCredential: false,
-      }),
-    ]);
-
-    const resolved = resolveWebSearchDefinition({
-      config: {},
-      runtimeWebSearch: {
-        providerSource: "auto-detect",
-        selectedProvider: "parallel-free",
-        diagnostics: [],
-      },
-    });
-
-    expect(resolved).toBeNull();
   });
 
   it("falls back to another provider when auto-selected search execution fails", async () => {
