@@ -83,6 +83,17 @@ const silentLogger: Logger = {
 const testReplyResolver: typeof getReplyFromConfig = async () => ({ text: "ok" });
 const withMainAlertReplyRequirement = (text: string) =>
   `${text}\n\n${MAIN_SESSION_ALERT_REPLY_TEXT}`;
+const withAlertProvenance = (text: string, source = "codex") =>
+  `[OpenClaw alert]\nSource: ${source}\n\n${text}`;
+const getQueuedAnnounceCall = (index: number) =>
+  enqueueAnnounceMock.mock.calls[index]?.[0] as
+    | { item: unknown; send: (item: unknown) => Promise<void> }
+    | undefined;
+const sendQueuedAnnounce = async (index: number) => {
+  const call = getQueuedAnnounceCall(index);
+  expect(call).toBeDefined();
+  await call?.send(call.item);
+};
 const sha256Hex = (value: string) => createHash("sha256").update(value).digest("hex");
 const tinyPngBytes = () =>
   Buffer.from(
@@ -6287,13 +6298,20 @@ describe.sequential("clawline provider server", () => {
       const payload = await response.json();
       expect(payload).toEqual({ ok: true });
       expect(enqueueAnnounceMock).toHaveBeenCalledTimes(1);
-      const call = enqueueAnnounceMock.mock.calls[0]?.[0] as {
-        key?: string;
-        item?: { prompt?: string; origin?: { channel?: string; to?: string } };
-      };
-      expect(call?.key).toBe("agent:main:main");
-      expect(call?.item?.prompt).toBe(withMainAlertReplyRequirement("Check on Flynn"));
-      expect(call?.item?.origin).toEqual({ channel: "clawline", to: "agent:main:main" });
+      await sendQueuedAnnounce(0);
+      await vi.waitFor(() => {
+        expect(gatewayCallMock).toHaveBeenCalledTimes(1);
+      });
+      expect(gatewayCallMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          request: expect.objectContaining({
+            sessionKey: "agent:main:main",
+            message: withMainAlertReplyRequirement(withAlertProvenance("Check on Flynn")),
+            channel: "clawline",
+            to: "agent:main:main",
+          }),
+        }),
+      );
     } finally {
       await ctx.cleanup();
     }
@@ -6326,22 +6344,18 @@ describe.sequential("clawline provider server", () => {
         }),
       });
       expect(response.status).toBe(200);
-      const queued = enqueueAnnounceMock.mock.calls[0]?.[0] as
-        | {
-            item?: { attachments?: unknown[] };
-            send?: (item: unknown) => Promise<void>;
-          }
-        | undefined;
-      expect(queued?.item?.attachments).toEqual([attachment]);
-      await queued?.send?.(queued.item);
-      expect(gatewayCallMock).toHaveBeenCalledWith(
-        expect.objectContaining({
-          request: expect.objectContaining({
-            attachments: [attachment],
-            sessionKey: "agent:main:clawline:flynn:main",
+      expect(enqueueAnnounceMock).toHaveBeenCalledTimes(1);
+      await sendQueuedAnnounce(0);
+      await vi.waitFor(() => {
+        expect(gatewayCallMock).toHaveBeenCalledWith(
+          expect.objectContaining({
+            request: expect.objectContaining({
+              attachments: [attachment],
+              sessionKey: "agent:main:clawline:flynn:main",
+            }),
           }),
-        }),
-      );
+        );
+      });
     } finally {
       await ctx.cleanup();
     }
@@ -6368,36 +6382,35 @@ describe.sequential("clawline provider server", () => {
       const response = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: authHeader },
-        body: JSON.stringify({ message: "Check on Flynn", source: "codex" }),
+        body: JSON.stringify({
+          idempotencyKey: "alert-replied-main",
+          message: "Check on Flynn",
+          source: "codex",
+        }),
       });
       expect(response.status).toBe(200);
-      const queued = enqueueAnnounceMock.mock.calls[0]?.[0] as
-        | {
-            item?: { announceId?: string; sessionKey?: string };
-            send?: (item: unknown) => Promise<void>;
-          }
-        | undefined;
-      expect(typeof queued?.item?.announceId).toBe("string");
-      await queued?.send?.(queued.item);
+      expect(enqueueAnnounceMock).toHaveBeenCalledTimes(1);
+      await sendQueuedAnnounce(0);
+      await vi.waitFor(() => {
+        expect(gatewayCallMock).toHaveBeenCalledTimes(1);
+      });
 
       const alertLogs = info.mock.calls
         .map(([message]) => String(message))
         .filter((message) => message.startsWith("[clawline] alert_run_phase "));
       expect(alertLogs).toEqual([
+        expect.stringContaining("phase=queued sessionKey=agent:main:main runId=alert-replied-main"),
         expect.stringContaining(
-          `phase=queued sessionKey=agent:main:main runId=${queued?.item?.announceId}`,
+          "phase=wake-dispatched sessionKey=agent:main:main runId=alert-replied-main",
         ),
         expect.stringContaining(
-          `phase=wake-dispatched sessionKey=agent:main:main runId=${queued?.item?.announceId}`,
+          "phase=agent-run-start sessionKey=agent:main:main runId=alert-replied-main",
         ),
         expect.stringContaining(
-          `phase=agent-run-start sessionKey=agent:main:main runId=${queued?.item?.announceId}`,
+          "phase=agent-run-end sessionKey=agent:main:main runId=alert-replied-main payloadCount=1 status=ok",
         ),
         expect.stringContaining(
-          `phase=agent-run-end sessionKey=agent:main:main runId=${queued?.item?.announceId} payloadCount=1 status=ok`,
-        ),
-        expect.stringContaining(
-          `phase=replied sessionKey=agent:main:main runId=${queued?.item?.announceId} payloadCount=1`,
+          "phase=replied sessionKey=agent:main:main runId=alert-replied-main payloadCount=1",
         ),
       ]);
     } finally {
@@ -6427,39 +6440,37 @@ describe.sequential("clawline provider server", () => {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: authHeader },
         body: JSON.stringify({
+          idempotencyKey: "alert-no-reply-stream",
           message: "Check personal channel",
           source: "codex",
           sessionKey: "agent:main:clawline:flynn:main",
         }),
       });
       expect(response.status).toBe(200);
-      const queued = enqueueAnnounceMock.mock.calls[0]?.[0] as
-        | {
-            item?: { announceId?: string; sessionKey?: string };
-            send?: (item: unknown) => Promise<void>;
-          }
-        | undefined;
-      expect(typeof queued?.item?.announceId).toBe("string");
-      await queued?.send?.(queued.item);
+      expect(enqueueAnnounceMock).toHaveBeenCalledTimes(1);
+      await sendQueuedAnnounce(0);
+      await vi.waitFor(() => {
+        expect(gatewayCallMock).toHaveBeenCalledTimes(1);
+      });
 
       const alertLogs = info.mock.calls
         .map(([message]) => String(message))
         .filter((message) => message.startsWith("[clawline] alert_run_phase "));
       expect(alertLogs).toEqual([
         expect.stringContaining(
-          `phase=queued sessionKey=agent:main:clawline:flynn:main runId=${queued?.item?.announceId}`,
+          "phase=queued sessionKey=agent:main:clawline:flynn:main runId=alert-no-reply-stream",
         ),
         expect.stringContaining(
-          `phase=wake-dispatched sessionKey=agent:main:clawline:flynn:main runId=${queued?.item?.announceId}`,
+          "phase=wake-dispatched sessionKey=agent:main:clawline:flynn:main runId=alert-no-reply-stream",
         ),
         expect.stringContaining(
-          `phase=agent-run-start sessionKey=agent:main:clawline:flynn:main runId=${queued?.item?.announceId}`,
+          "phase=agent-run-start sessionKey=agent:main:clawline:flynn:main runId=alert-no-reply-stream",
         ),
         expect.stringContaining(
-          `phase=agent-run-end sessionKey=agent:main:clawline:flynn:main runId=${queued?.item?.announceId} payloadCount=0 status=ok`,
+          "phase=agent-run-end sessionKey=agent:main:clawline:flynn:main runId=alert-no-reply-stream payloadCount=0 status=ok",
         ),
         expect.stringContaining(
-          `phase=no-reply sessionKey=agent:main:clawline:flynn:main runId=${queued?.item?.announceId} payloadCount=0`,
+          "phase=no-reply sessionKey=agent:main:clawline:flynn:main runId=alert-no-reply-stream payloadCount=0",
         ),
       ]);
     } finally {
@@ -6497,15 +6508,18 @@ describe.sequential("clawline provider server", () => {
       });
       expect(response.status).toBe(200);
       expect(enqueueAnnounceMock).toHaveBeenCalledTimes(1);
-      const call = enqueueAnnounceMock.mock.calls[0]?.[0] as {
-        key?: string;
-        item?: { prompt?: string; origin?: { channel?: string; to?: string } };
-      };
-      expect(call?.key).toBe("agent:main:clawline:flynn:main");
-      expect(call?.item?.prompt).toBe("Check personal channel");
-      expect(call?.item?.origin).toEqual({
-        channel: "clawline",
-        to: "agent:main:clawline:flynn:main",
+      await sendQueuedAnnounce(0);
+      await vi.waitFor(() => {
+        expect(gatewayCallMock).toHaveBeenCalledWith(
+          expect.objectContaining({
+            request: expect.objectContaining({
+              sessionKey: "agent:main:clawline:flynn:main",
+              message: withAlertProvenance("Check personal channel"),
+              channel: "clawline",
+              to: "agent:main:clawline:flynn:main",
+            }),
+          }),
+        );
       });
     } finally {
       await ctx.cleanup();
@@ -6543,15 +6557,67 @@ describe.sequential("clawline provider server", () => {
       });
       expect(response.status).toBe(200);
       expect(enqueueAnnounceMock).toHaveBeenCalledTimes(1);
-      const call = enqueueAnnounceMock.mock.calls[0]?.[0] as {
-        key?: string;
-        item?: { origin?: { channel?: string; to?: string } };
-      };
-      expect(call?.key).toBe(streamSessionKey);
-      expect(call?.item?.origin).toEqual({
-        channel: "clawline",
-        to: streamSessionKey,
+      await sendQueuedAnnounce(0);
+      await vi.waitFor(() => {
+        expect(gatewayCallMock).toHaveBeenCalledWith(
+          expect.objectContaining({
+            request: expect.objectContaining({
+              sessionKey: streamSessionKey,
+              channel: "clawline",
+              to: streamSessionKey,
+            }),
+          }),
+        );
       });
+    } finally {
+      ws.terminate();
+      await ctx.cleanup();
+    }
+  });
+
+  it("keeps same-user queued alerts targeted to their original stream", async () => {
+    const entry = createAllowlistEntry();
+    const ctx = await setupTestServer([entry]);
+    const authHeader = await createAuthHeader(ctx, entry);
+    const authToken = await createAuthToken(ctx, entry);
+    const { ws } = await authenticateDevice(ctx.port, entry.deviceId, authToken);
+    try {
+      const streamKeys: string[] = [];
+      for (const displayName of ["Ideas", "Build"]) {
+        const createResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: authHeader },
+          body: JSON.stringify({
+            displayName,
+            idempotencyKey: `alert-stream-${displayName}-${randomUUID()}`,
+          }),
+        });
+        expect(createResponse.status).toBe(201);
+        const created = (await createResponse.json()) as { stream?: { sessionKey?: string } };
+        expect(typeof created.stream?.sessionKey).toBe("string");
+        streamKeys.push(created.stream.sessionKey);
+      }
+
+      for (const sessionKey of streamKeys) {
+        const response = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: authHeader },
+          body: JSON.stringify({
+            message: `Alert for ${sessionKey}`,
+            source: "codex",
+            sessionKey,
+          }),
+        });
+        expect(response.status).toBe(200);
+      }
+      expect(enqueueAnnounceMock).toHaveBeenCalledTimes(2);
+
+      await sendQueuedAnnounce(0);
+      await sendQueuedAnnounce(1);
+      expect(gatewayCallMock.mock.calls.map((call) => call[0]?.request?.sessionKey)).toEqual(
+        streamKeys,
+      );
+      expect(gatewayCallMock.mock.calls.map((call) => call[0]?.request?.to)).toEqual(streamKeys);
     } finally {
       ws.terminate();
       await ctx.cleanup();
@@ -6596,14 +6662,18 @@ describe.sequential("clawline provider server", () => {
       const data = await response.json();
       expect(data).toEqual({ ok: true });
       expect(enqueueAnnounceMock).toHaveBeenCalledTimes(1);
-      const call = enqueueAnnounceMock.mock.calls[0]?.[0] as {
-        key?: string;
-        item?: { origin?: { channel?: string; to?: string }; sessionKey?: string };
-      };
-      expect(call?.key).toBe(globalSessionKey);
-      expect(call?.item?.sessionKey).toBe(globalSessionKey);
-      expect(call?.item?.origin).toEqual({ channel: "clawline", to: globalSessionKey });
-      expect(gatewayCallMock).not.toHaveBeenCalled();
+      await sendQueuedAnnounce(0);
+      await vi.waitFor(() => {
+        expect(gatewayCallMock).toHaveBeenCalledWith(
+          expect.objectContaining({
+            request: expect.objectContaining({
+              sessionKey: globalSessionKey,
+              channel: "clawline",
+              to: globalSessionKey,
+            }),
+          }),
+        );
+      });
       expect(sendMessageMock).not.toHaveBeenCalled();
       expect(loadSessionStoreMock).not.toHaveBeenCalled();
 
@@ -6617,6 +6687,7 @@ describe.sequential("clawline provider server", () => {
         }),
       });
       expect(repeatedResponse.status).toBe(200);
+      expect(enqueueAnnounceMock).toHaveBeenCalledTimes(2);
       expect(loadSessionStoreMock).not.toHaveBeenCalled();
 
       const newGlobalSessionKey = "agent:codex:discord:channel:456";
@@ -6647,6 +6718,7 @@ describe.sequential("clawline provider server", () => {
         }),
       });
       expect(invalidatedResponse.status).toBe(200);
+      expect(enqueueAnnounceMock).toHaveBeenCalledTimes(3);
       expect(loadSessionStoreMock).not.toHaveBeenCalled();
     } finally {
       await ctx.cleanup();
@@ -6669,12 +6741,308 @@ describe.sequential("clawline provider server", () => {
       });
       expect(response.status).toBe(200);
       expect(enqueueAnnounceMock).toHaveBeenCalledTimes(1);
-      const call = enqueueAnnounceMock.mock.calls[0]?.[0] as {
-        key?: string;
-        item?: { origin?: { channel?: string; to?: string } };
-      };
-      expect(call?.key).toBe("agent:main:main");
-      expect(call?.item?.origin).toEqual({ channel: "clawline", to: "agent:main:main" });
+      await sendQueuedAnnounce(0);
+      await vi.waitFor(() => {
+        expect(gatewayCallMock).toHaveBeenCalledWith(
+          expect.objectContaining({
+            request: expect.objectContaining({
+              sessionKey: "agent:main:main",
+              channel: "clawline",
+              to: "agent:main:main",
+            }),
+          }),
+        );
+      });
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("queues busy alert prompt turns and drains them without another prompt", async () => {
+    const entry = createAllowlistEntry();
+    const ctx = await setupTestServer([entry]);
+    const authHeader = await createAuthHeader(ctx, entry);
+    let releaseFirst!: () => void;
+    const firstRun = new Promise((resolve) => {
+      releaseFirst = () =>
+        resolve({
+          runId: "first",
+          status: "ok",
+          result: { payloads: [{ type: "text", text: "first" }] },
+        });
+    });
+    gatewayCallMock
+      .mockImplementationOnce(() => firstRun)
+      .mockResolvedValueOnce({ runId: "second", status: "ok", result: { payloads: [] } });
+    try {
+      const first = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: authHeader },
+        body: JSON.stringify({
+          idempotencyKey: "busy-alert-1",
+          message: "First alert",
+          source: "codex",
+          sessionKey: "agent:main:clawline:flynn:main",
+        }),
+      });
+      expect(first.status).toBe(200);
+      expect(enqueueAnnounceMock).toHaveBeenCalledTimes(1);
+      const firstQueued = getQueuedAnnounceCall(0);
+      expect(firstQueued).toBeDefined();
+      const firstSend = firstQueued?.send(firstQueued.item);
+      await vi.waitFor(() => {
+        expect(gatewayCallMock).toHaveBeenCalledTimes(1);
+      });
+
+      const second = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: authHeader },
+        body: JSON.stringify({
+          idempotencyKey: "busy-alert-2",
+          message: "Second alert",
+          source: "codex",
+          sessionKey: "agent:main:clawline:flynn:main",
+        }),
+      });
+      expect(second.status).toBe(200);
+      expect(enqueueAnnounceMock).toHaveBeenCalledTimes(2);
+      const secondQueued = getQueuedAnnounceCall(1);
+      expect(secondQueued).toBeDefined();
+      const secondSend = secondQueued?.send(secondQueued.item);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(gatewayCallMock).toHaveBeenCalledTimes(1);
+
+      releaseFirst();
+      await Promise.all([firstSend, secondSend]);
+      await vi.waitFor(() => {
+        expect(gatewayCallMock).toHaveBeenCalledTimes(2);
+      });
+      expect(gatewayCallMock.mock.calls[1]?.[0]).toEqual(
+        expect.objectContaining({
+          request: expect.objectContaining({
+            idempotencyKey: expect.stringMatching(/^alert:[0-9a-f]{16}:busy-alert-2$/),
+            message: withAlertProvenance("Second alert"),
+          }),
+        }),
+      );
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("serializes busy main-session alert prompt turns on the admin prompt lane", async () => {
+    const entry = createAllowlistEntry({ isAdmin: true });
+    const ctx = await setupTestServer([entry]);
+    const authHeader = await createAuthHeader(ctx, entry);
+    let releaseFirst!: () => void;
+    const firstRun = new Promise((resolve) => {
+      releaseFirst = () => resolve({ runId: "first-main", status: "ok", result: { payloads: [] } });
+    });
+    gatewayCallMock
+      .mockImplementationOnce(() => firstRun)
+      .mockResolvedValueOnce({ runId: "second-main", status: "ok", result: { payloads: [] } });
+    try {
+      for (const idempotencyKey of ["busy-main-alert-1", "busy-main-alert-2"]) {
+        const response = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: authHeader },
+          body: JSON.stringify({
+            idempotencyKey,
+            message: idempotencyKey,
+            source: "codex",
+            sessionKey: "agent:main:main",
+          }),
+        });
+        expect(response.status).toBe(200);
+      }
+      expect(enqueueAnnounceMock).toHaveBeenCalledTimes(2);
+      const firstQueued = getQueuedAnnounceCall(0);
+      const secondQueued = getQueuedAnnounceCall(1);
+      expect(firstQueued).toBeDefined();
+      expect(secondQueued).toBeDefined();
+      const firstSend = firstQueued?.send(firstQueued.item);
+      await vi.waitFor(() => {
+        expect(gatewayCallMock).toHaveBeenCalledTimes(1);
+      });
+      const secondSend = secondQueued?.send(secondQueued.item);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(gatewayCallMock).toHaveBeenCalledTimes(1);
+
+      releaseFirst();
+      await Promise.all([firstSend, secondSend]);
+      await vi.waitFor(() => {
+        expect(gatewayCallMock).toHaveBeenCalledTimes(2);
+      });
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("dedupes alert prompt turns by idempotency key", async () => {
+    const entry = createAllowlistEntry();
+    const ctx = await setupTestServer([entry]);
+    const authHeader = await createAuthHeader(ctx, entry);
+    try {
+      for (let i = 0; i < 2; i += 1) {
+        const response = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: authHeader },
+          body: JSON.stringify({
+            idempotencyKey: "dedupe-alert",
+            message: "Deduped alert",
+            source: "codex",
+            sessionKey: "agent:main:clawline:flynn:main",
+          }),
+        });
+        expect(response.status).toBe(200);
+      }
+      expect(enqueueAnnounceMock).toHaveBeenCalledTimes(1);
+      await sendQueuedAnnounce(0);
+      await vi.waitFor(() => {
+        expect(gatewayCallMock).toHaveBeenCalledTimes(1);
+      });
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("allows retry when a queued alert with an idempotency key is dropped", async () => {
+    const entry = createAllowlistEntry();
+    const ctx = await setupTestServer([entry]);
+    const authHeader = await createAuthHeader(ctx, entry);
+    let firstQueuedItem: unknown;
+    enqueueAnnounceMock
+      .mockImplementationOnce((params: { item: unknown }) => {
+        firstQueuedItem = params.item;
+        return true;
+      })
+      .mockImplementationOnce((params: { onDrop?: (items: unknown[]) => void }) => {
+        params.onDrop?.([firstQueuedItem]);
+        return true;
+      })
+      .mockReturnValue(true);
+    try {
+      for (const idempotencyKey of ["retry-after-drop", "different-alert", "retry-after-drop"]) {
+        const response = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: authHeader },
+          body: JSON.stringify({
+            idempotencyKey,
+            message: idempotencyKey,
+            source: "codex",
+            sessionKey: "agent:main:clawline:flynn:main",
+          }),
+        });
+        expect(response.status).toBe(200);
+      }
+      expect(enqueueAnnounceMock).toHaveBeenCalledTimes(3);
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("does not dedupe repeated alerts without an explicit idempotency key", async () => {
+    const entry = createAllowlistEntry();
+    const ctx = await setupTestServer([entry]);
+    const authHeader = await createAuthHeader(ctx, entry);
+    try {
+      for (let i = 0; i < 2; i += 1) {
+        const response = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: authHeader },
+          body: JSON.stringify({
+            message: "Repeated alert",
+            source: "codex",
+            sessionKey: "agent:main:clawline:flynn:main",
+          }),
+        });
+        expect(response.status).toBe(200);
+      }
+      expect(enqueueAnnounceMock).toHaveBeenCalledTimes(2);
+      await sendQueuedAnnounce(0);
+      await sendQueuedAnnounce(1);
+      await vi.waitFor(() => {
+        expect(gatewayCallMock).toHaveBeenCalledTimes(2);
+      });
+      const idempotencyKeys = gatewayCallMock.mock.calls.map(
+        (call) => call[0]?.request?.idempotencyKey,
+      );
+      expect(new Set(idempotencyKeys).size).toBe(2);
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("strips control characters from explicit alert idempotency keys", async () => {
+    const entry = createAllowlistEntry();
+    const ctx = await setupTestServer([entry]);
+    const authHeader = await createAuthHeader(ctx, entry);
+    try {
+      const response = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: authHeader },
+        body: JSON.stringify({
+          idempotencyKey: "alert\nforged",
+          message: "Sanitize idempotency",
+          source: "codex",
+          sessionKey: "agent:main:clawline:flynn:main",
+        }),
+      });
+      expect(response.status).toBe(200);
+      expect(enqueueAnnounceMock).toHaveBeenCalledTimes(1);
+      await sendQueuedAnnounce(0);
+      await vi.waitFor(() => {
+        expect(gatewayCallMock).toHaveBeenCalledWith(
+          expect.objectContaining({
+            request: expect.objectContaining({
+              idempotencyKey: expect.stringMatching(/^alert:[0-9a-f]{16}:alertforged$/),
+            }),
+          }),
+        );
+      });
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("scopes alert idempotency keys by target session", async () => {
+    const entry = createAllowlistEntry();
+    const ctx = await setupTestServer([entry]);
+    const authHeader = await createAuthHeader(ctx, entry);
+    try {
+      for (const sessionKey of ["agent:main:clawline:flynn:main", "agent:main:main"]) {
+        const response = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: authHeader },
+          body: JSON.stringify({
+            idempotencyKey: "shared-alert-key",
+            message: `Alert for ${sessionKey}`,
+            source: "codex",
+            sessionKey,
+          }),
+        });
+        expect(response.status).toBe(200);
+      }
+      expect(enqueueAnnounceMock).toHaveBeenCalledTimes(2);
+      await sendQueuedAnnounce(0);
+      await sendQueuedAnnounce(1);
+      await vi.waitFor(() => {
+        expect(gatewayCallMock).toHaveBeenCalledTimes(2);
+      });
+      expect(gatewayCallMock.mock.calls.map((call) => call[0]?.request?.sessionKey)).toEqual([
+        "agent:main:clawline:flynn:main",
+        "agent:main:main",
+      ]);
+      const gatewayIdempotencyKeys = gatewayCallMock.mock.calls.map(
+        (call) => call[0]?.request?.idempotencyKey,
+      );
+      expect(gatewayIdempotencyKeys).toEqual([
+        expect.stringMatching(/^alert:[0-9a-f]{16}:shared-alert-key$/),
+        expect.stringMatching(/^alert:[0-9a-f]{16}:shared-alert-key$/),
+      ]);
+      expect(new Set(gatewayIdempotencyKeys).size).toBe(2);
     } finally {
       await ctx.cleanup();
     }
@@ -6692,13 +7060,16 @@ describe.sequential("clawline provider server", () => {
         body: JSON.stringify({ message: "Check on Flynn", source: "codex" }),
       });
       expect(response.status).toBe(200);
-      const call = enqueueAnnounceMock.mock.calls[0]?.[0] as
-        | { item?: { prompt?: string } }
-        | undefined;
       const expected = withMainAlertReplyRequirement(
-        "These items completed. Execute the next task, or identify what is blocking.\n\nCheck on Flynn",
+        `These items completed. Execute the next task, or identify what is blocking.\n\n${withAlertProvenance("Check on Flynn")}`,
       );
-      expect(call?.item?.prompt).toBe(expected);
+      expect(enqueueAnnounceMock).toHaveBeenCalledTimes(1);
+      await sendQueuedAnnounce(0);
+      await vi.waitFor(() => {
+        expect(gatewayCallMock).toHaveBeenCalledWith(
+          expect.objectContaining({ request: expect.objectContaining({ message: expected }) }),
+        );
+      });
     } finally {
       await ctx.cleanup();
     }
@@ -6719,11 +7090,16 @@ describe.sequential("clawline provider server", () => {
       expect(response.status).toBe(200);
       const payload = await response.json();
       expect(payload).toEqual({ ok: true });
-      const expected = "Check on Flynn\n\nFollow up with Flynn ASAP.";
-      const call = enqueueAnnounceMock.mock.calls[0]?.[0] as
-        | { item?: { prompt?: string } }
-        | undefined;
-      expect(call?.item?.prompt).toBe(withMainAlertReplyRequirement(expected));
+      const expected = withMainAlertReplyRequirement(
+        `${withAlertProvenance("Check on Flynn")}\n\nFollow up with Flynn ASAP.`,
+      );
+      expect(enqueueAnnounceMock).toHaveBeenCalledTimes(1);
+      await sendQueuedAnnounce(0);
+      await vi.waitFor(() => {
+        expect(gatewayCallMock).toHaveBeenCalledWith(
+          expect.objectContaining({ request: expect.objectContaining({ message: expected }) }),
+        );
+      });
     } finally {
       await ctx.cleanup();
     }
@@ -6744,10 +7120,17 @@ describe.sequential("clawline provider server", () => {
       expect(response.status).toBe(200);
       const payload = await response.json();
       expect(payload).toEqual({ ok: true });
-      const call = enqueueAnnounceMock.mock.calls[0]?.[0] as
-        | { item?: { prompt?: string } }
-        | undefined;
-      expect(call?.item?.prompt).toBe(withMainAlertReplyRequirement("Check on Flynn"));
+      expect(enqueueAnnounceMock).toHaveBeenCalledTimes(1);
+      await sendQueuedAnnounce(0);
+      await vi.waitFor(() => {
+        expect(gatewayCallMock).toHaveBeenCalledWith(
+          expect.objectContaining({
+            request: expect.objectContaining({
+              message: withMainAlertReplyRequirement(withAlertProvenance("Check on Flynn")),
+            }),
+          }),
+        );
+      });
     } finally {
       await ctx.cleanup();
     }
@@ -6766,11 +7149,16 @@ describe.sequential("clawline provider server", () => {
         body: JSON.stringify({ message: "Check on Flynn", source: "codex" }),
       });
       expect(response.status).toBe(200);
-      const expected = `Check on Flynn\n\n${DEFAULT_ALERT_INSTRUCTIONS_TEXT}`;
-      const call = enqueueAnnounceMock.mock.calls[0]?.[0] as
-        | { item?: { prompt?: string } }
-        | undefined;
-      expect(call?.item?.prompt).toBe(withMainAlertReplyRequirement(expected));
+      const expected = withMainAlertReplyRequirement(
+        `${withAlertProvenance("Check on Flynn")}\n\n${DEFAULT_ALERT_INSTRUCTIONS_TEXT}`,
+      );
+      expect(enqueueAnnounceMock).toHaveBeenCalledTimes(1);
+      await sendQueuedAnnounce(0);
+      await vi.waitFor(() => {
+        expect(gatewayCallMock).toHaveBeenCalledWith(
+          expect.objectContaining({ request: expect.objectContaining({ message: expected }) }),
+        );
+      });
     } finally {
       await ctx.cleanup();
     }

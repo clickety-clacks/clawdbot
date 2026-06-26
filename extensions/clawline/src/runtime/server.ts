@@ -388,6 +388,7 @@ const STREAM_SUFFIX_REGEX = /^s_[0-9a-f]{8}$/;
 const STREAM_DISPLAY_NAME_FALLBACK = "Stream";
 const STREAM_IDEMPOTENCY_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const STREAM_IDEMPOTENCY_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
+const ALERT_IDEMPOTENCY_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const STREAM_OPERATION_CREATE = "create_stream";
 const STREAM_OPERATION_DELETE = "delete_stream";
 const MAX_STREAMS_BODY_BYTES = 16 * 1024;
@@ -418,6 +419,15 @@ type ClawlineAnnounceQueueItem = {
     accountId?: string;
     threadId?: string | number;
   };
+};
+
+type ClawlineAlertPromptTurn = {
+  attachments?: unknown[];
+  dedupe: boolean;
+  idempotencyKey: string;
+  prompt: string;
+  sessionKey: string;
+  source?: string;
 };
 
 function truncateUtf8(value: string, maxBytes: number): string {
@@ -2025,6 +2035,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const queuedPromptTurnsBySession = new Map<string, PromptTurnAdmissionFacts[]>();
   const startingPromptTurnsBySession = new Map<string, PromptTurnAdmissionFacts>();
   const scheduledPromptTurnCountsBySession = new Map<string, number>();
+  const pendingAlertPromptTurnCountsBySession = new Map<string, number>();
+  const scheduledAlertPromptTurnsByIdempotencyKey = new Map<string, number>();
 
   type SessionInfo = {
     dmScope: string;
@@ -4307,7 +4319,20 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         text = await applyAlertInstructions(text);
       }
       text = applyMainSessionAlertRequirement(text, alertResolvedKey);
-      await wakeGatewayForAlert(text, alertResolvedKey, payload.attachments);
+      const idempotencyKey = resolveAlertIdempotencyKey({
+        idempotencyKey: payload.idempotencyKey,
+        message: text,
+        sessionKey: alertResolvedKey,
+        source: payload.source,
+      });
+      await wakeGatewayForAlertPromptTurn({
+        attachments: payload.attachments,
+        dedupe: Boolean(payload.idempotencyKey),
+        idempotencyKey,
+        prompt: text,
+        sessionKey: alertResolvedKey,
+        source: payload.source,
+      });
       res.setHeader("Content-Type", "application/json");
       res.writeHead(200);
       res.end(JSON.stringify({ ok: true }));
@@ -4329,6 +4354,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     message: string;
     source?: string;
     sessionKey?: string;
+    idempotencyKey?: string;
     noOverlay?: boolean;
   }> {
     const raw = await readRequestBody(req, MAX_ALERT_BODY_BYTES);
@@ -4349,6 +4375,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     const message = typeof obj.message === "string" ? obj.message : "";
     const source = typeof obj.source === "string" ? obj.source : undefined;
     const sessionKey = typeof obj.sessionKey === "string" ? obj.sessionKey : undefined;
+    const idempotencyKey =
+      typeof obj.idempotencyKey === "string"
+        ? truncateUtf8(stripControlChars(obj.idempotencyKey).trim(), 256)
+        : undefined;
     const noOverlay = typeof obj.noOverlay === "boolean" ? obj.noOverlay : undefined;
     const attachments =
       obj.attachments === undefined
@@ -4362,7 +4392,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     if (attachments === null) {
       throw new HttpError(400, "invalid_request", "Alert attachments must be an array");
     }
-    return { attachments, raw: rawText, message, source, sessionKey, noOverlay };
+    return { attachments, raw: rawText, message, source, sessionKey, idempotencyKey, noOverlay };
   }
 
   async function readRequestBody(
@@ -4408,11 +4438,12 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     if (!normalizedMessage) {
       throw new HttpError(400, "invalid_message", "Alert message is required");
     }
-    resolveAlertSource(source);
-    if (Buffer.byteLength(normalizedMessage, "utf8") > config.sessions.maxMessageBytes) {
+    const resolvedSource = resolveAlertSource(source) ?? DEFAULT_ALERT_SOURCE;
+    const alertText = `[OpenClaw alert]\nSource: ${resolvedSource}\n\n${normalizedMessage}`;
+    if (Buffer.byteLength(alertText, "utf8") > config.sessions.maxMessageBytes) {
       throw new HttpError(400, "message_too_large", "Alert message exceeds max size");
     }
-    return normalizedMessage;
+    return alertText;
   }
 
   function normalizeAlertMessage(value: string): string | null {
@@ -4426,6 +4457,81 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   function resolveAlertSource(source?: string): string | undefined {
     const cleaned = source ? sanitizeLabel(source) : undefined;
     return cleaned ?? DEFAULT_ALERT_SOURCE;
+  }
+
+  function resolveAlertIdempotencyKey(params: {
+    idempotencyKey?: string;
+    message: string;
+    sessionKey: string;
+    source?: string;
+  }): string {
+    const explicit = params.idempotencyKey?.trim();
+    if (explicit) {
+      return explicit;
+    }
+    return `alert:${randomUUID()}`;
+  }
+
+  function resolveAlertDedupeKey(sessionKey: string, idempotencyKey: string): string {
+    return `${normalizeSessionKey(sessionKey)}\0${idempotencyKey}`;
+  }
+
+  function resolveGatewayAlertIdempotencyKey(sessionKey: string, idempotencyKey: string): string {
+    const sessionHash = sha256(normalizeSessionKey(sessionKey)).slice(0, 16);
+    return `alert:${sessionHash}:${idempotencyKey}`;
+  }
+
+  function cleanupExpiredAlertIdempotencyKeys(now: number) {
+    const cutoff = now - ALERT_IDEMPOTENCY_RETENTION_MS;
+    for (const [key, createdAt] of scheduledAlertPromptTurnsByIdempotencyKey) {
+      if (createdAt < cutoff) {
+        scheduledAlertPromptTurnsByIdempotencyKey.delete(key);
+      }
+    }
+  }
+
+  function markPendingAlertPromptTurn(sessionKey: string): void {
+    const normalizedSessionKey = normalizeSessionKey(sessionKey);
+    pendingAlertPromptTurnCountsBySession.set(
+      normalizedSessionKey,
+      (pendingAlertPromptTurnCountsBySession.get(normalizedSessionKey) ?? 0) + 1,
+    );
+  }
+
+  function clearPendingAlertPromptTurn(sessionKey: string): void {
+    const normalizedSessionKey = normalizeSessionKey(sessionKey);
+    const nextCount = (pendingAlertPromptTurnCountsBySession.get(normalizedSessionKey) ?? 1) - 1;
+    if (nextCount > 0) {
+      pendingAlertPromptTurnCountsBySession.set(normalizedSessionKey, nextCount);
+    } else {
+      pendingAlertPromptTurnCountsBySession.delete(normalizedSessionKey);
+    }
+  }
+
+  function clearDroppedAlertIdempotencyKeys(items: ClawlineAnnounceQueueItem[]): void {
+    for (const item of items) {
+      const droppedRunId = item.announceId?.trim();
+      if (droppedRunId) {
+        scheduledAlertPromptTurnsByIdempotencyKey.delete(
+          resolveAlertDedupeKey(item.sessionKey, droppedRunId),
+        );
+      }
+      clearPendingAlertPromptTurn(item.sessionKey);
+    }
+  }
+
+  function resolveAlertPromptTurnQueueUserId(sessionKey: string): string {
+    const parsed = parseClawlineUserSessionKey(sessionKey);
+    if (parsed) {
+      return parsed.userId;
+    }
+    if (sessionKeyEq(sessionKey, mainSessionKey)) {
+      const admin = allowlist.entries.find((entry) => entry.isAdmin);
+      if (admin) {
+        return admin.userId;
+      }
+    }
+    return sessionKey;
   }
 
   function isRedirectStatus(status: number): boolean {
@@ -4763,7 +4869,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       | "agent-run-start"
       | "agent-run-end"
       | "replied"
-      | "no-reply",
+      | "no-reply"
+      | "dropped",
     details: {
       sessionKey: string;
       runId: string;
@@ -4851,6 +4958,132 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     return null;
   }
 
+  async function wakeGatewayForAlertPromptTurn(alert: ClawlineAlertPromptTurn): Promise<boolean> {
+    try {
+      const resolvedSessionKey = resolveAlertSessionKey(alert.sessionKey);
+      const gatewayToken =
+        (typeof openClawCfg.gateway?.auth?.token === "string"
+          ? openClawCfg.gateway.auth.token
+          : undefined) ||
+        (typeof (openClawCfg.gateway as { token?: unknown } | undefined)?.token === "string"
+          ? (openClawCfg.gateway as { token?: string }).token
+          : undefined);
+      logger.info?.(`[clawline] alert_wake_start sessionKey=${resolvedSessionKey}`);
+
+      const alertDedupeKey = resolveAlertDedupeKey(resolvedSessionKey, alert.idempotencyKey);
+      if (alert.dedupe) {
+        const now = nowMs();
+        cleanupExpiredAlertIdempotencyKeys(now);
+        if (scheduledAlertPromptTurnsByIdempotencyKey.has(alertDedupeKey)) {
+          logger.info?.("[clawline] alert_wake_result", {
+            outcome: "duplicate",
+            sessionKey: resolvedSessionKey,
+            idempotencyKey: alert.idempotencyKey,
+          });
+          return true;
+        }
+        scheduledAlertPromptTurnsByIdempotencyKey.set(alertDedupeKey, now);
+      }
+      const phaseBase = {
+        sessionKey: resolvedSessionKey,
+        runId: alert.idempotencyKey,
+      };
+      logAlertRunPhase("queued", phaseBase);
+      const queueSettings = resolveClawlineQueueSettings({ cfg: openClawCfg });
+      const alertQueueSettings =
+        queueSettings.mode === "collect"
+          ? { ...queueSettings, mode: "followup" as const }
+          : queueSettings;
+      const queued = enqueueAnnounce({
+        key: `alert-prompt:${resolvedSessionKey}`,
+        settings: alertQueueSettings,
+        item: {
+          announceId: alert.idempotencyKey,
+          attachments: alert.attachments,
+          enqueuedAt: nowMs(),
+          prompt: alert.prompt,
+          sessionKey: resolvedSessionKey,
+          summaryLine: alert.prompt,
+          origin: {
+            channel: "clawline",
+            to: resolvedSessionKey,
+          },
+        },
+        send: async (item) => {
+          const targetSessionKey = item.sessionKey;
+          const targetQueueUserId = resolveAlertPromptTurnQueueUserId(targetSessionKey);
+          try {
+            await runPromptTurnTask(targetQueueUserId, targetSessionKey, async () => {
+              const correlatedRunId = item.announceId?.trim() || alert.idempotencyKey;
+              const correlatedPhaseBase = {
+                sessionKey: targetSessionKey,
+                runId: correlatedRunId,
+              };
+              logAlertRunPhase("wake-dispatched", correlatedPhaseBase);
+              logAlertRunPhase("agent-run-start", correlatedPhaseBase);
+              try {
+                const result = await callClawlineGatewayAgent({
+                  token: gatewayToken,
+                  request: {
+                    sessionKey: targetSessionKey,
+                    message: item.prompt,
+                    channel: "clawline",
+                    to: targetSessionKey,
+                    deliver: true,
+                    attachments: item.attachments,
+                    idempotencyKey: resolveGatewayAlertIdempotencyKey(
+                      targetSessionKey,
+                      correlatedRunId,
+                    ),
+                  },
+                  timeoutMs: 300_000,
+                });
+                const payloadCount = countAlertReplyPayloads(result);
+                logAlertRunPhase("agent-run-end", {
+                  ...correlatedPhaseBase,
+                  status: "ok",
+                  payloadCount,
+                });
+                logAlertRunPhase(payloadCount > 0 ? "replied" : "no-reply", {
+                  ...correlatedPhaseBase,
+                  payloadCount,
+                });
+              } catch (err) {
+                scheduledAlertPromptTurnsByIdempotencyKey.delete(alertDedupeKey);
+                logAlertRunPhase("agent-run-end", {
+                  ...correlatedPhaseBase,
+                  status: "error",
+                  error: formatError(err),
+                });
+                throw err;
+              }
+            });
+          } finally {
+            clearPendingAlertPromptTurn(targetSessionKey);
+          }
+        },
+        onDrop: clearDroppedAlertIdempotencyKeys,
+      });
+      if (!queued) {
+        scheduledAlertPromptTurnsByIdempotencyKey.delete(alertDedupeKey);
+        logAlertRunPhase("dropped", phaseBase);
+        logger.warn?.(
+          `[clawline] alert_wake_result outcome=dropped sessionKey=${resolvedSessionKey}`,
+        );
+        return false;
+      }
+      markPendingAlertPromptTurn(resolvedSessionKey);
+
+      logger.info?.(`[clawline] alert_wake_result outcome=queued sessionKey=${resolvedSessionKey}`);
+      return false;
+    } catch (err) {
+      logger.error?.(`alert_gateway_wake_failed: ${formatError(err)}`);
+      throw err instanceof HttpError
+        ? err
+        : new HttpError(502, "wake_failed", "Failed to wake CLU");
+    }
+  }
+
   async function wakeGatewayForAlert(text: string, sessionKey?: string, attachments?: unknown[]) {
     try {
       const resolvedSessionKey = resolveAlertSessionKey(sessionKey);
@@ -4913,13 +5146,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         }
       };
 
-      // Always enqueue — never send directly to the agent, even if it appears idle.
-      // The gateway has no session-level locking. isEmbeddedPiRunActive has a race window:
-      // the agent turn can finish writing JSONL but not yet clear the active-runs Map,
-      // so a 'direct' send can hit the JSONL lock and timeout, losing the message.
-      // Enqueuing unconditionally eliminates this race. The queue drains when the agent
-      // is truly idle. The latency cost is negligible vs message loss.
-      // Explicit origin prevents core fallback to lastTo (which could target a different session).
       const alertOrigin =
         resolvedSessionKey.trim().toLowerCase() === "global"
           ? undefined
@@ -4937,6 +5163,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         } as ClawlineAnnounceQueueItem,
         settings: queueSettings,
         send: sendQueuedAlert,
+        onDrop: clearDroppedAlertIdempotencyKeys,
       });
 
       logger.info?.(`[clawline] alert_wake_result outcome=queued sessionKey=${resolvedSessionKey}`);
@@ -5451,6 +5678,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       activeSessionRuns.has(normalizedSessionKey) ||
       startingPromptTurnsBySession.has(normalizedSessionKey) ||
       (queuedPromptTurnsBySession.get(normalizedSessionKey)?.length ?? 0) > 0 ||
+      (pendingAlertPromptTurnCountsBySession.get(normalizedSessionKey) ?? 0) > 0 ||
       (scheduledPromptTurnCountsBySession.get(normalizedSessionKey) ?? 0) > 0
     );
   }

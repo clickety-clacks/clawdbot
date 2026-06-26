@@ -20,6 +20,7 @@ export type AnnounceQueueItem = {
   // Stable announce identity shared by direct + queued delivery paths.
   // Optional for backward compatibility with previously queued items.
   announceId?: string;
+  attachments?: unknown[];
   prompt: string;
   summaryLine?: string;
   internalEvents?: AgentInternalEvent[];
@@ -280,6 +281,7 @@ export function enqueueAnnounce(params: {
   settings: AnnounceQueueSettings;
   send: (item: AnnounceQueueItem) => Promise<void>;
   shouldDefer?: (item: AnnounceQueueItem) => boolean;
+  onDrop?: (items: AnnounceQueueItem[]) => void;
 }): boolean {
   const queue = getAnnounceQueue(params.key, params.settings, params.send, params.shouldDefer);
   // Preserve any retry backoff marker already encoded in lastEnqueuedAt.
@@ -288,6 +290,7 @@ export function enqueueAnnounce(params: {
   const shouldEnqueue = applyQueueDropPolicy({
     queue,
     summarize: (item) => item.summaryLine?.trim() || item.prompt.trim(),
+    onDrop: params.onDrop,
   });
   if (!shouldEnqueue) {
     if (queue.dropPolicy === "new") {
