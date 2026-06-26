@@ -866,6 +866,7 @@ async function handleSessionSend(params: {
       message: (p as { message: string }).message,
       thinking: (p as { thinking?: string }).thinking,
       attachments: (p as { attachments?: unknown[] }).attachments,
+      deliver: (p as { deliver?: boolean }).deliver,
       timeoutMs: (p as { timeoutMs?: number }).timeoutMs,
       idempotencyKey,
     },

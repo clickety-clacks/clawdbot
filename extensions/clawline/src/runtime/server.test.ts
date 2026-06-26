@@ -6820,11 +6820,15 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
-  it("persists alert prompt input before gateway delivery can fail", async () => {
+  it("does not persist alert prompt input as a user-authored chat row", async () => {
     const entry = createAllowlistEntry();
     const ctx = await setupTestServer([entry]);
     const authHeader = await createAuthHeader(ctx, entry);
-    gatewayCallMock.mockRejectedValueOnce(new Error("compaction failed"));
+    gatewayCallMock.mockResolvedValueOnce({
+      runId: "visible-authorship-alert",
+      status: "ok",
+      result: { payloads: [{ type: "text", text: "ack" }] },
+    });
     try {
       const response = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
         method: "POST",
@@ -6845,39 +6849,25 @@ describe.sequential("clawline provider server", () => {
       });
       expect(response.status).toBe(200);
       expect(enqueueAnnounceMock).toHaveBeenCalledTimes(1);
-      await expect(sendQueuedAnnounce(0)).rejects.toThrow("compaction failed");
+      await sendQueuedAnnounce(0);
+      await vi.waitFor(() => {
+        expect(gatewayCallMock).toHaveBeenCalledTimes(1);
+      });
 
       const db = new BetterSqlite3(path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite"));
       try {
         const row = db
           .prepare(
-            `SELECT messages.content, messages.promptTurnState, events.sessionKey, events.payloadJson
+            `SELECT messages.content, messages.deviceId, events.sessionKey, events.payloadJson
                FROM messages
                JOIN events ON events.id = messages.serverEventId
               WHERE messages.content LIKE ?
               LIMIT 1`,
           )
           .get("%T1442 delayed alert persisted%") as
-          | { content: string; promptTurnState: string; sessionKey: string; payloadJson: string }
+          | { content: string; deviceId: string; sessionKey: string; payloadJson: string }
           | undefined;
-        expect(row).toEqual(
-          expect.objectContaining({
-            content: expect.stringContaining("T1442 delayed alert persisted"),
-            promptTurnState: "queued",
-            sessionKey: "agent:main:clawline:flynn:main",
-          }),
-        );
-        expect(row?.content).toContain("[OpenClaw alert]");
-        expect(row?.content).toContain("Source: codex");
-        expect(JSON.parse(row?.payloadJson ?? "{}")).toMatchObject({
-          attachments: [
-            {
-              type: "image",
-              mimeType: "image/png",
-              data: "aGVsbG8=",
-            },
-          ],
-        });
+        expect(row).toBeUndefined();
       } finally {
         db.close();
       }

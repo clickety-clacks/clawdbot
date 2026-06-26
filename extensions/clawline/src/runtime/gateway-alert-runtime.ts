@@ -54,6 +54,7 @@ export async function callClawlineGatewaySessionSend(params: {
       key: params.request.sessionKey,
       message: params.request.message,
       attachments: params.request.attachments,
+      deliver: true,
       idempotencyKey: params.request.idempotencyKey,
     },
     {

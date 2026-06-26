@@ -312,6 +312,7 @@ export type SessionSendParams = {
   message: string;
   thinking?: string;
   attachments?: unknown[];
+  deliver?: boolean;
   timeoutMs?: number;
   idempotencyKey?: string;
 };

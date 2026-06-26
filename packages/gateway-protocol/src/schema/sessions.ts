@@ -168,6 +168,7 @@ export const SessionsSendParamsSchema = Type.Object(
     message: Type.String(),
     thinking: Type.Optional(Type.String()),
     attachments: Type.Optional(Type.Array(Type.Unknown())),
+    deliver: Type.Optional(Type.Boolean()),
     timeoutMs: Type.Optional(Type.Integer({ minimum: 0 })),
     idempotencyKey: Type.Optional(NonEmptyString),
   },

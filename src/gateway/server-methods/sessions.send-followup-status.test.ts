@@ -159,6 +159,7 @@ describe("sessions.send completed subagent follow-up status", () => {
         params: {
           key: "global",
           agentId: "work",
+          deliver: true,
           message: "follow-up",
           idempotencyKey: "run-work",
         },
@@ -175,6 +176,7 @@ describe("sessions.send completed subagent follow-up status", () => {
       expect(chatSendCall?.params).toMatchObject({
         sessionKey: "global",
         agentId: "work",
+        deliver: true,
         message: "follow-up",
       });
       expect(respondMock.mock.calls.at(0)?.[0]).toBe(true);

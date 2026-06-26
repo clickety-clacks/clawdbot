@@ -45,6 +45,7 @@ describe("clawline gateway alert runtime", () => {
       expect.objectContaining({ token: "test-token", timeout: "1234" }),
       {
         attachments: [{ type: "file" }],
+        deliver: true,
         idempotencyKey: "alert-idem",
         key: "agent:main:clawline:flynn:main",
         message: "[OpenClaw alert]\nSource: test\n\nCheck",
