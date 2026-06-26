@@ -31,6 +31,7 @@ export type AnnounceQueueItem = {
   sourceSessionKey?: string;
   sourceChannel?: string;
   sourceTool?: string;
+  onSent?: (item: AnnounceQueueItem) => void;
 };
 
 type AnnounceQueueSettings = {
@@ -51,7 +52,6 @@ type AnnounceQueueState = {
   droppedCount: number;
   summaryLines: string[];
   send: (item: AnnounceQueueItem) => Promise<void>;
-  onSent?: (item: AnnounceQueueItem) => void;
   /** Return true while the target parent session is still busy and delivery should wait. */
   shouldDefer?: (item: AnnounceQueueItem) => boolean;
   /** Consecutive drain failures drives exponential backoff on errors. */
@@ -78,7 +78,6 @@ function getAnnounceQueue(
   settings: AnnounceQueueSettings,
   send: (item: AnnounceQueueItem) => Promise<void>,
   shouldDefer?: (item: AnnounceQueueItem) => boolean,
-  onSent?: (item: AnnounceQueueItem) => void,
 ) {
   const existing = ANNOUNCE_QUEUES.get(key);
   if (existing) {
@@ -90,7 +89,6 @@ function getAnnounceQueue(
     if (shouldDefer !== undefined) {
       existing.shouldDefer = shouldDefer;
     }
-    existing.onSent = onSent;
     return existing;
   }
   const created: AnnounceQueueState = {
@@ -104,7 +102,6 @@ function getAnnounceQueue(
     droppedCount: 0,
     summaryLines: [],
     send,
-    onSent,
     shouldDefer,
     consecutiveFailures: 0,
   };
@@ -201,7 +198,7 @@ function scheduleAnnounceDrain(key: string) {
             items: queue.items,
             run: async (item) => {
               await queue.send(item);
-              queue.onSent?.(item);
+              item.onSent?.(item);
             },
           });
           if (collectDrainResult === "empty") {
@@ -237,7 +234,7 @@ function scheduleAnnounceDrain(key: string) {
             };
             await queue.send(summaryItem);
             for (const item of groupItems) {
-              queue.onSent?.(item);
+              item.onSent?.(item);
             }
             queue.items.splice(0, groupItems.length);
             if (pendingSummary) {
@@ -253,7 +250,7 @@ function scheduleAnnounceDrain(key: string) {
           if (
             !(await drainNextQueueItem(queue.items, async (item) => {
               await queue.send({ ...item, prompt: summaryPrompt });
-              queue.onSent?.(item);
+              item.onSent?.(item);
             }))
           ) {
             break;
@@ -265,7 +262,7 @@ function scheduleAnnounceDrain(key: string) {
         if (
           !(await drainNextQueueItem(queue.items, async (item) => {
             await queue.send(item);
-            queue.onSent?.(item);
+            item.onSent?.(item);
           }))
         ) {
           break;
@@ -300,13 +297,7 @@ export function enqueueAnnounce(params: {
   onDrop?: (items: AnnounceQueueItem[]) => void;
   onSent?: (item: AnnounceQueueItem) => void;
 }): boolean {
-  const queue = getAnnounceQueue(
-    params.key,
-    params.settings,
-    params.send,
-    params.shouldDefer,
-    params.onSent,
-  );
+  const queue = getAnnounceQueue(params.key, params.settings, params.send, params.shouldDefer);
   // Preserve any retry backoff marker already encoded in lastEnqueuedAt.
   queue.lastEnqueuedAt = Math.max(queue.lastEnqueuedAt, Date.now());
 
@@ -324,7 +315,7 @@ export function enqueueAnnounce(params: {
 
   const origin = normalizeDeliveryContext(params.item.origin);
   const originKey = deliveryContextKey(origin);
-  queue.items.push({ ...params.item, origin, originKey });
+  queue.items.push({ ...params.item, origin, originKey, onSent: params.onSent });
   scheduleAnnounceDrain(params.key);
   return true;
 }
