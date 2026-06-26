@@ -544,8 +544,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
       openclaw:
-        specifier: 2026.5.28
-        version: 2026.5.28
+        specifier: 2026.6.10
+        version: 2026.6.10
 
   extensions/cloudflare-ai-gateway:
     devDependencies:
@@ -742,8 +742,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
       openclaw:
-        specifier: 2026.5.28
-        version: 2026.5.28
+        specifier: 2026.6.10
+        version: 2026.6.10
 
   extensions/document-extract:
     dependencies:
@@ -795,8 +795,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
       openclaw:
-        specifier: 2026.5.28
-        version: 2026.5.28
+        specifier: 2026.6.10
+        version: 2026.6.10
 
   extensions/file-transfer:
     dependencies:
@@ -869,8 +869,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
       openclaw:
-        specifier: 2026.5.28
-        version: 2026.5.28
+        specifier: 2026.6.10
+        version: 2026.6.10
 
   extensions/googlechat:
     dependencies:
@@ -888,8 +888,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
       openclaw:
-        specifier: 2026.5.28
-        version: 2026.5.28
+        specifier: 2026.6.10
+        version: 2026.6.10
 
   extensions/gradium:
     devDependencies:
@@ -962,8 +962,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
       openclaw:
-        specifier: 2026.5.28
-        version: 2026.5.28
+        specifier: 2026.6.10
+        version: 2026.6.10
 
   extensions/litellm:
     devDependencies:
@@ -1037,8 +1037,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
       openclaw:
-        specifier: 2026.5.28
-        version: 2026.5.28
+        specifier: 2026.6.10
+        version: 2026.6.10
 
   extensions/mattermost:
     dependencies:
@@ -1053,8 +1053,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
       openclaw:
-        specifier: 2026.5.28
-        version: 2026.5.28
+        specifier: 2026.6.10
+        version: 2026.6.10
 
   extensions/media-understanding-core:
     devDependencies:
@@ -1078,8 +1078,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
       openclaw:
-        specifier: 2026.5.28
-        version: 2026.5.28
+        specifier: 2026.6.10
+        version: 2026.6.10
 
   extensions/memory-lancedb:
     dependencies:
@@ -1116,8 +1116,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
       openclaw:
-        specifier: 2026.5.28
-        version: 2026.5.28
+        specifier: 2026.6.10
+        version: 2026.6.10
 
   extensions/microsoft:
     dependencies:
@@ -1141,8 +1141,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
       openclaw:
-        specifier: 2026.5.28
-        version: 2026.5.28
+        specifier: 2026.6.10
+        version: 2026.6.10
 
   extensions/migrate-hermes:
     dependencies:
@@ -1154,8 +1154,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
       openclaw:
-        specifier: 2026.5.28
-        version: 2026.5.28
+        specifier: 2026.6.10
+        version: 2026.6.10
 
   extensions/minimax:
     devDependencies:
@@ -1200,8 +1200,8 @@ importers:
         specifier: 6.2.3
         version: 6.2.3
       openclaw:
-        specifier: 2026.5.28
-        version: 2026.5.28
+        specifier: 2026.6.10
+        version: 2026.6.10
 
   extensions/nextcloud-talk:
     dependencies:
@@ -1213,8 +1213,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
       openclaw:
-        specifier: 2026.5.28
-        version: 2026.5.28
+        specifier: 2026.6.10
+        version: 2026.6.10
 
   extensions/nostr:
     dependencies:
@@ -1229,8 +1229,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
       openclaw:
-        specifier: 2026.5.28
-        version: 2026.5.28
+        specifier: 2026.6.10
+        version: 2026.6.10
 
   extensions/novita:
     devDependencies:
@@ -1263,8 +1263,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
       openclaw:
-        specifier: 2026.5.28
-        version: 2026.5.28
+        specifier: 2026.6.10
+        version: 2026.6.10
 
   extensions/ollama:
     dependencies:
@@ -1338,8 +1338,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
       openclaw:
-        specifier: 2026.5.28
-        version: 2026.5.28
+        specifier: 2026.6.10
+        version: 2026.6.10
 
   extensions/policy:
     dependencies:
@@ -1351,8 +1351,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
       openclaw:
-        specifier: 2026.5.28
-        version: 2026.5.28
+        specifier: 2026.6.10
+        version: 2026.6.10
 
   extensions/qa-channel:
     dependencies:
@@ -1367,8 +1367,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
       openclaw:
-        specifier: 2026.5.28
-        version: 2026.5.28
+        specifier: 2026.6.10
+        version: 2026.6.10
 
   extensions/qa-lab:
     dependencies:
@@ -1401,8 +1401,8 @@ importers:
         specifier: workspace:*
         version: link:../whatsapp
       openclaw:
-        specifier: 2026.5.28
-        version: 2026.5.28
+        specifier: 2026.6.10
+        version: 2026.6.10
 
   extensions/qa-matrix:
     dependencies:
@@ -1417,8 +1417,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
       openclaw:
-        specifier: 2026.5.28
-        version: 2026.5.28
+        specifier: 2026.6.10
+        version: 2026.6.10
 
   extensions/qianfan:
     devDependencies:
@@ -1451,8 +1451,8 @@ importers:
         specifier: 8.18.1
         version: 8.18.1
       openclaw:
-        specifier: 2026.5.28
-        version: 2026.5.28
+        specifier: 2026.6.10
+        version: 2026.6.10
 
   extensions/qwen:
     devDependencies:
@@ -1516,8 +1516,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
       openclaw:
-        specifier: 2026.5.28
-        version: 2026.5.28
+        specifier: 2026.6.10
+        version: 2026.6.10
 
   extensions/sms:
     dependencies:
@@ -1611,8 +1611,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
       openclaw:
-        specifier: 2026.5.28
-        version: 2026.5.28
+        specifier: 2026.6.10
+        version: 2026.6.10
 
   extensions/together:
     devDependencies:
@@ -1630,8 +1630,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
       openclaw:
-        specifier: 2026.5.28
-        version: 2026.5.28
+        specifier: 2026.6.10
+        version: 2026.6.10
 
   extensions/tts-local-cli:
     devDependencies:
@@ -1701,8 +1701,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
       openclaw:
-        specifier: 2026.5.28
-        version: 2026.5.28
+        specifier: 2026.6.10
+        version: 2026.6.10
 
   extensions/volcengine:
     devDependencies:
@@ -1761,8 +1761,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
       openclaw:
-        specifier: 2026.5.28
-        version: 2026.5.28
+        specifier: 2026.6.10
+        version: 2026.6.10
 
   extensions/workboard:
     dependencies:
@@ -1774,8 +1774,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
       openclaw:
-        specifier: 2026.5.28
-        version: 2026.5.28
+        specifier: 2026.6.10
+        version: 2026.6.10
 
   extensions/xai:
     dependencies:
@@ -1812,8 +1812,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
       openclaw:
-        specifier: 2026.5.28
-        version: 2026.5.28
+        specifier: 2026.6.10
+        version: 2026.6.10
 
   extensions/zalouser:
     dependencies:
@@ -1831,8 +1831,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
       openclaw:
-        specifier: 2026.5.28
-        version: 2026.5.28
+        specifier: 2026.6.10
+        version: 2026.6.10
 
   packages/acp-core:
     dependencies:
@@ -1932,8 +1932,8 @@ importers:
   packages/speech-core:
     dependencies:
       openclaw:
-        specifier: 2026.5.28
-        version: 2026.5.28
+        specifier: 2026.6.10
+        version: 2026.6.10
 
   packages/terminal-core:
     dependencies:
