@@ -5012,57 +5012,54 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         send: async (item) => {
           const targetSessionKey = item.sessionKey;
           const targetQueueUserId = resolveAlertPromptTurnQueueUserId(targetSessionKey);
-          try {
-            await runPromptTurnTask(targetQueueUserId, targetSessionKey, async () => {
-              const correlatedRunId = item.announceId?.trim() || alert.idempotencyKey;
-              const correlatedPhaseBase = {
-                sessionKey: targetSessionKey,
-                runId: correlatedRunId,
-              };
-              logAlertRunPhase("wake-dispatched", correlatedPhaseBase);
-              logAlertRunPhase("agent-run-start", correlatedPhaseBase);
-              try {
-                const result = await callClawlineGatewayAgent({
-                  token: gatewayToken,
-                  request: {
-                    sessionKey: targetSessionKey,
-                    message: item.prompt,
-                    channel: "clawline",
-                    to: targetSessionKey,
-                    deliver: true,
-                    attachments: item.attachments,
-                    idempotencyKey: resolveGatewayAlertIdempotencyKey(
-                      targetSessionKey,
-                      correlatedRunId,
-                    ),
-                  },
-                  timeoutMs: 300_000,
-                });
-                const payloadCount = countAlertReplyPayloads(result);
-                logAlertRunPhase("agent-run-end", {
-                  ...correlatedPhaseBase,
-                  status: "ok",
-                  payloadCount,
-                });
-                logAlertRunPhase(payloadCount > 0 ? "replied" : "no-reply", {
-                  ...correlatedPhaseBase,
-                  payloadCount,
-                });
-              } catch (err) {
-                scheduledAlertPromptTurnsByIdempotencyKey.delete(alertDedupeKey);
-                logAlertRunPhase("agent-run-end", {
-                  ...correlatedPhaseBase,
-                  status: "error",
-                  error: formatError(err),
-                });
-                throw err;
-              }
-            });
-          } finally {
-            clearPendingAlertPromptTurn(targetSessionKey);
-          }
+          await runPromptTurnTask(targetQueueUserId, targetSessionKey, async () => {
+            const correlatedRunId = item.announceId?.trim() || alert.idempotencyKey;
+            const correlatedPhaseBase = {
+              sessionKey: targetSessionKey,
+              runId: correlatedRunId,
+            };
+            logAlertRunPhase("wake-dispatched", correlatedPhaseBase);
+            logAlertRunPhase("agent-run-start", correlatedPhaseBase);
+            try {
+              const result = await callClawlineGatewayAgent({
+                token: gatewayToken,
+                request: {
+                  sessionKey: targetSessionKey,
+                  message: item.prompt,
+                  channel: "clawline",
+                  to: targetSessionKey,
+                  deliver: true,
+                  attachments: item.attachments,
+                  idempotencyKey: resolveGatewayAlertIdempotencyKey(
+                    targetSessionKey,
+                    correlatedRunId,
+                  ),
+                },
+                timeoutMs: 300_000,
+              });
+              const payloadCount = countAlertReplyPayloads(result);
+              logAlertRunPhase("agent-run-end", {
+                ...correlatedPhaseBase,
+                status: "ok",
+                payloadCount,
+              });
+              logAlertRunPhase(payloadCount > 0 ? "replied" : "no-reply", {
+                ...correlatedPhaseBase,
+                payloadCount,
+              });
+            } catch (err) {
+              scheduledAlertPromptTurnsByIdempotencyKey.delete(alertDedupeKey);
+              logAlertRunPhase("agent-run-end", {
+                ...correlatedPhaseBase,
+                status: "error",
+                error: formatError(err),
+              });
+              throw err;
+            }
+          });
         },
         onDrop: clearDroppedAlertIdempotencyKeys,
+        onSent: (item) => clearPendingAlertPromptTurn(item.sessionKey),
       });
       if (!queued) {
         scheduledAlertPromptTurnsByIdempotencyKey.delete(alertDedupeKey);
