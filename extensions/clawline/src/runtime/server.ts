@@ -5048,7 +5048,6 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
                 payloadCount,
               });
             } catch (err) {
-              scheduledAlertPromptTurnsByIdempotencyKey.delete(alertDedupeKey);
               logAlertRunPhase("agent-run-end", {
                 ...correlatedPhaseBase,
                 status: "error",
