@@ -7302,6 +7302,7 @@ public struct ChatSendParams: Codable, Sendable {
         originatingto: String?,
         originatingaccountid: String?,
         originatingthreadid: String?,
+        references: [[String: AnyCodable]]?,
         attachments: [AnyCodable]?,
         timeoutms: Int?,
         systeminputprovenance: [String: AnyCodable]?,
@@ -7321,6 +7322,7 @@ public struct ChatSendParams: Codable, Sendable {
         self.originatingto = originatingto
         self.originatingaccountid = originatingaccountid
         self.originatingthreadid = originatingthreadid
+        self.references = references
         self.attachments = attachments
         self.timeoutms = timeoutms
         self.systeminputprovenance = systeminputprovenance
@@ -7362,6 +7364,7 @@ public struct ChatSendParams: Codable, Sendable {
             originatingto: originatingto,
             originatingaccountid: originatingaccountid,
             originatingthreadid: originatingthreadid,
+            references: references,
             attachments: attachments,
             timeoutms: timeoutms,
             systeminputprovenance: systeminputprovenance,
