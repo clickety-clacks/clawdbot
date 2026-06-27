@@ -1521,6 +1521,7 @@ type TerminalSessionRecord = {
 };
 
 export const DEFAULT_ALERT_INSTRUCTIONS_TEXT = `After handling this alert, evaluate: would Flynn want to know what happened? If yes, report to him. Don't just process silently.`;
+// Alerts stay hidden as user input; the handler must post a visible ACK when Flynn needs one.
 export const MAIN_SESSION_ALERT_REPLY_TEXT =
   "Reply with one brief visible update to Flynn for this alert. Do not answer with NO_REPLY.";
 

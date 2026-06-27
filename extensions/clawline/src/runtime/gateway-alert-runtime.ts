@@ -54,6 +54,7 @@ export async function callClawlineGatewaySessionSend(params: {
       key: params.request.sessionKey,
       message: params.request.message,
       attachments: params.request.attachments,
+      // Route only the assistant ACK back to Clawline; the alert prompt is not a user-authored bubble.
       deliver: true,
       idempotencyKey: params.request.idempotencyKey,
     },
