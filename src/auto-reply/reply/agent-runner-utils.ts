@@ -3,6 +3,7 @@ import {
   normalizeOptionalLowercaseString,
   normalizeOptionalString,
 } from "@openclaw/normalization-core/string-coerce";
+import { resolveFastModeState } from "../../agents/fast-mode.js";
 import { normalizeChatType } from "../../channels/chat-type.js";
 import { getChannelPlugin } from "../../channels/plugins/index.js";
 import type {
@@ -22,6 +23,7 @@ import {
   selectApplicableRuntimeConfig,
   type OpenClawConfig,
 } from "../../config/config.js";
+import type { SessionEntry } from "../../config/sessions.js";
 import { isReasoningTagProvider } from "../../utils/provider-utils.js";
 import type { TemplateContext } from "../templating.js";
 import {
@@ -39,6 +41,15 @@ import { resolveOriginMessageProvider, resolveOriginMessageTo } from "./origin-r
 import type { FollowupRun } from "./queue.js";
 
 const BUN_FETCH_SOCKET_ERROR_RE = /socket connection was closed unexpectedly/i;
+type EmbeddedReplyRoute = Pick<
+  FollowupRun,
+  | "originatingChannel"
+  | "originatingTo"
+  | "originatingAccountId"
+  | "originatingChatType"
+  | "originatingThreadId"
+  | "originatingReplyToId"
+>;
 
 /** Selects the freshest runtime config usable by queued reply execution. */
 export function resolveQueuedReplyRuntimeConfig(config: OpenClawConfig): OpenClawConfig {
@@ -198,6 +209,36 @@ export const resolveEnforceFinalTag = (
   model = run.model,
 ) => resolveEnforceFinalTagWithResolver(run, provider, model, isReasoningTagProvider);
 
+/** Resolves candidate-scoped fast mode after model fallback changes provider/model. */
+export function resolveRunFastModeForFallbackCandidate(params: {
+  run: FollowupRun["run"];
+  config: OpenClawConfig;
+  provider: string;
+  model: string;
+  sessionEntry?: Pick<SessionEntry, "fastMode">;
+}) {
+  const state = resolveFastModeState({
+    cfg: params.config,
+    provider: params.provider,
+    model: params.model,
+    agentId: params.run.agentId,
+    sessionEntry: params.sessionEntry,
+  });
+  if (params.run.fastModeOverride) {
+    return {
+      fastMode: params.run.fastMode,
+      fastModeAutoOnSeconds: params.run.fastModeAutoOnSecondsOverride
+        ? params.run.fastModeAutoOnSeconds
+        : state.fastAutoOnSeconds,
+    };
+  }
+  return {
+    fastMode: state.mode,
+    fastModeAutoOnSeconds: params.run.fastModeAutoOnSecondsOverride
+      ? params.run.fastModeAutoOnSeconds
+      : state.fastAutoOnSeconds,
+  };
+}
 /** Builds base embedded run params with auth and provider runtime hints. */
 export function buildEmbeddedRunBaseParams(
   params: Parameters<typeof buildEmbeddedRunBaseParamsCore>[0],
@@ -210,35 +251,51 @@ export function buildEmbeddedRunBaseParams(
 
 function buildEmbeddedContextFromTemplate(params: {
   run: FollowupRun["run"];
+  replyRoute?: EmbeddedReplyRoute;
   sessionCtx: TemplateContext;
   hasRepliedRef: { value: boolean } | undefined;
 }) {
   const config = params.run.config;
-  const chatType = normalizeChatType(params.sessionCtx.ChatType) ?? params.run.chatType;
+  const sessionCtx = {
+    ...params.sessionCtx,
+    OriginatingChannel:
+      params.replyRoute?.originatingChannel ?? params.sessionCtx.OriginatingChannel,
+    OriginatingTo: params.replyRoute?.originatingTo ?? params.sessionCtx.OriginatingTo,
+    AccountId:
+      params.replyRoute?.originatingAccountId ??
+      params.sessionCtx.AccountId ??
+      params.run.agentAccountId,
+    ChatType:
+      normalizeChatType(params.replyRoute?.originatingChatType) ??
+      normalizeChatType(params.sessionCtx.ChatType) ??
+      params.run.chatType,
+    MessageThreadId: params.replyRoute?.originatingThreadId ?? params.sessionCtx.MessageThreadId,
+    ReplyToId: params.replyRoute?.originatingReplyToId ?? params.sessionCtx.ReplyToId,
+  };
   return {
     sessionId: params.run.sessionId,
     sessionKey: params.run.sessionKey,
     sandboxSessionKey: params.run.runtimePolicySessionKey,
     agentId: params.run.agentId,
     messageProvider: resolveOriginMessageProvider({
-      originatingChannel: params.sessionCtx.OriginatingChannel,
-      provider: params.sessionCtx.Provider,
+      originatingChannel: sessionCtx.OriginatingChannel,
+      provider: sessionCtx.Provider,
     }),
-    ...(chatType ? { chatType } : {}),
-    agentAccountId: params.sessionCtx.AccountId,
+    ...(sessionCtx.ChatType ? { chatType: sessionCtx.ChatType } : {}),
+    agentAccountId: sessionCtx.AccountId,
     messageTo: resolveOriginMessageTo({
-      originatingTo: params.sessionCtx.OriginatingTo,
-      to: params.sessionCtx.To,
+      originatingTo: sessionCtx.OriginatingTo,
+      to: sessionCtx.To,
     }),
-    messageThreadId: params.sessionCtx.MessageThreadId ?? undefined,
-    memberRoleIds: normalizeMemberRoleIds(params.sessionCtx.MemberRoleIds),
+    messageThreadId: sessionCtx.MessageThreadId ?? undefined,
+    memberRoleIds: normalizeMemberRoleIds(sessionCtx.MemberRoleIds),
     // Provider threading context for tool auto-injection
     ...buildThreadingToolContext({
-      sessionCtx: params.sessionCtx,
+      sessionCtx,
       config,
       hasRepliedRef: params.hasRepliedRef,
     }),
-    currentInboundAudio: hasInboundAudio(params.sessionCtx),
+    currentInboundAudio: hasInboundAudio(sessionCtx),
   };
 }
 
@@ -263,6 +320,7 @@ function buildTemplateSenderContext(sessionCtx: TemplateContext) {
 /** Builds extra context payloads for embedded run execution. */
 export function buildEmbeddedRunContexts(params: {
   run: FollowupRun["run"];
+  replyRoute?: EmbeddedReplyRoute;
   sessionCtx: TemplateContext;
   hasRepliedRef: { value: boolean } | undefined;
   provider: string;
@@ -271,6 +329,7 @@ export function buildEmbeddedRunContexts(params: {
     authProfile: resolveRunAuthProfile(params.run, params.provider),
     embeddedContext: buildEmbeddedContextFromTemplate({
       run: params.run,
+      replyRoute: params.replyRoute,
       sessionCtx: params.sessionCtx,
       hasRepliedRef: params.hasRepliedRef,
     }),
@@ -281,6 +340,7 @@ export function buildEmbeddedRunContexts(params: {
 /** Builds execution-specific embedded run params for queued reply dispatch. */
 export function buildEmbeddedRunExecutionParams(params: {
   run: FollowupRun["run"];
+  replyRoute?: EmbeddedReplyRoute;
   sessionCtx: TemplateContext;
   hasRepliedRef: { value: boolean } | undefined;
   provider: string;

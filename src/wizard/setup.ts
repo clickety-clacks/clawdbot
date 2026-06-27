@@ -18,11 +18,11 @@ import { createConfigIO, replaceConfigFile, resolveGatewayPort } from "../config
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { normalizeSecretInputString } from "../config/types.secrets.js";
 import { formatErrorMessage } from "../infra/errors.js";
+import { PLUGIN_INSTALLS_CONFIG_PATH } from "../plugins/installed-plugin-index-records.js";
 import {
   buildPluginCompatibilitySnapshotNotices,
   formatPluginCompatibilityNotice,
 } from "../plugins/status.js";
-import { PLUGIN_INSTALLS_CONFIG_PATH } from "../plugins/installed-plugin-index-records.js";
 import type { RuntimeEnv } from "../runtime.js";
 import { defaultRuntime } from "../runtime.js";
 import { resolveUserPath } from "../utils.js";
@@ -741,6 +741,7 @@ export async function runSetupWizard(
       prompter,
       runtime,
       setDefaultModel: true,
+      preserveExistingDefaultModel: true,
       opts: {
         ...opts,
         token: opts.authChoice === "apiKey" && opts.token ? opts.token : undefined,

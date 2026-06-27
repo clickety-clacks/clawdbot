@@ -5,8 +5,8 @@ import OpenClawProtocol
 import OSLog
 
 struct IOSGatewayChatTransport: OpenClawChatTransport {
-    static let logger = Logger(subsystem: "ai.openclaw", category: "ios.chat.transport")
-    static let defaultChatSendTimeoutMs = 30000
+    static let logger = Logger(subsystem: "ai.openclawfoundation.app", category: "ios.chat.transport")
+    static let defaultChatSendTimeoutMs = 300_000
     private let gateway: GatewayNodeSession
 
     private struct CreateSessionParams: Codable {
@@ -70,7 +70,10 @@ struct IOSGatewayChatTransport: OpenClawChatTransport {
     }
 
     func listModels() async throws -> [OpenClawChatModelChoice] {
-        let res = try await self.gateway.request(method: "models.list", paramsJSON: "{\"view\":\"configured\"}", timeoutSeconds: 15)
+        let res = try await self.gateway.request(
+            method: "models.list",
+            paramsJSON: "{\"view\":\"configured\"}",
+            timeoutSeconds: 15)
         let decoded = try JSONDecoder().decode(ModelsListResult.self, from: res)
         return decoded.models.map(Self.mapModelChoice)
     }
