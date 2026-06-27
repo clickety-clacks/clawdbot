@@ -6,7 +6,7 @@ import OSLog
 
 struct IOSGatewayChatTransport: OpenClawChatTransport {
     static let logger = Logger(subsystem: "ai.openclawfoundation.app", category: "ios.chat.transport")
-    static let defaultChatSendTimeoutMs = 0
+    static let defaultChatSendTimeoutMs = 300_000
     private let gateway: GatewayNodeSession
 
     private struct CreateSessionParams: Codable {
