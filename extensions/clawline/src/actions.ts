@@ -597,6 +597,7 @@ export const clawlineMessageActions: ChannelMessageActionAdapter = {
     };
   },
   supportsAction: ({ action }) => action === "sendAttachment" || action === "read",
+  resolveExecutionMode: () => "gateway",
 
   handleAction: async ({ action, params, cfg }): Promise<AgentToolResult<unknown>> => {
     if (action === "sendAttachment") {

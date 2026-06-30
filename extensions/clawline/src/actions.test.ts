@@ -36,6 +36,10 @@ describe("clawlineMessageActions", () => {
     const discovery = clawlineMessageActions.describeMessageTool({ cfg });
     expect(discovery?.actions).toEqual(expect.arrayContaining(["sendAttachment", "read"]));
     expect(clawlineMessageActions.supportsAction?.({ action: "sendAttachment" })).toBe(true);
+    expect(clawlineMessageActions.resolveExecutionMode?.({ action: "sendAttachment" })).toBe(
+      "gateway",
+    );
+    expect(clawlineMessageActions.resolveExecutionMode?.({ action: "read" })).toBe("gateway");
     expect(discovery?.schema).toMatchObject({
       properties: {
         destination: expect.any(Object),

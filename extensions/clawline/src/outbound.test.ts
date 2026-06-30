@@ -10,6 +10,7 @@ describe("clawlineOutbound", () => {
   it("uses the shared outbound text chunker", async () => {
     const { clawlineOutbound } = await import("./outbound.js");
 
+    expect(clawlineOutbound.deliveryMode).toBe("gateway");
     expect(clawlineOutbound.chunker?.("alpha\nbeta gamma", 8)).toEqual(
       chunkTextForOutbound("alpha\nbeta gamma", 8),
     );

@@ -156,7 +156,7 @@ function chunkClawlineOutboundText(text: string, limit: number): string[] {
 }
 
 export const clawlineOutbound: ChannelOutboundAdapter = {
-  deliveryMode: "direct",
+  deliveryMode: "gateway",
   chunker: chunkClawlineOutboundText,
   textChunkLimit: 4000,
   resolveTarget: ({ to }) => {
