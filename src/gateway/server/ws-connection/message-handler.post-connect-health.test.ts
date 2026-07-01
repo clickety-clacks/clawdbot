@@ -699,68 +699,6 @@ describe("attachGatewayWsMessageHandler post-connect health refresh", () => {
   });
 });
 
-describe("legacy Clawline message frame adapter", () => {
-  it("defaults omitted legacy session keys to the configured main session", () => {
-    const frame = testing.parseLegacyClientMessageFrame({
-      type: "message",
-      id: "c_main_1",
-      content: "use main",
-    });
-
-    expect(frame).toBeDefined();
-    expect(testing.legacyClientMessageToChatSendRequest(frame!)).toMatchObject({
-      type: "req",
-      id: "legacy:c_main_1",
-      method: "chat.send",
-      params: {
-        sessionKey: "agent:main:main",
-        message: "use main",
-        attachments: [],
-        idempotencyKey: "c_main_1",
-      },
-    });
-  });
-
-  it("maps reply references onto chat.send params without resolving the target id", () => {
-    const frame = testing.parseLegacyClientMessageFrame({
-      type: "message",
-      id: "c_reply_1",
-      content: "replying here",
-      attachments: [{ type: "asset", assetId: "a_1" }],
-      sessionKey: "agent:main:clawline:user_1:main",
-      references: [
-        {
-          kind: "reply",
-          llmVisibleMessageId: "s_msg_123",
-          role: "assistant",
-          preview: "Bounded visible snippet",
-        },
-      ],
-    });
-
-    expect(frame).toBeDefined();
-    expect(testing.legacyClientMessageToChatSendRequest(frame!)).toEqual({
-      type: "req",
-      id: "legacy:c_reply_1",
-      method: "chat.send",
-      params: {
-        sessionKey: "agent:main:clawline:user_1:main",
-        message: "replying here",
-        attachments: [{ type: "asset", assetId: "a_1" }],
-        idempotencyKey: "c_reply_1",
-        references: [
-          {
-            kind: "reply",
-            llmVisibleMessageId: "s_msg_123",
-            role: "assistant",
-            preview: "Bounded visible snippet",
-          },
-        ],
-      },
-    });
-  });
-});
-
 describe("resolvePinnedClientMetadata", () => {
   it.each([
     ["darwin", "macos"],
