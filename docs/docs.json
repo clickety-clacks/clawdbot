@@ -69,6 +69,14 @@
       "destination": "/gateway/external-apps"
     },
     {
+      "source": "/reference/maturity-scorecard",
+      "destination": "/maturity/scorecard"
+    },
+    {
+      "source": "/reference/maturity-taxonomy",
+      "destination": "/maturity/taxonomy"
+    },
+    {
       "source": "/mcp",
       "destination": "/cli/mcp"
     },
@@ -1123,6 +1131,7 @@
                   "channels/nextcloud-talk",
                   "channels/clawline",
                   "channels/nostr",
+                  "channels/raft",
                   "channels/tlon",
                   "channels/synology-chat",
                   "channels/twitch"
@@ -1852,6 +1861,8 @@
               {
                 "group": "Release and CI",
                 "pages": [
+                  "maturity/scorecard",
+                  "maturity/taxonomy",
                   "reference/RELEASING",
                   "reference/full-release-validation",
                   "reference/release-performance-sweep",

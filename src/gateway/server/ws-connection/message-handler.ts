@@ -30,7 +30,6 @@ import {
   formatValidationErrors,
   MIN_PROBE_PROTOCOL_VERSION,
   PROTOCOL_VERSION,
-  type RequestFrame,
   validateConnectParams,
   validateRequestFrame,
 } from "../../../../packages/gateway-protocol/src/index.js";
@@ -43,7 +42,6 @@ import {
 } from "../../../../packages/gateway-protocol/src/startup-unavailable.js";
 import { getRuntimeConfig } from "../../../config/io.js";
 import { resolveStateDir } from "../../../config/paths.js";
-import { resolveMainSessionKey } from "../../../config/sessions.js";
 import {
   getBoundDeviceBootstrapProfile,
   getDeviceBootstrapTokenProfile,
@@ -189,61 +187,6 @@ const DEVICE_CREDENTIAL_INVALIDATING_METHODS = new Set([
   "node.pair.remove",
 ]);
 const unauthorizedHandshakeLogLimiter = new HandshakeAuthLogLimiter();
-
-type LegacyClientMessageFrame = {
-  type: "message";
-  id: string;
-  content: string;
-  attachments?: unknown[];
-  sessionKey?: string;
-  references?: unknown;
-};
-
-function logClawlineProviderDiag(
-  logGateway: SubsystemLogger,
-  event: string,
-  details: Record<string, unknown>,
-): void {
-  logGateway.info(`[ClawlineProviderDiag] ${event} ${JSON.stringify(details)}`);
-}
-
-function legacyClientMessageToChatSendRequest(frame: LegacyClientMessageFrame): RequestFrame {
-  const sessionKey = frame.sessionKey?.trim() || resolveMainSessionKey(getRuntimeConfig());
-  return {
-    type: "req",
-    id: `legacy:${frame.id}`,
-    method: "chat.send",
-    params: {
-      sessionKey,
-      message: frame.content,
-      attachments: Array.isArray(frame.attachments) ? frame.attachments : [],
-      idempotencyKey: frame.id,
-      references: frame.references,
-    },
-  };
-}
-
-function parseLegacyClientMessageFrame(value: unknown): LegacyClientMessageFrame | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return undefined;
-  }
-  const frame = value as Record<string, unknown>;
-  if (
-    frame.type !== "message" ||
-    typeof frame.id !== "string" ||
-    typeof frame.content !== "string"
-  ) {
-    return undefined;
-  }
-  return {
-    type: "message",
-    id: frame.id,
-    content: frame.content,
-    attachments: Array.isArray(frame.attachments) ? frame.attachments : undefined,
-    sessionKey: typeof frame.sessionKey === "string" ? frame.sessionKey : undefined,
-    references: frame.references,
-  };
-}
 
 class NodePairingRateLimitError extends Error {
   constructor(readonly retryAfterMs: number) {
@@ -2236,25 +2179,7 @@ export function attachGatewayWsMessageHandler(params: GatewayWsMessageHandlerPar
         return;
       }
 
-      // After handshake, accept normal request frames and the legacy Clawline message frame.
-      const legacyClientMessageFrame = parseLegacyClientMessageFrame(parsed);
-      if (legacyClientMessageFrame) {
-        logClawlineProviderDiag(logGateway, "ws_legacy_frame_received", {
-          connId,
-          clientMessageId: legacyClientMessageFrame.id,
-          sessionKey: legacyClientMessageFrame.sessionKey,
-          contentChars: legacyClientMessageFrame.content.length,
-          attachmentCount: Array.isArray(legacyClientMessageFrame.attachments)
-            ? legacyClientMessageFrame.attachments.length
-            : 0,
-          hasReferences: legacyClientMessageFrame.references !== undefined,
-          payloadBytes,
-          clientId: client.connect?.client?.id,
-          deviceId: client.connect?.device?.id,
-          scopes: client.connect?.scopes,
-        });
-      }
-      if (!legacyClientMessageFrame && !validateRequestFrame(parsed)) {
+      if (!validateRequestFrame(parsed)) {
         send({
           type: "res",
           id: (parsed as { id?: unknown })?.id ?? "invalid",
@@ -2266,18 +2191,7 @@ export function attachGatewayWsMessageHandler(params: GatewayWsMessageHandlerPar
         });
         return;
       }
-      const req = legacyClientMessageFrame
-        ? legacyClientMessageToChatSendRequest(legacyClientMessageFrame)
-        : parsed;
-      const legacyClientMessageId = legacyClientMessageFrame?.id;
-      if (legacyClientMessageFrame) {
-        logClawlineProviderDiag(logGateway, "ws_legacy_frame_mapped", {
-          connId,
-          clientMessageId: legacyClientMessageId,
-          reqId: req.id,
-          method: req.method,
-        });
-      }
+      const req = parsed;
       logWs("in", "req", { connId, id: req.id, method: req.method });
       for (;;) {
         const barrier = deviceCredentialMutationBarrier;
@@ -2313,32 +2227,7 @@ export function attachGatewayWsMessageHandler(params: GatewayWsMessageHandlerPar
         error?: ErrorShape,
         meta?: Record<string, unknown>,
       ) => {
-        if (legacyClientMessageId) {
-          logClawlineProviderDiag(logGateway, "ws_legacy_response", {
-            connId,
-            clientMessageId: legacyClientMessageId,
-            reqId: req.id,
-            method: req.method,
-            ok,
-            errorCode: error?.code,
-            errorMessage: error?.message,
-            ...meta,
-          });
-        }
-        if (legacyClientMessageId) {
-          if (ok) {
-            send({ type: "ack", id: legacyClientMessageId });
-          } else {
-            send({
-              type: "error",
-              code: error?.code ?? ErrorCodes.UNAVAILABLE,
-              message: error?.message,
-              messageId: legacyClientMessageId,
-            });
-          }
-        } else {
-          send({ type: "res", id: req.id, ok, payload, error });
-        }
+        send({ type: "res", id: req.id, ok, payload, error });
         const unauthorizedRoleError = isUnauthorizedRoleError(error);
         let logMeta = meta;
         if (unauthorizedRoleError) {
@@ -2437,8 +2326,6 @@ function setSocketMaxPayload(socket: WebSocket, maxPayload: number): void {
 }
 
 export const testing = {
-  legacyClientMessageToChatSendRequest,
-  parseLegacyClientMessageFrame,
   resolvePinnedClientMetadata,
 };
 export { testing as __testing };

@@ -2339,6 +2339,7 @@ public struct SessionsSendParams: Codable, Sendable {
     public let message: String
     public let thinking: String?
     public let attachments: [AnyCodable]?
+    public let deliver: Bool?
     public let timeoutms: Int?
     public let idempotencykey: String?
 
@@ -2348,6 +2349,7 @@ public struct SessionsSendParams: Codable, Sendable {
         message: String,
         thinking: String?,
         attachments: [AnyCodable]?,
+        deliver: Bool?,
         timeoutms: Int?,
         idempotencykey: String?)
     {
@@ -2356,6 +2358,7 @@ public struct SessionsSendParams: Codable, Sendable {
         self.message = message
         self.thinking = thinking
         self.attachments = attachments
+        self.deliver = deliver
         self.timeoutms = timeoutms
         self.idempotencykey = idempotencykey
     }
@@ -2366,6 +2369,7 @@ public struct SessionsSendParams: Codable, Sendable {
         case message
         case thinking
         case attachments
+        case deliver
         case timeoutms = "timeoutMs"
         case idempotencykey = "idempotencyKey"
     }
@@ -6592,6 +6596,7 @@ public struct ExecApprovalRequestParams: Codable, Sendable {
     public let turnsourceto: AnyCodable?
     public let turnsourceaccountid: AnyCodable?
     public let turnsourcethreadid: AnyCodable?
+    public let approvalreviewerdeviceids: [String]?
     public let requiredeliveryroute: Bool?
     public let suppressdelivery: Bool?
     public let timeoutms: Int?
@@ -6618,6 +6623,7 @@ public struct ExecApprovalRequestParams: Codable, Sendable {
         turnsourceto: AnyCodable?,
         turnsourceaccountid: AnyCodable?,
         turnsourcethreadid: AnyCodable?,
+        approvalreviewerdeviceids: [String]?,
         requiredeliveryroute: Bool? = nil,
         suppressdelivery: Bool? = nil,
         timeoutms: Int?,
@@ -6643,6 +6649,7 @@ public struct ExecApprovalRequestParams: Codable, Sendable {
         self.turnsourceto = turnsourceto
         self.turnsourceaccountid = turnsourceaccountid
         self.turnsourcethreadid = turnsourcethreadid
+        self.approvalreviewerdeviceids = approvalreviewerdeviceids
         self.requiredeliveryroute = requiredeliveryroute
         self.suppressdelivery = suppressdelivery
         self.timeoutms = timeoutms
@@ -6670,6 +6677,7 @@ public struct ExecApprovalRequestParams: Codable, Sendable {
         case turnsourceto = "turnSourceTo"
         case turnsourceaccountid = "turnSourceAccountId"
         case turnsourcethreadid = "turnSourceThreadId"
+        case approvalreviewerdeviceids = "approvalReviewerDeviceIds"
         case requiredeliveryroute = "requireDeliveryRoute"
         case suppressdelivery = "suppressDelivery"
         case timeoutms = "timeoutMs"

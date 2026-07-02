@@ -154,6 +154,7 @@ import { ADMIN_SCOPE } from "../method-scopes.js";
 import { chatAbortMarkerTimestampMs, type ChatRunTiming } from "../server-chat-state.js";
 import { getMaxChatHistoryMessagesBytes, MAX_PAYLOAD_BYTES } from "../server-constants.js";
 import { resolveSessionHistoryTailReadOptions } from "../session-history-state.js";
+import { persistGatewaySessionLifecycleEvent } from "../session-lifecycle-state.js";
 import { readSessionTranscriptIndex } from "../session-transcript-index.fs.js";
 import {
   capArrayByJsonBytes,
@@ -281,6 +282,26 @@ function shouldIncludeChatSendAckServerTiming(client?: {
   mode?: string | null;
 }): boolean {
   return isOperatorUiClient(client);
+}
+
+const CONTROL_UI_RECONNECT_RESUME_PARAM = "__controlUiReconnectResume";
+
+function resolveControlUiReconnectResumeParams(
+  params: unknown,
+  clientInfo?: { id?: string | null; mode?: string | null },
+): { params: unknown; resumeRequested: boolean } {
+  if (!params || typeof params !== "object" || Array.isArray(params)) {
+    return { params, resumeRequested: false };
+  }
+  const record = params as Record<string, unknown>;
+  const resumeRequested =
+    record[CONTROL_UI_RECONNECT_RESUME_PARAM] === true && isOperatorUiClient(clientInfo);
+  if (!resumeRequested) {
+    return { params, resumeRequested: false };
+  }
+  const validatedParams = { ...record };
+  delete validatedParams[CONTROL_UI_RECONNECT_RESUME_PARAM];
+  return { params: validatedParams, resumeRequested: true };
 }
 
 function emitOperatorChatSendServerTiming(params: {
@@ -2423,16 +2444,6 @@ function broadcastChatFinal(params: {
   params.context.agentRunSeq.delete(params.runId);
 }
 
-function withLlmVisibleMessageId(
-  message: Record<string, unknown> | undefined,
-  messageId: string | undefined,
-): Record<string, unknown> | undefined {
-  if (!message || typeof message.llmVisibleMessageId === "string" || !messageId?.trim()) {
-    return message;
-  }
-  return { ...message, llmVisibleMessageId: messageId };
-}
-
 function isBtwReplyPayload(payload: ReplyPayload | undefined): payload is ReplyPayload & {
   btw: { question: string };
   text: string;
@@ -3120,38 +3131,9 @@ export const chatHandlers: GatewayRequestHandlers = {
   },
   "chat.send": async ({ params, respond, context, client }) => {
     const chatSendReceivedAtMs = performance.now();
-    const logClawlineChatDiag = (event: string, details: Record<string, unknown>): void => {
-      context.logGateway.info(`[ClawlineProviderDiag] ${event} ${JSON.stringify(details)}`);
-    };
-    const rawParams =
-      params && typeof params === "object" && !Array.isArray(params)
-        ? (params as Record<string, unknown>)
-        : undefined;
-    const diagIdempotencyKey =
-      typeof rawParams?.idempotencyKey === "string" ? rawParams.idempotencyKey : undefined;
-    const diagSessionKey =
-      typeof rawParams?.sessionKey === "string" ? rawParams.sessionKey : undefined;
-    const diagMessageChars =
-      typeof rawParams?.message === "string" ? rawParams.message.length : undefined;
-    const diagAttachmentCount = Array.isArray(rawParams?.attachments)
-      ? rawParams.attachments.length
-      : undefined;
-    logClawlineChatDiag("chat_send_enter", {
-      idempotencyKey: diagIdempotencyKey,
-      sessionKey: diagSessionKey,
-      messageChars: diagMessageChars,
-      attachmentCount: diagAttachmentCount,
-      hasReferences: rawParams?.references !== undefined,
-      clientId: client?.connect?.client?.id,
-      deviceId: client?.connect?.device?.id,
-      connId: client?.connId,
-    });
-    if (!validateChatSendParams(params)) {
-      logClawlineChatDiag("chat_send_validation_failed", {
-        idempotencyKey: diagIdempotencyKey,
-        sessionKey: diagSessionKey,
-        errors: formatValidationErrors(validateChatSendParams.errors),
-      });
+    const clientInfo = client?.connect?.client;
+    const controlUiReconnectResume = resolveControlUiReconnectResumeParams(params, clientInfo);
+    if (!validateChatSendParams(controlUiReconnectResume.params)) {
       respond(
         false,
         undefined,
@@ -3162,7 +3144,7 @@ export const chatHandlers: GatewayRequestHandlers = {
       );
       return;
     }
-    const p = params as {
+    const p = controlUiReconnectResume.params as {
       sessionKey: string;
       agentId?: string;
       sessionId?: string;
@@ -3175,7 +3157,6 @@ export const chatHandlers: GatewayRequestHandlers = {
       originatingTo?: string;
       originatingAccountId?: string;
       originatingThreadId?: string;
-      references?: MsgContext["References"];
       attachments?: Array<{
         type?: string;
         mimeType?: string;
@@ -3283,20 +3264,6 @@ export const chatHandlers: GatewayRequestHandlers = {
       respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, selectedAgent.error));
       return;
     }
-    logClawlineChatDiag("chat_send_session_loaded", {
-      idempotencyKey: p.idempotencyKey,
-      rawSessionKey,
-      sessionKey,
-      hasEntry: entry !== undefined,
-      sessionId: entry?.sessionId,
-      agentId: resolveSessionAgentId({
-        sessionKey,
-        config: cfg,
-        agentId: selectedAgent.agentId,
-      }),
-      chatType: entry?.chatType,
-      channel: entry?.channel,
-    });
     const requestedSessionId = normalizeOptionalText(p.sessionId);
     const backingSessionId = entry?.sessionId ?? requestedSessionId;
     const deletedAgentId = resolveDeletedAgentIdFromSessionKey(cfg, sessionKey, entry, {
@@ -3348,11 +3315,6 @@ export const chatHandlers: GatewayRequestHandlers = {
       chatType: entry?.chatType,
     });
     if (sendPolicy === "deny") {
-      logClawlineChatDiag("chat_send_policy_denied", {
-        idempotencyKey: p.idempotencyKey,
-        sessionKey,
-        sendPolicy,
-      });
       respond(
         false,
         undefined,
@@ -3388,11 +3350,6 @@ export const chatHandlers: GatewayRequestHandlers = {
 
     const cached = context.dedupe.get(`chat:${clientRunId}`);
     if (cached) {
-      logClawlineChatDiag("chat_send_dedupe_cached", {
-        idempotencyKey: p.idempotencyKey,
-        sessionKey,
-        ok: cached.ok,
-      });
       respond(cached.ok, cached.payload, cached.error, {
         cached: true,
       });
@@ -3424,17 +3381,12 @@ export const chatHandlers: GatewayRequestHandlers = {
 
     const activeExisting = context.chatAbortControllers.get(clientRunId);
     if (activeExisting) {
-      logClawlineChatDiag("chat_send_active_existing", {
-        idempotencyKey: p.idempotencyKey,
-        sessionKey,
-      });
       respond(true, { runId: clientRunId, status: "in_flight" as const }, undefined, {
         cached: true,
         runId: clientRunId,
       });
       return;
     }
-    const clientInfo = client?.connect?.client;
     const chatSendTraceAttributes = {
       runId: clientRunId,
       sessionKey,
@@ -3639,15 +3591,6 @@ export const chatHandlers: GatewayRequestHandlers = {
         clientRunId,
         ...(chatSendTiming ? { chatSendTiming } : {}),
       });
-      logClawlineChatDiag("chat_send_registered", {
-        idempotencyKey: p.idempotencyKey,
-        sessionKey,
-        backingSessionId,
-        timeoutMs,
-        providerId: resolvedSessionModel.provider,
-        authProviderId: resolvedSessionAuthProvider,
-        attachmentCount: normalizedAttachments.length,
-      });
       const ackPayload = {
         runId: clientRunId,
         status: "started" as const,
@@ -3667,11 +3610,6 @@ export const chatHandlers: GatewayRequestHandlers = {
         { config: cfg },
       );
       respond(true, ackPayload, undefined, { runId: clientRunId });
-      logClawlineChatDiag("chat_send_ack_started", {
-        idempotencyKey: p.idempotencyKey,
-        sessionKey,
-        runId: clientRunId,
-      });
       const chatSendAckedAtMs = chatSendTiming?.ackedAtMs ?? performance.now();
       const persistedImagesPromise = persistChatSendImages({
         images: parsedImages,
@@ -3750,7 +3688,6 @@ export const chatHandlers: GatewayRequestHandlers = {
         ExplicitDeliverRoute: explicitDeliverRoute,
         AccountId: accountId,
         MessageThreadId: messageThreadId,
-        References: p.references,
         ChatType: "direct",
         ...(commandSource ? { CommandSource: commandSource } : {}),
         CommandAuthorized: !suppressCommandInterpretation,
@@ -3768,6 +3705,7 @@ export const chatHandlers: GatewayRequestHandlers = {
               body: commandBody,
             },
         MessageSid: clientRunId,
+        ApprovalReviewerDeviceId: normalizeOptionalText(client?.connect?.device?.id),
         ...(!isOperatorUiClient(clientInfo)
           ? {
               SenderId: clientInfo?.id,
@@ -3809,6 +3747,14 @@ export const chatHandlers: GatewayRequestHandlers = {
       const deliveredReplies: Array<{ payload: ReplyPayload; kind: "block" | "final" }> = [];
       let appendedWebchatAgentMedia = false;
       let agentRunStarted = false;
+      let pendingDispatchLifecycleError:
+        | {
+            endedAt: number;
+            error: string;
+            sessionId: string;
+            startedAt: number;
+          }
+        | undefined;
       const userTurnRecorder: UserTurnTranscriptRecorder = createUserTurnTranscriptRecorder({
         input: baseUserTurnInput,
         resolveInput: () => userTurnInputPromise,
@@ -3841,10 +3787,6 @@ export const chatHandlers: GatewayRequestHandlers = {
         },
       });
       const persistGatewayUserTurnTranscript = async () => {
-        logClawlineChatDiag("chat_send_persist_user_transcript_start", {
-          idempotencyKey: p.idempotencyKey,
-          sessionKey,
-        });
         await measureDiagnosticsTimelineSpan(
           "gateway.chat_send.persist_user_transcript",
           async () => {
@@ -3856,10 +3798,6 @@ export const chatHandlers: GatewayRequestHandlers = {
             attributes: chatSendTraceAttributes,
           },
         );
-        logClawlineChatDiag("chat_send_persist_user_transcript_success", {
-          idempotencyKey: p.idempotencyKey,
-          sessionKey,
-        });
       };
       const persistGatewayUserTurnTranscriptBestEffort = async () => {
         await persistGatewayUserTurnTranscript().catch(() => undefined);
@@ -4027,14 +3965,6 @@ export const chatHandlers: GatewayRequestHandlers = {
       void measureDiagnosticsTimelineSpan(
         "gateway.chat_send.dispatch_inbound",
         async () => {
-          logClawlineChatDiag("chat_send_dispatch_start", {
-            idempotencyKey: p.idempotencyKey,
-            sessionKey,
-            hasAttachments: normalizedAttachments.length > 0,
-            explicitDeliverRoute,
-            originatingChannel,
-            originatingTo,
-          });
           applyChatSendManagedMediaFields(ctx, await pluginBoundMediaFieldsPromise);
           const dispatchResult = await dispatchInboundMessage({
             ctx,
@@ -4057,6 +3987,8 @@ export const chatHandlers: GatewayRequestHandlers = {
                     }),
                   }
                 : {}),
+              requestedSessionId,
+              resumeRequestedSession: controlUiReconnectResume.resumeRequested,
               abortSignal: activeRunAbort.controller.signal,
               images: replyOptionImages,
               imageOrder: imageOrder.length > 0 ? imageOrder : undefined,
@@ -4066,11 +3998,6 @@ export const chatHandlers: GatewayRequestHandlers = {
               fastModeAutoOnSecondsOverride: p.fastAutoOnSeconds,
               onAgentRunStart: (runId) => {
                 agentRunStarted = true;
-                logClawlineChatDiag("chat_send_agent_run_start", {
-                  idempotencyKey: p.idempotencyKey,
-                  sessionKey,
-                  runId,
-                });
                 emitServerTiming(
                   "agent-run-started",
                   runId !== clientRunId ? { agentRunId: runId } : undefined,
@@ -4130,12 +4057,6 @@ export const chatHandlers: GatewayRequestHandlers = {
           if (dispatchResult.beforeAgentRunBlocked === true) {
             userTurnRecorder.markBlocked();
           }
-          logClawlineChatDiag("chat_send_dispatch_result", {
-            idempotencyKey: p.idempotencyKey,
-            sessionKey,
-            beforeAgentRunBlocked: dispatchResult.beforeAgentRunBlocked === true,
-            agentRunStarted,
-          });
           return dispatchResult;
         },
         {
@@ -4145,12 +4066,6 @@ export const chatHandlers: GatewayRequestHandlers = {
         },
       )
         .then(async () => {
-          logClawlineChatDiag("chat_send_dispatch_then", {
-            idempotencyKey: p.idempotencyKey,
-            sessionKey,
-            agentRunStarted,
-            deliveredReplyCount: deliveredReplies.length,
-          });
           emitServerTiming("dispatch-completed", undefined, dispatchStartedAtMs);
           const postDispatchStartedAtMs = performance.now();
           await measureDiagnosticsTimelineSpan(
@@ -4615,11 +4530,8 @@ export const chatHandlers: GatewayRequestHandlers = {
                         });
                       }
                       message = broadcastAssistantContent?.length
-                        ? withLlmVisibleMessageId(
-                            { ...appended.message, content: broadcastAssistantContent },
-                            appended.messageId,
-                          )
-                        : withLlmVisibleMessageId(appended.message, appended.messageId);
+                        ? { ...appended.message, content: broadcastAssistantContent }
+                        : appended.message;
                     } else {
                       context.logGateway.warn(
                         `webchat transcript append failed: ${appended.error ?? "unknown error"}`,
@@ -5054,14 +4966,7 @@ export const chatHandlers: GatewayRequestHandlers = {
           );
         })
         .catch(async (err: unknown) => {
-          logClawlineChatDiag("chat_send_dispatch_error", {
-            idempotencyKey: p.idempotencyKey,
-            sessionKey,
-            error: formatForLog(err),
-            agentRunStarted,
-            userTurnPersisted: userTurnRecorder.hasPersisted(),
-            userTurnBlocked: userTurnRecorder.isBlocked(),
-          });
+          const errorMessage = String(err);
           const emitAfterError =
             userTurnRecorder.hasPersisted() || userTurnRecorder.isBlocked()
               ? Promise.resolve()
@@ -5071,7 +4976,19 @@ export const chatHandlers: GatewayRequestHandlers = {
               `webchat user transcript update failed after error: ${formatForLog(transcriptErr)}`,
             );
           });
-          const error = errorShape(ErrorCodes.UNAVAILABLE, String(err));
+          if (
+            !agentRunStarted &&
+            !activeRunAbort.controller.signal.aborted &&
+            !context.chatAbortedRuns.has(clientRunId)
+          ) {
+            pendingDispatchLifecycleError = {
+              endedAt: Date.now(),
+              error: errorMessage,
+              sessionId: activeRunAbort.entry?.sessionId ?? backingSessionId ?? clientRunId,
+              startedAt: activeRunAbort.entry?.startedAtMs ?? now,
+            };
+          }
+          const error = errorShape(ErrorCodes.UNAVAILABLE, errorMessage);
           setGatewayDedupeEntry({
             dedupe: context.dedupe,
             key: `chat:${clientRunId}`,
@@ -5081,7 +4998,7 @@ export const chatHandlers: GatewayRequestHandlers = {
               payload: {
                 runId: clientRunId,
                 status: "error" as const,
-                summary: String(err),
+                summary: errorMessage,
               },
               error,
             },
@@ -5091,29 +5008,63 @@ export const chatHandlers: GatewayRequestHandlers = {
             runId: clientRunId,
             sessionKey,
             agentId,
-            errorMessage: String(err),
+            errorMessage,
           });
         })
         .finally(() => {
-          logClawlineChatDiag("chat_send_cleanup", {
-            idempotencyKey: p.idempotencyKey,
-            sessionKey,
-            agentRunStarted,
-            deliveredReplyCount: deliveredReplies.length,
-            userTurnPersisted: userTurnRecorder.hasPersisted(),
-            userTurnBlocked: userTurnRecorder.isBlocked(),
-          });
           activeRunAbort.cleanup();
           clearAgentRunContext(clientRunId, lifecycleGeneration);
           clearActiveChatSendDedupeRun(context.dedupe, activeChatSendDedupeKey, clientRunId);
           context.removeChatRun(clientRunId, clientRunId, sessionKey);
+          if (!pendingDispatchLifecycleError) {
+            return;
+          }
+          const persistDispatchLifecycleError = async () => {
+            const dispatchError = pendingDispatchLifecycleError;
+            if (!dispatchError) {
+              return;
+            }
+            const hasActiveRun = hasTrackedActiveSessionRun({
+              context,
+              requestedKey: rawSessionKey,
+              canonicalKey: sessionKey,
+              ...(sessionKey === "global" && agentId ? { agentId } : {}),
+              defaultAgentId: resolveDefaultAgentId(cfg),
+            });
+            if (hasActiveRun) {
+              return;
+            }
+            try {
+              await persistGatewaySessionLifecycleEvent({
+                sessionKey,
+                ...(sessionKey === "global" && agentId ? { agentId } : {}),
+                event: {
+                  runId: clientRunId,
+                  sessionId: dispatchError.sessionId,
+                  lifecycleGeneration,
+                  ts: dispatchError.endedAt,
+                  data: {
+                    phase: "error",
+                    startedAt: dispatchError.startedAt,
+                    endedAt: dispatchError.endedAt,
+                    error: dispatchError.error,
+                  },
+                },
+              });
+              emitSessionsChanged(context, {
+                sessionKey,
+                ...(agentId ? { agentId } : {}),
+                reason: "chat.dispatch-error",
+              });
+            } catch (persistErr: unknown) {
+              context.logGateway.warn(
+                `webchat session lifecycle persist failed after error: ${formatForLog(persistErr)}`,
+              );
+            }
+          };
+          void persistDispatchLifecycleError();
         });
     } catch (err) {
-      logClawlineChatDiag("chat_send_sync_error", {
-        idempotencyKey: p.idempotencyKey,
-        sessionKey,
-        error: formatForLog(err),
-      });
       activeRunAbort.cleanup({ force: true });
       clearAgentRunContext(clientRunId, lifecycleGeneration);
       clearActiveChatSendDedupeRun(context.dedupe, activeChatSendDedupeKey, clientRunId);
@@ -5224,12 +5175,9 @@ export const chatHandlers: GatewayRequestHandlers = {
     }
 
     // Broadcast to webchat for immediate UI update
-    const message = withLlmVisibleMessageId(
-      projectChatDisplayMessage(appended.message, {
-        maxChars: resolveEffectiveChatHistoryMaxChars(cfg),
-      }),
-      appended.messageId,
-    );
+    const message = projectChatDisplayMessage(appended.message, {
+      maxChars: resolveEffectiveChatHistoryMaxChars(cfg),
+    });
     const chatPayload = {
       runId: `inject-${appended.messageId}`,
       sessionKey,

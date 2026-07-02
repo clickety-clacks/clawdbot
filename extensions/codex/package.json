@@ -1,16 +1,12 @@
 {
   "name": "@openclaw/codex",
-  "version": "2026.6.10",
+  "version": "2026.6.11",
   "description": "OpenClaw Codex app-server harness and model provider plugin with a Codex-managed GPT catalog.",
   "repository": {
     "type": "git",
     "url": "https://github.com/openclaw/openclaw"
   },
   "type": "module",
-  "exports": {
-    ".": "./index.ts",
-    "./runtime-api.js": "./runtime-api.ts"
-  },
   "dependencies": {
     "@openai/codex": "0.139.0",
     "typebox": "1.1.39",
@@ -38,10 +34,10 @@
       ]
     },
     "compat": {
-      "pluginApi": ">=2026.6.10"
+      "pluginApi": ">=2026.6.11"
     },
     "build": {
-      "openclawVersion": "2026.6.10"
+      "openclawVersion": "2026.6.11"
     },
     "release": {
       "publishToClawHub": true,
