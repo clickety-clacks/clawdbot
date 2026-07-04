@@ -1,13 +1,16 @@
+// Trajectory cleanup helpers remove old trajectory files by retention policy.
 import fs from "node:fs";
 import path from "node:path";
+import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { resolveSessionFilePath } from "../config/sessions/paths.js";
+import { isPathInside } from "../infra/path-guards.js";
 import {
   resolveTrajectoryFilePath,
   resolveTrajectoryPointerFilePath,
   safeTrajectorySessionFileName,
 } from "./paths.js";
 
-export type RemovedTrajectoryArtifact = {
+type RemovedTrajectoryArtifact = {
   kind: "pointer" | "runtime";
   path: string;
 };
@@ -15,10 +18,6 @@ export type RemovedTrajectoryArtifact = {
 type TrajectoryPointer = {
   runtimeFile: string;
 };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === "object" && !Array.isArray(value);
-}
 
 function canonicalizePathForComparison(filePath: string): string {
   const resolved = path.resolve(filePath);
@@ -32,8 +31,7 @@ function canonicalizePathForComparison(filePath: string): string {
 function isPathWithinDir(parentDir: string, filePath: string): boolean {
   const resolvedParent = canonicalizePathForComparison(parentDir);
   const resolvedFile = canonicalizePathForComparison(filePath);
-  const relative = path.relative(resolvedParent, resolvedFile);
-  return Boolean(relative) && !relative.startsWith("..") && !path.isAbsolute(relative);
+  return resolvedFile !== resolvedParent && isPathInside(resolvedParent, resolvedFile);
 }
 
 function isRegularNonSymlinkFile(filePath: string): boolean {

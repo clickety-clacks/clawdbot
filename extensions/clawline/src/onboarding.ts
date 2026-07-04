@@ -1,3 +1,5 @@
+import { randomBytes } from "node:crypto";
+import { restartGatewayServiceAfterChannelConfigWrite } from "openclaw/plugin-sdk/gateway-lifecycle";
 import type {
   ChannelSetupAdapter,
   ChannelSetupWizard,
@@ -9,11 +11,12 @@ import {
   setSetupChannelEnabled,
 } from "openclaw/plugin-sdk/setup";
 
-const DOCS_PATH = "/providers/clawline";
+const DOCS_PATH = "/channels/clawline";
 const DEFAULT_PORT = 18800;
 const DEFAULT_BIND = "127.0.0.1";
 const DEFAULT_ORIGINS = ["null"];
 const channel = "clawline" as const;
+const CLU_SECRET_BYTES = 32;
 
 function sanitizeBindAddress(input: string | undefined): string {
   const trimmed = input?.trim();
@@ -24,6 +27,10 @@ function ensureClawlineBlock(
   cfg: OpenClawConfig,
 ): NonNullable<NonNullable<OpenClawConfig["channels"]>["clawline"]> {
   return cfg.channels?.clawline ?? {};
+}
+
+function generateCluSecret(): string {
+  return randomBytes(CLU_SECRET_BYTES).toString("base64url");
 }
 
 export const clawlineSetupWizard: ChannelSetupWizard = {
@@ -45,7 +52,7 @@ export const clawlineSetupWizard: ChannelSetupWizard = {
         configured
           ? `Listening on ${bindAddress}:${port}`
           : `Default listen address ${DEFAULT_BIND}:${DEFAULT_PORT}`,
-        `Docs: ${formatDocsLink(DOCS_PATH, "providers/clawline")}`,
+        `Docs: ${formatDocsLink(DOCS_PATH, "channels/clawline")}`,
       ];
     },
   }),
@@ -54,7 +61,8 @@ export const clawlineSetupWizard: ChannelSetupWizard = {
     lines: [
       "Clawline is a local-device channel managed by the gateway host.",
       "Enable it here, then set optional network/media/server fields in config if needed.",
-      `Docs: ${formatDocsLink(DOCS_PATH, "providers/clawline")}`,
+      "Re-adding Clawline regenerates the CLU secret and restarts the gateway so the new secret is live.",
+      `Docs: ${formatDocsLink(DOCS_PATH, "channels/clawline")}`,
     ],
   },
   credentials: [],
@@ -84,8 +92,19 @@ export const clawlineSetupAdapter: ChannelSetupAdapter = {
             bindAddress,
             allowedOrigins,
           },
+          server: {
+            ...current.server,
+            cluSecret: generateCluSecret(),
+          },
         },
       },
     };
+  },
+  requireSuccessfulPostWrite: true,
+  afterAccountConfigWritten: async () => {
+    const restarted = await restartGatewayServiceAfterChannelConfigWrite();
+    if (!restarted) {
+      throw new Error("Gateway restart did not complete after Clawline config write.");
+    }
   },
 };

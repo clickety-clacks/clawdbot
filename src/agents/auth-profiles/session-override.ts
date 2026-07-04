@@ -1,33 +1,74 @@
+/**
+ * Session-level auth profile override rotation.
+ * Keeps automatic profile choice stable within a session while still rotating
+ * across new sessions, compactions, provider changes, and cooldowns.
+ */
 import type { SessionEntry } from "../../config/sessions/types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { createLazyImportLoader } from "../../shared/lazy-promise.js";
-import { resolveAuthProfileOrder } from "../auth-profiles/order.js";
+import {
+  isConfiguredAwsSdkAuthProfileForProvider,
+  isStoredCredentialCompatibleWithAuthProvider,
+  resolveAuthProfileOrder,
+} from "../auth-profiles/order.js";
 import { ensureAuthProfileStore, hasAnyAuthProfileStoreSource } from "../auth-profiles/store.js";
 import { isProfileInCooldown } from "../auth-profiles/usage.js";
-import { resolveProviderIdForAuth } from "../provider-auth-aliases.js";
 
-const sessionStoreRuntimeLoader = createLazyImportLoader(
-  () => import("../../config/sessions/store.runtime.js"),
+const sessionAccessorLoader = createLazyImportLoader(
+  () => import("../../config/sessions/session-accessor.js"),
 );
 
-function loadSessionStoreRuntime() {
-  return sessionStoreRuntimeLoader.load();
+// Session accessor writes are lazy-loaded so read-only auth resolution paths do
+// not import persistence code unless an override must be updated.
+function loadSessionAccessor() {
+  return sessionAccessorLoader.load();
 }
 
+// Current session overrides are only valid when the selected provider can use
+// that profile, including configured aws-sdk profiles without stored secrets.
 function isProfileForProvider(params: {
   cfg: OpenClawConfig;
-  provider: string;
+  providers: readonly string[];
   profileId: string;
   store: ReturnType<typeof ensureAuthProfileStore>;
 }): boolean {
   const entry = params.store.profiles[params.profileId];
-  if (!entry?.provider) {
-    return false;
+  if (entry) {
+    if (!entry.provider) {
+      return false;
+    }
+    return params.providers.some((provider) =>
+      isStoredCredentialCompatibleWithAuthProvider({
+        cfg: params.cfg,
+        provider,
+        credential: entry,
+      }),
+    );
   }
-  const providerKey = resolveProviderIdForAuth(params.provider, { config: params.cfg });
-  return resolveProviderIdForAuth(entry.provider, { config: params.cfg }) === providerKey;
+  return params.providers.some((provider) =>
+    isConfiguredAwsSdkAuthProfileForProvider({
+      cfg: params.cfg,
+      provider,
+      profileId: params.profileId,
+    }),
+  );
 }
 
+function uniqueProviders(provider: string, acceptedProviderIds?: readonly string[]): string[] {
+  const providers = new Set<string>();
+  const push = (value: string | undefined) => {
+    const normalized = value?.trim();
+    if (normalized) {
+      providers.add(normalized);
+    }
+  };
+  const candidates =
+    acceptedProviderIds && acceptedProviderIds.length > 0 ? acceptedProviderIds : [provider];
+  candidates.forEach(push);
+  return [...providers];
+}
+
+/** Clears an auth-profile override from a session and persists it when possible. */
 export async function clearSessionAuthProfileOverride(params: {
   sessionEntry: SessionEntry;
   sessionStore: Record<string, SessionEntry>;
@@ -42,13 +83,15 @@ export async function clearSessionAuthProfileOverride(params: {
   sessionStore[sessionKey] = sessionEntry;
   if (storePath) {
     await (
-      await loadSessionStoreRuntime()
-    ).updateSessionStore(storePath, (store) => {
-      store[sessionKey] = sessionEntry;
+      await loadSessionAccessor()
+    ).patchSessionEntry({ storePath, sessionKey }, () => sessionEntry, {
+      fallbackEntry: sessionEntry,
+      replaceEntry: true,
     });
   }
 }
 
+/** Resolves and optionally rotates the session auth-profile override. */
 export async function resolveSessionAuthProfileOverride(params: {
   cfg: OpenClawConfig;
   provider: string;
@@ -58,6 +101,7 @@ export async function resolveSessionAuthProfileOverride(params: {
   sessionKey?: string;
   storePath?: string;
   isNewSession: boolean;
+  acceptedProviderIds?: string[];
 }): Promise<string | undefined> {
   const {
     cfg,
@@ -85,7 +129,14 @@ export async function resolveSessionAuthProfileOverride(params: {
   }
 
   const store = ensureAuthProfileStore(agentDir, { allowKeychainPrompt: false });
-  const order = resolveAuthProfileOrder({ cfg, store, provider });
+  const providers = uniqueProviders(provider, params.acceptedProviderIds);
+  const order = [
+    ...new Set(
+      providers.flatMap((candidateProvider) =>
+        resolveAuthProfileOrder({ cfg, store, provider: candidateProvider }),
+      ),
+    ),
+  ];
   let current = sessionEntry.authProfileOverride?.trim();
   const source =
     sessionEntry.authProfileOverrideSource ??
@@ -95,12 +146,23 @@ export async function resolveSessionAuthProfileOverride(params: {
         ? "user"
         : undefined);
 
-  if (current && !store.profiles[current]) {
+  const currentProfileId = current;
+  if (
+    currentProfileId &&
+    !store.profiles[currentProfileId] &&
+    !providers.some((candidateProvider) =>
+      isConfiguredAwsSdkAuthProfileForProvider({
+        cfg,
+        provider: candidateProvider,
+        profileId: currentProfileId,
+      }),
+    )
+  ) {
     await clearSessionAuthProfileOverride({ sessionEntry, sessionStore, sessionKey, storePath });
     current = undefined;
   }
 
-  if (current && !isProfileForProvider({ cfg, provider, profileId: current, store })) {
+  if (current && !isProfileForProvider({ cfg, providers, profileId: current, store })) {
     await clearSessionAuthProfileOverride({ sessionEntry, sessionStore, sessionKey, storePath });
     current = undefined;
   }
@@ -140,6 +202,8 @@ export async function resolveSessionAuthProfileOverride(params: {
     current && isProfileInCooldown(store, current)
       ? order.find((profileId) => profileId !== current && !isProfileInCooldown(store, profileId))
       : undefined;
+  // User-pinned profiles persist unless unusable/mismatched. Auto-selected
+  // profiles rotate on new sessions or compaction boundaries.
   if (replacementForUnusableCurrent) {
     current = undefined;
   }
@@ -173,9 +237,10 @@ export async function resolveSessionAuthProfileOverride(params: {
     sessionStore[sessionKey] = sessionEntry;
     if (storePath) {
       await (
-        await loadSessionStoreRuntime()
-      ).updateSessionStore(storePath, (store) => {
-        store[sessionKey] = sessionEntry;
+        await loadSessionAccessor()
+      ).patchSessionEntry({ storePath, sessionKey }, () => sessionEntry, {
+        fallbackEntry: sessionEntry,
+        replaceEntry: true,
       });
     }
   }

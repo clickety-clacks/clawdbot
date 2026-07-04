@@ -75,6 +75,7 @@ struct TalkConfigContractTests {
                 fixture.gatewayResponseTalk,
                 defaultProvider: fixture.defaultProvider)
             if let expected = fixture.expectedSelection {
+                #expect(fixture.payloadValid)
                 #expect(selection != nil)
                 #expect(selection?.provider == expected.provider)
                 #expect(selection?.normalizedPayload == expected.normalizedPayload)
@@ -83,7 +84,6 @@ struct TalkConfigContractTests {
             } else {
                 #expect(selection == nil)
             }
-            #expect(fixture.payloadValid == (selection != nil))
         }
     }
 

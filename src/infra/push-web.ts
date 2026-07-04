@@ -1,7 +1,8 @@
+// Stores and verifies web push subscriptions and delivery payloads.
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { resolveStateDir } from "../config/paths.js";
-import { createAsyncLock, readJsonFile, writeJsonAtomic } from "./json-files.js";
+import { createAsyncLock, tryReadJson, writeJson } from "./json-files.js";
 
 // --- Types ---
 
@@ -36,7 +37,7 @@ const WEB_PUSH_STATE_FILENAME = "push/web-push-subscriptions.json";
 const VAPID_KEYS_FILENAME = "push/vapid-keys.json";
 const MAX_ENDPOINT_LENGTH = 2048;
 const MAX_KEY_LENGTH = 512;
-const DEFAULT_VAPID_SUBJECT = "mailto:openclaw@localhost";
+const DEFAULT_VAPID_SUBJECT = "https://openclaw.ai";
 
 const withLock = createAsyncLock();
 
@@ -88,13 +89,13 @@ function isValidKey(key: string): boolean {
 
 async function loadState(baseDir?: string): Promise<WebPushRegistrationState> {
   const filePath = resolveWebPushStatePath(baseDir);
-  const state = await readJsonFile<WebPushRegistrationState>(filePath);
+  const state = await tryReadJson<WebPushRegistrationState>(filePath);
   return state ?? { subscriptionsByEndpointHash: {} };
 }
 
 async function persistState(state: WebPushRegistrationState, baseDir?: string): Promise<void> {
   const filePath = resolveWebPushStatePath(baseDir);
-  await writeJsonAtomic(filePath, state, { trailingNewline: true });
+  await writeJson(filePath, state, { trailingNewline: true });
 }
 
 // --- VAPID keys ---
@@ -116,7 +117,7 @@ export async function resolveVapidKeys(baseDir?: string): Promise<VapidKeyPair> 
   // prevent concurrent bootstraps from writing different keypairs.
   return await withLock(async () => {
     const filePath = resolveVapidKeysPath(baseDir);
-    const existing = await readJsonFile<VapidKeyPair>(filePath);
+    const existing = await tryReadJson<VapidKeyPair>(filePath);
     if (existing?.publicKey && existing?.privateKey) {
       return {
         publicKey: existing.publicKey,
@@ -133,7 +134,7 @@ export async function resolveVapidKeys(baseDir?: string): Promise<VapidKeyPair> 
       privateKey: keys.privateKey,
       subject: resolveVapidSubjectFromEnv(),
     };
-    await writeJsonAtomic(filePath, pair, { trailingNewline: true });
+    await writeJson(filePath, pair, { trailingNewline: true });
     return pair;
   });
 }
@@ -190,39 +191,9 @@ export async function registerWebPushSubscription(
   });
 }
 
-export async function loadWebPushSubscription(
-  subscriptionId: string,
-  baseDir?: string,
-): Promise<WebPushSubscription | null> {
-  const state = await loadState(baseDir);
-  for (const sub of Object.values(state.subscriptionsByEndpointHash)) {
-    if (sub.subscriptionId === subscriptionId) {
-      return sub;
-    }
-  }
-  return null;
-}
-
 export async function listWebPushSubscriptions(baseDir?: string): Promise<WebPushSubscription[]> {
   const state = await loadState(baseDir);
   return Object.values(state.subscriptionsByEndpointHash);
-}
-
-export async function clearWebPushSubscription(
-  subscriptionId: string,
-  baseDir?: string,
-): Promise<boolean> {
-  return await withLock(async () => {
-    const state = await loadState(baseDir);
-    for (const [hash, sub] of Object.entries(state.subscriptionsByEndpointHash)) {
-      if (sub.subscriptionId === subscriptionId) {
-        delete state.subscriptionsByEndpointHash[hash];
-        await persistState(state, baseDir);
-        return true;
-      }
-    }
-    return false;
-  });
 }
 
 export async function clearWebPushSubscriptionByEndpoint(
@@ -252,18 +223,6 @@ type WebPushPayload = {
 
 function applyVapidDetails(webPush: WebPushRuntime, keys: VapidKeyPair): void {
   webPush.setVapidDetails(keys.subject, keys.publicKey, keys.privateKey);
-}
-
-export async function sendWebPushNotification(
-  subscription: WebPushSubscription,
-  payload: WebPushPayload,
-  vapidKeys?: VapidKeyPair,
-): Promise<WebPushSendResult> {
-  const keys = vapidKeys ?? (await resolveVapidKeys());
-  const webPush = await loadWebPushRuntime();
-  applyVapidDetails(webPush, keys);
-
-  return sendPreparedWebPushNotification(webPush, subscription, payload);
 }
 
 async function sendPreparedWebPushNotification(

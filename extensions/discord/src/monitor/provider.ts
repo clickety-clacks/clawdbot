@@ -1,9 +1,11 @@
+import { loadModelCatalog } from "openclaw/plugin-sdk/agent-runtime";
+// Discord provider module implements model/runtime integration.
 import type { ChannelRuntimeSurface } from "openclaw/plugin-sdk/channel-contract";
 import {
   listNativeCommandSpecsForConfig,
   listSkillCommandsForAgents,
-} from "openclaw/plugin-sdk/command-auth";
-import type { OpenClawConfig, ReplyToMode } from "openclaw/plugin-sdk/config-types";
+} from "openclaw/plugin-sdk/command-auth-native";
+import type { OpenClawConfig, ReplyToMode } from "openclaw/plugin-sdk/config-contracts";
 import { createConnectedChannelStatusPatch } from "openclaw/plugin-sdk/gateway-runtime";
 import {
   resolveNativeCommandsEnabled,
@@ -89,8 +91,6 @@ let discordProviderSessionRuntimePromise: Promise<DiscordProviderSessionRuntimeM
 let fetchDiscordApplicationIdForTesting: typeof fetchDiscordApplicationId | undefined;
 let createDiscordNativeCommandForTesting: typeof createDiscordNativeCommand | undefined;
 let runDiscordGatewayLifecycleForTesting: typeof runDiscordGatewayLifecycle | undefined;
-let createDiscordGatewayPluginForTesting: typeof createDiscordGatewayPlugin | undefined;
-let createDiscordGatewaySupervisorForTesting: typeof createDiscordGatewaySupervisor | undefined;
 let loadDiscordVoiceRuntimeForTesting: (() => Promise<DiscordVoiceRuntimeModule>) | undefined;
 let loadDiscordProviderSessionRuntimeForTesting:
   | (() => Promise<DiscordProviderSessionRuntimeModule>)
@@ -279,6 +279,7 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
     token,
     guildEntries,
     allowFrom,
+    discordConfig: discordCfg,
     fetcher: discordRestFetch,
     runtime,
   });
@@ -395,6 +396,11 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
   let earlyGatewayEmitter = gatewaySupervisor?.emitter;
   let onEarlyGatewayDebug: ((msg: unknown) => void) | undefined;
   try {
+    if (nativeEnabled && commandSpecs.some((command) => command.name === "think")) {
+      // Autocomplete cannot defer. Warm opportunistically before interactions begin,
+      // but never let provider discovery block Discord startup.
+      void loadModelCatalog({ config: cfg });
+    }
     const { commands, components, modals } = createDiscordProviderInteractionSurface({
       cfg,
       discordConfig: discordCfg,
@@ -435,9 +441,8 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
       discordConfig: discordCfg,
       runtime,
       createClient: createClientForTesting ?? ((...args) => new Client(...args)),
-      createGatewayPlugin: createDiscordGatewayPluginForTesting ?? createDiscordGatewayPlugin,
-      createGatewaySupervisor:
-        createDiscordGatewaySupervisorForTesting ?? createDiscordGatewaySupervisor,
+      createGatewayPlugin: createDiscordGatewayPlugin,
+      createGatewaySupervisor: createDiscordGatewaySupervisor,
       createAutoPresenceController: createDiscordAutoPresenceController,
       isDisallowedIntentsError: isDiscordDisallowedIntentsError,
     });
@@ -479,7 +484,7 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
       string,
       import("openclaw/plugin-sdk/reply-history").HistoryEntry[]
     >();
-    let { botUserId, botUserName } = await fetchDiscordBotIdentity({
+    const { botUserId, botUserName } = await fetchDiscordBotIdentity({
       client,
       token,
       runtime,
@@ -496,8 +501,12 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
     let voiceManager: DiscordVoiceManager | null = null;
 
     if (voiceEnabled) {
-      const { DiscordVoiceManager, DiscordVoiceReadyListener, DiscordVoiceResumedListener } =
-        await loadDiscordVoiceRuntime();
+      const {
+        DiscordVoiceManager,
+        DiscordVoiceReadyListener,
+        DiscordVoiceResumedListener,
+        DiscordVoiceStateUpdateListener,
+      } = await loadDiscordVoiceRuntime();
       voiceManager = new DiscordVoiceManager({
         client,
         cfg,
@@ -506,9 +515,15 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
         runtime,
         botUserId,
       });
+      const { setDiscordTranscriptsVoiceManager } = await import("../voice/transcripts-source.js");
+      setDiscordTranscriptsVoiceManager({
+        accountId: account.accountId,
+        manager: voiceManager,
+      });
       voiceManagerRef.current = voiceManager;
       registerDiscordListener(client.listeners, new DiscordVoiceReadyListener(voiceManager));
       registerDiscordListener(client.listeners, new DiscordVoiceResumedListener(voiceManager));
+      registerDiscordListener(client.listeners, new DiscordVoiceStateUpdateListener(voiceManager));
     }
 
     const messageHandler = discordProviderSessionRuntime.createDiscordMessageHandler({
@@ -614,7 +629,7 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
   }
 }
 
-export const __testing = {
+export const testing = {
   createDiscordGatewayPlugin,
   resolveDiscordRuntimeGroupPolicy: resolveOpenProviderRuntimeGroupPolicy,
   resolveDefaultGroupPolicy,
@@ -630,12 +645,6 @@ export const __testing = {
   },
   setRunDiscordGatewayLifecycle(mock?: typeof runDiscordGatewayLifecycle) {
     runDiscordGatewayLifecycleForTesting = mock;
-  },
-  setCreateDiscordGatewayPlugin(mock?: typeof createDiscordGatewayPlugin) {
-    createDiscordGatewayPluginForTesting = mock;
-  },
-  setCreateDiscordGatewaySupervisor(mock?: typeof createDiscordGatewaySupervisor) {
-    createDiscordGatewaySupervisorForTesting = mock;
   },
   setLoadDiscordVoiceRuntime(mock?: () => Promise<DiscordVoiceRuntimeModule>) {
     loadDiscordVoiceRuntimeForTesting = mock;
@@ -679,3 +688,4 @@ export const __testing = {
 };
 
 export const resolveDiscordRuntimeGroupPolicy = resolveOpenProviderRuntimeGroupPolicy;
+export { testing as __testing };

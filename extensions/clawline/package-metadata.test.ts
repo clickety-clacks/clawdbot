@@ -4,18 +4,18 @@ import { fileURLToPath } from "node:url";
 import BetterSqlite3 from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const extensionRoot = __dirname;
+const currentDir = path.dirname(fileURLToPath(import.meta.url));
+const extensionRoot = currentDir;
 const repoRoot = path.resolve(extensionRoot, "../..");
 
 function readJsonFile(filePath: string): unknown {
   return JSON.parse(fs.readFileSync(filePath, "utf8"));
 }
 
-function readWorkspaceOnlyBuiltDependencies(): string[] {
+function readWorkspaceBuildAllowlist(): string[] {
   const workspace = fs.readFileSync(path.join(repoRoot, "pnpm-workspace.yaml"), "utf8");
   const lines = workspace.split(/\r?\n/u);
-  const start = lines.findIndex((line) => line.trim() === "onlyBuiltDependencies:");
+  const start = lines.findIndex((line) => line.trim() === "allowBuilds:");
   if (start < 0) {
     return [];
   }
@@ -24,7 +24,7 @@ function readWorkspaceOnlyBuiltDependencies(): string[] {
     if (/^\S/u.test(line)) {
       break;
     }
-    const match = /^\s*-\s+"?([^"\n]+)"?\s*$/u.exec(line);
+    const match = /^\s*"?([^":\n]+)"?\s*:\s*true\s*$/u.exec(line);
     if (match?.[1]) {
       values.push(match[1]);
     }
@@ -33,28 +33,31 @@ function readWorkspaceOnlyBuiltDependencies(): string[] {
 }
 
 describe("Clawline package metadata", () => {
-  it("is synced to the OpenClaw v2026.5.4 plugin/runtime contract", () => {
+  it("is synced to the OpenClaw v2026.6.8 plugin/runtime contract", () => {
     const manifest = readJsonFile(path.join(extensionRoot, "package.json")) as {
       version?: string;
       dependencies?: Record<string, string>;
       peerDependencies?: Record<string, string>;
       openclaw?: {
+        channel?: { aliases?: string[] };
         install?: { minHostVersion?: string };
         compat?: { pluginApi?: string };
         build?: { openclawVersion?: string };
       };
     };
 
-    expect(manifest.version).toBe("2026.5.4");
-    expect(manifest.peerDependencies?.openclaw).toBe(">=2026.5.4");
+    expect(manifest.version).toBe("2026.6.8");
+    expect(manifest.peerDependencies?.openclaw).toBe(">=2026.6.8");
     expect(manifest.openclaw?.install?.minHostVersion).toBe(">=2026.5.4");
-    expect(manifest.openclaw?.compat?.pluginApi).toBe(">=2026.5.4");
-    expect(manifest.openclaw?.build?.openclawVersion).toBe("2026.5.4");
+    expect(manifest.openclaw?.compat?.pluginApi).toBe(">=2026.6.8");
+    expect(manifest.openclaw?.build?.openclawVersion).toBe("2026.6.8");
+    expect(manifest.openclaw?.channel?.aliases).toEqual(["clawline-dm"]);
+    expect(manifest.dependencies?.["@openclaw/codex"]).toBe("workspace:*");
     expect(manifest.dependencies?.["better-sqlite3"]).toBe("12.6.2");
   });
 
   it("keeps better-sqlite3 in pnpm's effective workspace build allowlist", () => {
-    expect(readWorkspaceOnlyBuiltDependencies()).toContain("better-sqlite3");
+    expect(readWorkspaceBuildAllowlist()).toContain("better-sqlite3");
   });
 
   it("keeps the native sqlite runtime external to the ESM gateway bundle", () => {

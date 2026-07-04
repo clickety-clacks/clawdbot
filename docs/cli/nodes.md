@@ -1,7 +1,7 @@
 ---
 summary: "CLI reference for `openclaw nodes` (status, pairing, invoke, camera/canvas/screen)"
 read_when:
-  - You’re managing paired nodes (cameras, screen, canvas)
+  - You're managing paired nodes (cameras, screen, canvas)
   - You need to approve requests or invoke node commands
 title: "Nodes"
 ---
@@ -39,7 +39,13 @@ openclaw nodes status --last-connected 24h
 `nodes list` prints pending/paired tables. Paired rows include the most recent connect age (Last Connect).
 Use `--connected` to only show currently-connected nodes. Use `--last-connected <duration>` to
 filter to nodes that connected within a duration (e.g. `24h`, `7d`).
-Use `nodes remove --node <id|name|ip>` to delete a stale gateway-owned node pairing record.
+Use `nodes remove --node <id|name|ip>` to remove a node pairing. For a
+device-backed node this revokes the device's `node` role in `devices/paired.json`
+and disconnects its node-role sessions (a mixed-role device keeps its row and
+only loses the `node` role; a node-only device is deleted); it also clears any
+matching legacy gateway-owned node pairing record. `operator.pairing` can remove
+non-operator node rows; a device-token caller revoking its own node role on a
+mixed-role device additionally needs `operator.admin`.
 
 Approval note:
 
@@ -68,7 +74,7 @@ Invoke flags:
 
 For shell execution on a node, use the `exec` tool with `host=node` instead of `openclaw nodes run`.
 The `nodes` CLI is now capability-focused: direct RPC via `nodes invoke`, plus pairing, camera,
-screen, location, canvas, and notifications.
+screen, location, Canvas, and notifications. Canvas commands are implemented by the bundled experimental Canvas plugin; core keeps a compatibility hook so they remain under `openclaw nodes canvas`.
 
 ## Related
 

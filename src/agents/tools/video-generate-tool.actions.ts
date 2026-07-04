@@ -1,12 +1,20 @@
+/**
+ * video_generate action result helpers.
+ *
+ * Formats provider listing, active-task status, and duplicate-guard responses for the tool.
+ */
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { listSupportedVideoGenerationModes } from "../../video-generation/capabilities.js";
 import { listRuntimeVideoGenerationProviders } from "../../video-generation/runtime.js";
+import type { AuthProfileStore } from "../auth-profiles/types.js";
 import {
   buildVideoGenerationTaskStatusDetails,
   buildVideoGenerationTaskStatusText,
   findActiveVideoGenerationTaskForSession,
+  findDuplicateGuardVideoGenerationTaskForSession,
 } from "../video-generation-task-status.js";
 import {
+  createMediaGenerateDuplicateGuardResult,
   createMediaGenerateProviderListActionResult,
   createMediaGenerateTaskStatusActions,
   type MediaGenerateActionResult,
@@ -79,11 +87,17 @@ function summarizeVideoGenerationCapabilities(
 
 export function createVideoGenerateListActionResult(
   config?: OpenClawConfig,
+  options?: { workspaceDir?: string; agentDir?: string; authStore?: AuthProfileStore },
 ): VideoGenerateActionResult {
   const providers = listRuntimeVideoGenerationProviders({ config });
   return createMediaGenerateProviderListActionResult({
+    kind: "video_generation",
     providers,
     emptyText: "No video-generation providers are registered.",
+    cfg: config,
+    workspaceDir: options?.workspaceDir,
+    agentDir: options?.agentDir,
+    authStore: options?.authStore,
     listModes: listSupportedVideoGenerationModes,
     summarizeCapabilities: summarizeVideoGenerationCapabilities,
   });
@@ -104,6 +118,14 @@ export function createVideoGenerateStatusActionResult(
 
 export function createVideoGenerateDuplicateGuardResult(
   sessionKey?: string,
+  params?: { prompt?: string; requestKey?: string },
 ): VideoGenerateActionResult | undefined {
-  return videoGenerateTaskStatusActions.createDuplicateGuardResult(sessionKey);
+  return createMediaGenerateDuplicateGuardResult({
+    sessionKey,
+    prompt: params?.prompt,
+    requestKey: params?.requestKey,
+    findDuplicateTask: findDuplicateGuardVideoGenerationTaskForSession,
+    buildStatusText: buildVideoGenerationTaskStatusText,
+    buildStatusDetails: buildVideoGenerationTaskStatusDetails,
+  });
 }

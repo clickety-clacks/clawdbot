@@ -9,8 +9,11 @@ export {
   isPrivateIpAddress,
   resolvePinnedHostname,
   resolvePinnedHostnameWithPolicy,
+  resolveSsrFPolicyForUrl,
   ssrfPolicyFromHttpBaseUrlAllowedHostname,
+  ssrfPolicyFromHttpBaseUrlAllowedOrigin,
   type LookupFn,
+  type PinnedHostname,
   type SsrFPolicy,
 } from "../infra/net/ssrf.js";
 export { formatErrorMessage } from "../infra/errors.js";

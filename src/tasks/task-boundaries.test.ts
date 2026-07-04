@@ -1,3 +1,4 @@
+// Verifies task imports stay inside allowed runtime and registry boundaries.
 import { beforeAll, describe, expect, it } from "vitest";
 import {
   listTaskBoundarySourceFiles,
@@ -13,7 +14,6 @@ type TaskBoundarySource = {
 const RAW_TASK_MUTATORS = [
   "createTaskRecord",
   "markTaskRunningByRunId",
-  "markTaskTerminalByRunId",
   "markTaskTerminalById",
   "setTaskRunDeliveryStatusByRunId",
 ] as const;
@@ -61,7 +61,7 @@ describe("task boundaries", () => {
         }
       }
     }
-    expect(offenders).toEqual([]);
+    expect(offenders).toStrictEqual([]);
   });
 
   it("keeps direct task-flow-registry imports behind approved task-flow access seams", () => {

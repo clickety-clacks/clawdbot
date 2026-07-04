@@ -686,10 +686,6 @@ type PaneEvidence = {
   matchedLineHash?: string;
 };
 
-function lastNonEmptyLine(value: string): string {
-  return trimLines(value).at(-1) ?? "";
-}
-
 function activeWorkIndicatorEvidence(paneText: string): PaneEvidence | null {
   const line = trimLines(paneText)
     .slice(-5)
@@ -733,10 +729,6 @@ function workStartEvidence(
         matchedLineHash: proofHash(matchedLine),
       }
     : null;
-}
-
-function hasWorkStartEvidence(before: string, after: string, submittedPrompt: string): boolean {
-  return workStartEvidence(before, after, submittedPrompt) !== null;
 }
 
 function hasCurrentBusyEvidence(paneText: string): boolean {

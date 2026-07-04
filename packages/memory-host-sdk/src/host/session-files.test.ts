@@ -1,16 +1,43 @@
+// Memory Host SDK tests cover session files behavior.
 import fsSync from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { clearConfigCache, clearRuntimeConfigSnapshot } from "./openclaw-runtime-session.js";
 import {
   buildSessionEntry,
   listSessionFilesForAgent,
+  listSessionTranscriptCorpusEntriesForAgent,
+  loadSessionTranscriptClassificationForAgent,
+  parseCanonicalSessionSyncTargetFromPath,
+  resolveSessionIdentityForTranscriptFile,
+  resolveSessionFileForSyncTarget,
   sessionPathForFile,
+  type SessionFileEntry,
 } from "./session-files.js";
+
+function captureStateDirEnv() {
+  const stateDir = process.env.OPENCLAW_STATE_DIR;
+  const configPath = process.env.OPENCLAW_CONFIG_PATH;
+  return {
+    restore() {
+      if (stateDir === undefined) {
+        Reflect.deleteProperty(process.env, "OPENCLAW_STATE_DIR");
+      } else {
+        Reflect.set(process.env, "OPENCLAW_STATE_DIR", stateDir);
+      }
+      if (configPath === undefined) {
+        Reflect.deleteProperty(process.env, "OPENCLAW_CONFIG_PATH");
+      } else {
+        Reflect.set(process.env, "OPENCLAW_CONFIG_PATH", configPath);
+      }
+    },
+  };
+}
 
 let fixtureRoot: string;
 let tmpDir: string;
-let originalStateDir: string | undefined;
+let envSnapshot: ReturnType<typeof captureStateDirEnv> | undefined;
 let fixtureId = 0;
 
 beforeAll(() => {
@@ -24,17 +51,25 @@ afterAll(() => {
 beforeEach(() => {
   tmpDir = path.join(fixtureRoot, `case-${fixtureId++}`);
   fsSync.mkdirSync(tmpDir, { recursive: true });
-  originalStateDir = process.env.OPENCLAW_STATE_DIR;
-  process.env.OPENCLAW_STATE_DIR = tmpDir;
+  envSnapshot = captureStateDirEnv();
+  Reflect.set(process.env, "OPENCLAW_STATE_DIR", tmpDir);
+  clearRuntimeConfigSnapshot();
+  clearConfigCache();
 });
 
 afterEach(() => {
-  if (originalStateDir === undefined) {
-    delete process.env.OPENCLAW_STATE_DIR;
-  } else {
-    process.env.OPENCLAW_STATE_DIR = originalStateDir;
-  }
+  envSnapshot?.restore();
+  envSnapshot = undefined;
+  clearRuntimeConfigSnapshot();
+  clearConfigCache();
 });
+
+function requireSessionEntry(entry: SessionFileEntry | null): SessionFileEntry {
+  if (!entry) {
+    throw new Error("expected session entry");
+  }
+  return entry;
+}
 
 describe("listSessionFilesForAgent", () => {
   it("includes reset and deleted transcripts in session file listing", async () => {
@@ -65,6 +100,381 @@ describe("listSessionFilesForAgent", () => {
   });
 });
 
+describe("listSessionTranscriptCorpusEntriesForAgent", () => {
+  it("lists active session entries with accessor-backed identity and classification", async () => {
+    const sessionsDir = path.join(tmpDir, "agents", "main", "sessions");
+    fsSync.mkdirSync(sessionsDir, { recursive: true });
+    fsSync.writeFileSync(path.join(sessionsDir, "narrative.jsonl"), "");
+    fsSync.writeFileSync(
+      path.join(sessionsDir, "sessions.json"),
+      JSON.stringify({
+        "agent:main:dreaming-narrative-run-1": {
+          sessionFile: "narrative.jsonl",
+          sessionId: "narrative",
+        },
+      }),
+    );
+
+    await expect(listSessionTranscriptCorpusEntriesForAgent("main")).resolves.toEqual([
+      {
+        agentId: "main",
+        artifactKind: "active-session",
+        generatedByDreamingNarrative: true,
+        sessionFile: path.join(sessionsDir, "narrative.jsonl"),
+        sessionId: "narrative",
+        sessionKey: "agent:main:dreaming-narrative-run-1",
+      },
+    ]);
+  });
+
+  it("keeps archive artifacts in the corpus and inherits active session classification", async () => {
+    const sessionsDir = path.join(tmpDir, "agents", "main", "sessions");
+    fsSync.mkdirSync(sessionsDir, { recursive: true });
+    const activePath = path.join(sessionsDir, "cron-run.jsonl");
+    const archivePath = path.join(sessionsDir, "cron-run.jsonl.deleted.2026-02-16T22-27-33.000Z");
+    fsSync.writeFileSync(activePath, "");
+    fsSync.writeFileSync(archivePath, "");
+    fsSync.writeFileSync(
+      path.join(sessionsDir, "sessions.json"),
+      JSON.stringify({
+        "agent:main:cron:job-1:run:run-1": {
+          sessionFile: "cron-run.jsonl",
+          sessionId: "cron-run",
+        },
+      }),
+    );
+
+    const classification = loadSessionTranscriptClassificationForAgent("main");
+
+    expect(classification.cronRunTranscriptPaths).toEqual(
+      new Set([activePath, archivePath].map((filePath) => path.resolve(filePath))),
+    );
+    await expect(listSessionTranscriptCorpusEntriesForAgent("main")).resolves.toContainEqual({
+      agentId: "main",
+      artifactKind: "archive-artifact",
+      generatedByCronRun: true,
+      sessionFile: archivePath,
+      sessionId: "cron-run",
+    });
+  });
+
+  it("keeps archive classification when the active transcript is missing", async () => {
+    const sessionsDir = path.join(tmpDir, "agents", "main", "sessions");
+    fsSync.mkdirSync(sessionsDir, { recursive: true });
+    const archivePath = path.join(sessionsDir, "cron-run.jsonl.reset.2026-02-16T22-26-33.000Z");
+    fsSync.writeFileSync(archivePath, "");
+    fsSync.writeFileSync(
+      path.join(sessionsDir, "sessions.json"),
+      JSON.stringify({
+        "agent:main:cron:job-1:run:run-1": {
+          sessionFile: "cron-run.jsonl",
+          sessionId: "cron-run",
+        },
+      }),
+    );
+
+    const expectedArchivePath = archivePath;
+    const classification = loadSessionTranscriptClassificationForAgent("main");
+
+    expect(classification.cronRunTranscriptPaths).toEqual(new Set([expectedArchivePath]));
+    await expect(listSessionFilesForAgent("main")).resolves.toEqual([expectedArchivePath]);
+    await expect(listSessionTranscriptCorpusEntriesForAgent("main")).resolves.toEqual([
+      {
+        agentId: "main",
+        artifactKind: "archive-artifact",
+        generatedByCronRun: true,
+        sessionFile: expectedArchivePath,
+        sessionId: "cron-run",
+      },
+    ]);
+  });
+
+  it("omits active session entries whose transcript files are missing", async () => {
+    const sessionsDir = path.join(tmpDir, "agents", "main", "sessions");
+    fsSync.mkdirSync(sessionsDir, { recursive: true });
+    fsSync.writeFileSync(
+      path.join(sessionsDir, "sessions.json"),
+      JSON.stringify({
+        "agent:main:chat:missing": {
+          sessionFile: "missing.jsonl",
+          sessionId: "missing",
+        },
+      }),
+    );
+
+    await expect(listSessionFilesForAgent("main")).resolves.toEqual([]);
+    await expect(listSessionTranscriptCorpusEntriesForAgent("main")).resolves.toEqual([]);
+  });
+
+  it("omits active session entries whose transcript path is a symlink", async () => {
+    const sessionsDir = path.join(tmpDir, "agents", "main", "sessions");
+    const targetPath = path.join(tmpDir, "external.jsonl");
+    const symlinkPath = path.join(sessionsDir, "linked.jsonl");
+    fsSync.mkdirSync(sessionsDir, { recursive: true });
+    fsSync.writeFileSync(targetPath, "");
+    fsSync.symlinkSync(targetPath, symlinkPath);
+    fsSync.writeFileSync(
+      path.join(sessionsDir, "sessions.json"),
+      JSON.stringify({
+        "agent:main:chat:linked": {
+          sessionFile: "linked.jsonl",
+          sessionId: "linked",
+        },
+      }),
+    );
+
+    await expect(listSessionFilesForAgent("main")).resolves.toEqual([]);
+    await expect(listSessionTranscriptCorpusEntriesForAgent("main")).resolves.toEqual([]);
+  });
+
+  it("rejects session ids that would escape the sessions directory", async () => {
+    const sessionsDir = path.join(tmpDir, "agents", "main", "sessions");
+    fsSync.mkdirSync(sessionsDir, { recursive: true });
+    fsSync.writeFileSync(path.join(tmpDir, "secret.jsonl"), "");
+    fsSync.writeFileSync(
+      path.join(sessionsDir, "sessions.json"),
+      JSON.stringify({
+        "agent:main:chat:escape": {
+          sessionId: "../secret",
+        },
+      }),
+    );
+
+    await expect(listSessionFilesForAgent("main")).resolves.toEqual([]);
+    await expect(listSessionTranscriptCorpusEntriesForAgent("main")).resolves.toEqual([]);
+  });
+
+  it("does not classify a fallback transcript when explicit sessionFile is invalid", async () => {
+    const sessionsDir = path.join(tmpDir, "agents", "main", "sessions");
+    const sessionFile = path.join(sessionsDir, "active.jsonl");
+    fsSync.mkdirSync(sessionsDir, { recursive: true });
+    fsSync.writeFileSync(sessionFile, "");
+    fsSync.writeFileSync(
+      path.join(sessionsDir, "sessions.json"),
+      JSON.stringify({
+        "agent:main:cron:job-1:run:run-1": {
+          sessionFile: "../old.jsonl",
+          sessionId: "active",
+        },
+      }),
+    );
+
+    await expect(listSessionTranscriptCorpusEntriesForAgent("main")).resolves.toEqual([
+      {
+        agentId: "main",
+        artifactKind: "orphan-file-artifact",
+        sessionFile,
+        sessionId: "active",
+      },
+    ]);
+  });
+
+  it("rejects relative sessionFile values that escape through nested segments", async () => {
+    const sessionsDir = path.join(tmpDir, "agents", "main", "sessions");
+    const secretPath = path.join(tmpDir, "agents", "main", "secret.jsonl");
+    fsSync.mkdirSync(path.join(sessionsDir, "sub"), { recursive: true });
+    fsSync.writeFileSync(secretPath, "");
+    fsSync.writeFileSync(
+      path.join(sessionsDir, "sessions.json"),
+      JSON.stringify({
+        "agent:main:chat:escape-file": {
+          sessionFile: "sub/../../secret.jsonl",
+          sessionId: "secret",
+        },
+      }),
+    );
+
+    await expect(listSessionTranscriptCorpusEntriesForAgent("main")).resolves.toEqual([]);
+  });
+
+  it("rejects absolute transcript paths owned by another agent", async () => {
+    const sessionsDir = path.join(tmpDir, "agents", "main", "sessions");
+    const otherSessionsDir = path.join(tmpDir, "agents", "ops", "sessions");
+    const otherSessionFile = path.join(otherSessionsDir, "private.jsonl");
+    fsSync.mkdirSync(sessionsDir, { recursive: true });
+    fsSync.mkdirSync(otherSessionsDir, { recursive: true });
+    fsSync.writeFileSync(otherSessionFile, "");
+    fsSync.writeFileSync(
+      path.join(sessionsDir, "sessions.json"),
+      JSON.stringify({
+        "agent:main:chat:cross-agent": {
+          sessionFile: otherSessionFile,
+          sessionId: "private",
+        },
+      }),
+    );
+
+    await expect(listSessionTranscriptCorpusEntriesForAgent("main")).resolves.toEqual([]);
+  });
+
+  it("falls back to transcript filename identity when an active row lacks sessionId", async () => {
+    const sessionsDir = path.join(tmpDir, "agents", "main", "sessions");
+    fsSync.mkdirSync(sessionsDir, { recursive: true });
+    const sessionFile = path.join(sessionsDir, "active-thread-456.jsonl");
+    fsSync.writeFileSync(sessionFile, "");
+    fsSync.writeFileSync(
+      path.join(sessionsDir, "sessions.json"),
+      JSON.stringify({
+        "agent:main:chat:thread-456": {
+          sessionFile: "active-thread-456.jsonl",
+        },
+      }),
+    );
+
+    await expect(listSessionTranscriptCorpusEntriesForAgent("main")).resolves.toEqual([
+      {
+        agentId: "main",
+        artifactKind: "active-session",
+        sessionFile,
+        sessionId: "active-thread-456",
+        sessionKey: "agent:main:chat:thread-456",
+      },
+    ]);
+  });
+
+  it("lists only the requested agent's active transcripts from a shared custom store", async () => {
+    const sessionsDir = path.join(tmpDir, "custom-sessions");
+    const sessionFile = path.join(sessionsDir, "custom-thread.jsonl");
+    const otherSessionFile = path.join(sessionsDir, "ops-thread.jsonl");
+    const storePath = path.join(sessionsDir, "sessions.json");
+    const configPath = path.join(tmpDir, "openclaw.json");
+    fsSync.mkdirSync(sessionsDir, { recursive: true });
+    fsSync.writeFileSync(sessionFile, "");
+    fsSync.writeFileSync(otherSessionFile, "");
+    fsSync.writeFileSync(
+      storePath,
+      JSON.stringify({
+        "agent:main:chat:custom": {
+          sessionFile: "custom-thread.jsonl",
+          sessionId: "custom-thread",
+        },
+        "agent:ops:chat:custom": {
+          sessionFile: "ops-thread.jsonl",
+          sessionId: "ops-thread",
+        },
+      }),
+    );
+    fsSync.writeFileSync(configPath, JSON.stringify({ session: { store: storePath } }));
+    Reflect.set(process.env, "OPENCLAW_CONFIG_PATH", configPath);
+    clearRuntimeConfigSnapshot();
+    clearConfigCache();
+
+    await expect(listSessionFilesForAgent("main")).resolves.toEqual([sessionFile]);
+    await expect(listSessionTranscriptCorpusEntriesForAgent("main")).resolves.toEqual([
+      {
+        agentId: "main",
+        artifactKind: "active-session",
+        sessionFile,
+        sessionId: "custom-thread",
+        sessionKey: "agent:main:chat:custom",
+      },
+    ]);
+    await expect(listSessionFilesForAgent("ops")).resolves.toEqual([otherSessionFile]);
+  });
+
+  it("keeps unowned archives from an agent-owned fixed session store", async () => {
+    const sessionsDir = path.join(tmpDir, "agents", "main", "sessions");
+    const archivePath = path.join(sessionsDir, "retained.jsonl.deleted.2026-02-16T22-27-33.000Z");
+    const configPath = path.join(tmpDir, "openclaw.json");
+    fsSync.mkdirSync(sessionsDir, { recursive: true });
+    fsSync.writeFileSync(archivePath, "");
+    fsSync.writeFileSync(path.join(sessionsDir, "sessions.json"), "{}");
+    fsSync.writeFileSync(
+      configPath,
+      JSON.stringify({ session: { store: path.join(sessionsDir, "sessions.json") } }),
+    );
+    Reflect.set(process.env, "OPENCLAW_CONFIG_PATH", configPath);
+    clearRuntimeConfigSnapshot();
+    clearConfigCache();
+
+    await expect(listSessionFilesForAgent("main")).resolves.toEqual([archivePath]);
+    await expect(listSessionTranscriptCorpusEntriesForAgent("main")).resolves.toEqual([
+      {
+        agentId: "main",
+        artifactKind: "archive-artifact",
+        sessionFile: archivePath,
+        sessionId: "retained",
+      },
+    ]);
+  });
+
+  it("resolves absolute transcript paths from a fixed custom store", async () => {
+    const storeDir = path.join(tmpDir, "custom-sessions");
+    const sessionsDir = path.join(tmpDir, "agents", "main", "sessions");
+    const sessionFile = path.join(sessionsDir, "absolute-thread.jsonl");
+    const archivePath = path.join(
+      sessionsDir,
+      "absolute-thread.jsonl.deleted.2026-02-16T22-27-33.000Z",
+    );
+    const storePath = path.join(storeDir, "sessions.json");
+    const configPath = path.join(tmpDir, "openclaw.json");
+    fsSync.mkdirSync(storeDir, { recursive: true });
+    fsSync.mkdirSync(sessionsDir, { recursive: true });
+    fsSync.writeFileSync(sessionFile, "");
+    fsSync.writeFileSync(archivePath, "");
+    fsSync.writeFileSync(
+      storePath,
+      JSON.stringify({
+        "agent:main:chat:absolute": {
+          sessionFile,
+          sessionId: "absolute-thread",
+        },
+      }),
+    );
+    fsSync.writeFileSync(configPath, JSON.stringify({ session: { store: storePath } }));
+    Reflect.set(process.env, "OPENCLAW_CONFIG_PATH", configPath);
+    clearRuntimeConfigSnapshot();
+    clearConfigCache();
+
+    await expect(listSessionFilesForAgent("main")).resolves.toEqual([sessionFile, archivePath]);
+  });
+
+  it("keeps legacy session keys in non-main per-agent stores", async () => {
+    const sessionsDir = path.join(tmpDir, "agents", "ops", "sessions");
+    const sessionFile = path.join(sessionsDir, "legacy-thread.jsonl");
+    fsSync.mkdirSync(sessionsDir, { recursive: true });
+    fsSync.writeFileSync(sessionFile, "");
+    fsSync.writeFileSync(
+      path.join(sessionsDir, "sessions.json"),
+      JSON.stringify({
+        "slack:workspace:thread": {
+          sessionFile: "legacy-thread.jsonl",
+          sessionId: "legacy-thread",
+        },
+      }),
+    );
+
+    await expect(listSessionFilesForAgent("ops")).resolves.toEqual([sessionFile]);
+    await expect(listSessionFilesForAgent("main")).resolves.toEqual([]);
+  });
+
+  it("keeps legacy main aliases in a renamed default agent store", async () => {
+    const sessionsDir = path.join(tmpDir, "agents", "ops", "sessions");
+    const sessionFile = path.join(sessionsDir, "legacy-main.jsonl");
+    const configPath = path.join(tmpDir, "openclaw.json");
+    fsSync.mkdirSync(sessionsDir, { recursive: true });
+    fsSync.writeFileSync(sessionFile, "");
+    fsSync.writeFileSync(
+      path.join(sessionsDir, "sessions.json"),
+      JSON.stringify({
+        "agent:main:main": {
+          sessionFile: "legacy-main.jsonl",
+          sessionId: "legacy-main",
+        },
+      }),
+    );
+    fsSync.writeFileSync(
+      configPath,
+      JSON.stringify({ agents: { list: [{ id: "ops", default: true }] } }),
+    );
+    Reflect.set(process.env, "OPENCLAW_CONFIG_PATH", configPath);
+    clearRuntimeConfigSnapshot();
+    clearConfigCache();
+
+    await expect(listSessionFilesForAgent("ops")).resolves.toEqual([sessionFile]);
+  });
+});
+
 describe("sessionPathForFile", () => {
   it("includes the owning agent id when the transcript lives under an agent sessions dir", () => {
     const absPath = path.join(
@@ -84,6 +494,118 @@ describe("sessionPathForFile", () => {
     expect(sessionPathForFile(path.join(tmpDir, "loose-session.jsonl"))).toBe(
       "sessions/loose-session.jsonl",
     );
+  });
+});
+
+describe("memory session sync targets", () => {
+  it("parses deprecated canonical OpenClaw transcript paths into sync identity", () => {
+    const sessionFile = path.join(tmpDir, "agents", "main", "sessions", "active.jsonl");
+    fsSync.mkdirSync(path.dirname(sessionFile), { recursive: true });
+
+    expect(parseCanonicalSessionSyncTargetFromPath(sessionFile)).toEqual({
+      agentId: "main",
+      sessionId: "active",
+    });
+  });
+
+  it("rejects arbitrary deprecated transcript path hints", () => {
+    expect(parseCanonicalSessionSyncTargetFromPath(path.join(tmpDir, "active.jsonl"))).toBeNull();
+    expect(
+      parseCanonicalSessionSyncTargetFromPath(
+        path.join(tmpDir, "agents", "main", "sessions", "active.trajectory.jsonl"),
+      ),
+    ).toBeNull();
+  });
+
+  it("resolves identity sync targets to the current file-backed transcript", () => {
+    expect(resolveSessionFileForSyncTarget({ sessionId: "active" }, "main")).toEqual({
+      agentId: "main",
+      sessionId: "active",
+      sessionFile: path.join(tmpDir, "agents", "main", "sessions", "active.jsonl"),
+    });
+  });
+
+  it("normalizes agent ids before resolving identity sync targets", () => {
+    expect(resolveSessionFileForSyncTarget({ agentId: "MAIN", sessionId: "active" })).toEqual({
+      agentId: "main",
+      sessionId: "active",
+      sessionFile: path.join(tmpDir, "agents", "main", "sessions", "active.jsonl"),
+    });
+  });
+
+  it("rejects identity sync targets that would escape the sessions directory", () => {
+    expect(resolveSessionFileForSyncTarget({ sessionId: "../outside" }, "main")).toBeNull();
+  });
+
+  it("rejects identity sync targets that normalize to another transcript", () => {
+    expect(resolveSessionFileForSyncTarget({ sessionId: "foo/../active" }, "main")).toBeNull();
+  });
+
+  it("resolves identity sync targets through persisted session keys", () => {
+    const sessionsDir = path.join(tmpDir, "agents", "main", "sessions");
+    fsSync.mkdirSync(sessionsDir, { recursive: true });
+    fsSync.writeFileSync(
+      path.join(sessionsDir, "sessions.json"),
+      JSON.stringify({
+        "agent:main:chat:thread-456": {
+          sessionFile: "active-thread-456.jsonl",
+          sessionId: "active",
+        },
+      }),
+    );
+
+    expect(
+      resolveSessionFileForSyncTarget({
+        agentId: "main",
+        sessionId: "active",
+        sessionKey: "agent:main:chat:thread-456",
+      }),
+    ).toEqual({
+      agentId: "main",
+      sessionId: "active",
+      sessionFile: path.join(sessionsDir, "active-thread-456.jsonl"),
+    });
+  });
+
+  it("resolves identity sync targets through persisted session ids", () => {
+    const sessionsDir = path.join(tmpDir, "agents", "main", "sessions");
+    fsSync.mkdirSync(sessionsDir, { recursive: true });
+    fsSync.writeFileSync(
+      path.join(sessionsDir, "sessions.json"),
+      JSON.stringify({
+        "agent:main:chat:thread-456": {
+          sessionFile: "active-thread-456.jsonl",
+          sessionId: "active",
+        },
+      }),
+    );
+
+    expect(resolveSessionFileForSyncTarget({ agentId: "main", sessionId: "active" })).toEqual({
+      agentId: "main",
+      sessionId: "active",
+      sessionFile: path.join(sessionsDir, "active-thread-456.jsonl"),
+    });
+  });
+
+  it("resolves transcript file identities through persisted session keys", () => {
+    const sessionsDir = path.join(tmpDir, "agents", "main", "sessions");
+    fsSync.mkdirSync(sessionsDir, { recursive: true });
+    const sessionFile = path.join(sessionsDir, "active-thread-456.jsonl");
+    fsSync.writeFileSync(
+      path.join(sessionsDir, "sessions.json"),
+      JSON.stringify({
+        "agent:main:chat:thread-456": {
+          sessionFile: "active-thread-456.jsonl",
+          sessionId: "active",
+        },
+      }),
+    );
+
+    expect(resolveSessionIdentityForTranscriptFile(sessionFile)).toEqual({
+      agentId: "main",
+      sessionId: "active",
+      sessionKey: "agent:main:chat:thread-456",
+    });
   });
 });
 
@@ -110,22 +632,16 @@ describe("buildSessionEntry", () => {
     const filePath = path.join(tmpDir, "session.jsonl");
     fsSync.writeFileSync(filePath, jsonlLines.join("\n"));
 
-    const entry = await buildSessionEntry(filePath);
-    expect(entry).not.toBeNull();
-
-    // The content should have 3 lines (3 message records)
-    const contentLines = entry!.content.split("\n");
-    expect(contentLines).toHaveLength(3);
-    expect(contentLines[0]).toContain("User: Hello world");
-    expect(contentLines[1]).toContain("Assistant: Hi there");
-    expect(contentLines[2]).toContain("User: Tell me a joke");
+    const entry = requireSessionEntry(await buildSessionEntry(filePath));
+    expect(entry.content).toBe(
+      "User: Hello world\nAssistant: Hi there, how can I help?\nUser: Tell me a joke",
+    );
 
     // lineMap should map each content line to its original JSONL line (1-indexed)
     // Content line 0 → JSONL line 4 (the first user message)
     // Content line 1 → JSONL line 6 (the assistant message)
     // Content line 2 → JSONL line 7 (the second user message)
-    expect(entry!.lineMap).toBeDefined();
-    expect(entry!.lineMap).toEqual([4, 6, 7]);
+    expect(entry.lineMap).toStrictEqual([4, 6, 7]);
   });
 
   it("returns empty lineMap when no messages are found", async () => {
@@ -136,10 +652,9 @@ describe("buildSessionEntry", () => {
     const filePath = path.join(tmpDir, "empty-session.jsonl");
     fsSync.writeFileSync(filePath, jsonlLines.join("\n"));
 
-    const entry = await buildSessionEntry(filePath);
-    expect(entry).not.toBeNull();
-    expect(entry!.content).toBe("");
-    expect(entry!.lineMap).toEqual([]);
+    const entry = requireSessionEntry(await buildSessionEntry(filePath));
+    expect(entry.content).toBe("");
+    expect(entry.lineMap).toStrictEqual([]);
   });
 
   it("indexes usage-counted reset/deleted archives but still skips bak and checkpoint artifacts", async () => {
@@ -159,26 +674,24 @@ describe("buildSessionEntry", () => {
     fsSync.writeFileSync(bakPath, content);
     fsSync.writeFileSync(checkpointPath, content);
 
-    const resetEntry = await buildSessionEntry(resetPath);
-    const deletedEntry = await buildSessionEntry(deletedPath);
-    const bakEntry = await buildSessionEntry(bakPath);
-    const checkpointEntry = await buildSessionEntry(checkpointPath);
+    const resetEntry = requireSessionEntry(await buildSessionEntry(resetPath));
+    const deletedEntry = requireSessionEntry(await buildSessionEntry(deletedPath));
+    const bakEntry = requireSessionEntry(await buildSessionEntry(bakPath));
+    const checkpointEntry = requireSessionEntry(await buildSessionEntry(checkpointPath));
 
     // Usage-counted archives (reset, deleted) must surface real content so
     // post-reset memory_search can recover prior session history.
-    expect(resetEntry?.content).toContain("User: Archived hello");
-    expect(resetEntry?.lineMap).toEqual([1]);
-    expect(deletedEntry?.content).toContain("User: Archived hello");
-    expect(deletedEntry?.lineMap).toEqual([1]);
+    expect(resetEntry.content).toBe("User: Archived hello");
+    expect(resetEntry.lineMap).toStrictEqual([1]);
+    expect(deletedEntry.content).toBe("User: Archived hello");
+    expect(deletedEntry.lineMap).toStrictEqual([1]);
 
     // .bak and compaction checkpoints remain opaque pre-archive / snapshot
     // artifacts and stay empty so they do not get double-indexed.
-    expect(bakEntry).not.toBeNull();
-    expect(bakEntry?.content).toBe("");
-    expect(bakEntry?.lineMap).toEqual([]);
-    expect(checkpointEntry).not.toBeNull();
-    expect(checkpointEntry?.content).toBe("");
-    expect(checkpointEntry?.lineMap).toEqual([]);
+    expect(bakEntry.content).toBe("");
+    expect(bakEntry.lineMap).toStrictEqual([]);
+    expect(checkpointEntry.content).toBe("");
+    expect(checkpointEntry.lineMap).toStrictEqual([]);
   });
 
   it("keeps cron-run deleted archives opaque when the live session store entry is gone", async () => {
@@ -198,12 +711,11 @@ describe("buildSessionEntry", () => {
     ];
     fsSync.writeFileSync(archivePath, jsonlLines.join("\n"));
 
-    const entry = await buildSessionEntry(archivePath);
+    const entry = requireSessionEntry(await buildSessionEntry(archivePath));
 
-    expect(entry).not.toBeNull();
-    expect(entry?.content).toBe("");
-    expect(entry?.lineMap).toEqual([]);
-    expect(entry?.generatedByCronRun).toBe(true);
+    expect(entry.content).toBe("");
+    expect(entry.lineMap).toStrictEqual([]);
+    expect(entry.generatedByCronRun).toBe(true);
   });
 
   it("keeps cron-run reset archives opaque when session metadata preserves the cron key", async () => {
@@ -220,12 +732,11 @@ describe("buildSessionEntry", () => {
     ];
     fsSync.writeFileSync(archivePath, jsonlLines.join("\n"));
 
-    const entry = await buildSessionEntry(archivePath);
+    const entry = requireSessionEntry(await buildSessionEntry(archivePath));
 
-    expect(entry).not.toBeNull();
-    expect(entry?.content).toBe("");
-    expect(entry?.lineMap).toEqual([]);
-    expect(entry?.generatedByCronRun).toBe(true);
+    expect(entry.content).toBe("");
+    expect(entry.lineMap).toStrictEqual([]);
+    expect(entry.generatedByCronRun).toBe(true);
   });
 
   it("skips blank lines and invalid JSON without breaking lineMap", async () => {
@@ -239,9 +750,8 @@ describe("buildSessionEntry", () => {
     const filePath = path.join(tmpDir, "gaps.jsonl");
     fsSync.writeFileSync(filePath, jsonlLines.join("\n"));
 
-    const entry = await buildSessionEntry(filePath);
-    expect(entry).not.toBeNull();
-    expect(entry!.lineMap).toEqual([3, 5]);
+    const entry = requireSessionEntry(await buildSessionEntry(filePath));
+    expect(entry.lineMap).toStrictEqual([3, 5]);
   });
 
   it("strips inbound metadata when a user envelope is split across text blocks", async () => {
@@ -269,9 +779,8 @@ describe("buildSessionEntry", () => {
     const filePath = path.join(tmpDir, "enveloped-session-array.jsonl");
     fsSync.writeFileSync(filePath, jsonlLines.join("\n"));
 
-    const entry = await buildSessionEntry(filePath);
-    expect(entry).not.toBeNull();
-    expect(entry!.content).toBe("User: Actual user text");
+    const entry = requireSessionEntry(await buildSessionEntry(filePath));
+    expect(entry.content).toBe("User: Actual user text");
   });
 
   it("skips inter-session user messages", async () => {
@@ -296,9 +805,26 @@ describe("buildSessionEntry", () => {
     const filePath = path.join(tmpDir, "inter-session-session.jsonl");
     fsSync.writeFileSync(filePath, jsonlLines.join("\n"));
 
-    const entry = await buildSessionEntry(filePath);
-    expect(entry).not.toBeNull();
-    expect(entry!.content).toBe("Assistant: User-facing summary.\nUser: Actual user follow-up.");
-    expect(entry!.lineMap).toEqual([2, 3]);
+    const entry = requireSessionEntry(await buildSessionEntry(filePath));
+    expect(entry.content).toBe("Assistant: User-facing summary.\nUser: Actual user follow-up.");
+    expect(entry.lineMap).toStrictEqual([2, 3]);
+  });
+
+  it("drops Date-invalid numeric message timestamps", async () => {
+    const jsonlLines = [
+      JSON.stringify({
+        type: "message",
+        message: {
+          role: "user",
+          content: "Hello",
+          timestamp: 8_640_000_000_000_001,
+        },
+      }),
+    ];
+    const filePath = path.join(tmpDir, "invalid-timestamp-session.jsonl");
+    fsSync.writeFileSync(filePath, jsonlLines.join("\n"));
+
+    const entry = requireSessionEntry(await buildSessionEntry(filePath));
+    expect(entry.messageTimestampsMs).toStrictEqual([0]);
   });
 });

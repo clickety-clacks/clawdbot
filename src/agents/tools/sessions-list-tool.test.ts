@@ -1,4 +1,7 @@
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+// sessions_list tool tests cover session metadata projection, visibility
+// helpers, and numeric argument validation.
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createSessionsListTool } from "./sessions-list-tool.js";
 
 const mocks = vi.hoisted(() => ({
   gatewayCall: vi.fn(),
@@ -39,7 +42,10 @@ type SessionsListDetails = {
       to?: string;
     };
     elevatedLevel?: string;
-    fastMode?: boolean;
+    effectiveFastMode?: boolean | "auto";
+    effectiveFastModeSource?: "session" | "agent" | "config" | "default";
+    fastMode?: boolean | "auto";
+    fastAutoOnSeconds?: number;
     reasoningLevel?: string;
     responseUsage?: string;
     thinkingLevel?: string;
@@ -52,12 +58,6 @@ function getSessionsListDetails(result: { details?: unknown }): SessionsListDeta
 }
 
 describe("sessions-list-tool", () => {
-  let createSessionsListTool: typeof import("./sessions-list-tool.js").createSessionsListTool;
-
-  beforeAll(async () => {
-    ({ createSessionsListTool } = await import("./sessions-list-tool.js"));
-  });
-
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.createAgentToAgentPolicy.mockReturnValue({});
@@ -74,6 +74,8 @@ describe("sessions-list-tool", () => {
   });
 
   it("keeps deliveryContext.threadId in sessions_list results", async () => {
+    // Thread/topic ids are required for channel-specific follow-up routing, so
+    // list results must preserve both string and numeric variants.
     mocks.gatewayCall.mockImplementation(async (opts: unknown) => {
       const request = opts as { method?: string };
       if (request.method === "sessions.list") {
@@ -118,6 +120,7 @@ describe("sessions-list-tool", () => {
       accountId: "acct-1",
       threadId: "thread-1",
     });
+    expect(Object.hasOwn(details.sessions?.[0] ?? {}, "effectiveFastMode")).toBe(false);
     expect(details.sessions?.[1]?.deliveryContext).toEqual({
       channel: "telegram",
       to: "telegram:topic",
@@ -174,7 +177,10 @@ describe("sessions-list-tool", () => {
               kind: "direct",
               sessionId: "sess-main",
               thinkingLevel: "high",
-              fastMode: true,
+              fastMode: "auto",
+              effectiveFastMode: "auto",
+              effectiveFastModeSource: "config",
+              fastAutoOnSeconds: 30,
               verboseLevel: "on",
               reasoningLevel: "deep",
               elevatedLevel: "on",
@@ -190,13 +196,29 @@ describe("sessions-list-tool", () => {
     const result = await tool.execute("call-3", {});
     const details = getSessionsListDetails(result);
 
-    expect(details.sessions?.[0]).toMatchObject({
-      thinkingLevel: "high",
-      fastMode: true,
-      verboseLevel: "on",
-      reasoningLevel: "deep",
-      elevatedLevel: "on",
-      responseUsage: "full",
-    });
+    const session = details.sessions?.[0];
+    expect(session?.thinkingLevel).toBe("high");
+    expect(session?.fastMode).toBe("auto");
+    expect(session?.effectiveFastMode).toBe("auto");
+    expect(session?.effectiveFastModeSource).toBe("config");
+    expect(session?.fastAutoOnSeconds).toBe(30);
+    expect(session?.verboseLevel).toBe("on");
+    expect(session?.reasoningLevel).toBe("deep");
+    expect(session?.elevatedLevel).toBe("on");
+    expect(session?.responseUsage).toBe("full");
+  });
+
+  it.each([
+    [{ limit: 1.5 }, "limit must be a positive integer"],
+    [{ activeMinutes: 0 }, "activeMinutes must be a positive integer"],
+    [{ messageLimit: 1.5 }, "messageLimit must be a non-negative integer"],
+    [{ messageLimit: -1 }, "messageLimit must be a non-negative integer"],
+  ])("rejects invalid numeric parameter %o", async (params, message) => {
+    // Reject before gateway dispatch so malformed limits cannot reach session
+    // store queries.
+    const tool = createSessionsListTool({ config: {} as never });
+
+    await expect(tool.execute("call-4", params)).rejects.toThrow(message);
+    expect(mocks.gatewayCall).not.toHaveBeenCalled();
   });
 });

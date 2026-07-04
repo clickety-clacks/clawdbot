@@ -1,5 +1,9 @@
+// Control UI tests cover message normalizer behavior.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { normalizeMessage } from "./message-normalizer.ts";
+
+const SENDER_METADATA_BLOCK =
+  'Sender (untrusted metadata):\n```json\n{"label":"openclaw-control-ui","id":"openclaw-control-ui"}\n```';
 
 describe("message-normalizer", () => {
   describe("normalizeMessage", () => {
@@ -27,6 +31,24 @@ describe("message-normalizer", () => {
         id: "msg-1",
         senderLabel: null,
       });
+    });
+
+    it("strips sender metadata blocks before displaying message text", () => {
+      const result = normalizeMessage({
+        role: "assistant",
+        content: `${SENDER_METADATA_BLOCK}\n\nVisible reply`,
+      });
+
+      expect(result.content).toEqual([{ type: "text", text: "Visible reply" }]);
+    });
+
+    it("drops standalone sender metadata blocks before display", () => {
+      const result = normalizeMessage({
+        role: "system",
+        content: SENDER_METADATA_BLOCK,
+      });
+
+      expect(result.content).toStrictEqual([]);
     });
 
     it("does not reinterpret directive-like user string content", () => {
@@ -66,6 +88,118 @@ describe("message-normalizer", () => {
         name: "bash",
         args: { command: "ls" },
       });
+    });
+
+    it("normalizes persisted Responses text blocks as renderable text", () => {
+      const user = normalizeMessage({
+        role: "user",
+        content: [{ type: "input_text", text: "Persisted user question" }],
+      });
+      const assistant = normalizeMessage({
+        role: "assistant",
+        content: [{ type: "output_text", text: "Persisted assistant answer" }],
+      });
+
+      expect(user.content).toEqual([
+        {
+          type: "text",
+          text: "Persisted user question",
+          name: undefined,
+          args: undefined,
+        },
+      ]);
+      expect(assistant.content).toEqual([{ type: "text", text: "Persisted assistant answer" }]);
+    });
+
+    it("accepts assistant Responses input blocks but rejects user output blocks", () => {
+      const user = normalizeMessage({
+        role: "user",
+        content: [{ type: "output_text", text: "Assistant-only block" }],
+      });
+      const assistant = normalizeMessage({
+        role: "assistant",
+        content: [{ type: "input_text", text: "User-only block" }],
+      });
+
+      expect(user.content).not.toContainEqual({ type: "text", text: "Assistant-only block" });
+      expect(assistant.content).toContainEqual({ type: "text", text: "User-only block" });
+    });
+
+    it("normalizes structured base64 audio content blocks as renderable attachments", () => {
+      const result = normalizeMessage({
+        role: "assistant",
+        content: [
+          {
+            type: "audio",
+            label: "tts.mp3",
+            source: {
+              type: "base64",
+              media_type: "audio/mpeg",
+              data: "//uQAA==",
+            },
+          },
+        ],
+      });
+
+      expect(result.content).toEqual([
+        {
+          type: "attachment",
+          attachment: {
+            url: "data:audio/mpeg;base64,//uQAA==",
+            kind: "audio",
+            label: "tts.mp3",
+            mimeType: "audio/mpeg",
+          },
+        },
+      ]);
+    });
+
+    it("normalizes structured URL audio content blocks as renderable attachments", () => {
+      const result = normalizeMessage({
+        role: "assistant",
+        content: [
+          {
+            type: "audio",
+            label: "clip.mp3",
+            source: {
+              type: "url",
+              media_type: "audio/mpeg",
+              url: "/tmp/openclaw/clip.mp3",
+            },
+          },
+        ],
+      });
+
+      expect(result.content).toEqual([
+        {
+          type: "attachment",
+          attachment: {
+            url: "/tmp/openclaw/clip.mp3",
+            kind: "audio",
+            label: "clip.mp3",
+            mimeType: "audio/mpeg",
+          },
+        },
+      ]);
+    });
+
+    it("does not normalize non-assistant structured audio blocks as attachments", () => {
+      const result = normalizeMessage({
+        role: "user",
+        content: [
+          {
+            type: "audio",
+            label: "upload.mp3",
+            source: {
+              type: "base64",
+              media_type: "audio/mpeg",
+              data: "//uQAA==",
+            },
+          },
+        ],
+      });
+
+      expect(result.content).toEqual([]);
     });
 
     it("does not reinterpret directive-like user text blocks inside array content", () => {
@@ -286,7 +420,7 @@ describe("message-normalizer", () => {
       });
 
       expect(result.replyTarget).toEqual({ kind: "current" });
-      expect(result.content).toEqual([]);
+      expect(result.content).toStrictEqual([]);
     });
 
     it("preserves structured attachment content items", () => {
@@ -360,7 +494,7 @@ describe("message-normalizer", () => {
 
     it("handles missing content", () => {
       const result = normalizeMessage({ role: "user" });
-      expect(result.content).toEqual([]);
+      expect(result.content).toStrictEqual([]);
     });
 
     it("uses current timestamp when not provided", () => {

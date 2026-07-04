@@ -1,15 +1,45 @@
+// Codex tests cover auth profile runtime contract plugin behavior.
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
-  abortAgentHarnessRun,
+  abortAndDrainAgentHarnessRun,
   type EmbeddedRunAttemptParams,
 } from "openclaw/plugin-sdk/agent-harness";
 import { AUTH_PROFILE_RUNTIME_CONTRACT } from "openclaw/plugin-sdk/agent-runtime-test-contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { runCodexAppServerAttempt, __testing } from "./run-attempt.js";
-import { readCodexAppServerBinding, writeCodexAppServerBinding } from "./session-binding.js";
+import type { CodexAppServerClientFactory } from "./client-factory.js";
+import { runCodexAppServerAttempt as runCodexAppServerAttemptImpl } from "./run-attempt.js";
+import {
+  readCodexAppServerBinding,
+  writeCodexAppServerBinding as writeRawCodexAppServerBinding,
+} from "./session-binding.js";
 import { createCodexTestModel } from "./test-support.js";
+
+let codexAppServerClientFactoryForTest: CodexAppServerClientFactory | undefined;
+
+type RunCodexAppServerAttemptOptions = NonNullable<
+  Parameters<typeof runCodexAppServerAttemptImpl>[1]
+>;
+
+function setCodexAppServerClientFactoryForTest(factory: CodexAppServerClientFactory): void {
+  codexAppServerClientFactoryForTest = factory;
+}
+
+function resetCodexAppServerClientFactoryForTest(): void {
+  codexAppServerClientFactoryForTest = undefined;
+}
+
+function runCodexAppServerAttempt(
+  params: EmbeddedRunAttemptParams,
+  options: RunCodexAppServerAttemptOptions = {},
+) {
+  const clientFactory = options.clientFactory ?? codexAppServerClientFactoryForTest;
+  return runCodexAppServerAttemptImpl(
+    params,
+    clientFactory ? { ...options, clientFactory } : options,
+  );
+}
 
 function createParams(sessionFile: string, workspaceDir: string): EmbeddedRunAttemptParams {
   return {
@@ -31,10 +61,29 @@ function createParams(sessionFile: string, workspaceDir: string): EmbeddedRunAtt
   } as EmbeddedRunAttemptParams;
 }
 
+const DISABLED_CODEX_WEB_SEARCH_THREAD_CONFIG_FINGERPRINT = JSON.stringify({
+  "features.standalone_web_search": false,
+  web_search: "disabled",
+});
+const APP_SERVER_START_WAIT = { interval: 1, timeout: 5_000 } as const;
+
+function writeCodexAppServerBinding(...args: Parameters<typeof writeRawCodexAppServerBinding>) {
+  const [sessionFile, binding, lookup] = args;
+  return writeRawCodexAppServerBinding(
+    sessionFile,
+    {
+      webSearchThreadConfigFingerprint: DISABLED_CODEX_WEB_SEARCH_THREAD_CONFIG_FINGERPRINT,
+      ...binding,
+    },
+    lookup,
+  );
+}
+
 function threadStartResult(threadId = "thread-auth-contract") {
   return {
     thread: {
       id: threadId,
+      sessionId: "session-1",
       forkedFromId: null,
       preview: "",
       ephemeral: false,
@@ -79,40 +128,54 @@ function turnStartResult(turnId = "turn-auth-contract") {
   };
 }
 
+function getMockServerVersion() {
+  return "0.132.0";
+}
+
+function getMockRuntimeIdentity() {
+  return { serverVersion: getMockServerVersion() };
+}
+
+function mockClientRuntimeMethods() {
+  return {
+    getRuntimeIdentity: getMockRuntimeIdentity,
+    getServerVersion: getMockServerVersion,
+  };
+}
+
 function createCodexAuthProfileHarness(params: { startMethod: "thread/start" | "thread/resume" }) {
   const seenAuthProfileIds: Array<string | undefined> = [];
   const seenAgentDirs: Array<string | undefined> = [];
   const requests: Array<{ method: string; params: unknown }> = [];
   let notify: (notification: unknown) => Promise<void> = async () => undefined;
-  __testing.setCodexAppServerClientFactoryForTests(
-    async (_startOptions, authProfileId, agentDir) => {
-      seenAuthProfileIds.push(authProfileId);
-      seenAgentDirs.push(agentDir);
-      return {
-        request: vi.fn(async (method: string, requestParams?: unknown) => {
-          requests.push({ method, params: requestParams });
-          if (method === params.startMethod) {
-            return threadStartResult();
-          }
-          if (method === "turn/start") {
-            return turnStartResult();
-          }
-          throw new Error(`unexpected method: ${method}`);
-        }),
-        addNotificationHandler: (handler: (notification: unknown) => Promise<void>) => {
-          notify = handler;
-          return () => undefined;
-        },
-        addRequestHandler: () => () => undefined,
-      } as never;
-    },
-  );
+  setCodexAppServerClientFactoryForTest(async (_startOptions, authProfileId, agentDir) => {
+    seenAuthProfileIds.push(authProfileId);
+    seenAgentDirs.push(agentDir);
+    return {
+      ...mockClientRuntimeMethods(),
+      request: vi.fn(async (method: string, requestParams?: unknown) => {
+        requests.push({ method, params: requestParams });
+        if (method === params.startMethod) {
+          return threadStartResult();
+        }
+        if (method === "turn/start") {
+          return turnStartResult();
+        }
+        throw new Error(`unexpected method: ${method}`);
+      }),
+      addNotificationHandler: (handler: (notification: unknown) => Promise<void>) => {
+        notify = handler;
+        return () => undefined;
+      },
+      addRequestHandler: () => () => undefined,
+    } as never;
+  });
   return {
     seenAuthProfileIds,
     seenAgentDirs,
     async waitForMethod(method: string) {
-      await vi.waitFor(() => expect(requests.some((entry) => entry.method === method)).toBe(true), {
-        interval: 1,
+      await vi.waitFor(() => expect(requests.map((entry) => entry.method)).toContain(method), {
+        ...APP_SERVER_START_WAIT,
       });
     },
     async completeTurn() {
@@ -132,12 +195,20 @@ describe("Auth profile runtime contract - Codex app-server adapter", () => {
   let tmpDir: string;
 
   beforeEach(async () => {
+    vi.useRealTimers();
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-codex-auth-contract-"));
   });
 
   afterEach(async () => {
-    abortAgentHarnessRun(AUTH_PROFILE_RUNTIME_CONTRACT.sessionId);
-    __testing.resetCodexAppServerClientFactoryForTests();
+    vi.useRealTimers();
+    await abortAndDrainAgentHarnessRun({
+      sessionId: AUTH_PROFILE_RUNTIME_CONTRACT.sessionId,
+      sessionKey: AUTH_PROFILE_RUNTIME_CONTRACT.sessionKey,
+      settleMs: 1_000,
+      forceClear: true,
+      reason: "test_cleanup",
+    });
+    resetCodexAppServerClientFactoryForTest();
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
@@ -154,7 +225,7 @@ describe("Auth profile runtime contract - Codex app-server adapter", () => {
         expect(harness.seenAuthProfileIds).toEqual([
           AUTH_PROFILE_RUNTIME_CONTRACT.openAiCodexProfileId,
         ]),
-      { interval: 1 },
+      APP_SERVER_START_WAIT,
     );
     expect(harness.seenAgentDirs).toEqual([tmpDir]);
     await harness.waitForMethod("turn/start");
@@ -180,7 +251,7 @@ describe("Auth profile runtime contract - Codex app-server adapter", () => {
         expect(harness.seenAuthProfileIds).toEqual([
           AUTH_PROFILE_RUNTIME_CONTRACT.openAiCodexProfileId,
         ]),
-      { interval: 1 },
+      APP_SERVER_START_WAIT,
     );
     await harness.waitForMethod("turn/start");
     await harness.completeTurn();
@@ -193,7 +264,7 @@ describe("Auth profile runtime contract - Codex app-server adapter", () => {
     await writeCodexAppServerBinding(sessionFile, {
       threadId: "thread-auth-contract",
       cwd: tmpDir,
-      authProfileId: "openai-codex:stale",
+      authProfileId: "openai:stale",
       dynamicToolsFingerprint: "[]",
     });
     const params = createParams(sessionFile, tmpDir);
@@ -205,14 +276,13 @@ describe("Auth profile runtime contract - Codex app-server adapter", () => {
         expect(harness.seenAuthProfileIds).toEqual([
           AUTH_PROFILE_RUNTIME_CONTRACT.openAiCodexProfileId,
         ]),
-      { interval: 1 },
+      APP_SERVER_START_WAIT,
     );
     await harness.waitForMethod("turn/start");
     await harness.completeTurn();
     await run;
 
-    await expect(readCodexAppServerBinding(sessionFile)).resolves.toMatchObject({
-      authProfileId: AUTH_PROFILE_RUNTIME_CONTRACT.openAiCodexProfileId,
-    });
+    const binding = await readCodexAppServerBinding(sessionFile);
+    expect(binding?.authProfileId).toBe(AUTH_PROFILE_RUNTIME_CONTRACT.openAiCodexProfileId);
   });
 });

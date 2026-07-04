@@ -1,3 +1,4 @@
+// Tests session usage command output and token accounting summaries.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../config/config.js";
 import type {
@@ -32,8 +33,18 @@ const loadCostUsageSummaryMock = vi.hoisted(() =>
     },
   })),
 );
+type FastModeStateMockResult = {
+  mode: boolean | "auto" | undefined;
+  enabled: boolean;
+  source: "session" | "agent" | "config" | "default";
+  fastAutoOnSeconds?: number;
+};
 const resolveFastModeStateMock = vi.hoisted(() =>
-  vi.fn(() => ({ enabled: true, source: "agent" })),
+  vi.fn<() => FastModeStateMockResult>(() => ({
+    mode: true,
+    enabled: true,
+    source: "agent",
+  })),
 );
 
 vi.mock("../../agents/agent-scope.js", async () => {
@@ -51,9 +62,15 @@ vi.mock("../../infra/session-cost-usage.js", () => ({
   loadCostUsageSummary: loadCostUsageSummaryMock,
 }));
 
-vi.mock("../../agents/fast-mode.js", () => ({
-  resolveFastModeState: resolveFastModeStateMock,
-}));
+vi.mock("../../agents/fast-mode.js", async () => {
+  const actual = await vi.importActual<typeof import("../../agents/fast-mode.js")>(
+    "../../agents/fast-mode.js",
+  );
+  return {
+    ...actual,
+    resolveFastModeState: resolveFastModeStateMock,
+  };
+});
 
 function buildUsageParams(): HandleCommandsParams {
   return {
@@ -104,6 +121,32 @@ function buildCostTotals(overrides: Partial<CostUsageTotals> = {}): CostUsageTot
   };
 }
 
+function expectSessionCostArgs(): Record<string, unknown> {
+  expect(loadSessionCostSummaryMock).toHaveBeenCalledTimes(1);
+  const call = loadSessionCostSummaryMock.mock.calls[0] as unknown[] | undefined;
+  if (!call) {
+    throw new Error("expected loadSessionCostSummary call");
+  }
+  const args = call[0];
+  if (!args || typeof args !== "object") {
+    throw new Error("expected loadSessionCostSummary args");
+  }
+  return args as Record<string, unknown>;
+}
+
+function expectFastModeArgs(): Record<string, unknown> {
+  expect(resolveFastModeStateMock).toHaveBeenCalledTimes(1);
+  const call = resolveFastModeStateMock.mock.calls[0] as unknown[] | undefined;
+  if (!call) {
+    throw new Error("expected resolveFastModeState call");
+  }
+  const args = call[0];
+  if (!args || typeof args !== "object") {
+    throw new Error("expected resolveFastModeState args");
+  }
+  return args as Record<string, unknown>;
+}
+
 describe("handleUsageCommand", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -130,12 +173,9 @@ describe("handleUsageCommand", () => {
     const result = await handleUsageCommand(buildUsageParams(), true);
 
     expect(result?.shouldContinue).toBe(false);
-    expect(loadSessionCostSummaryMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        agentId: "target",
-        sessionId: "session-1",
-      }),
-    );
+    const args = expectSessionCostArgs();
+    expect(args.agentId).toBe("target");
+    expect(args.sessionId).toBe("session-1");
   });
 
   it("prefers the target session entry from sessionStore for /usage cost", async () => {
@@ -155,12 +195,9 @@ describe("handleUsageCommand", () => {
 
     await handleUsageCommand(params, true);
 
-    expect(loadSessionCostSummaryMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        sessionId: "target-session",
-        sessionFile: "/tmp/target-session.jsonl",
-      }),
-    );
+    const args = expectSessionCostArgs();
+    expect(args.sessionId).toBe("target-session");
+    expect(args.sessionFile).toBe("/tmp/target-session.jsonl");
   });
 
   it("prefers the target session entry from sessionStore for /usage footer mode", async () => {
@@ -184,13 +221,49 @@ describe("handleUsageCommand", () => {
     expect(result?.shouldContinue).toBe(false);
     expect(result?.reply?.text).toBe("⚙️ Usage footer: full.");
   });
+
+  it("updates usage footer mode as a session preference", async () => {
+    const params = buildUsageParams();
+    params.command.commandBodyNormalized = "/usage tokens";
+    params.sessionEntry = {
+      sessionId: "target-session",
+      updatedAt: Date.now(),
+      responseUsage: "full",
+    };
+    params.sessionStore = { [params.sessionKey]: params.sessionEntry };
+
+    const result = await handleUsageCommand(params, true);
+
+    expect(result?.reply?.text).toBe("⚙️ Usage footer: tokens.");
+    expect(params.sessionEntry.responseUsage).toBe("tokens");
+  });
+
+  it("clears usage footer mode on off updates", async () => {
+    const params = buildUsageParams();
+    params.command.commandBodyNormalized = "/usage off";
+    params.sessionEntry = {
+      sessionId: "target-session",
+      updatedAt: Date.now(),
+      responseUsage: "full",
+    };
+    params.sessionStore = { [params.sessionKey]: params.sessionEntry };
+
+    const result = await handleUsageCommand(params, true);
+
+    expect(result?.reply?.text).toBe("⚙️ Usage footer: off.");
+    expect(params.sessionEntry.responseUsage).toBeUndefined();
+  });
 });
 
 describe("handleFastCommand", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     resolveSessionAgentIdMock.mockReturnValue("target");
-    resolveFastModeStateMock.mockReturnValue({ enabled: true, source: "agent" });
+    resolveFastModeStateMock.mockReturnValue({
+      mode: true,
+      enabled: true,
+      source: "agent",
+    });
   });
 
   it("uses the canonical target session agent for /fast status", async () => {
@@ -202,14 +275,28 @@ describe("handleFastCommand", () => {
     const result = await handleFastCommand(params, true);
 
     expect(result?.shouldContinue).toBe(false);
-    expect(resolveFastModeStateMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        agentId: "target",
-        provider: "openai",
-        model: "gpt-5.4",
-      }),
-    );
+    const args = expectFastModeArgs();
+    expect(args.agentId).toBe("target");
+    expect(args.provider).toBe("openai");
+    expect(args.model).toBe("gpt-5.4");
     expect(result?.reply?.text).toContain("Current fast mode: on");
+  });
+
+  it("shows the resolved auto threshold for /fast status", async () => {
+    resolveFastModeStateMock.mockReturnValue({
+      mode: "auto",
+      enabled: true,
+      source: "config",
+      fastAutoOnSeconds: 30,
+    });
+    const params = buildUsageParams();
+    params.command.commandBodyNormalized = "/fast status";
+    params.provider = "openai-codex";
+    params.model = "gpt-5.5";
+
+    const result = await handleFastCommand(params, true);
+
+    expect(result?.reply?.text).toContain("Current fast mode: auto (30 sec) (default: model)");
   });
 
   it("prefers the target session entry from sessionStore for /fast status", async () => {
@@ -232,13 +319,50 @@ describe("handleFastCommand", () => {
 
     await handleFastCommand(params, true);
 
-    expect(resolveFastModeStateMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        sessionEntry: expect.objectContaining({
-          sessionId: "target-session",
-          fastMode: true,
-        }),
-      }),
-    );
+    const args = expectFastModeArgs();
+    const sessionEntry = args.sessionEntry as Record<string, unknown> | undefined;
+    expect(sessionEntry?.sessionId).toBe("target-session");
+    expect(sessionEntry?.fastMode).toBe(true);
+  });
+
+  it("clears fast mode for /fast default", async () => {
+    const params = buildUsageParams();
+    params.command.commandBodyNormalized = "/fast default";
+    params.sessionEntry = {
+      sessionId: "target-session",
+      updatedAt: Date.now(),
+      fastMode: true,
+    };
+    params.sessionStore = { [params.sessionKey]: params.sessionEntry };
+
+    const result = await handleFastCommand(params, true);
+
+    expect(result?.shouldContinue).toBe(false);
+    expect(result?.reply?.text).toBe("⚙️ Fast mode reset to default.");
+    expect(params.sessionEntry.fastMode).toBeUndefined();
+    expect(params.sessionStore[params.sessionKey]?.fastMode).toBeUndefined();
+  });
+
+  it("clears fast mode on the target store entry for /fast default", async () => {
+    const params = buildUsageParams();
+    params.command.commandBodyNormalized = "/fast default";
+    params.sessionEntry = {
+      sessionId: "wrapper-session",
+      updatedAt: Date.now(),
+      fastMode: false,
+    };
+    params.sessionStore = {
+      [params.sessionKey]: {
+        sessionId: "target-session",
+        updatedAt: Date.now(),
+        fastMode: true,
+      },
+    };
+
+    const result = await handleFastCommand(params, true);
+
+    expect(result?.reply?.text).toBe("⚙️ Fast mode reset to default.");
+    expect(params.sessionEntry.fastMode).toBe(false);
+    expect(params.sessionStore[params.sessionKey]?.fastMode).toBeUndefined();
   });
 });

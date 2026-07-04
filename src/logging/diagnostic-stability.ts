@@ -1,15 +1,19 @@
+// Diagnostic stability helpers compare diagnostic outputs across runs.
 import {
   onDiagnosticEvent,
   type DiagnosticEventPayload,
   type DiagnosticMemoryUsage,
 } from "../infra/diagnostic-events.js";
 
+// Ring-buffer recorder for stability diagnostics and support-bundle snapshots.
 const DEFAULT_DIAGNOSTIC_STABILITY_CAPACITY = 1000;
 const DEFAULT_DIAGNOSTIC_STABILITY_LIMIT = 50;
 export const MAX_DIAGNOSTIC_STABILITY_LIMIT = DEFAULT_DIAGNOSTIC_STABILITY_CAPACITY;
+const LIVENESS_EVENT_LOOP_DELAY_WARN_MS = 1_000;
 
 const SAFE_REASON_CODE = /^[A-Za-z0-9_.:-]{1,120}$/u;
 
+/** Sanitized diagnostic event record retained in the stability ring buffer. */
 export type DiagnosticStabilityEventRecord = {
   seq: number;
   ts: number;
@@ -27,6 +31,9 @@ export type DiagnosticStabilityEventRecord = {
   phase?: string;
   detector?: string;
   deliveryKind?: string;
+  talkEventType?: string;
+  transport?: string;
+  brain?: string;
   toolName?: string;
   activeWorkKind?: string;
   pairedToolName?: string;
@@ -40,6 +47,7 @@ export type DiagnosticStabilityEventRecord = {
   commandLength?: number;
   exitCode?: number;
   timedOut?: boolean;
+  final?: boolean;
   costUsd?: number;
   count?: number;
   bytes?: number;
@@ -54,11 +62,18 @@ export type DiagnosticStabilityEventRecord = {
   ageMs?: number;
   queueDepth?: number;
   queueSize?: number;
+  queueLength?: number;
   waitMs?: number;
   failureKind?: string;
   active?: number;
   waiting?: number;
   queued?: number;
+  droppedEvents?: number;
+  droppedTrustedEvents?: number;
+  droppedUntrustedEvents?: number;
+  droppedPriorityEvents?: number;
+  maxQueueLength?: number;
+  drainBatchSize?: number;
   webhooks?: {
     received: number;
     processed: number;
@@ -79,6 +94,7 @@ export type DiagnosticStabilityEventRecord = {
   };
 };
 
+/** Point-in-time stability snapshot with records and derived summaries. */
 export type DiagnosticStabilitySnapshot = {
   generatedAt: string;
   capacity: number;
@@ -141,8 +157,8 @@ function getDiagnosticStabilityState(): DiagnosticStabilityState {
   const globalStore = globalThis as typeof globalThis & {
     __openclawDiagnosticStabilityState?: DiagnosticStabilityState;
   };
-  globalStore.__openclawDiagnosticStabilityState ??= createState();
-  return globalStore.__openclawDiagnosticStabilityState;
+  globalStore["__openclawDiagnosticStabilityState"] ??= createState();
+  return globalStore["__openclawDiagnosticStabilityState"];
 }
 
 function copyMemory(memory: DiagnosticMemoryUsage): DiagnosticMemoryUsage {
@@ -164,6 +180,15 @@ function assignReasonCode(
   if (reasonCode) {
     record.reason = reasonCode;
   }
+}
+
+function resolveDiagnosticLivenessRecordLevel(
+  event: Extract<DiagnosticEventPayload, { type: "diagnostic.liveness.warning" }>,
+): "warning" | "info" {
+  const hasBlockingWork = event.waiting > 0 || event.queued > 0;
+  const hasSustainedEventLoopDelay =
+    (event.eventLoopDelayP99Ms ?? 0) >= LIVENESS_EVENT_LOOP_DELAY_WARN_MS;
+  return hasBlockingWork || (event.active > 0 && hasSustainedEventLoopDelay) ? "warning" : "info";
 }
 
 function isRecord(
@@ -204,6 +229,21 @@ function sanitizeDiagnosticEvent(event: DiagnosticEventPayload): DiagnosticStabi
       record.source = event.source;
       record.queueDepth = event.queueDepth;
       break;
+    case "message.received":
+      record.channel = event.channel;
+      record.source = event.source;
+      break;
+    case "message.dispatch.started":
+      record.channel = event.channel;
+      record.source = event.source;
+      break;
+    case "message.dispatch.completed":
+      record.channel = event.channel;
+      record.source = event.source;
+      record.durationMs = event.durationMs;
+      record.outcome = event.outcome;
+      assignReasonCode(record, event.reason);
+      break;
     case "message.processed":
       record.channel = event.channel;
       record.durationMs = event.durationMs;
@@ -228,6 +268,16 @@ function sanitizeDiagnosticEvent(event: DiagnosticEventPayload): DiagnosticStabi
       record.outcome = "error";
       assignReasonCode(record, event.errorCategory);
       break;
+    case "talk.event":
+      record.talkEventType = event.talkEventType;
+      record.mode = event.mode;
+      record.transport = event.transport;
+      record.brain = event.brain;
+      record.provider = event.provider;
+      record.final = event.final;
+      record.durationMs = event.durationMs;
+      record.bytes = event.byteLength;
+      break;
     case "session.state":
       record.outcome = event.state;
       assignReasonCode(record, event.reason);
@@ -249,6 +299,32 @@ function sanitizeDiagnosticEvent(event: DiagnosticEventPayload): DiagnosticStabi
       if (event.activeToolName) {
         record.toolName = event.activeToolName;
       }
+      break;
+    case "session.recovery.requested":
+      record.outcome = event.state;
+      record.action = event.allowActiveAbort ? "abort" : "recover";
+      record.ageMs = event.ageMs;
+      record.queueDepth = event.queueDepth;
+      if (event.activeWorkKind) {
+        record.activeWorkKind = event.activeWorkKind;
+      }
+      assignReasonCode(record, event.reason);
+      break;
+    case "session.recovery.completed":
+      record.outcome = event.status;
+      record.action = event.action;
+      record.ageMs = event.ageMs;
+      record.queueDepth = event.queueDepth;
+      record.count = event.released;
+      if (event.activeWorkKind) {
+        record.activeWorkKind = event.activeWorkKind;
+      }
+      assignReasonCode(record, event.outcomeReason ?? event.reason);
+      break;
+    case "session.turn.created":
+      record.source = event.agentId;
+      record.channel = event.channel;
+      record.outcome = event.trigger;
       break;
     case "queue.lane.enqueue":
       record.source = event.lane;
@@ -282,7 +358,7 @@ function sanitizeDiagnosticEvent(event: DiagnosticEventPayload): DiagnosticStabi
       record.queued = event.queued;
       break;
     case "diagnostic.liveness.warning":
-      record.level = event.active > 0 || event.waiting > 0 || event.queued > 0 ? "warning" : "info";
+      record.level = resolveDiagnosticLivenessRecordLevel(event);
       record.durationMs = event.intervalMs;
       record.count = event.reasons.length;
       assignReasonCode(record, event.reasons[0]);
@@ -315,20 +391,34 @@ function sanitizeDiagnosticEvent(event: DiagnosticEventPayload): DiagnosticStabi
       break;
     case "tool.execution.started":
       record.toolName = event.toolName;
+      record.source = event.toolSource;
+      record.pluginId = event.toolOwner;
       break;
     case "tool.execution.completed":
       record.toolName = event.toolName;
+      record.source = event.toolSource;
+      record.pluginId = event.toolOwner;
       record.durationMs = event.durationMs;
       break;
     case "tool.execution.error":
       record.toolName = event.toolName;
+      record.source = event.toolSource;
+      record.pluginId = event.toolOwner;
       record.durationMs = event.durationMs;
       assignReasonCode(record, event.errorCategory);
       break;
     case "tool.execution.blocked":
       record.toolName = event.toolName;
+      record.source = event.toolSource;
+      record.pluginId = event.toolOwner;
       record.outcome = "blocked";
       assignReasonCode(record, event.deniedReason);
+      break;
+    case "skill.used":
+      record.toolName = event.toolName;
+      record.source = event.skillSource;
+      record.action = event.activation;
+      record.target = event.skillName;
       break;
     case "exec.process.completed":
       record.target = event.target;
@@ -409,6 +499,14 @@ function sanitizeDiagnosticEvent(event: DiagnosticEventPayload): DiagnosticStabi
       record.level = event.level;
       record.source = event.loggerName;
       break;
+    case "security.event":
+      record.source = event.category;
+      record.action = event.action;
+      record.outcome = event.outcome;
+      record.level = event.severity;
+      record.target = event.target?.name ?? event.target?.kind;
+      assignReasonCode(record, event.reason ?? event.policy?.reason);
+      break;
     case "diagnostic.memory.sample":
       record.memory = copyMemory(event.memory);
       break;
@@ -435,6 +533,20 @@ function sanitizeDiagnosticEvent(event: DiagnosticEventPayload): DiagnosticStabi
       record.target = event.signal;
       record.outcome = event.status;
       assignReasonCode(record, event.reason ?? event.errorCategory);
+      break;
+    case "diagnostic.async_queue.dropped":
+      record.droppedEvents = event.droppedEvents;
+      record.droppedTrustedEvents = event.droppedTrustedEvents;
+      record.droppedUntrustedEvents = event.droppedUntrustedEvents;
+      record.droppedPriorityEvents = event.droppedPriorityEvents;
+      record.queueLength = event.queueLength;
+      record.maxQueueLength = event.maxQueueLength;
+      record.drainBatchSize = event.drainBatchSize;
+      break;
+    case "model.failover":
+      record.provider = event.fromProvider;
+      record.model = event.fromModel;
+      assignReasonCode(record, event.reason);
       break;
   }
 
@@ -588,6 +700,7 @@ function normalizeLimit(limit: unknown, defaultLimit = DEFAULT_DIAGNOSTIC_STABIL
   return parsed;
 }
 
+/** Normalizes user-facing snapshot query options. */
 export function normalizeDiagnosticStabilityQuery(
   input: DiagnosticStabilityQueryInput = {},
   options?: { defaultLimit?: number },
@@ -599,6 +712,7 @@ export function normalizeDiagnosticStabilityQuery(
   };
 }
 
+/** Starts the process-wide diagnostic event recorder if it is not already active. */
 export function startDiagnosticStabilityRecorder(): void {
   const state = getDiagnosticStabilityState();
   if (state.unsubscribe) {
@@ -609,12 +723,14 @@ export function startDiagnosticStabilityRecorder(): void {
   });
 }
 
+/** Stops the process-wide diagnostic event recorder. */
 export function stopDiagnosticStabilityRecorder(): void {
   const state = getDiagnosticStabilityState();
   state.unsubscribe?.();
   state.unsubscribe = null;
 }
 
+/** Returns a sanitized stability snapshot from the process-wide ring buffer. */
 export function getDiagnosticStabilitySnapshot(options?: {
   limit?: number;
   type?: string;
@@ -634,6 +750,7 @@ export function getDiagnosticStabilitySnapshot(options?: {
   };
 }
 
+/** Applies filtering/limits to an existing snapshot without mutating its source records. */
 export function selectDiagnosticStabilitySnapshot(
   snapshot: DiagnosticStabilitySnapshot,
   options?: {
@@ -653,6 +770,7 @@ export function selectDiagnosticStabilitySnapshot(
   };
 }
 
+/** Resets recorder state and subscriptions for isolated tests. */
 export function resetDiagnosticStabilityRecorderForTest(): void {
   const state = getDiagnosticStabilityState();
   state.unsubscribe?.();
@@ -660,5 +778,5 @@ export function resetDiagnosticStabilityRecorderForTest(): void {
   const globalStore = globalThis as typeof globalThis & {
     __openclawDiagnosticStabilityState?: DiagnosticStabilityState;
   };
-  globalStore.__openclawDiagnosticStabilityState = next;
+  globalStore["__openclawDiagnosticStabilityState"] = next;
 }

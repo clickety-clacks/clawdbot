@@ -1,5 +1,7 @@
+// Onboard channel post-write tests cover plugin post-write hooks after channel setup.
 import { describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../config/config.js";
+import type { RuntimeEnv } from "../runtime.js";
 import {
   createChannelOnboardingPostWriteHook,
   createChannelOnboardingPostWriteHookCollector,
@@ -70,5 +72,57 @@ describe("setupChannels post-write hooks", () => {
       'Channel telegram post-setup warning for "acct-1": hook failed',
     );
     expect(runtime.exit).not.toHaveBeenCalled();
+  });
+
+  it("fails required onboarding post-write hook failures", async () => {
+    const runtime = createExitThrowingRuntime();
+
+    await expect(
+      runCollectedChannelOnboardingPostWriteHooks({
+        hooks: [
+          {
+            channel: "clawline",
+            accountId: "default",
+            required: true,
+            run: async () => {
+              throw new Error("restart failed");
+            },
+          },
+        ],
+        cfg: {} as OpenClawConfig,
+        runtime,
+      }),
+    ).rejects.toThrow("exit:1");
+
+    expect(runtime.error).toHaveBeenCalledWith(
+      'Channel clawline post-setup failed for "default": restart failed',
+    );
+    expect(runtime.exit).toHaveBeenCalledWith(1);
+  });
+
+  it("returns false for required hook failures when runtime exit does not throw", async () => {
+    const runtime: RuntimeEnv = {
+      log: vi.fn(),
+      error: vi.fn(),
+      exit: vi.fn(),
+    };
+
+    const succeeded = await runCollectedChannelOnboardingPostWriteHooks({
+      hooks: [
+        {
+          channel: "clawline",
+          accountId: "default",
+          required: true,
+          run: async () => {
+            throw new Error("restart failed");
+          },
+        },
+      ],
+      cfg: {} as OpenClawConfig,
+      runtime,
+    });
+
+    expect(succeeded).toBe(false);
+    expect(runtime.exit).toHaveBeenCalledWith(1);
   });
 });

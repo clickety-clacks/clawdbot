@@ -2,8 +2,11 @@
  * Low-level outbound media sends (photo, voice, video, document) and path resolution.
  */
 
-import fs from "node:fs";
 import path from "node:path";
+import {
+  pathExistsSync,
+  resolveLocalPathFromRootsSync,
+} from "openclaw/plugin-sdk/security-runtime";
 import type { GatewayAccount } from "../types.js";
 import { MediaFileType } from "../types.js";
 import {
@@ -22,7 +25,6 @@ import {
   getQQBotMediaDir,
   isLocalPath as isLocalFilePath,
   normalizePath,
-  resolveQQBotPayloadLocalFilePath,
 } from "../utils/platform.js";
 import { normalizeLowercaseStringOrEmpty, sanitizeFileName } from "../utils/string-normalize.js";
 import { audioFileToSilkBase64, shouldTranscodeVoice, waitForFile } from "./outbound-audio-port.js";
@@ -39,6 +41,7 @@ import {
   type DeliveryTarget,
 } from "./sender.js";
 import { parseTarget as coreParseTarget } from "./target-parser.js";
+import { resolveTrustedOutboundMediaPath } from "./trusted-media-path.js";
 
 /** Parse a qqbot target into a structured delivery target. */
 export function parseTarget(to: string): { type: "c2c" | "group" | "channel"; id: string } {
@@ -98,79 +101,32 @@ function isHttpOrDataSource(pathValue: string): boolean {
   );
 }
 
-function isPathWithinRoot(candidate: string, root: string): boolean {
-  const relative = path.relative(root, candidate);
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
-}
-
 function resolveMissingPathWithinMediaRoot(normalizedPath: string): string | null {
   const resolvedCandidate = path.resolve(normalizedPath);
-  if (fs.existsSync(resolvedCandidate)) {
+  if (pathExistsSync(resolvedCandidate)) {
     return null;
   }
-
-  const allowedRoot = path.resolve(getQQBotMediaDir());
-  let canonicalAllowedRoot: string;
-  try {
-    canonicalAllowedRoot = fs.realpathSync(allowedRoot);
-  } catch {
-    return null;
-  }
-
-  const missingSegments: string[] = [];
-  let cursor = resolvedCandidate;
-  while (!fs.existsSync(cursor)) {
-    const parent = path.dirname(cursor);
-    if (parent === cursor) {
-      break;
-    }
-    missingSegments.unshift(path.basename(cursor));
-    cursor = parent;
-  }
-
-  if (!fs.existsSync(cursor)) {
-    return null;
-  }
-
-  let canonicalCursor: string;
-  try {
-    canonicalCursor = fs.realpathSync(cursor);
-  } catch {
-    return null;
-  }
-  const canonicalCandidate =
-    missingSegments.length > 0 ? path.join(canonicalCursor, ...missingSegments) : canonicalCursor;
-
-  return isPathWithinRoot(canonicalCandidate, canonicalAllowedRoot) ? canonicalCandidate : null;
+  return (
+    resolveLocalPathFromRootsSync({
+      filePath: resolvedCandidate,
+      roots: [getQQBotMediaDir()],
+      label: "QQ Bot media storage",
+      allowMissing: true,
+    })?.path ?? null
+  );
 }
 
 function resolveExistingPathWithinRoots(
   normalizedPath: string,
   allowedRoots: readonly string[],
 ): string | null {
-  const resolvedCandidate = path.resolve(normalizedPath);
-  if (!fs.existsSync(resolvedCandidate)) {
-    return null;
-  }
-
-  let canonicalCandidate: string;
-  try {
-    canonicalCandidate = fs.realpathSync(resolvedCandidate);
-  } catch {
-    return null;
-  }
-
-  for (const root of allowedRoots) {
-    const resolvedRoot = path.resolve(root);
-    const canonicalRoot = fs.existsSync(resolvedRoot)
-      ? fs.realpathSync(resolvedRoot)
-      : resolvedRoot;
-    if (isPathWithinRoot(canonicalCandidate, canonicalRoot)) {
-      return canonicalCandidate;
-    }
-  }
-
-  return null;
+  return (
+    resolveLocalPathFromRootsSync({
+      filePath: normalizedPath,
+      roots: allowedRoots,
+      label: "QQ Bot local roots",
+    })?.path ?? null
+  );
 }
 
 export function resolveOutboundMediaPath(
@@ -183,7 +139,9 @@ export function resolveOutboundMediaPath(
     return { ok: true, mediaPath: normalizedPath };
   }
 
-  const allowedPath = resolveQQBotPayloadLocalFilePath(normalizedPath);
+  const allowedPath = resolveTrustedOutboundMediaPath(normalizedPath, {
+    allowMissing: options.allowMissingLocalPath,
+  });
   if (allowedPath) {
     return { ok: true, mediaPath: allowedPath };
   }
@@ -347,7 +305,7 @@ export async function sendVoice(
   ctx: MediaTargetContext,
   voicePath: string,
   directUploadFormats?: string[],
-  transcodeEnabled: boolean = true,
+  transcodeEnabled = true,
 ): Promise<OutboundResult> {
   const resolvedMediaPath = resolveOutboundMediaPath(voicePath, "voice", {
     allowMissingLocalPath: true,
@@ -412,7 +370,7 @@ async function sendVoiceFromLocal(
   }
 
   // Re-check containment after the file appears to prevent symlink-race escapes.
-  const safeMediaPath = resolveQQBotPayloadLocalFilePath(mediaPath);
+  const safeMediaPath = resolveTrustedOutboundMediaPath(mediaPath);
   if (!safeMediaPath) {
     debugWarn(`sendVoice: blocked local voice path outside QQ Bot media storage`);
     return { channel: "qqbot", error: "Voice path must be inside QQ Bot media storage" };

@@ -7,12 +7,18 @@ read_when:
 ---
 
 Use IRC when you want OpenClaw in classic channels (`#room`) and direct messages.
-IRC ships as a bundled plugin, but it is configured in the main config under `channels.irc`.
+Install the official IRC plugin, then configure it under `channels.irc`.
 
 ## Quick start
 
-1. Enable IRC config in `~/.openclaw/openclaw.json`.
-2. Set at least:
+1. Install the plugin:
+
+```bash
+openclaw plugins install @openclaw/irc
+```
+
+2. Enable IRC config in `~/.openclaw/openclaw.json`.
+3. Set at least:
 
 ```json5
 {
@@ -31,7 +37,7 @@ IRC ships as a bundled plugin, but it is configured in the main config under `ch
 
 Prefer a private IRC server for bot coordination. If you intentionally use a public IRC network, common choices include Libera.Chat, OFTC, and Snoonet. Avoid predictable public channels for bot or swarm backchannel traffic.
 
-3. Start/restart gateway:
+4. Start/restart gateway:
 
 ```bash
 openclaw gateway run
@@ -47,7 +53,7 @@ openclaw gateway run
 
 ## Access control
 
-There are two separate “gates” for IRC channels:
+There are two separate "gates" for IRC channels:
 
 1. **Channel access** (`groupPolicy` + `groups`): whether the bot accepts messages from a channel at all.
 2. **Sender access** (`groupAllowFrom` / per-channel `groups["#channel"].allowFrom`): who is allowed to trigger the bot inside that channel.
@@ -68,7 +74,7 @@ If you see logs like:
 
 - `irc: drop group sender alice!ident@host (policy=allowlist)`
 
-…it means the sender wasn’t allowed for **group/channel** messages. Fix it by either:
+...it means the sender wasn't allowed for **group/channel** messages. Fix it by either:
 
 - setting `channels.irc.groupAllowFrom` (global for all channels), or
 - setting per-channel sender allowlists: `channels.irc.groups["#channel"].allowFrom`

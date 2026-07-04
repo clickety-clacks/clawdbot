@@ -1,3 +1,4 @@
+// Control UI view renders usage screen content.
 import { html, nothing } from "lit";
 import { t } from "../../i18n/index.ts";
 import { getUsageCacheRefreshTitle } from "../usage-cache-status.ts";
@@ -31,7 +32,7 @@ import {
   renderSessionsCard,
   renderUsageInsights,
 } from "./usage-render-overview.ts";
-import {
+import type {
   SessionLogEntry,
   SessionLogRole,
   UsageColumnId,
@@ -134,6 +135,21 @@ function renderUsageEmptyState(onRefresh: () => void) {
   `;
 }
 
+function closeDetailsOnOutsideClick(e: Event) {
+  const el = e.currentTarget as HTMLDetailsElement;
+  if (!el.open) {
+    return;
+  }
+  const onClick = (ev: MouseEvent) => {
+    const path = ev.composedPath();
+    if (!path.includes(el)) {
+      el.open = false;
+      window.removeEventListener("click", onClick, true);
+    }
+  };
+  window.addEventListener("click", onClick, true);
+}
+
 export function renderUsage(props: UsageProps) {
   const { data, filters, display, detail, callbacks } = props;
   const filterActions = callbacks.filters;
@@ -155,10 +171,16 @@ export function renderUsage(props: UsageProps) {
     return valB - valA;
   });
 
+  const agentScopedSessions = filters.agentId
+    ? sortedSessions.filter(
+        (s) => normalizeQueryText(s.agentId ?? "") === normalizeQueryText(filters.agentId ?? ""),
+      )
+    : sortedSessions;
+
   // Filter sessions by selected days
   const dayFilteredSessions =
     filters.selectedDays.length > 0
-      ? sortedSessions.filter((s) => {
+      ? agentScopedSessions.filter((s) => {
           if (s.usage?.activityDates?.length) {
             return s.usage.activityDates.some((d) => filters.selectedDays.includes(d));
           }
@@ -169,7 +191,7 @@ export function renderUsage(props: UsageProps) {
           const sessionDate = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
           return filters.selectedDays.includes(sessionDate);
         })
-      : sortedSessions;
+      : agentScopedSessions;
 
   const hourFilteredSessions =
     filters.selectedHours.length > 0
@@ -184,7 +206,7 @@ export function renderUsage(props: UsageProps) {
   const queryWarnings = queryResult.warnings;
   const querySuggestions = buildQuerySuggestions(
     filters.queryDraft,
-    sortedSessions,
+    agentScopedSessions,
     data.aggregates,
   );
   const queryTerms = extractQueryTerms(filters.query);
@@ -204,15 +226,18 @@ export function renderUsage(props: UsageProps) {
     }
     return Array.from(set);
   };
-  const agentOptions = unique(sortedSessions.map((s) => s.agentId)).slice(0, 12);
-  const channelOptions = unique(sortedSessions.map((s) => s.channel)).slice(0, 12);
+  const agentOptions = unique([...data.agents, ...sortedSessions.map((s) => s.agentId)]).slice(
+    0,
+    12,
+  );
+  const channelOptions = unique(agentScopedSessions.map((s) => s.channel)).slice(0, 12);
   const providerOptions = unique([
-    ...sortedSessions.map((s) => s.modelProvider),
-    ...sortedSessions.map((s) => s.providerOverride),
+    ...agentScopedSessions.map((s) => s.modelProvider),
+    ...agentScopedSessions.map((s) => s.providerOverride),
     ...(data.aggregates?.byProvider.map((entry) => entry.provider) ?? []),
   ]).slice(0, 12);
   const modelOptions = unique([
-    ...sortedSessions.map((s) => s.model),
+    ...agentScopedSessions.map((s) => s.model),
     ...(data.aggregates?.byModel.map((entry) => entry.model) ?? []),
   ]).slice(0, 12);
   const toolOptions = unique(data.aggregates?.tools.tools.map((tool) => tool.name) ?? []).slice(
@@ -244,7 +269,7 @@ export function renderUsage(props: UsageProps) {
   // Compute display totals and count based on filters
   let displayTotals: UsageTotals | null;
   let displaySessionCount: number;
-  const totalSessions = sortedSessions.length;
+  const totalSessions = agentScopedSessions.length;
 
   if (filters.selectedSessions.length > 0) {
     // Sessions selected - compute totals from selected sessions
@@ -263,6 +288,9 @@ export function renderUsage(props: UsageProps) {
   } else if (hasQuery) {
     displayTotals = computeSessionTotals(filteredSessions);
     displaySessionCount = filteredSessions.length;
+  } else if (filters.agentId) {
+    displayTotals = computeSessionTotals(agentScopedSessions);
+    displaySessionCount = totalSessions;
   } else {
     // No filters - show all
     displayTotals = data.totals;
@@ -277,7 +305,22 @@ export function renderUsage(props: UsageProps) {
         : filters.selectedDays.length > 0
           ? dayFilteredSessions
           : sortedSessions;
-  const activeAggregates = buildAggregatesFromSessions(aggregateSessions, data.aggregates);
+  const hasAggregateFilters =
+    filters.selectedSessions.length > 0 ||
+    hasQuery ||
+    filters.selectedHours.length > 0 ||
+    filters.selectedDays.length > 0 ||
+    Boolean(filters.agentId);
+  const activeAggregates = hasAggregateFilters
+    ? buildAggregatesFromSessions(aggregateSessions, data.aggregates)
+    : buildAggregatesFromSessions([], data.aggregates);
+  const insightsUseVisiblePage = data.sessionsLimitReached && !hasAggregateFilters;
+  const insightTotals = insightsUseVisiblePage
+    ? computeSessionTotals(aggregateSessions)
+    : displayTotals;
+  const insightAggregates = insightsUseVisiblePage
+    ? buildAggregatesFromSessions(aggregateSessions)
+    : activeAggregates;
 
   // Filter daily chart data if sessions are selected
   const filteredDaily =
@@ -298,24 +341,26 @@ export function renderUsage(props: UsageProps) {
         })()
       : data.costDaily;
 
-  const insightStats = buildUsageInsightStats(aggregateSessions, displayTotals, activeAggregates);
+  const insightStats = buildUsageInsightStats(aggregateSessions, insightTotals, insightAggregates);
   const isEmpty = !data.loading && !data.totals && data.sessions.length === 0;
   const cacheStatusTitle = getUsageCacheRefreshTitle(data.cacheStatus);
   const hasMissingCost =
-    (displayTotals?.missingCostEntries ?? 0) > 0 ||
-    (displayTotals
-      ? displayTotals.totalTokens > 0 &&
-        displayTotals.totalCost === 0 &&
-        displayTotals.input +
-          displayTotals.output +
-          displayTotals.cacheRead +
-          displayTotals.cacheWrite >
+    (insightTotals?.missingCostEntries ?? 0) > 0 ||
+    (insightTotals
+      ? insightTotals.totalTokens > 0 &&
+        insightTotals.totalCost === 0 &&
+        insightTotals.input +
+          insightTotals.output +
+          insightTotals.cacheRead +
+          insightTotals.cacheWrite >
           0
       : false);
   const datePresets = [
     { label: t("usage.presets.today"), days: 1 },
     { label: t("usage.presets.last7d"), days: 7 },
     { label: t("usage.presets.last30d"), days: 30 },
+    { label: t("usage.presets.last90d"), days: 90 },
+    { label: t("usage.presets.last1y"), days: 365 },
   ];
   const applyPreset = (days: number) => {
     const end = new Date();
@@ -323,6 +368,10 @@ export function renderUsage(props: UsageProps) {
     start.setDate(start.getDate() - (days - 1));
     filterActions.onStartDateChange(formatIsoDate(start));
     filterActions.onEndDateChange(formatIsoDate(end));
+  };
+  const applyAllRange = () => {
+    filterActions.onStartDateChange("1970-01-01");
+    filterActions.onEndDateChange(formatIsoDate(new Date()));
   };
   const renderFilterSelect = (key: string, label: string, options: string[]) => {
     if (options.length === 0) {
@@ -334,23 +383,7 @@ export function renderUsage(props: UsageProps) {
       options.length > 0 && options.every((value) => selectedSet.has(normalizeQueryText(value)));
     const selectedCount = selected.length;
     return html`
-      <details
-        class="usage-filter-select"
-        @toggle=${(e: Event) => {
-          const el = e.currentTarget as HTMLDetailsElement;
-          if (!el.open) {
-            return;
-          }
-          const onClick = (ev: MouseEvent) => {
-            const path = ev.composedPath();
-            if (!path.includes(el)) {
-              el.open = false;
-              window.removeEventListener("click", onClick, true);
-            }
-          };
-          window.addEventListener("click", onClick, true);
-        }}
-      >
+      <details class="usage-filter-select" @toggle=${closeDetailsOnOutsideClick}>
         <summary>
           <span>${label}</span>
           ${selectedCount > 0
@@ -411,15 +444,39 @@ export function renderUsage(props: UsageProps) {
       </details>
     `;
   };
+  const renderAgentScopeSelect = () => {
+    const selected = filters.agentId ?? "";
+    return html`
+      <details class="usage-filter-select">
+        <summary>
+          <span>${t("usage.filters.agent")}</span>
+          <span class="usage-filter-badge">${selected || t("usage.filters.all")}</span>
+        </summary>
+        <div class="usage-filter-popover">
+          <div class="usage-filter-options">
+            ${["", ...agentOptions].map((value) => {
+              const checked = selected === value;
+              return html`
+                <label class="usage-filter-option">
+                  <input
+                    type="radio"
+                    name="usage-agent-scope"
+                    .checked=${checked}
+                    @change=${() => filterActions.onAgentChange(value || null)}
+                  />
+                  <span>${value || t("usage.filters.all")}</span>
+                </label>
+              `;
+            })}
+          </div>
+        </div>
+      </details>
+    `;
+  };
   const exportStamp = formatIsoDate(new Date());
 
   return html`
     <div class="usage-page">
-      <section class="usage-page-header">
-        <div class="usage-page-title">${t("tabs.usage")}</div>
-        <div class="usage-page-subtitle">${t("usage.page.subtitle")}</div>
-      </section>
-
       <section class="card usage-header ${display.headerPinned ? "pinned" : ""}">
         <div class="usage-header-row">
           <div class="usage-header-title">
@@ -459,23 +516,7 @@ export function renderUsage(props: UsageProps) {
             >
               ${display.headerPinned ? t("usage.filters.pinned") : t("usage.filters.pin")}
             </button>
-            <details
-              class="usage-export-menu"
-              @toggle=${(e: Event) => {
-                const el = e.currentTarget as HTMLDetailsElement;
-                if (!el.open) {
-                  return;
-                }
-                const onClick = (ev: MouseEvent) => {
-                  const path = ev.composedPath();
-                  if (!path.includes(el)) {
-                    el.open = false;
-                    window.removeEventListener("click", onClick, true);
-                  }
-                };
-                window.addEventListener("click", onClick, true);
-              }}
-            >
+            <details class="usage-export-menu" @toggle=${closeDetailsOnOutsideClick}>
               <summary class="btn btn--sm">${t("usage.export.label")} ▾</summary>
               <div class="usage-export-popover">
                 <div class="usage-export-list">
@@ -550,6 +591,7 @@ export function renderUsage(props: UsageProps) {
                   </button>
                 `,
               )}
+              <button class="btn btn--sm" @click=${applyAllRange}>${t("usage.presets.all")}</button>
             </div>
             <div class="usage-date-range">
               <input
@@ -585,6 +627,22 @@ export function renderUsage(props: UsageProps) {
               <option value="local">${t("usage.filters.timeZoneLocal")}</option>
               <option value="utc">${t("usage.filters.timeZoneUtc")}</option>
             </select>
+            <div class="chart-toggle">
+              <button
+                class="btn btn--sm toggle-btn ${filters.scope === "instance" ? "active" : ""}"
+                title=${t("usage.scope.instanceHint")}
+                @click=${() => filterActions.onScopeChange("instance")}
+              >
+                ${t("usage.scope.instance")}
+              </button>
+              <button
+                class="btn btn--sm toggle-btn ${filters.scope === "family" ? "active" : ""}"
+                title=${t("usage.scope.familyHint")}
+                @click=${() => filterActions.onScopeChange("family")}
+              >
+                ${t("usage.scope.family")}
+              </button>
+            </div>
             <div class="chart-toggle">
               <button
                 class="btn btn--sm toggle-btn ${isTokenMode ? "active" : ""}"
@@ -651,7 +709,7 @@ export function renderUsage(props: UsageProps) {
             </div>
           </div>
           <div class="usage-filter-row">
-            ${renderFilterSelect("agent", t("usage.filters.agent"), agentOptions)}
+            ${renderAgentScopeSelect()}
             ${renderFilterSelect("channel", t("usage.filters.channel"), channelOptions)}
             ${renderFilterSelect("provider", t("usage.filters.provider"), providerOptions)}
             ${renderFilterSelect("model", t("usage.filters.model"), modelOptions)}
@@ -730,8 +788,8 @@ export function renderUsage(props: UsageProps) {
         ? renderUsageEmptyState(filterActions.onRefresh)
         : html`
             ${renderUsageInsights(
-              displayTotals,
-              activeAggregates,
+              insightTotals,
+              insightAggregates,
               insightStats,
               hasMissingCost,
               buildPeakErrorHours(aggregateSessions, filters.timeZone),

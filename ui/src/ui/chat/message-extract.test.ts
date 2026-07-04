@@ -1,3 +1,4 @@
+// Control UI tests cover message extract behavior.
 import { describe, expect, it } from "vitest";
 import {
   extractText,
@@ -15,7 +16,7 @@ describe("extractTextCached", () => {
     expect(extractTextCached(message)).toBe(extractText(message));
   });
 
-  it("returns consistent output for repeated calls", () => {
+  it("returns consistent text output for repeated calls", () => {
     const message = {
       role: "user",
       content: "plain text",
@@ -41,6 +42,36 @@ describe("extractTextCached", () => {
     };
     expect(extractText(message)).toBe("Final user answer");
     expect(extractTextCached(message)).toBe("Final user answer");
+  });
+
+  it("extracts text from persisted Responses content blocks", () => {
+    expect(
+      extractText({
+        role: "user",
+        content: [{ type: "input_text", text: "Persisted user question" }],
+      }),
+    ).toBe("Persisted user question");
+    expect(
+      extractText({
+        role: "assistant",
+        content: [{ type: "output_text", text: "Persisted assistant answer" }],
+      }),
+    ).toBe("Persisted assistant answer");
+  });
+
+  it("accepts assistant Responses input blocks but ignores user output blocks", () => {
+    expect(
+      extractText({
+        role: "user",
+        content: [{ type: "output_text", text: "Assistant-only block" }],
+      }),
+    ).toBeNull();
+    expect(
+      extractText({
+        role: "assistant",
+        content: [{ type: "input_text", text: "User-only block" }],
+      }),
+    ).toBe("User-only block");
   });
 
   it("prefers final_answer assistant text over commentary text", () => {
@@ -109,7 +140,7 @@ describe("extractThinkingCached", () => {
     expect(extractThinkingCached(message)).toBe(extractThinking(message));
   });
 
-  it("returns consistent output for repeated calls", () => {
+  it("returns consistent thinking output for repeated calls", () => {
     const message = {
       role: "assistant",
       content: [{ type: "thinking", thinking: "Plan A" }],

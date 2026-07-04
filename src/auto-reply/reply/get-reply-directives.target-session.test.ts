@@ -1,3 +1,4 @@
+/** Tests directive handling for target-session command turns. */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionEntry } from "../../config/sessions.js";
 import type { TemplateContext } from "../templating.js";
@@ -113,6 +114,31 @@ function parseInlineDirectivesForTest(body: string) {
   };
 }
 
+function mockCallInput(mock: { mock: { calls: unknown[][] } }, index = 0): Record<string, unknown> {
+  const call = mock.mock.calls[index];
+  if (!call) {
+    throw new Error(`Expected mock call ${index}`);
+  }
+  const input = call[0];
+  if (!input || typeof input !== "object") {
+    throw new Error(`expected mock input ${index}`);
+  }
+  return input as Record<string, unknown>;
+}
+
+function expectContinueResult(
+  value: Awaited<ReturnType<typeof resolveReplyDirectives>>,
+  fields: Record<string, unknown>,
+) {
+  expect(value.kind).toBe("continue");
+  if (value.kind !== "continue") {
+    throw new Error(`expected continue result, got ${value.kind}`);
+  }
+  for (const [key, expected] of Object.entries(fields)) {
+    expect(value.result[key as keyof typeof value.result]).toEqual(expected);
+  }
+}
+
 async function resolveHelloWithModelDefaults(params: {
   defaultThinking: "off" | "low";
   defaultReasoning: "on";
@@ -120,13 +146,19 @@ async function resolveHelloWithModelDefaults(params: {
   sessionEntry?: SessionEntry;
   agentCfg?: { reasoningDefault?: "off" | "on" | "stream" };
   commandAuthorized?: boolean;
+  hasOneTurnModelOverride?: boolean;
+  selectedProvider?: string;
+  selectedModel?: string;
+  provider?: string;
+  model?: string;
   ctx?: Parameters<typeof buildTestCtx>[0];
+  opts?: Parameters<typeof resolveReplyDirectives>[0]["opts"];
 }) {
   const resolveDefaultThinkingLevel = vi.fn(async () => params.defaultThinking);
   const resolveDefaultReasoningLevel = vi.fn(async () => params.defaultReasoning);
   mocks.createModelSelectionState.mockResolvedValueOnce({
-    provider: "openai",
-    model: "gpt-4o-mini",
+    provider: params.selectedProvider ?? "openai",
+    model: params.selectedModel ?? "gpt-4o-mini",
     allowedModelKeys: new Set<string>(),
     allowedModelCatalog: [],
     resetModelOverride: false,
@@ -165,11 +197,12 @@ async function resolveHelloWithModelDefaults(params: {
     defaultProvider: "openai",
     defaultModel: "gpt-4o-mini",
     aliasIndex: { byAlias: new Map(), byKey: new Map() },
-    provider: "openai",
-    model: "gpt-4o-mini",
+    provider: params.provider ?? "openai",
+    model: params.model ?? "gpt-4o-mini",
+    hasOneTurnModelOverride: params.hasOneTurnModelOverride,
     hasResolvedHeartbeatModelOverride: false,
     typing: makeTypingController(),
-    opts: undefined,
+    opts: params.opts,
     skillFilter: undefined,
   });
 
@@ -284,9 +317,73 @@ describe("resolveReplyDirectives", () => {
       contextTokens: params.contextTokens,
     }));
     mocks.resolveFastModeState.mockImplementation(({ sessionEntry }) => ({
+      mode: sessionEntry?.sessionId === "target-session",
       enabled: sessionEntry?.sessionId === "target-session",
+      source: "session",
+      fastAutoOnSeconds: 60,
     }));
     mocks.resolveReplyExecOverrides.mockReturnValue(undefined);
+  });
+
+  it("passes one-turn model override state into model selection", async () => {
+    await resolveHelloWithModelDefaults({
+      defaultThinking: "off",
+      defaultReasoning: "on",
+      provider: "openai",
+      model: "gpt-4o-mini",
+      hasOneTurnModelOverride: true,
+    });
+
+    const modelSelectionInput = mockCallInput(mocks.createModelSelectionState);
+    expect(modelSelectionInput.provider).toBe("openai");
+    expect(modelSelectionInput.model).toBe("gpt-4o-mini");
+    expect(modelSelectionInput.hasOneTurnModelOverride).toBe(true);
+  });
+
+  it("keeps one-turn fast mode with the resolved fast mode", async () => {
+    const { result } = await resolveHelloWithModelDefaults({
+      defaultThinking: "off",
+      defaultReasoning: "on",
+      opts: {
+        fastModeOverride: "auto",
+      },
+    });
+
+    expectContinueResult(result, {
+      resolvedFastMode: "auto",
+      resolvedFastModeAutoOnSeconds: 60,
+    });
+  });
+
+  it("resolves fast defaults after model selection updates provider and model", async () => {
+    mocks.resolveFastModeState.mockImplementation(
+      ({ provider, model }: { provider?: string; model?: string }) => ({
+        mode: provider === "openai" && model === "gpt-5.5" ? "auto" : false,
+        enabled: provider === "openai" && model === "gpt-5.5",
+        source: "config",
+        fastAutoOnSeconds: provider === "openai" && model === "gpt-5.5" ? 30 : 60,
+      }),
+    );
+
+    const { result } = await resolveHelloWithModelDefaults({
+      defaultThinking: "off",
+      defaultReasoning: "on",
+      provider: "anthropic",
+      model: "claude-opus-4-6",
+      selectedProvider: "openai",
+      selectedModel: "gpt-5.5",
+    });
+
+    expect(mockCallInput(mocks.resolveFastModeState)).toMatchObject({
+      provider: "openai",
+      model: "gpt-5.5",
+    });
+    expectContinueResult(result, {
+      provider: "openai",
+      model: "gpt-5.5",
+      resolvedFastMode: "auto",
+      resolvedFastModeAutoOnSeconds: 30,
+    });
   });
 
   it("prefers the target session entry from sessionStore for directive state", async () => {
@@ -357,36 +454,20 @@ describe("resolveReplyDirectives", () => {
       skillFilter: undefined,
     });
 
-    expect(mocks.resolveFastModeState).toHaveBeenCalledWith(
-      expect.objectContaining({
-        sessionEntry: targetSessionEntry,
-      }),
+    expect(mockCallInput(mocks.resolveFastModeState).sessionEntry).toBe(targetSessionEntry);
+    const modelSelectionInput = mockCallInput(mocks.createModelSelectionState);
+    expect(modelSelectionInput.sessionEntry).toBe(targetSessionEntry);
+    expect(modelSelectionInput.parentSessionKey).toBe("target-parent");
+    expect(mockCallInput(mocks.applyInlineDirectiveOverrides).sessionEntry).toBe(
+      targetSessionEntry,
     );
-    expect(mocks.createModelSelectionState).toHaveBeenCalledWith(
-      expect.objectContaining({
-        sessionEntry: targetSessionEntry,
-        parentSessionKey: "target-parent",
-      }),
-    );
-    expect(mocks.applyInlineDirectiveOverrides).toHaveBeenCalledWith(
-      expect.objectContaining({
-        sessionEntry: targetSessionEntry,
-      }),
-    );
-    expect(mocks.resolveReplyExecOverrides).toHaveBeenCalledWith(
-      expect.objectContaining({
-        sessionEntry: targetSessionEntry,
-      }),
-    );
-    expect(result).toEqual({
-      kind: "continue",
-      result: expect.objectContaining({
-        resolvedThinkLevel: "high",
-        resolvedFastMode: true,
-        resolvedVerboseLevel: "full",
-        resolvedReasoningLevel: "high",
-        resolvedElevatedLevel: "on",
-      }),
+    expect(mockCallInput(mocks.resolveReplyExecOverrides).sessionEntry).toBe(targetSessionEntry);
+    expectContinueResult(result, {
+      resolvedThinkLevel: "high",
+      resolvedFastMode: true,
+      resolvedVerboseLevel: "full",
+      resolvedReasoningLevel: "high",
+      resolvedElevatedLevel: "on",
     });
   });
 
@@ -454,12 +535,9 @@ describe("resolveReplyDirectives", () => {
       defaultReasoning: "on",
     });
 
-    expect(result).toEqual({
-      kind: "continue",
-      result: expect.objectContaining({
-        resolvedThinkLevel: "off",
-        resolvedReasoningLevel: "on",
-      }),
+    expectContinueResult(result, {
+      resolvedThinkLevel: "off",
+      resolvedReasoningLevel: "on",
     });
     expect(resolveDefaultReasoningLevel).toHaveBeenCalledOnce();
   });
@@ -471,12 +549,9 @@ describe("resolveReplyDirectives", () => {
       sessionEntry: makeSessionEntry({ thinkingLevel: "off" }),
     });
 
-    expect(result).toEqual({
-      kind: "continue",
-      result: expect.objectContaining({
-        resolvedThinkLevel: "off",
-        resolvedReasoningLevel: "off",
-      }),
+    expectContinueResult(result, {
+      resolvedThinkLevel: "off",
+      resolvedReasoningLevel: "off",
     });
     expect(resolveDefaultReasoningLevel).not.toHaveBeenCalled();
   });
@@ -487,12 +562,9 @@ describe("resolveReplyDirectives", () => {
       defaultReasoning: "on",
     });
 
-    expect(result).toEqual({
-      kind: "continue",
-      result: expect.objectContaining({
-        resolvedThinkLevel: "low",
-        resolvedReasoningLevel: "off",
-      }),
+    expectContinueResult(result, {
+      resolvedThinkLevel: "low",
+      resolvedReasoningLevel: "off",
     });
     expect(resolveDefaultReasoningLevel).not.toHaveBeenCalled();
   });
@@ -504,12 +576,9 @@ describe("resolveReplyDirectives", () => {
       agentCfg: { reasoningDefault: "off" },
     });
 
-    expect(result).toEqual({
-      kind: "continue",
-      result: expect.objectContaining({
-        resolvedThinkLevel: "off",
-        resolvedReasoningLevel: "off",
-      }),
+    expectContinueResult(result, {
+      resolvedThinkLevel: "off",
+      resolvedReasoningLevel: "off",
     });
     expect(resolveDefaultReasoningLevel).not.toHaveBeenCalled();
   });
@@ -521,11 +590,8 @@ describe("resolveReplyDirectives", () => {
       agentCfg: { reasoningDefault: "stream" },
     });
 
-    expect(result).toEqual({
-      kind: "continue",
-      result: expect.objectContaining({
-        resolvedReasoningLevel: "off",
-      }),
+    expectContinueResult(result, {
+      resolvedReasoningLevel: "off",
     });
     expect(resolveDefaultReasoningLevel).not.toHaveBeenCalled();
   });
@@ -537,11 +603,8 @@ describe("resolveReplyDirectives", () => {
       defaultReasoning: "on",
     });
 
-    expect(result).toEqual({
-      kind: "continue",
-      result: expect.objectContaining({
-        resolvedReasoningLevel: "off",
-      }),
+    expectContinueResult(result, {
+      resolvedReasoningLevel: "off",
     });
     expect(resolveDefaultReasoningLevel).not.toHaveBeenCalled();
   });
@@ -553,11 +616,8 @@ describe("resolveReplyDirectives", () => {
       sessionEntry: makeSessionEntry({ reasoningLevel: "stream" }),
     });
 
-    expect(result).toEqual({
-      kind: "continue",
-      result: expect.objectContaining({
-        resolvedReasoningLevel: "off",
-      }),
+    expectContinueResult(result, {
+      resolvedReasoningLevel: "off",
     });
     expect(resolveDefaultReasoningLevel).not.toHaveBeenCalled();
   });
@@ -570,11 +630,8 @@ describe("resolveReplyDirectives", () => {
       commandAuthorized: true,
     });
 
-    expect(result).toEqual({
-      kind: "continue",
-      result: expect.objectContaining({
-        resolvedReasoningLevel: "stream",
-      }),
+    expectContinueResult(result, {
+      resolvedReasoningLevel: "stream",
     });
     expect(resolveDefaultReasoningLevel).not.toHaveBeenCalled();
   });
@@ -587,11 +644,8 @@ describe("resolveReplyDirectives", () => {
       ctx: { GatewayClientScopes: ["operator.admin"] },
     });
 
-    expect(result).toEqual({
-      kind: "continue",
-      result: expect.objectContaining({
-        resolvedReasoningLevel: "stream",
-      }),
+    expectContinueResult(result, {
+      resolvedReasoningLevel: "stream",
     });
     expect(resolveDefaultReasoningLevel).not.toHaveBeenCalled();
   });
@@ -604,11 +658,8 @@ describe("resolveReplyDirectives", () => {
       commandAuthorized: true,
     });
 
-    expect(result).toEqual({
-      kind: "continue",
-      result: expect.objectContaining({
-        resolvedReasoningLevel: "stream",
-      }),
+    expectContinueResult(result, {
+      resolvedReasoningLevel: "stream",
     });
     expect(resolveDefaultReasoningLevel).not.toHaveBeenCalled();
   });
@@ -667,11 +718,8 @@ describe("resolveReplyDirectives", () => {
       skillFilter: undefined,
     });
 
-    expect(result).toEqual({
-      kind: "continue",
-      result: expect.objectContaining({
-        cleanedBody: "",
-      }),
+    expectContinueResult(result, {
+      cleanedBody: "",
     });
     expect(sessionCtx.Body).toBe("");
     expect(sessionCtx.BodyForAgent).toBe("");

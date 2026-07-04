@@ -1,7 +1,7 @@
+/** Public host-hook type contracts exposed to plugin runtimes. */
 import type { OperatorScope } from "../gateway/operator-scopes.js";
 import type { AgentEventPayload, AgentEventStream } from "../infra/agent-events.js";
 import type {
-  PluginHookAgentContext,
   PluginHookBeforeToolCallEvent,
   PluginHookBeforeToolCallResult,
   PluginHookToolContext,
@@ -26,6 +26,7 @@ export type {
   PluginNextTurnInjectionRecord,
 } from "./host-hook-turn-types.js";
 
+/** Reason passed to plugin cleanup callbacks when host-owned state changes. */
 export type PluginHostCleanupReason = "disable" | "reset" | "delete" | "restart";
 
 export type PluginSessionExtensionProjectionContext = {
@@ -34,6 +35,7 @@ export type PluginSessionExtensionProjectionContext = {
   state: PluginJsonValue | undefined;
 };
 
+/** Session extension registration owned by a plugin namespace. */
 export type PluginSessionExtensionRegistration = {
   namespace: string;
   description: string;
@@ -64,14 +66,6 @@ export type PluginSessionExtensionProjection = {
   value: PluginJsonValue;
 };
 
-export type PluginSessionExtensionPatchParams = {
-  key: string;
-  pluginId: string;
-  namespace: string;
-  value?: PluginJsonValue;
-  unset?: boolean;
-};
-
 export type PluginToolPolicyDecision =
   | PluginHookBeforeToolCallResult
   | {
@@ -96,10 +90,6 @@ export type PluginToolMetadataRegistration = {
   tags?: string[];
 };
 
-export type PluginCommandContinuation = {
-  continueAgent?: boolean;
-};
-
 export type PluginControlUiDescriptor = {
   id: string;
   surface: "session" | "tool" | "run" | "settings";
@@ -108,6 +98,41 @@ export type PluginControlUiDescriptor = {
   placement?: string;
   schema?: PluginJsonValue;
   requiredScopes?: OperatorScope[];
+};
+
+export type PluginSessionActionContext = {
+  pluginId: string;
+  actionId: string;
+  sessionKey?: string;
+  payload?: PluginJsonValue;
+  client?: {
+    connId?: string;
+    scopes: string[];
+  };
+};
+
+export type PluginSessionActionResult =
+  | {
+      ok?: true;
+      result?: PluginJsonValue;
+      reply?: PluginJsonValue;
+      continueAgent?: boolean;
+    }
+  | {
+      ok: false;
+      error: string;
+      code?: string;
+      details?: PluginJsonValue;
+    };
+
+export type PluginSessionActionRegistration = {
+  id: string;
+  description?: string;
+  schema?: PluginJsonValue;
+  requiredScopes?: OperatorScope[];
+  handler: (
+    ctx: PluginSessionActionContext,
+  ) => PluginSessionActionResult | void | Promise<PluginSessionActionResult | void>;
 };
 
 export type PluginRuntimeLifecycleRegistration = {
@@ -136,6 +161,17 @@ export type PluginAgentEventSubscriptionRegistration = {
     },
   ) => void | Promise<void>;
 };
+
+export type PluginAgentEventEmitParams = {
+  runId: string;
+  stream: AgentEventStream;
+  data: PluginJsonValue;
+  sessionKey?: string;
+};
+
+export type PluginAgentEventEmitResult =
+  | { emitted: true; stream: AgentEventStream }
+  | { emitted: false; reason: string };
 
 export type PluginRunContextPatch = {
   runId: string;
@@ -166,6 +202,87 @@ export type PluginSessionSchedulerJobHandle = {
   pluginId: string;
   sessionKey: string;
   kind: string;
+};
+
+export type PluginSessionAttachmentFile = {
+  path: string;
+};
+
+export type PluginAttachmentChannelHints = {
+  telegram?: {
+    parseMode?: "HTML";
+    disableNotification?: boolean;
+    /**
+     * Require host-side detection to match this MIME before forcing document delivery.
+     * Mismatched files are rejected before the outbound adapter is called.
+     */
+    forceDocumentMime?: string;
+  };
+  slack?: {
+    threadTs?: string;
+  };
+};
+
+export type PluginSessionAttachmentCaptionFormat = "plain" | "html" | "markdown";
+
+export type PluginSessionAttachmentParams = {
+  sessionKey: string;
+  files: PluginSessionAttachmentFile[];
+  text?: string;
+  threadId?: string | number;
+  forceDocument?: boolean;
+  maxBytes?: number;
+  captionFormat?: PluginSessionAttachmentCaptionFormat;
+  channelHints?: PluginAttachmentChannelHints;
+};
+
+export type PluginSessionAttachmentResult =
+  | {
+      ok: true;
+      channel: string;
+      deliveredTo: string;
+      count: number;
+    }
+  | { ok: false; error: string };
+
+export type PluginSessionTurnSchedule =
+  | { at: string | number | Date }
+  | { delayMs: number }
+  | { cron: string; tz?: string };
+
+type PluginSessionTurnScheduleCommonParams = {
+  sessionKey: string;
+  message: string;
+  agentId?: string;
+  deliveryMode?: "none" | "announce";
+  name?: string;
+  /** Optional cleanup tag. Reserved cron-name delimiters like `:` are rejected. */
+  tag?: string;
+};
+
+export type PluginSessionTurnScheduleParams =
+  | ({
+      at: string | number | Date;
+      deleteAfterRun?: boolean;
+    } & PluginSessionTurnScheduleCommonParams)
+  | ({
+      delayMs: number;
+      deleteAfterRun?: boolean;
+    } & PluginSessionTurnScheduleCommonParams)
+  | ({
+      cron: string;
+      tz?: string;
+      deleteAfterRun?: false;
+    } & PluginSessionTurnScheduleCommonParams);
+
+export type PluginSessionTurnUnscheduleByTagParams = {
+  sessionKey: string;
+  tag: string;
+};
+
+export type PluginSessionTurnUnscheduleByTagResult = {
+  removed: number;
+  failed: number;
 };
 
 export function normalizePluginHostHookId(value: string | undefined): string {
@@ -201,5 +318,3 @@ export function buildPluginAgentTurnPrepareContext(params: {
     ...(append.length > 0 ? { appendContext: append.join("\n\n") } : {}),
   };
 }
-
-export type PluginHostHookRunContext = PluginHookAgentContext;

@@ -1,7 +1,7 @@
 import { createServer, type Server } from "node:http";
 import path from "node:path";
 import { getTaskFlowById } from "../tasks/task-flow-registry.js";
-import type { JsonValue, TaskFlowRecord } from "../tasks/task-flow-registry.types.js";
+import type { TaskFlowRecord } from "../tasks/task-flow-registry.types.js";
 import { ForemanTaskFlowController, type ForemanWorkerEvent } from "./foreman-controller.js";
 import {
   createForemanControllerHttpHandler,

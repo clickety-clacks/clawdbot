@@ -26,14 +26,14 @@ struct MacGatewayChatTransport: OpenClawChatTransport {
         do {
             let data = try await GatewayConnection.shared.request(
                 method: "models.list",
-                params: [:],
+                params: ["view": AnyCodable("configured")],
                 timeoutMs: 15000)
             let result = try JSONDecoder().decode(ModelsListResult.self, from: data)
             return result.models.map(Self.mapModelChoice)
         } catch {
             webChatSwiftLogger.warning(
-                "models.list failed; hiding model picker: \(error.localizedDescription, privacy: .public)")
-            return []
+                "models.list failed: \(error.localizedDescription, privacy: .public)")
+            throw error
         }
     }
 
@@ -63,8 +63,12 @@ struct MacGatewayChatTransport: OpenClawChatTransport {
         let mainSessionKey = await GatewayConnection.shared.cachedMainSessionKey()
         let defaults = decoded.defaults.map {
             OpenClawChatSessionsDefaults(
+                modelProvider: $0.modelProvider,
                 model: $0.model,
                 contextTokens: $0.contextTokens,
+                thinkingLevels: $0.thinkingLevels,
+                thinkingOptions: $0.thinkingOptions,
+                thinkingDefault: $0.thinkingDefault,
                 mainSessionKey: mainSessionKey)
         } ?? OpenClawChatSessionsDefaults(
             model: nil,
@@ -226,7 +230,8 @@ struct MacGatewayChatTransport: OpenClawChatTransport {
             modelID: model.id,
             name: model.name,
             provider: model.provider,
-            contextWindow: model.contextwindow)
+            contextWindow: model.contextwindow,
+            available: model.available)
     }
 }
 
@@ -243,17 +248,31 @@ final class WebChatSwiftUIWindowController {
     var onClosed: (() -> Void)?
     var onVisibilityChanged: ((Bool) -> Void)?
 
-    convenience init(sessionKey: String, presentation: WebChatPresentation) {
-        self.init(sessionKey: sessionKey, presentation: presentation, transport: MacGatewayChatTransport())
+    convenience init(
+        sessionKey: String,
+        presentation: WebChatPresentation,
+        onSessionChanged: (@MainActor (String) -> Void)? = nil)
+    {
+        self.init(
+            sessionKey: sessionKey,
+            presentation: presentation,
+            onSessionChanged: onSessionChanged,
+            transport: MacGatewayChatTransport())
     }
 
-    init(sessionKey: String, presentation: WebChatPresentation, transport: any OpenClawChatTransport) {
+    init(
+        sessionKey: String,
+        presentation: WebChatPresentation,
+        onSessionChanged: (@MainActor (String) -> Void)? = nil,
+        transport: any OpenClawChatTransport)
+    {
         self.sessionKey = sessionKey
         self.presentation = presentation
         let vm = OpenClawChatViewModel(
             sessionKey: sessionKey,
             transport: transport,
             initialThinkingLevel: Self.persistedThinkingLevel(),
+            onSessionChanged: onSessionChanged,
             onThinkingLevelChanged: { level in
                 UserDefaults.standard.set(level, forKey: webChatThinkingLevelDefaultsKey)
             })

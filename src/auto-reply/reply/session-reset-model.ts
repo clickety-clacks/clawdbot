@@ -1,10 +1,15 @@
+/** Applies model override tokens embedded in reset/new command text. */
+import { normalizeProviderId } from "@openclaw/model-catalog-core/provider-id";
+import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import type { ModelCatalogEntry } from "../../agents/model-catalog.types.js";
-import { normalizeProviderId } from "../../agents/provider-id.js";
+import {
+  buildAllowedModelSetWithFallbacks,
+  isModelKeyAllowedBySet,
+} from "../../agents/model-selection-shared.js";
 import { resolveAgentModelFallbackValues } from "../../config/model-input.js";
 import type { SessionEntry } from "../../config/sessions.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { applyModelOverrideToSessionEntry } from "../../sessions/model-overrides.js";
-import { normalizeOptionalString } from "../../shared/string-coerce.js";
 import type { MsgContext, TemplateContext } from "../templating.js";
 import {
   modelKey,
@@ -13,7 +18,9 @@ import {
   type ModelAliasIndex,
   type ModelDirectiveSelection,
 } from "./model-selection-directive.js";
+import type { ReplySessionEntryHandle } from "./session-entry-handle.js";
 
+/** Result of applying a reset-message model override. */
 type ResetModelResult = {
   selection?: ModelDirectiveSelection;
   cleanedBody?: string;
@@ -57,8 +64,6 @@ async function buildResetAllowedModelKeys(params: {
 }): Promise<Set<string>> {
   const rawAllowlist = Object.keys(params.cfg.agents?.defaults?.models ?? {});
   if (rawAllowlist.length > 0 || params.cfg.models?.providers) {
-    const { buildAllowedModelSetWithFallbacks } =
-      await import("../../agents/model-selection-shared.js");
     return buildAllowedModelSetWithFallbacks(params).allowedKeys;
   }
 
@@ -89,7 +94,7 @@ function buildSelectionFromExplicit(params: {
     return undefined;
   }
   const key = modelKey(resolved.ref.provider, resolved.ref.model);
-  if (params.allowedModelKeys.size > 0 && !params.allowedModelKeys.has(key)) {
+  if (params.allowedModelKeys.size > 0 && !isModelKeyAllowedBySet(params.allowedModelKeys, key)) {
     return undefined;
   }
   const isDefault =
@@ -105,12 +110,14 @@ function buildSelectionFromExplicit(params: {
 function applySelectionToSession(params: {
   selection: ModelDirectiveSelection;
   sessionEntry?: SessionEntry;
+  sessionEntryHandle?: ReplySessionEntryHandle;
   sessionStore?: Record<string, SessionEntry>;
   sessionKey?: string;
   storePath?: string;
 }) {
-  const { selection, sessionEntry, sessionStore, sessionKey, storePath } = params;
-  if (!sessionEntry || !sessionStore || !sessionKey) {
+  const { selection, sessionEntryHandle, sessionStore, sessionKey, storePath } = params;
+  const sessionEntry = sessionEntryHandle?.getCurrent() ?? params.sessionEntry;
+  if (!sessionEntry || !sessionKey) {
     return;
   }
   const { updated } = applyModelOverrideToSessionEntry({
@@ -120,13 +127,15 @@ function applySelectionToSession(params: {
   if (!updated) {
     return;
   }
-  sessionStore[sessionKey] = sessionEntry;
+  if (sessionEntryHandle) {
+    sessionEntryHandle.replaceCurrent(sessionEntry);
+  } else if (sessionStore) {
+    sessionStore[sessionKey] = sessionEntry;
+  }
   if (storePath) {
-    void import("../../config/sessions.js")
-      .then(({ updateSessionStore }) =>
-        updateSessionStore(storePath, (store) => {
-          store[sessionKey] = sessionEntry;
-        }),
+    void import("../../config/sessions/session-accessor.js")
+      .then(({ replaceSessionEntry }) =>
+        replaceSessionEntry({ storePath, sessionKey }, sessionEntry),
       )
       .catch(() => {
         // Ignore persistence errors; session still proceeds.
@@ -134,6 +143,8 @@ function applySelectionToSession(params: {
   }
 }
 
+/** Applies a model override embedded in a reset command body. */
+/** Applies a valid reset model override to session state and returns the cleaned body. */
 export async function applyResetModelOverride(params: {
   cfg: OpenClawConfig;
   agentId?: string;
@@ -142,6 +153,7 @@ export async function applyResetModelOverride(params: {
   sessionCtx: TemplateContext;
   ctx: MsgContext;
   sessionEntry?: SessionEntry;
+  sessionEntryHandle?: ReplySessionEntryHandle;
   sessionStore?: Record<string, SessionEntry>;
   sessionKey?: string;
   storePath?: string;
@@ -200,6 +212,7 @@ export async function applyResetModelOverride(params: {
   let consumed = 0;
 
   if (providers.has(normalizeProviderId(first)) && second) {
+    // Support reset bodies like `openai gpt-5.5 rest of prompt`.
     const composite = `${normalizeProviderId(first)}/${second}`;
     const resolved = resolveSelection(composite);
     if (resolved.selection) {
@@ -243,6 +256,7 @@ export async function applyResetModelOverride(params: {
   applySelectionToSession({
     selection,
     sessionEntry: params.sessionEntry,
+    sessionEntryHandle: params.sessionEntryHandle,
     sessionStore: params.sessionStore,
     sessionKey: params.sessionKey,
     storePath: params.storePath,

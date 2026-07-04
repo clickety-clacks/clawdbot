@@ -1,5 +1,6 @@
 {
   "id": "opencode",
+  "icon": "https://cdn.simpleicons.org/opencode",
   "activation": {
     "onStartup": false
   },
@@ -18,8 +19,13 @@
       }
     }
   },
-  "providerAuthEnvVars": {
-    "opencode": ["OPENCODE_API_KEY", "OPENCODE_ZEN_API_KEY"]
+  "setup": {
+    "providers": [
+      {
+        "id": "opencode",
+        "envVars": ["OPENCODE_API_KEY", "OPENCODE_ZEN_API_KEY"]
+      }
+    ]
   },
   "providerAuthChoices": [
     {

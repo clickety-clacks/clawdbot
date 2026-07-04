@@ -1,8 +1,9 @@
+// Qa Matrix tests cover harness plugin behavior.
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { __testing, startMatrixQaHarness, writeMatrixQaHarnessFiles } from "./harness.runtime.js";
+import { testing, startMatrixQaHarness, writeMatrixQaHarnessFiles } from "./harness.runtime.js";
 
 type MatrixQaHarnessDeps = Parameters<typeof startMatrixQaHarness>[1];
 type MatrixQaHarnessResult = Awaited<ReturnType<typeof startMatrixQaHarness>>;
@@ -45,6 +46,16 @@ function createContainerNetworkRunCommand(calls?: string[]) {
   };
 }
 
+function countMatching<T>(items: readonly T[], predicate: (item: T) => boolean): number {
+  let count = 0;
+  for (const item of items) {
+    if (predicate(item)) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
 describe("matrix harness runtime", () => {
   it("writes a pinned Tuwunel compose file and redacted manifest", async () => {
     const outputDir = await mkdtemp(path.join(os.tmpdir(), "matrix-qa-harness-"));
@@ -65,14 +76,14 @@ describe("matrix harness runtime", () => {
         composeFile: string;
       };
 
-      expect(compose).toContain(`image: ${__testing.MATRIX_QA_DEFAULT_IMAGE}`);
+      expect(compose).toContain(`image: ${testing.MATRIX_QA_DEFAULT_IMAGE}`);
       expect(compose).toContain('      - "127.0.0.1:28008:8008"');
       expect(compose).toContain('TUWUNEL_ALLOW_ENCRYPTION: "true"');
       expect(compose).toContain('TUWUNEL_ALLOW_REGISTRATION: "true"');
       expect(compose).toContain('TUWUNEL_REGISTRATION_TOKEN: "secret-token"');
       expect(compose).toContain('TUWUNEL_SERVER_NAME: "matrix-qa.test"');
       expect(manifest).toEqual({
-        image: __testing.MATRIX_QA_DEFAULT_IMAGE,
+        image: testing.MATRIX_QA_DEFAULT_IMAGE,
         serverName: "matrix-qa.test",
         homeserverPort: 28008,
         composeFile: path.join(outputDir, "docker-compose.matrix-qa.yml"),
@@ -145,6 +156,18 @@ describe("matrix harness runtime", () => {
     );
   });
 
+  it("cancels Matrix versions probe response bodies", async () => {
+    const cancel = vi.fn(async () => {});
+    const fetchImpl = vi.fn(async () => ({ ok: true, body: { cancel } }));
+
+    await expect(
+      testing.isMatrixVersionsReachable("http://127.0.0.1:28008/", fetchImpl),
+    ).resolves.toBe(true);
+
+    expect(fetchImpl).toHaveBeenCalledWith("http://127.0.0.1:28008/_matrix/client/versions");
+    expect(cancel).toHaveBeenCalledTimes(1);
+  });
+
   it("falls back to the container IP when the host port is unreachable", async () => {
     const calls: string[] = [];
 
@@ -163,7 +186,7 @@ describe("matrix harness runtime", () => {
           `docker compose -f ${outputDir}/docker-compose.matrix-qa.yml ps -q matrix-qa-homeserver @/repo/openclaw`,
         );
         expect(calls).toContain(
-          "docker inspect --format {{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}} container-123 @/repo/openclaw",
+          "docker inspect --format {{range .NetworkSettings.Networks}}{{println .IPAddress}}{{end}} container-123 @/repo/openclaw",
         );
       },
     );
@@ -180,7 +203,7 @@ describe("matrix harness runtime", () => {
           return {
             ok:
               input === "http://127.0.0.1:28008/_matrix/client/versions" &&
-              fetchCalls.filter((url) => url === input).length > 1,
+              countMatching(fetchCalls, (url) => url === input) > 1,
           };
         }),
         sleepImpl: vi.fn(async () => {}),
@@ -208,7 +231,7 @@ describe("matrix harness runtime", () => {
           return {
             ok:
               input === "http://172.18.0.10:8008/_matrix/client/versions" &&
-              fetchCalls.filter((url) => url === input).length > 1,
+              countMatching(fetchCalls, (url) => url === input) > 1,
           };
         }),
         sleepImpl: vi.fn(async () => {}),

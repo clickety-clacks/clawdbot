@@ -1,6 +1,8 @@
+// Discord plugin module implements send.webhook behavior.
 import { recordChannelActivity } from "openclaw/plugin-sdk/channel-activity-runtime";
-import type { OpenClawConfig } from "openclaw/plugin-sdk/config-types";
-import { normalizeOptionalString } from "openclaw/plugin-sdk/text-runtime";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+import { readResponseTextLimited } from "openclaw/plugin-sdk/provider-http";
+import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { resolveDiscordClientAccountContext } from "./client.js";
 import {
   DiscordError,
@@ -10,7 +12,10 @@ import {
   readRetryAfter,
 } from "./internal/rest-errors.js";
 import { rewriteDiscordKnownMentions } from "./mentions.js";
+import { createDiscordSendResult } from "./send.receipt.js";
 import type { DiscordSendResult } from "./send.types.js";
+
+const DISCORD_WEBHOOK_ERROR_BODY_LIMIT_BYTES = 8 * 1024;
 
 type DiscordWebhookSendOpts = {
   cfg: OpenClawConfig;
@@ -52,7 +57,9 @@ function coerceWebhookErrorBody(raw: string): unknown {
 }
 
 async function throwWebhookResponseError(response: Response): Promise<never> {
-  const raw = await response.text().catch(() => "");
+  const raw = await readResponseTextLimited(response, DISCORD_WEBHOOK_ERROR_BODY_LIMIT_BYTES).catch(
+    () => "",
+  );
   const parsed = coerceWebhookErrorBody(raw);
   if (response.status === 429) {
     throw new RateLimitError(response, {
@@ -126,8 +133,11 @@ export async function sendWebhookMessageDiscord(
   } catch {
     // Best-effort telemetry only.
   }
-  return {
-    messageId: payload.id || "unknown",
-    channelId: payload.channel_id ? payload.channel_id : opts.threadId ? String(opts.threadId) : "",
-  };
+  return createDiscordSendResult({
+    result: payload,
+    fallbackChannelId: opts.threadId ? String(opts.threadId) : "",
+    kind: "text",
+    ...(opts.threadId != null ? { threadId: opts.threadId } : {}),
+    ...(replyTo ? { replyToId: replyTo } : {}),
+  });
 }

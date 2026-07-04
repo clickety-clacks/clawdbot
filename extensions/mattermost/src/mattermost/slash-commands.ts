@@ -1,18 +1,5 @@
-/**
- * Mattermost native slash command support.
- *
- * Registers custom slash commands via the Mattermost REST API and handles
- * incoming command callbacks via an HTTP endpoint on the gateway.
- *
- * Architecture:
- * - On startup, registers commands with MM via POST /api/v4/commands
- * - MM sends HTTP POST to callbackUrl when a user invokes a command
- * - The callback handler reconstructs the text as `/<command> <args>` and
- *   routes it through the standard inbound reply pipeline
- * - On shutdown, cleans up registered commands via DELETE /api/v4/commands/{id}
- */
-
-import { normalizeOptionalString } from "openclaw/plugin-sdk/text-runtime";
+// Mattermost plugin module implements slash commands behavior.
+import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
 import type { MattermostClient } from "./client.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -185,6 +172,14 @@ export const DEFAULT_COMMAND_SPECS: MattermostCommandSpec[] = [
     autoComplete: true,
     autoCompleteHint: "[on|off]",
   },
+  {
+    trigger: "oc_queue",
+    originalName: "queue",
+    description: "Adjust active-run queue behavior",
+    autoComplete: true,
+    autoCompleteHint:
+      "[steer|followup|collect|interrupt] [debounce:2s] [cap:N] [drop:old|new|summarize]",
+  },
 ];
 
 // ─── Command registration ────────────────────────────────────────────────────
@@ -275,7 +270,7 @@ export async function registerSlashCommands(params: {
   }
 
   // Fetch existing commands to avoid duplicates
-  let existing: MattermostCommandResponse[] = [];
+  let existing: MattermostCommandResponse[];
   try {
     existing = await listMattermostCommands(client, teamId);
   } catch (err) {

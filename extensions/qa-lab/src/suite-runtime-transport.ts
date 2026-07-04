@@ -1,3 +1,4 @@
+// Qa Lab plugin module implements suite runtime transport behavior.
 import { setTimeout as sleep } from "node:timers/promises";
 import {
   createFailureAwareTransportWaitForCondition,
@@ -7,6 +8,10 @@ import {
 } from "./qa-transport.js";
 import { extractQaFailureReplyText } from "./reply-failure.js";
 import type { QaBusMessage } from "./runtime-api.js";
+
+type WaitForNoOutboundOptions = {
+  sinceIndex?: number;
+};
 
 function findFailureOutboundMessage(
   state: QaTransportState,
@@ -26,14 +31,15 @@ async function waitForOutboundMessage(
   options?: { sinceIndex?: number },
 ) {
   return await waitForQaTransportCondition(() => {
-    const failureMessage = findFailureOutboundMessage(state, options);
+    const cursorOptions = { ...options, cursorSpace: "all" as const };
+    const failureMessage = findFailureOutboundMessage(state, cursorOptions);
     if (failureMessage) {
       throw new Error(extractQaFailureReplyText(failureMessage.text) ?? failureMessage.text);
     }
     const match = state
       .getSnapshot()
-      .messages.filter((message: QaBusMessage) => message.direction === "outbound")
-      .slice(options?.sinceIndex ?? 0)
+      .messages.slice(options?.sinceIndex ?? 0)
+      .filter((message: QaBusMessage) => message.direction === "outbound")
       .find(predicate);
     if (!match) {
       return undefined;
@@ -46,13 +52,25 @@ async function waitForOutboundMessage(
   }, timeoutMs);
 }
 
-async function waitForNoOutbound(state: QaTransportState, timeoutMs = 1_200) {
+async function waitForNoOutbound(
+  state: QaTransportState,
+  timeoutMs = 1_200,
+  options?: WaitForNoOutboundOptions,
+) {
   await sleep(timeoutMs);
   const outbound = state
     .getSnapshot()
-    .messages.filter((message: QaBusMessage) => message.direction === "outbound");
+    .messages.filter((message: QaBusMessage) => message.direction === "outbound")
+    .slice(options?.sinceIndex ?? 0);
   if (outbound.length > 0) {
-    throw new Error(`expected no outbound messages, saw ${outbound.length}`);
+    const summary = outbound
+      .slice(0, 5)
+      .map(
+        (message: QaBusMessage) =>
+          `${message.conversation.kind}:${message.conversation.id}:${message.senderId}:${message.text}`,
+      )
+      .join(" | ");
+    throw new Error(`expected no outbound messages, saw ${outbound.length}: ${summary}`);
   }
 }
 
@@ -140,8 +158,12 @@ async function waitForChannelOutboundMessage(
   return await waitForTransportOutboundMessage(state, predicate, timeoutMs);
 }
 
-async function waitForNoTransportOutbound(state: QaTransportState, timeoutMs = 1_200) {
-  await waitForNoOutbound(state, timeoutMs);
+async function waitForNoTransportOutbound(
+  state: QaTransportState,
+  timeoutMs = 1_200,
+  options?: WaitForNoOutboundOptions,
+) {
+  await waitForNoOutbound(state, timeoutMs, options);
 }
 
 export {

@@ -1,4 +1,4 @@
-import { type QueueDropPolicy, type QueueMode } from "../auto-reply/reply/queue.js";
+import type { QueueDropPolicy, QueueMode } from "../auto-reply/reply/queue.js";
 import { defaultRuntime } from "../runtime.js";
 import { deliveryContextKey, normalizeDeliveryContext } from "../utils/delivery-context.shared.js";
 import type { DeliveryContext } from "../utils/delivery-context.types.js";
@@ -20,6 +20,7 @@ export type AnnounceQueueItem = {
   // Stable announce identity shared by direct + queued delivery paths.
   // Optional for backward compatibility with previously queued items.
   announceId?: string;
+  attachments?: unknown[];
   prompt: string;
   summaryLine?: string;
   internalEvents?: AgentInternalEvent[];
@@ -30,6 +31,7 @@ export type AnnounceQueueItem = {
   sourceSessionKey?: string;
   sourceChannel?: string;
   sourceTool?: string;
+  onSent?: (item: AnnounceQueueItem) => void;
 };
 
 type AnnounceQueueSettings = {
@@ -52,7 +54,7 @@ type AnnounceQueueState = {
   send: (item: AnnounceQueueItem) => Promise<void>;
   /** Return true while the target parent session is still busy and delivery should wait. */
   shouldDefer?: (item: AnnounceQueueItem) => boolean;
-  /** Consecutive drain failures — drives exponential backoff on errors. */
+  /** Consecutive drain failures drives exponential backoff on errors. */
   consecutiveFailures: number;
 };
 
@@ -194,7 +196,10 @@ function scheduleAnnounceDrain(key: string) {
             collectState,
             isCrossChannel: hasAnnounceCrossChannelItems(queue.items),
             items: queue.items,
-            run: async (item) => await queue.send(item),
+            run: async (item) => {
+              await queue.send(item);
+              item.onSent?.(item);
+            },
           });
           if (collectDrainResult === "empty") {
             break;
@@ -222,11 +227,15 @@ function scheduleAnnounceDrain(key: string) {
             if (!last) {
               break;
             }
-            await queue.send({
+            const summaryItem = {
               ...last,
               prompt,
               internalEvents: internalEvents.length > 0 ? internalEvents : last.internalEvents,
-            });
+            };
+            await queue.send(summaryItem);
+            for (const item of groupItems) {
+              item.onSent?.(item);
+            }
             queue.items.splice(0, groupItems.length);
             if (pendingSummary) {
               clearQueueSummaryState(queue);
@@ -239,10 +248,10 @@ function scheduleAnnounceDrain(key: string) {
         const summaryPrompt = previewQueueSummaryPrompt({ state: queue, noun: "announce" });
         if (summaryPrompt) {
           if (
-            !(await drainNextQueueItem(
-              queue.items,
-              async (item) => await queue.send({ ...item, prompt: summaryPrompt }),
-            ))
+            !(await drainNextQueueItem(queue.items, async (item) => {
+              await queue.send({ ...item, prompt: summaryPrompt });
+              item.onSent?.(item);
+            }))
           ) {
             break;
           }
@@ -250,15 +259,18 @@ function scheduleAnnounceDrain(key: string) {
           continue;
         }
 
-        if (!(await drainNextQueueItem(queue.items, async (item) => await queue.send(item)))) {
+        if (
+          !(await drainNextQueueItem(queue.items, async (item) => {
+            await queue.send(item);
+            item.onSent?.(item);
+          }))
+        ) {
           break;
         }
       }
-      // Drain succeeded — reset failure counter.
       queue.consecutiveFailures = 0;
     } catch (err) {
       queue.consecutiveFailures++;
-      // Exponential backoff on consecutive failures: 2s, 4s, 8s, ... capped at 60s.
       const errorBackoffMs = Math.min(1000 * 2 ** queue.consecutiveFailures, 60_000);
       const retryDelayMs = Math.max(errorBackoffMs, queue.debounceMs);
       queue.lastEnqueuedAt = Date.now() + retryDelayMs - queue.debounceMs;
@@ -282,6 +294,8 @@ export function enqueueAnnounce(params: {
   settings: AnnounceQueueSettings;
   send: (item: AnnounceQueueItem) => Promise<void>;
   shouldDefer?: (item: AnnounceQueueItem) => boolean;
+  onDrop?: (items: AnnounceQueueItem[]) => void;
+  onSent?: (item: AnnounceQueueItem) => void;
 }): boolean {
   const queue = getAnnounceQueue(params.key, params.settings, params.send, params.shouldDefer);
   // Preserve any retry backoff marker already encoded in lastEnqueuedAt.
@@ -290,6 +304,7 @@ export function enqueueAnnounce(params: {
   const shouldEnqueue = applyQueueDropPolicy({
     queue,
     summarize: (item) => item.summaryLine?.trim() || item.prompt.trim(),
+    onDrop: params.onDrop,
   });
   if (!shouldEnqueue) {
     if (queue.dropPolicy === "new") {
@@ -300,7 +315,7 @@ export function enqueueAnnounce(params: {
 
   const origin = normalizeDeliveryContext(params.item.origin);
   const originKey = deliveryContextKey(origin);
-  queue.items.push({ ...params.item, origin, originKey });
+  queue.items.push({ ...params.item, origin, originKey, onSent: params.onSent });
   scheduleAnnounceDrain(params.key);
   return true;
 }

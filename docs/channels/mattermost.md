@@ -32,7 +32,7 @@ Details: [Plugins](/tools/plugin)
 
 <Steps>
   <Step title="Ensure plugin is available">
-    Current packaged OpenClaw releases already bundle it. Older/custom installs can add it manually with the commands above.
+    Install `@openclaw/mattermost` with the command above, then restart the Gateway if it is already running.
   </Step>
   <Step title="Create a Mattermost bot">
     Create a Mattermost bot account and copy the **bot token**.
@@ -155,6 +155,7 @@ Notes:
 
 - `onchar` still responds to explicit @mentions.
 - `channels.mattermost.requireMention` is honored for legacy configs but `chatmode` is preferred.
+- After the bot sends a visible reply in a channel thread, later messages in that same thread are answered without a new @mention or `onchar` prefix, so multi-turn thread conversations keep flowing. Participation is remembered for 7 days of thread inactivity (refreshed on each reply) and persists across gateway restarts. Threads the bot has only observed are unaffected; start a new top-level message to require an explicit mention again.
 
 ## Threading and sessions
 
@@ -189,11 +190,13 @@ Notes:
   - `openclaw pairing list mattermost`
   - `openclaw pairing approve mattermost <CODE>`
 - Public DMs: `channels.mattermost.dmPolicy="open"` plus `channels.mattermost.allowFrom=["*"]`.
+- `channels.mattermost.allowFrom` accepts `accessGroup:<name>` entries. See [Access groups](/channels/access-groups).
 
 ## Channels (groups)
 
 - Default: `channels.mattermost.groupPolicy = "allowlist"` (mention-gated).
 - Allowlist senders with `channels.mattermost.groupAllowFrom` (user IDs recommended).
+- `channels.mattermost.groupAllowFrom` accepts `accessGroup:<name>` entries. See [Access groups](/channels/access-groups).
 - Per-channel mention overrides live under `channels.mattermost.groups.<channelId>.requireMention` or `channels.mattermost.groups["*"].requireMention` for a default.
 - `@username` matching is mutable and only enabled when `channels.mattermost.dangerouslyAllowNameMatching: true`.
 - Open channels: `channels.mattermost.groupPolicy="open"` (mention-gated).
@@ -287,7 +290,7 @@ Enable via `channels.mattermost.streaming`:
   </Accordion>
   <Accordion title="Streaming behavior notes">
     - If the stream cannot be finalized in place (for example the post was deleted mid-stream), OpenClaw falls back to sending a fresh final post so the reply is never lost.
-    - Reasoning-only payloads are suppressed from channel posts, including text that arrives as a `> Reasoning:` blockquote. Set `/reasoning on` to see thinking in other surfaces; the Mattermost final post keeps the answer only.
+    - Thinking-only payloads are suppressed from channel posts, including text that arrives as a `> Thinking` blockquote. Set `/reasoning on` to see thinking in other surfaces; the Mattermost final post keeps the answer only.
     - See [Streaming](/concepts/streaming#preview-streaming-modes) for the channel-mapping matrix.
 
   </Accordion>
@@ -316,6 +319,8 @@ Config:
 ## Interactive buttons (message tool)
 
 Send messages with clickable buttons. When a user clicks a button, the agent receives the selection and can respond.
+
+Normal agent replies can also include semantic `presentation` payloads. OpenClaw renders value buttons as Mattermost interactive buttons, keeps URL buttons visible in the message text, and downgrades select menus to readable text.
 
 Enable buttons by adding `inlineButtons` to the channel capabilities:
 
@@ -361,7 +366,7 @@ When a user clicks a button:
 <AccordionGroup>
   <Accordion title="Implementation notes">
     - Button callbacks use HMAC-SHA256 verification (automatic, no config needed).
-    - Mattermost strips callback data from its API responses (security feature), so all buttons are removed on click — partial removal is not possible.
+    - Mattermost strips callback data from its API responses (security feature), so all buttons are removed on click - partial removal is not possible.
     - Action IDs containing hyphens or underscores are sanitized automatically (Mattermost routing limitation).
 
   </Accordion>
@@ -391,7 +396,7 @@ External scripts and webhooks can post buttons directly via the Mattermost REST 
       {
         actions: [
           {
-            id: "mybutton01", // alphanumeric only — see below
+            id: "mybutton01", // alphanumeric only - see below
             type: "button", // required, or clicks are silently ignored
             name: "Approve", // display label
             style: "primary", // optional: "default", "primary", "danger"
@@ -416,11 +421,11 @@ External scripts and webhooks can post buttons directly via the Mattermost REST 
 **Critical rules**
 
 1. Attachments go in `props.attachments`, not top-level `attachments` (silently ignored).
-2. Every action needs `type: "button"` — without it, clicks are swallowed silently.
-3. Every action needs an `id` field — Mattermost ignores actions without IDs.
+2. Every action needs `type: "button"` - without it, clicks are swallowed silently.
+3. Every action needs an `id` field - Mattermost ignores actions without IDs.
 4. Action `id` must be **alphanumeric only** (`[a-zA-Z0-9]`). Hyphens and underscores break Mattermost's server-side action routing (returns 404). Strip them before use.
 5. `context.action_id` must match the button's `id` so the confirmation message shows the button name (e.g., "Approve") instead of a raw ID.
-6. `context.action_id` is required — the interaction handler returns 400 without it.
+6. `context.action_id` is required - the interaction handler returns 400 without it.
 
 </Warning>
 
@@ -467,7 +472,7 @@ context = {**ctx, "_token": token}
   <Accordion title="Common HMAC pitfalls">
     - Python's `json.dumps` adds spaces by default (`{"key": "val"}`). Use `separators=(",", ":")` to match JavaScript's compact output (`{"key":"val"}`).
     - Always sign **all** context fields (minus `_token`). The gateway strips `_token` then signs everything remaining. Signing a subset causes silent verification failure.
-    - Use `sort_keys=True` — the gateway sorts keys before signing, and Mattermost may reorder context fields when storing the payload.
+    - Use `sort_keys=True` - the gateway sorts keys before signing, and Mattermost may reorder context fields when storing the payload.
     - Derive the secret from the bot token (deterministic), not random bytes. The secret must be the same across the process that creates buttons and the gateway that verifies.
 
   </Accordion>
@@ -477,7 +482,7 @@ context = {**ctx, "_token": token}
 
 The Mattermost plugin includes a directory adapter that resolves channel and user names via the Mattermost API. This enables `#channel-name` and `@username` targets in `openclaw message send` and cron/webhook deliveries.
 
-No configuration is needed — the adapter uses the bot token from the account config.
+No configuration is needed - the adapter uses the bot token from the account config.
 
 ## Multi-account
 
@@ -531,8 +536,8 @@ Mattermost supports multiple accounts under `channels.mattermost.accounts`:
 
 ## Related
 
-- [Channel Routing](/channels/channel-routing) — session routing for messages
-- [Channels Overview](/channels) — all supported channels
-- [Groups](/channels/groups) — group chat behavior and mention gating
-- [Pairing](/channels/pairing) — DM authentication and pairing flow
-- [Security](/gateway/security) — access model and hardening
+- [Channel Routing](/channels/channel-routing) - session routing for messages
+- [Channels Overview](/channels) - all supported channels
+- [Groups](/channels/groups) - group chat behavior and mention gating
+- [Pairing](/channels/pairing) - DM authentication and pairing flow
+- [Security](/gateway/security) - access model and hardening
