@@ -4905,16 +4905,8 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   }
 
   function userIdForPendingEntry(entry: PendingEntry): string {
-    const normalized = normalizeUserIdFromClaimedName(entry.claimedName);
-    if (normalized) {
-      return normalized;
-    }
     const compactDeviceId = entry.deviceId.replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
     return `device_${compactDeviceId.slice(0, Math.max(1, USER_ID_MAX_LENGTH - 7))}`;
-  }
-
-  function adminDefaultForPendingEntry(entry: PendingEntry): boolean {
-    return userIdForPendingEntry(entry) === "flynn";
   }
 
   function createAllowlistEntryFromPending(entry: PendingEntry): AllowlistEntry {
@@ -4924,7 +4916,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       claimedName: entry.claimedName,
       deviceInfo: entry.deviceInfo,
       userId,
-      isAdmin: userId === "flynn",
+      isAdmin: false,
       tokenDelivered: false,
       createdAt: nowMs(),
       lastSeenAt: null,
@@ -4981,7 +4973,7 @@ button.deny { background: #9b1c31; color: white; }
 <div class="row"><div class="label">Platform</div><div class="value">${escapeHtml(surface)}</div></div>
 <div class="row"><div class="label">Device ID</div><div class="value">${escapeHtml(entry.deviceId)}</div></div>
 <div class="row"><div class="label">User ID</div><div class="value">${escapeHtml(userId)}</div></div>
-<div class="row"><div class="label">Admin</div><div class="value">${adminDefaultForPendingEntry(entry) ? "yes" : "no"}</div></div>
+<div class="row"><div class="label">Admin</div><div class="value">no</div></div>
 <div class="actions">
 <button class="approve" type="button" data-action="approve">Approve</button>
 <button class="deny" type="button" data-action="deny">Deny</button>

@@ -88,6 +88,12 @@ const testOpenClawConfig = {
 const INTERACTIVE_HTML_MIME = "application/vnd.clawline.interactive-html+json";
 const DEVICE_APPROVAL_APPROVE_ACTION = "clawline.deviceApproval.approve";
 const DEVICE_APPROVAL_DENY_ACTION = "clawline.deviceApproval.deny";
+const defaultDeviceUserId = (deviceId: string) =>
+  `device_` +
+  deviceId
+    .replace(/[^a-zA-Z0-9]/g, "")
+    .toLowerCase()
+    .slice(0, 41);
 
 type ParsedWsFrame = Record<string, unknown>;
 
@@ -1817,6 +1823,9 @@ describe.sequential("clawline provider server", () => {
       expect(descriptor.html).toContain("Approve");
       expect(descriptor.html).toContain("Deny");
       expect(descriptor.html).toContain(pendingDeviceId);
+      expect(descriptor.html).toContain(
+        '<div class="row"><div class="label">Admin</div><div class="value">no</div></div>',
+      );
       expect(descriptor.html).toContain(DEVICE_APPROVAL_APPROVE_ACTION);
       expect(descriptor.html).toContain(DEVICE_APPROVAL_DENY_ACTION);
       expect(descriptor.html).toContain("messageHandlers.clawline");
@@ -2227,7 +2236,7 @@ describe.sequential("clawline provider server", () => {
       };
       expect(allowlist.entries.find((entry) => entry.deviceId === pendingDeviceId)).toMatchObject({
         deviceId: pendingDeviceId,
-        userId: "qa_sim",
+        userId: defaultDeviceUserId(pendingDeviceId),
         isAdmin: false,
       });
     } finally {
@@ -2329,7 +2338,7 @@ describe.sequential("clawline provider server", () => {
       expect(delivered).toMatchObject({
         type: "pair_result",
         success: true,
-        userId: "flynn",
+        userId: defaultDeviceUserId(pendingDeviceId),
       });
       expect((delivered as { token?: string }).token).toEqual(expect.any(String));
       await vi.waitFor(async () => {
@@ -2344,8 +2353,8 @@ describe.sequential("clawline provider server", () => {
         expect(approved).toMatchObject({
           deviceId: pendingDeviceId,
           claimedName: "flynn",
-          userId: "flynn",
-          isAdmin: true,
+          userId: defaultDeviceUserId(pendingDeviceId),
+          isAdmin: false,
           tokenDelivered: true,
         });
         const pending = JSON.parse(await fs.readFile(ctx.pendingPath, "utf8")) as {
@@ -2444,8 +2453,8 @@ describe.sequential("clawline provider server", () => {
       expect(switched).toMatchObject({
         deviceId: switchingDeviceId,
         claimedName: "flynn",
-        userId: "flynn",
-        isAdmin: true,
+        userId: defaultDeviceUserId(switchingDeviceId),
+        isAdmin: false,
         tokenDelivered: false,
       });
       const pending = JSON.parse(await fs.readFile(ctx.pendingPath, "utf8")) as {
