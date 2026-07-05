@@ -1,5 +1,5 @@
-import Testing
 import Foundation
+import Testing
 @testable import OpenClaw
 
 struct CommandCenterTabSessionFilterTests {
@@ -41,7 +41,7 @@ struct CommandCenterTabSessionFilterTests {
     }
 
     @Test func `fresh session update labels show seconds`() {
-        let now = Date(timeIntervalSince1970: 1_000)
+        let now = Date(timeIntervalSince1970: 1000)
         #expect(CommandCenterTab.relativeTimeText(
             forMilliseconds: now.timeIntervalSince1970 * 1000,
             relativeTo: now) == "0s ago")
@@ -54,7 +54,7 @@ struct CommandCenterTabSessionFilterTests {
     }
 
     @Test func `session update labels roll into minute wording`() {
-        let now = Date(timeIntervalSince1970: 1_000)
+        let now = Date(timeIntervalSince1970: 1000)
         let updatedAt = now.addingTimeInterval(-60).timeIntervalSince1970 * 1000
         let expected = Self.existingRelativeTimeText(
             forMilliseconds: updatedAt,
@@ -65,14 +65,14 @@ struct CommandCenterTabSessionFilterTests {
     }
 
     @Test func `older session update labels preserve existing friendly dates`() {
-        let now = Date(timeIntervalSince1970: 1_000)
+        let now = Date(timeIntervalSince1970: 1000)
         for age in [2 * 60, 60 * 60, 3 * 60 * 60, 26 * 60 * 60] {
             let updatedAt = now.addingTimeInterval(TimeInterval(-age)).timeIntervalSince1970 * 1000
             #expect(CommandCenterTab.relativeTimeText(
                 forMilliseconds: updatedAt,
                 relativeTo: now) == Self.existingRelativeTimeText(
-                    forMilliseconds: updatedAt,
-                    relativeTo: now))
+                forMilliseconds: updatedAt,
+                relativeTo: now))
         }
     }
 
