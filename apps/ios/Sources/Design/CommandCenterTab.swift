@@ -534,12 +534,19 @@ struct CommandCenterTab: View {
         return session.key
     }
 
-    fileprivate static func relativeTimeText(forMilliseconds milliseconds: Double) -> String {
+    static func relativeTimeText(
+        forMilliseconds milliseconds: Double,
+        relativeTo now: Date = .now) -> String
+    {
         let date = Date(timeIntervalSince1970: milliseconds / 1000)
+        let seconds = max(0, Int(now.timeIntervalSince(date)))
+        if seconds < 60 {
+            return "\(seconds)s ago"
+        }
         let formatter = RelativeDateTimeFormatter()
         formatter.dateTimeStyle = .numeric
         formatter.unitsStyle = .short
-        return formatter.localizedString(for: date, relativeTo: .now)
+        return formatter.localizedString(for: date, relativeTo: now)
     }
 
     fileprivate nonisolated static func isHiddenInternalSession(_ key: String) -> Bool {

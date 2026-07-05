@@ -60,6 +60,7 @@ type AnnounceQueueState = {
 
 const ANNOUNCE_QUEUES = new Map<string, AnnounceQueueState>();
 const MAX_DEFER_WHILE_BUSY_MS = 15_000;
+const MAX_CONSECUTIVE_DRAIN_FAILURES = 3;
 
 export function resetAnnounceQueuesForTests() {
   // Test isolation: other suites may leave a draining queue behind in the worker.
@@ -172,6 +173,38 @@ function waitBeforeDeferredAnnounceRetry(queue: AnnounceQueueState): Promise<voi
   });
 }
 
+function quarantinePoisonAnnounceItem(
+  queue: AnnounceQueueState,
+  key: string,
+  err: unknown,
+): boolean {
+  const dropped = queue.items.shift();
+  if (!dropped) {
+    clearQueueSummaryState(queue);
+    defaultRuntime.error?.(
+      `announce queue recovery cleared orphaned overflow summary for ${key} after ${queue.consecutiveFailures} failed drain attempts: ${String(err)}`,
+    );
+    return false;
+  }
+
+  defaultRuntime.error?.(
+    `announce queue recovery quarantined one undeliverable item for ${key} after ${queue.consecutiveFailures} failed drain attempts; remaining=${queue.items.length}; announceId=${dropped.announceId ?? "unknown"}; sourceChannel=${dropped.sourceChannel ?? "unknown"}; lastError=${String(err)}`,
+  );
+  return true;
+}
+
+function recoverFailedAnnounceDrain(queue: AnnounceQueueState, key: string, err: unknown): void {
+  if (queue.droppedCount > 0) {
+    clearQueueSummaryState(queue);
+    defaultRuntime.error?.(
+      `announce queue recovery cleared overflow summary for ${key} after ${queue.consecutiveFailures} failed drain attempts; retrying remaining=${queue.items.length} queued items without summary; lastError=${String(err)}`,
+    );
+    return;
+  }
+
+  quarantinePoisonAnnounceItem(queue, key, err);
+}
+
 function scheduleAnnounceDrain(key: string) {
   const queue = beginQueueDrain(ANNOUNCE_QUEUES, key);
   if (!queue) {
@@ -247,6 +280,13 @@ function scheduleAnnounceDrain(key: string) {
 
         const summaryPrompt = previewQueueSummaryPrompt({ state: queue, noun: "announce" });
         if (summaryPrompt) {
+          if (queue.items.length === 0) {
+            clearQueueSummaryState(queue);
+            defaultRuntime.error?.(
+              `announce queue recovery cleared orphaned overflow summary for ${key}; no queued announce item remained to carry it.`,
+            );
+            break;
+          }
           if (
             !(await drainNextQueueItem(queue.items, async (item) => {
               await queue.send({ ...item, prompt: summaryPrompt });
@@ -271,6 +311,10 @@ function scheduleAnnounceDrain(key: string) {
       queue.consecutiveFailures = 0;
     } catch (err) {
       queue.consecutiveFailures++;
+      if (queue.consecutiveFailures >= MAX_CONSECUTIVE_DRAIN_FAILURES) {
+        recoverFailedAnnounceDrain(queue, key, err);
+        queue.consecutiveFailures = 0;
+      }
       const errorBackoffMs = Math.min(1000 * 2 ** queue.consecutiveFailures, 60_000);
       const retryDelayMs = Math.max(errorBackoffMs, queue.debounceMs);
       queue.lastEnqueuedAt = Date.now() + retryDelayMs - queue.debounceMs;
