@@ -90,6 +90,13 @@ export const SessionsPatchParamsSchema = Type.Object(
   { additionalProperties: false },
 );
 
+export const SessionsReorderParamsSchema = Type.Object(
+  {
+    keys: Type.Array(NonEmptyString, { minItems: 1 }),
+  },
+  { additionalProperties: false },
+);
+
 export const SessionsResetParamsSchema = Type.Object(
   {
     key: NonEmptyString,

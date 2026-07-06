@@ -291,6 +291,7 @@ describe("gateway server sessions", () => {
         "sessions.list",
         "sessions.preview",
         "sessions.patch",
+        "sessions.reorder",
         "sessions.reset",
         "sessions.delete",
         "sessions.compact",
@@ -327,6 +328,11 @@ describe("gateway server sessions", () => {
     expect(list1.payload?.path).toBe(storePath);
     expect(list1.payload?.sessions.some((s) => s.key === "global")).toBe(false);
     expect(list1.payload?.defaults?.modelProvider).toBe(DEFAULT_PROVIDER);
+    expect(list1.payload?.sessions.map((s) => s.key)).toEqual([
+      "agent:main:main",
+      "agent:main:discord:group:dev",
+      "agent:main:subagent:one",
+    ]);
     const main = list1.payload?.sessions.find((s) => s.key === "agent:main:main");
     expect(main?.totalTokens).toBeUndefined();
     expect(main?.totalTokensFresh).toBe(false);
@@ -579,6 +585,66 @@ describe("gateway server sessions", () => {
     expect((badThinking.error as { message?: unknown } | undefined)?.message ?? "").toMatch(
       /invalid thinkinglevel/i,
     );
+
+    ws.close();
+  });
+
+  test("sessions.reorder persists explicit order before unordered recency fallback", async () => {
+    const { storePath } = await createSessionStoreDir();
+    await writeSessionStore({
+      entries: {
+        main: {
+          sessionId: "sess-main",
+          updatedAt: 3_000,
+        },
+        "agent:main:alpha": {
+          sessionId: "sess-alpha",
+          updatedAt: 2_000,
+        },
+        "agent:main:bravo": {
+          sessionId: "sess-bravo",
+          updatedAt: 1_000,
+        },
+      },
+    });
+
+    const { ws } = await openClient();
+    const initialList = await rpcReq<{ sessions: Array<{ key: string }> }>(ws, "sessions.list", {
+      includeGlobal: false,
+      includeUnknown: false,
+    });
+    expect(initialList.ok).toBe(true);
+    expect(initialList.payload?.sessions.map((s) => s.key)).toEqual([
+      "agent:main:main",
+      "agent:main:alpha",
+      "agent:main:bravo",
+    ]);
+
+    const reordered = await rpcReq<{ ok: true; keys: string[] }>(ws, "sessions.reorder", {
+      keys: ["agent:main:bravo", "agent:main:alpha"],
+    });
+    expect(reordered.ok).toBe(true);
+    expect(reordered.payload?.keys).toEqual(["agent:main:bravo", "agent:main:alpha"]);
+
+    const listAfterReorder = await rpcReq<{ sessions: Array<{ key: string }> }>(
+      ws,
+      "sessions.list",
+      { includeGlobal: false, includeUnknown: false },
+    );
+    expect(listAfterReorder.ok).toBe(true);
+    expect(listAfterReorder.payload?.sessions.map((s) => s.key)).toEqual([
+      "agent:main:bravo",
+      "agent:main:alpha",
+      "agent:main:main",
+    ]);
+
+    const storeAfterReorder = JSON.parse(await fs.readFile(storePath, "utf-8")) as Record<
+      string,
+      { sortIndex?: number }
+    >;
+    expect(storeAfterReorder["agent:main:bravo"]?.sortIndex).toBe(0);
+    expect(storeAfterReorder["agent:main:alpha"]?.sortIndex).toBe(1);
+    expect(storeAfterReorder["main"]?.sortIndex).toBeUndefined();
 
     ws.close();
   });

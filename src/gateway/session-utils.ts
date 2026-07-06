@@ -973,7 +973,22 @@ export function listSessionsFromStore(params: {
         lastAccountId: deliveryFields.lastAccountId ?? entry?.lastAccountId,
       };
     })
-    .toSorted((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
+    .toSorted((a, b) => {
+      const aOrder = Number.isFinite(a.entry?.sortIndex) ? a.entry?.sortIndex : undefined;
+      const bOrder = Number.isFinite(b.entry?.sortIndex) ? b.entry?.sortIndex : undefined;
+      if (aOrder !== undefined || bOrder !== undefined) {
+        if (aOrder === undefined) {
+          return 1;
+        }
+        if (bOrder === undefined) {
+          return -1;
+        }
+        if (aOrder !== bOrder) {
+          return aOrder - bOrder;
+        }
+      }
+      return (b.updatedAt ?? 0) - (a.updatedAt ?? 0);
+    });
 
   if (search) {
     sessions = sessions.filter((s) => {

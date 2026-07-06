@@ -56,6 +56,7 @@ const BASE_METHODS = [
   "sessions.list",
   "sessions.preview",
   "sessions.patch",
+  "sessions.reorder",
   "sessions.reset",
   "sessions.delete",
   "sessions.compact",

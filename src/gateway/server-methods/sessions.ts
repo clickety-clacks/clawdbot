@@ -33,6 +33,7 @@ import {
   validateSessionsListParams,
   validateSessionsPatchParams,
   validateSessionsPreviewParams,
+  validateSessionsReorderParams,
   validateSessionsResetParams,
   validateSessionsResolveParams,
 } from "../protocol/index.js";
@@ -462,6 +463,66 @@ export const sessionsHandlers: GatewayRequestHandlers = {
       },
     };
     respond(true, result, undefined);
+  },
+  "sessions.reorder": async ({ params, respond, client, isWebchatConnect }) => {
+    if (!assertValidParams(params, validateSessionsReorderParams, "sessions.reorder", respond)) {
+      return;
+    }
+    if (rejectWebchatSessionMutation({ action: "patch", client, isWebchatConnect, respond })) {
+      return;
+    }
+    const requestedKeys: string[] = [];
+    const seen = new Set<string>();
+    for (const rawKey of params.keys) {
+      const key = requireSessionKey(rawKey, respond);
+      if (!key) {
+        return;
+      }
+      if (seen.has(key)) {
+        respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "duplicate key"));
+        return;
+      }
+      seen.add(key);
+      requestedKeys.push(key);
+    }
+
+    const cfg = loadConfig();
+    const target = resolveGatewaySessionStoreTarget({ cfg, key: requestedKeys[0] });
+    const applied = await updateSessionStore(target.storePath, async (store) => {
+      const canonicalKeys = requestedKeys.map((key) => {
+        const resolved = resolveGatewaySessionStoreTarget({ cfg, key, store });
+        const existingKey = resolved.storeKeys.find((candidate) => Boolean(store[candidate]));
+        return existingKey ?? resolved.canonicalKey;
+      });
+      if (new Set(canonicalKeys).size !== canonicalKeys.length) {
+        return {
+          ok: false as const,
+          error: errorShape(ErrorCodes.INVALID_REQUEST, "duplicate key"),
+        };
+      }
+      for (const key of canonicalKeys) {
+        if (!store[key]) {
+          return {
+            ok: false as const,
+            error: errorShape(ErrorCodes.INVALID_REQUEST, "session not found"),
+          };
+        }
+      }
+      for (const [key, entry] of Object.entries(store)) {
+        if (entry && !canonicalKeys.includes(key)) {
+          delete entry.sortIndex;
+        }
+      }
+      canonicalKeys.forEach((key, index) => {
+        store[key].sortIndex = index;
+      });
+      return { ok: true as const, keys: canonicalKeys };
+    });
+    if (!applied.ok) {
+      respond(false, undefined, applied.error);
+      return;
+    }
+    respond(true, { ok: true, path: target.storePath, keys: applied.keys }, undefined);
   },
   "sessions.reset": async ({ params, respond }) => {
     if (!assertValidParams(params, validateSessionsResetParams, "sessions.reset", respond)) {
