@@ -2415,8 +2415,24 @@ type SessionEntrySelection = {
   hasMore: boolean;
 };
 
-function compareSessionEntryPairsByUpdatedAt(a: SessionEntryPair, b: SessionEntryPair): number {
-  return (b[1]?.updatedAt ?? 0) - (a[1]?.updatedAt ?? 0);
+function hasSessionSortIndex(entry: SessionEntry): entry is SessionEntry & { sortIndex: number } {
+  return typeof entry.sortIndex === "number" && Number.isFinite(entry.sortIndex);
+}
+
+function compareSessionEntryPairsBySortIndexThenUpdatedAt(
+  a: SessionEntryPair,
+  b: SessionEntryPair,
+): number {
+  const aHasSortIndex = hasSessionSortIndex(a[1]);
+  const bHasSortIndex = hasSessionSortIndex(b[1]);
+  if (aHasSortIndex && bHasSortIndex && a[1].sortIndex !== b[1].sortIndex) {
+    return a[1].sortIndex - b[1].sortIndex;
+  }
+  if (aHasSortIndex !== bHasSortIndex) {
+    return aHasSortIndex ? -1 : 1;
+  }
+  const updatedAtDelta = (b[1]?.updatedAt ?? 0) - (a[1]?.updatedAt ?? 0);
+  return updatedAtDelta !== 0 ? updatedAtDelta : a[0].localeCompare(b[0]);
 }
 
 function resolveSessionsListLimit(
@@ -2451,7 +2467,7 @@ function selectNewestLimitedEntries(
   const selected: SessionEntryPair[] = [];
   for (const entry of entries) {
     const insertAt = selected.findIndex(
-      (candidate) => compareSessionEntryPairsByUpdatedAt(entry, candidate) < 0,
+      (candidate) => compareSessionEntryPairsBySortIndexThenUpdatedAt(entry, candidate) < 0,
     );
     if (insertAt >= 0) {
       selected.splice(insertAt, 0, entry);
@@ -2472,7 +2488,7 @@ function sortAndLimitSessionEntries(
   if (limit !== undefined && limit <= SESSIONS_LIST_TOP_N_LIMIT) {
     return selectNewestLimitedEntries(entries, limit);
   }
-  const sorted = entries.toSorted(compareSessionEntryPairsByUpdatedAt);
+  const sorted = entries.toSorted(compareSessionEntryPairsBySortIndexThenUpdatedAt);
   return limit === undefined ? sorted : sorted.slice(0, limit);
 }
 

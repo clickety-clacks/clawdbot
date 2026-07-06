@@ -1442,6 +1442,7 @@ type TrackableSessionApiEntry = {
   sessionKey: string;
   displayName: string;
   updatedAt: number;
+  sortIndex?: number;
   channel?: string;
   lastChannel?: string;
   lastTo?: string;
@@ -2232,6 +2233,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   let selectStreamMaxOrderStmt!: SqliteStatement;
   let insertStreamSessionStmt!: SqliteStatement;
   let updateStreamSessionDisplayNameStmt!: SqliteStatement;
+  let updateStreamSessionOrderStmt!: SqliteStatement;
   let updateStreamSessionBuiltInMetadataStmt!: SqliteStatement;
   let deleteStreamSessionStmt!: SqliteStatement;
   let selectStreamReadStatesByUserStmt!: SqliteStatement;
@@ -3282,6 +3284,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
        SET displayName = ?, updatedAt = ?
        WHERE userId = ? AND sessionKey = ?`,
     );
+    updateStreamSessionOrderStmt = newDb.prepare(
+      `UPDATE stream_sessions
+       SET orderIndex = ?, updatedAt = ?
+       WHERE userId = ? AND sessionKey = ?`,
+    );
     updateStreamSessionBuiltInMetadataStmt = newDb.prepare(
       `UPDATE stream_sessions
        SET displayName = ?, kind = ?, isBuiltIn = 1, updatedAt = ?
@@ -4122,6 +4129,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       if (parsedUrl.pathname === "/api/streams") {
         if (req.method === "GET") {
           await handleListStreamsRequest(req, res);
+          return;
+        }
+        if (req.method === "PATCH") {
+          await handleReorderStreamsRequest(req, res);
           return;
         }
         if (req.method === "POST") {
@@ -7949,6 +7960,81 @@ button.deny { background: #9b1c31; color: white; }
     res.end(JSON.stringify({ streams }));
   }
 
+  async function handleReorderStreamsRequest(req: http.IncomingMessage, res: http.ServerResponse) {
+    const auth = authenticateHttpRequest(req);
+    const body = await parseStreamsRequestBody(req);
+    if (!Array.isArray(body.sessionKeys)) {
+      throw new HttpError(400, "invalid_request", "sessionKeys is required");
+    }
+    const normalizedSessionKeys = body.sessionKeys.map((value) => {
+      if (typeof value !== "string") {
+        throw new HttpError(400, "invalid_session_key", "Invalid session key");
+      }
+      const normalized = normalizeStreamMutationSessionKeyForUser(auth.userId, value);
+      if (!normalized) {
+        throw new HttpError(404, "stream_not_found", "Stream not found");
+      }
+      return normalized;
+    });
+    if (normalizedSessionKeys.length === 0) {
+      throw new HttpError(400, "invalid_request", "sessionKeys must not be empty");
+    }
+    if (
+      new Set(normalizedSessionKeys.map(normalizeSessionKey)).size !== normalizedSessionKeys.length
+    ) {
+      throw new HttpError(400, "duplicate_session_key", "sessionKeys must not contain duplicates");
+    }
+    const streams = await runPerUserTask(auth.userId, async () =>
+      enqueueWriteTask(() => {
+        const seeded = ensureStreamSessionsForUser({ userId: auth.userId, isAdmin: auth.isAdmin });
+        const visible = filterStreamAccess(seeded, auth.isAdmin);
+        const visibleKeys = new Set(
+          visible.map((stream) => normalizeSessionKey(stream.sessionKey)),
+        );
+        const requestedKeys = new Set(normalizedSessionKeys.map(normalizeSessionKey));
+        if (
+          requestedKeys.size !== visibleKeys.size ||
+          !normalizedSessionKeys.every((sessionKey) =>
+            visibleKeys.has(normalizeSessionKey(sessionKey)),
+          )
+        ) {
+          throw new HttpError(
+            409,
+            "stream_order_mismatch",
+            "Stream order does not match visible streams",
+          );
+        }
+
+        const now = nowMs();
+        const hidden = seeded.filter(
+          (stream) => !requestedKeys.has(normalizeSessionKey(stream.sessionKey)),
+        );
+        const orderedKeys = [
+          ...normalizedSessionKeys,
+          ...hidden.map((stream) => stream.sessionKey),
+        ];
+        const maxOrderRow = selectStreamMaxOrderStmt.get(auth.userId) as {
+          maxOrder: number | null;
+        };
+        const tempOrderBase =
+          (maxOrderRow?.maxOrder ?? orderedKeys.length) + orderedKeys.length + 1;
+        orderedKeys.forEach((sessionKey, index) => {
+          updateStreamSessionOrderStmt.run(tempOrderBase + index, now, auth.userId, sessionKey);
+        });
+        orderedKeys.forEach((sessionKey, index) => {
+          updateStreamSessionOrderStmt.run(index, now, auth.userId, sessionKey);
+        });
+        const synced = ensureStreamSessionsForUser({ userId: auth.userId, isAdmin: auth.isAdmin });
+        syncUserSessionSubscriptions(auth.userId, synced);
+        return filterStreamAccess(synced, auth.isAdmin);
+      }),
+    );
+    await broadcastStreamEvent(auth.userId, { type: "stream_snapshot", streams });
+    res.setHeader("Content-Type", "application/json");
+    res.writeHead(200);
+    res.end(JSON.stringify({ streams }));
+  }
+
   function requireAdminTrackAccess(auth: { isAdmin: boolean }) {
     if (!auth.isAdmin) {
       throw new HttpError(403, "forbidden", "Admin access required");
@@ -7990,6 +8076,24 @@ button.deny { background: #9b1c31; color: white; }
         displayName: `${session.displayName} (${buildTrackableSessionDuplicateMarker(session)})`,
       };
     });
+  }
+
+  function compareTrackableSessions(
+    a: TrackableSessionApiEntry,
+    b: TrackableSessionApiEntry,
+  ): number {
+    const aHasOrder = typeof a.sortIndex === "number" && Number.isFinite(a.sortIndex);
+    const bHasOrder = typeof b.sortIndex === "number" && Number.isFinite(b.sortIndex);
+    if (aHasOrder && bHasOrder && a.sortIndex !== b.sortIndex) {
+      return a.sortIndex! - b.sortIndex!;
+    }
+    if (aHasOrder !== bHasOrder) {
+      return aHasOrder ? -1 : 1;
+    }
+    if (a.updatedAt !== b.updatedAt) {
+      return b.updatedAt - a.updatedAt;
+    }
+    return a.sessionKey.localeCompare(b.sessionKey);
   }
 
   function loadMergedSessionStoreForClawline(): Record<string, SessionEntry> {
@@ -8051,6 +8155,9 @@ button.deny { background: #9b1c31; color: white; }
                 displayName:
                   sanitizeLabel(entry.displayName) ?? sanitizeLabel(entry.label) ?? candidateKey,
                 updatedAt: entry.updatedAt,
+                ...(typeof entry.sortIndex === "number" && Number.isFinite(entry.sortIndex)
+                  ? { sortIndex: entry.sortIndex }
+                  : {}),
                 channel: typeof entry.channel === "string" ? entry.channel : undefined,
                 lastChannel: typeof entry.lastChannel === "string" ? entry.lastChannel : undefined,
                 lastTo: typeof entry.lastTo === "string" ? entry.lastTo : undefined,
@@ -8058,12 +8165,9 @@ button.deny { background: #9b1c31; color: white; }
             ];
           },
         );
-        return disambiguateTrackableSessionDisplayNames(sessions).toSorted((a, b) => {
-          if (a.updatedAt !== b.updatedAt) {
-            return b.updatedAt - a.updatedAt;
-          }
-          return a.sessionKey.localeCompare(b.sessionKey);
-        });
+        return disambiguateTrackableSessionDisplayNames(sessions).toSorted(
+          compareTrackableSessions,
+        );
       }),
     );
   }

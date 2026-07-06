@@ -208,6 +208,8 @@ export type RestartRecoveryRun = {
 };
 
 export type SessionEntry = {
+  /** Optional persisted UI/list position. Ordered sessions sort before unordered recency rows. */
+  sortIndex?: number;
   /**
    * Last delivered heartbeat payload (used to suppress duplicate heartbeat notifications).
    * Stored on the main session entry.

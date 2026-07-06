@@ -460,6 +460,51 @@ test("lists and patches session store via sessions.* RPC", async () => {
   );
 });
 
+test("sessions.list orders persisted sort indexes before unordered recency fallback", async () => {
+  const { storePath } = await createSessionStoreDir();
+  const now = Date.now();
+  await writeSessionStore({
+    entries: {
+      "agent:main:main": {
+        sessionId: "sess-unordered-new",
+        updatedAt: now - 10,
+      },
+      "agent:main:subagent:ordered-second": {
+        sessionId: "sess-ordered-second",
+        updatedAt: now - 1_000,
+        sortIndex: 20,
+      },
+      "agent:main:discord:group:old": {
+        sessionId: "sess-unordered-old",
+        updatedAt: now - 20,
+      },
+      "agent:main:subagent:ordered-first": {
+        sessionId: "sess-ordered-first",
+        updatedAt: now - 2_000,
+        sortIndex: 10,
+      },
+    },
+  });
+
+  const list = await directSessionHandlerReq<{
+    path: string;
+    sessions: Array<{ key: string }>;
+  }>("sessions.list", {
+    includeGlobal: false,
+    includeUnknown: false,
+    limit: 4,
+  });
+
+  expect(list.ok).toBe(true);
+  expect(list.payload?.path).toBe(storePath);
+  expect(list.payload?.sessions.map((session) => session.key)).toEqual([
+    "agent:main:subagent:ordered-first",
+    "agent:main:subagent:ordered-second",
+    "agent:main:main",
+    "agent:main:discord:group:old",
+  ]);
+});
+
 test("sessions.list configuredAgentsOnly keeps configured-agent children and hides unrelated stores", async () => {
   const stateDir = process.env.OPENCLAW_STATE_DIR;
   if (!stateDir) {

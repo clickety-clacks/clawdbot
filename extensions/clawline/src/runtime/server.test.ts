@@ -7330,6 +7330,132 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("persists reordered stream rows and returns list order from the stored order", async () => {
+    const deviceId = randomUUID();
+    const entry = createAllowlistEntry({
+      deviceId,
+      userId: "flynn",
+      isAdmin: false,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry]);
+    try {
+      const pair = await performPairRequest(ctx.port, deviceId);
+      const token = pair.token as string;
+      const { ws } = await authenticateDevice(ctx.port, deviceId, token);
+      const createStream = async (displayName: string) => {
+        const response = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            displayName,
+            idempotencyKey: `reorder-${displayName}-${randomUUID()}`,
+          }),
+        });
+        expect(response.status).toBe(201);
+        const payload = (await response.json()) as { stream: { sessionKey: string } };
+        return payload.stream.sessionKey;
+      };
+      const alphaKey = await createStream("Alpha");
+      const bravoKey = await createStream("Bravo");
+      const mainKey = "agent:main:clawline:flynn:main";
+      const reorderedKeys = [bravoKey, mainKey, alphaKey];
+
+      const reorderResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ sessionKeys: reorderedKeys }),
+      });
+      expect(reorderResponse.status).toBe(200);
+      const reorderPayload = (await reorderResponse.json()) as {
+        streams: Array<{ sessionKey: string; orderIndex: number }>;
+      };
+      expect(reorderPayload.streams.map((stream) => stream.sessionKey)).toEqual(reorderedKeys);
+      expect(reorderPayload.streams.map((stream) => stream.orderIndex)).toEqual([0, 1, 2]);
+
+      const listResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      expect(listResponse.status).toBe(200);
+      const listPayload = (await listResponse.json()) as {
+        streams: Array<{ sessionKey: string; orderIndex: number }>;
+      };
+      expect(listPayload.streams.map((stream) => stream.sessionKey)).toEqual(reorderedKeys);
+      expect(listPayload.streams.map((stream) => stream.orderIndex)).toEqual([0, 1, 2]);
+
+      const dbPath = path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite");
+      const db = new BetterSqlite3(dbPath, { readonly: true });
+      try {
+        const rows = db
+          .prepare(
+            `SELECT sessionKey, orderIndex
+             FROM stream_sessions
+             WHERE userId = ?
+             ORDER BY orderIndex ASC`,
+          )
+          .all("flynn") as Array<{ sessionKey: string; orderIndex: number }>;
+        expect(rows).toEqual(
+          reorderedKeys.map((sessionKey, orderIndex) => ({ sessionKey, orderIndex })),
+        );
+      } finally {
+        db.close();
+      }
+      ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("rejects stale partial stream reorder requests", async () => {
+    const deviceId = randomUUID();
+    const entry = createAllowlistEntry({
+      deviceId,
+      userId: "flynn",
+      isAdmin: false,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry]);
+    try {
+      const pair = await performPairRequest(ctx.port, deviceId);
+      const token = pair.token as string;
+      const { ws } = await authenticateDevice(ctx.port, deviceId, token);
+      const createResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          displayName: "Alpha",
+          idempotencyKey: `reorder-partial-${randomUUID()}`,
+        }),
+      });
+      expect(createResponse.status).toBe(201);
+
+      const response = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ sessionKeys: ["agent:main:clawline:flynn:main"] }),
+      });
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({
+        error: { code: "stream_order_mismatch" },
+      });
+      ws.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("persists stream read state and syncs it across devices", async () => {
     const userId = "flynn";
     const sessionKey = "agent:main:clawline:flynn:main";
@@ -9285,6 +9411,77 @@ describe.sequential("clawline provider server", () => {
         queue.dispose();
         ws.terminate();
       }
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("orders trackable session-store entries by persisted sort index before recency fallback", async () => {
+    const deviceId = randomUUID();
+    const now = Date.now();
+    const entry = createAllowlistEntry({
+      deviceId,
+      userId: "flynn",
+      isAdmin: true,
+      tokenDelivered: true,
+    });
+    const ctx = await setupTestServer([entry], {
+      sessionStorePathRelative: path.join("agents", "main", "sessions", "sessions.json"),
+    });
+    try {
+      await fs.writeFile(
+        ctx.sessionStorePath,
+        JSON.stringify(
+          {
+            "agent:main:openclaw:flynn:s_unordered_new": {
+              sessionId: "sess_unordered_new",
+              updatedAt: now - 10,
+              displayName: "Unordered New",
+              channel: "openclaw",
+            },
+            "agent:main:openclaw:flynn:s_ordered_second": {
+              sessionId: "sess_ordered_second",
+              updatedAt: now - 1_000,
+              displayName: "Ordered Second",
+              channel: "openclaw",
+              sortIndex: 20,
+            },
+            "agent:main:openclaw:flynn:s_unordered_old": {
+              sessionId: "sess_unordered_old",
+              updatedAt: now - 20,
+              displayName: "Unordered Old",
+              channel: "openclaw",
+            },
+            "agent:main:openclaw:flynn:s_ordered_first": {
+              sessionId: "sess_ordered_first",
+              updatedAt: now - 2_000,
+              displayName: "Ordered First",
+              channel: "openclaw",
+              sortIndex: 10,
+            },
+          },
+          null,
+          2,
+        ),
+      );
+      const pair = await performPairRequest(ctx.port, deviceId);
+      const token = pair.token as string;
+      const { ws } = await authenticateDevice(ctx.port, deviceId, token);
+
+      const response = await fetch(`http://127.0.0.1:${ctx.port}/api/trackable-sessions`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      expect(response.status).toBe(200);
+      const payload = (await response.json()) as {
+        sessions: Array<{ sessionKey: string }>;
+      };
+      expect(payload.sessions.map((session) => session.sessionKey)).toEqual([
+        "agent:main:openclaw:flynn:s_ordered_first",
+        "agent:main:openclaw:flynn:s_ordered_second",
+        "agent:main:openclaw:flynn:s_unordered_new",
+        "agent:main:openclaw:flynn:s_unordered_old",
+      ]);
+      ws.terminate();
     } finally {
       await ctx.cleanup();
     }
