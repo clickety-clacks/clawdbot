@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   base64ByteLength,
+  prepareImageDataUrlForChatSend,
   setPrepareImageDataUrlForChatSendForTest,
 } from "../chat/attachment-image-preparer.ts";
 import {
@@ -45,6 +46,7 @@ function createState(overrides: Partial<ChatState> = {}): ChatState {
 
 afterEach(() => {
   setPrepareImageDataUrlForChatSendForTest(undefined);
+  vi.unstubAllGlobals();
   resetChatAttachmentPayloadStoreForTest();
 });
 
@@ -2400,6 +2402,45 @@ describe("sendChatMessage", () => {
     expect(attachmentRecord.mimeType).toBe("image/jpeg");
     expect(attachmentRecord.content).toBe(preparedContent);
     expect(attachmentRecord.content).not.toBe(oversizedContent);
+  });
+
+  it("rejects oversized image data when real preparation cannot downscale it", async () => {
+    const oversizedContent = "a".repeat(8 * 1024 * 1024 + 4);
+    const oversizedDataUrl = `data:image/png;base64,${oversizedContent}`;
+    vi.stubGlobal("Image", undefined);
+
+    await expect(prepareImageDataUrlForChatSend(oversizedDataUrl)).rejects.toThrow(
+      "Image attachment is too large to send after preparation.",
+    );
+  });
+
+  it("does not send the original oversized image when real preparation fails", async () => {
+    const oversizedContent = "a".repeat(8 * 1024 * 1024 + 4);
+    const request = vi.fn((_method: string, params?: unknown) =>
+      Promise.resolve(createStartedChatSendAck(params)),
+    );
+    const state = createState({
+      connected: true,
+      client: { request } as unknown as ChatState["client"],
+    });
+    const attachment = registerChatAttachmentPayload({
+      attachment: {
+        id: "att-undownscaleable-image",
+        mimeType: "image/png",
+        fileName: "huge.png",
+        sizeBytes: base64ByteLength(oversizedContent),
+      },
+      dataUrl: `data:image/png;base64,${oversizedContent}`,
+      file: new File(["large"], "huge.png", { type: "image/png" }),
+    });
+    vi.stubGlobal("Image", undefined);
+
+    const result = await sendChatMessage(state, "look at this", [attachment]);
+
+    expect(result).toBeNull();
+    expect(request).not.toHaveBeenCalled();
+    expect(state.chatError).toContain("Image attachment is too large to send after preparation.");
+    expect(JSON.stringify(state.chatMessages)).not.toContain(oversizedContent);
   });
 
   it("formats structured non-auth connect failures for chat send", async () => {

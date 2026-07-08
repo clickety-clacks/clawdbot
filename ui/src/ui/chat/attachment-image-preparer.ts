@@ -40,7 +40,11 @@ export function base64ByteLength(content: string): number {
 export async function prepareImageDataUrlForChatSend(dataUrl: string): Promise<string> {
   const override = prepareImageDataUrlForChatSendOverride;
   if (override) {
-    return (await override(dataUrl)) ?? dataUrl;
+    const prepared = await override(dataUrl);
+    if (prepared) {
+      return prepared;
+    }
+    return ensureOversizedImageDoesNotPassThrough(dataUrl);
   }
   const parsed = parseChatAttachmentDataUrl(dataUrl);
   if (!parsed?.mimeType.toLowerCase().startsWith("image/")) {
@@ -49,13 +53,28 @@ export async function prepareImageDataUrlForChatSend(dataUrl: string): Promise<s
   if (base64ByteLength(parsed.content) <= MAX_IMAGE_BYTES) {
     return dataUrl;
   }
-  return (await downscaleImageDataUrl(dataUrl)) ?? dataUrl;
+  return (await downscaleImageDataUrl(dataUrl)) ?? rejectOversizedImageAttachment();
 }
 
 export function setPrepareImageDataUrlForChatSendForTest(
   prepare: ((dataUrl: string) => Promise<string | undefined>) | undefined,
 ): void {
   prepareImageDataUrlForChatSendOverride = prepare;
+}
+
+function ensureOversizedImageDoesNotPassThrough(dataUrl: string): string {
+  const parsed = parseChatAttachmentDataUrl(dataUrl);
+  if (
+    parsed?.mimeType.toLowerCase().startsWith("image/") &&
+    base64ByteLength(parsed.content) > MAX_IMAGE_BYTES
+  ) {
+    return rejectOversizedImageAttachment();
+  }
+  return dataUrl;
+}
+
+function rejectOversizedImageAttachment(): never {
+  throw new Error("Image attachment is too large to send after preparation.");
 }
 
 function scaledSize(source: ImageScaleTarget, maxDimension: number): ImageScaleTarget {
