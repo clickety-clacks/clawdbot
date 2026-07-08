@@ -2392,6 +2392,7 @@ describe("handleSendChat", () => {
 
     const first = handleSendChat(host, "same prompt");
     const second = handleSendChat(host, "same prompt");
+    await Promise.resolve();
 
     expect(request).toHaveBeenCalledTimes(1);
     expect(host.chatQueue).toHaveLength(1);

@@ -1,6 +1,10 @@
 // Control UI controller manages chat gateway state.
 import type { CommandsListResult } from "../../../../packages/gateway-protocol/src/index.js";
 import { isNonTerminalAgentRunStatus } from "../../../../src/shared/agent-run-status.js";
+import {
+  parseChatAttachmentDataUrl,
+  prepareImageDataUrlForChatSend,
+} from "../chat/attachment-image-preparer.ts";
 import { getChatAttachmentDataUrl } from "../chat/attachment-payload-store.ts";
 import {
   isAssistantHeartbeatAckForDisplay,
@@ -870,33 +874,28 @@ async function loadChatHistoryUncached(
   return undefined;
 }
 
-function dataUrlToBase64(dataUrl: string): { content: string; mimeType: string } | null {
-  const match = /^data:([^;]+);base64,(.+)$/.exec(dataUrl);
-  if (!match) {
-    return null;
-  }
-  return { mimeType: match[1], content: match[2] };
-}
-
-function buildApiAttachments(attachments?: ChatAttachment[]) {
+async function buildApiAttachments(attachments?: ChatAttachment[]) {
   const hasAttachments = attachments && attachments.length > 0;
-  return hasAttachments
-    ? attachments
-        .map((att) => {
-          const dataUrl = getChatAttachmentDataUrl(att);
-          const parsed = dataUrl ? dataUrlToBase64(dataUrl) : null;
-          if (!parsed) {
-            return null;
-          }
-          return {
-            type: parsed.mimeType.startsWith("image/") ? "image" : "file",
-            mimeType: parsed.mimeType,
-            fileName: att.fileName,
-            content: parsed.content,
-          };
-        })
-        .filter((a): a is NonNullable<typeof a> => a !== null)
-    : undefined;
+  if (!hasAttachments) {
+    return undefined;
+  }
+  const prepared = await Promise.all(
+    attachments.map(async (att) => {
+      const dataUrl = getChatAttachmentDataUrl(att);
+      const sendDataUrl = dataUrl ? await prepareImageDataUrlForChatSend(dataUrl) : null;
+      const parsed = sendDataUrl ? parseChatAttachmentDataUrl(sendDataUrl) : null;
+      if (!parsed) {
+        return null;
+      }
+      return {
+        type: parsed.mimeType.startsWith("image/") ? "image" : "file",
+        mimeType: parsed.mimeType,
+        fileName: att.fileName,
+        content: parsed.content,
+      };
+    }),
+  );
+  return prepared.filter((a): a is NonNullable<typeof a> => a !== null);
 }
 
 export type ChatSendAckStatus = "started" | "in_flight" | "ok" | "timeout" | "error";
@@ -976,7 +975,7 @@ export async function requestChatSend(
     message: params.message,
     deliver: false,
     idempotencyKey: params.runId,
-    attachments: buildApiAttachments(params.attachments),
+    attachments: await buildApiAttachments(params.attachments),
   });
   if (controlUiReconnectResume) {
     state.reconnectResumeSessionId = null;
