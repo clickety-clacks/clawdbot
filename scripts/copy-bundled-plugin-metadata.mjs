@@ -31,6 +31,28 @@ function shouldCopyBundledPluginMetadata(id, env, buildablePluginDirs) {
   return env.OPENCLAW_BUILD_PRIVATE_QA === "1";
 }
 
+/** Verify and return the bundled plugin manifests required in generated dist output. */
+export function verifyBundledPluginManifestOutputs(params = {}) {
+  const repoRoot = params.cwd ?? params.repoRoot ?? process.cwd();
+  const env = params.env ?? process.env;
+  const buildableEntries = collectBundledPluginBuildEntries({ cwd: repoRoot, env });
+  const buildablePluginDirs = new Set(buildableEntries.map((entry) => entry.id));
+  const requiredPaths = buildableEntries
+    .filter(
+      ({ id, hasManifest }) =>
+        hasManifest && shouldCopyBundledPluginMetadata(id, env, buildablePluginDirs),
+    )
+    .map(({ id }) => `dist/extensions/${id}/openclaw.plugin.json`)
+    .toSorted((left, right) => left.localeCompare(right));
+  const missingPaths = requiredPaths.filter(
+    (relativePath) => !fs.existsSync(path.join(repoRoot, relativePath)),
+  );
+  if (missingPaths.length > 0) {
+    throw new Error(`missing required bundled plugin manifests:\n${missingPaths.join("\n")}`);
+  }
+  return requiredPaths;
+}
+
 /**
  * Rewrites package extension entries for bundled metadata output.
  */
@@ -333,17 +355,17 @@ export function copyBundledPluginMetadata(params = {}) {
     writeTextFileIfChanged(distPackageJsonPath, `${JSON.stringify(packageJson, null, 2)}\n`);
   }
 
-  if (!fs.existsSync(distExtensionsRoot)) {
-    return;
+  if (fs.existsSync(distExtensionsRoot)) {
+    for (const dirent of fs.readdirSync(distExtensionsRoot, { withFileTypes: true })) {
+      if (!dirent.isDirectory() || sourcePluginDirs.has(dirent.name)) {
+        continue;
+      }
+      const distPluginDir = path.join(distExtensionsRoot, dirent.name);
+      removePathIfExists(distPluginDir);
+    }
   }
 
-  for (const dirent of fs.readdirSync(distExtensionsRoot, { withFileTypes: true })) {
-    if (!dirent.isDirectory() || sourcePluginDirs.has(dirent.name)) {
-      continue;
-    }
-    const distPluginDir = path.join(distExtensionsRoot, dirent.name);
-    removePathIfExists(distPluginDir);
-  }
+  verifyBundledPluginManifestOutputs({ repoRoot, env });
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {

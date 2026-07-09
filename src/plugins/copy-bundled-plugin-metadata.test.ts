@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   copyBundledPluginMetadata,
   rewritePackageExtensions,
+  verifyBundledPluginManifestOutputs,
 } from "../../scripts/copy-bundled-plugin-metadata.mjs";
 import { cleanupTempDirs, makeTempRepoRoot, writeJsonFile } from "../../test/helpers/temp-repo.js";
 
@@ -96,6 +97,31 @@ describe("rewritePackageExtensions", () => {
 });
 
 describe("copyBundledPluginMetadata", () => {
+  it("fails verification when a required generated manifest is absent", () => {
+    const repoRoot = makeRepoRoot("openclaw-bundled-plugin-manifest-inventory-");
+    createPlugin(repoRoot, {
+      id: "openai",
+      packageName: "@openclaw/openai",
+      packageOpenClaw: { extensions: ["./index.ts"] },
+    });
+    createPlugin(repoRoot, {
+      id: "telegram",
+      packageName: "@openclaw/telegram",
+      packageOpenClaw: { extensions: ["./index.ts"] },
+    });
+
+    copyBundledPluginMetadata({ repoRoot });
+
+    expect(verifyBundledPluginManifestOutputs({ repoRoot })).toEqual([
+      "dist/extensions/openai/openclaw.plugin.json",
+      "dist/extensions/telegram/openclaw.plugin.json",
+    ]);
+    fs.rmSync(path.join(repoRoot, "dist", "extensions", "openai", "openclaw.plugin.json"));
+    expect(() => verifyBundledPluginManifestOutputs({ repoRoot })).toThrow(
+      "missing required bundled plugin manifests:\ndist/extensions/openai/openclaw.plugin.json",
+    );
+  });
+
   it("copies plugin manifests, package metadata, and local skill directories", () => {
     const repoRoot = makeRepoRoot("openclaw-bundled-plugin-meta-");
     const pluginDir = createPlugin(repoRoot, {
