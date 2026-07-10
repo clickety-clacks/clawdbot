@@ -2433,8 +2433,7 @@ function compareSessionEntryPairsBySortIndexThenUpdatedAt(
   if (aHasSortIndex !== bHasSortIndex) {
     return aHasSortIndex ? -1 : 1;
   }
-  const updatedAtDelta = (b[1]?.updatedAt ?? 0) - (a[1]?.updatedAt ?? 0);
-  return updatedAtDelta !== 0 ? updatedAtDelta : a[0].localeCompare(b[0]);
+  return (bEntry.updatedAt ?? 0) - (aEntry.updatedAt ?? 0);
 }
 
 function resolveSessionsListLimit(

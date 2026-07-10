@@ -2268,6 +2268,11 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     originatingDeviceId?: string,
     preserveOpaqueSessionKey?: unknown,
   ) => number;
+  let reorderStreamSessionsTx!: (params: {
+    userId: string;
+    orderedKeys: string[];
+    updatedAt: number;
+  }) => void;
   let deleteStreamDataTx!: (params: { userId: string; sessionKey: string }) => string[];
   let handleUpload!: AssetHandlers["handleUpload"];
   let handleDownload!: AssetHandlers["handleDownload"];
@@ -3288,6 +3293,26 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       `UPDATE stream_sessions
        SET orderIndex = ?, updatedAt = ?
        WHERE userId = ? AND sessionKey = ?`,
+    );
+    reorderStreamSessionsTx = newDb.transaction(
+      (params: { userId: string; orderedKeys: string[]; updatedAt: number }) => {
+        const maxOrderRow = selectStreamMaxOrderStmt.get(params.userId) as {
+          maxOrder: number | null;
+        };
+        const tempOrderBase =
+          (maxOrderRow?.maxOrder ?? params.orderedKeys.length) + params.orderedKeys.length + 1;
+        params.orderedKeys.forEach((sessionKey, index) => {
+          updateStreamSessionOrderStmt.run(
+            tempOrderBase + index,
+            params.updatedAt,
+            params.userId,
+            sessionKey,
+          );
+        });
+        params.orderedKeys.forEach((sessionKey, index) => {
+          updateStreamSessionOrderStmt.run(index, params.updatedAt, params.userId, sessionKey);
+        });
+      },
     );
     updateStreamSessionBuiltInMetadataStmt = newDb.prepare(
       `UPDATE stream_sessions
@@ -7930,7 +7955,10 @@ button.deny { background: #9b1c31; color: white; }
     );
   }
 
-  async function broadcastStreamEvent(userId: string, payload: StreamServerMessage) {
+  async function broadcastStreamEvent(
+    userId: string,
+    payload: StreamServerMessage | ((session: Session) => StreamServerMessage),
+  ) {
     const sessions = userSessions.get(userId);
     if (!sessions || sessions.size === 0) {
       return;
@@ -7940,8 +7968,12 @@ button.deny { background: #9b1c31; color: white; }
       if (session.replayInProgress) {
         continue;
       }
+      const sessionPayload = typeof payload === "function" ? payload(session) : payload;
       sends.push(
-        sendStreamEventWithTimeout(session, payload).then((delivered) => ({ session, delivered })),
+        sendStreamEventWithTimeout(session, sessionPayload).then((delivered) => ({
+          session,
+          delivered,
+        })),
       );
     }
     const results = await Promise.allSettled(sends);
@@ -7984,7 +8016,7 @@ button.deny { background: #9b1c31; color: white; }
     ) {
       throw new HttpError(400, "duplicate_session_key", "sessionKeys must not contain duplicates");
     }
-    const streams = await runPerUserTask(auth.userId, async () =>
+    const allStreams = await runPerUserTask(auth.userId, async () =>
       enqueueWriteTask(() => {
         const seeded = ensureStreamSessionsForUser({ userId: auth.userId, isAdmin: auth.isAdmin });
         const visible = filterStreamAccess(seeded, auth.isAdmin);
@@ -8005,31 +8037,24 @@ button.deny { background: #9b1c31; color: white; }
           );
         }
 
-        const now = nowMs();
-        const hidden = seeded.filter(
-          (stream) => !requestedKeys.has(normalizeSessionKey(stream.sessionKey)),
-        );
-        const orderedKeys = [
-          ...normalizedSessionKeys,
-          ...hidden.map((stream) => stream.sessionKey),
-        ];
-        const maxOrderRow = selectStreamMaxOrderStmt.get(auth.userId) as {
-          maxOrder: number | null;
-        };
-        const tempOrderBase =
-          (maxOrderRow?.maxOrder ?? orderedKeys.length) + orderedKeys.length + 1;
-        orderedKeys.forEach((sessionKey, index) => {
-          updateStreamSessionOrderStmt.run(tempOrderBase + index, now, auth.userId, sessionKey);
+        let requestedIndex = 0;
+        const orderedKeys = seeded.map((stream) => {
+          if (!requestedKeys.has(normalizeSessionKey(stream.sessionKey))) {
+            return stream.sessionKey;
+          }
+          return normalizedSessionKeys[requestedIndex++] as string;
         });
-        orderedKeys.forEach((sessionKey, index) => {
-          updateStreamSessionOrderStmt.run(index, now, auth.userId, sessionKey);
-        });
+        reorderStreamSessionsTx({ userId: auth.userId, orderedKeys, updatedAt: nowMs() });
         const synced = ensureStreamSessionsForUser({ userId: auth.userId, isAdmin: auth.isAdmin });
         syncUserSessionSubscriptions(auth.userId, synced);
-        return filterStreamAccess(synced, auth.isAdmin);
+        return synced;
       }),
     );
-    await broadcastStreamEvent(auth.userId, { type: "stream_snapshot", streams });
+    await broadcastStreamEvent(auth.userId, (session) => ({
+      type: "stream_snapshot",
+      streams: filterStreamAccess(allStreams, session.isAdmin),
+    }));
+    const streams = filterStreamAccess(allStreams, auth.isAdmin);
     res.setHeader("Content-Type", "application/json");
     res.writeHead(200);
     res.end(JSON.stringify({ streams }));

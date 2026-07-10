@@ -7412,6 +7412,134 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("preserves hidden stream positions and filters reorder snapshots per device role", async () => {
+    const adminDeviceId = randomUUID();
+    const userDeviceId = randomUUID();
+    const baseEntry = {
+      claimedName: "Flynn",
+      userId: "flynn",
+      tokenDelivered: true,
+      createdAt: Date.now() - 1_000,
+      lastSeenAt: Date.now() - 500,
+      deviceInfo: {
+        platform: "iOS",
+        model: "iPhone",
+        osVersion: "17.0",
+        appVersion: "1.0",
+      },
+    };
+    const personalKey = "agent:main:clawline:flynn:main";
+    const globalKey = "agent:main:main";
+    const alphaKey = "agent:main:clawline:flynn:s_aaaaaaaa";
+    const bravoKey = "agent:main:clawline:flynn:s_bbbbbbbb";
+    const ctx = await setupTestServer(
+      [
+        { ...baseEntry, deviceId: adminDeviceId, isAdmin: true },
+        { ...baseEntry, deviceId: userDeviceId, isAdmin: false },
+      ],
+      {
+        seedLegacyDatabase: async (dbPath) => {
+          const seededDb = new BetterSqlite3(dbPath);
+          seededDb.exec(`
+            CREATE TABLE stream_sessions (
+              userId TEXT NOT NULL,
+              sessionKey TEXT NOT NULL,
+              displayName TEXT NOT NULL,
+              kind TEXT NOT NULL,
+              orderIndex INTEGER NOT NULL,
+              isBuiltIn INTEGER NOT NULL,
+              adopted INTEGER NOT NULL DEFAULT 0,
+              createdAt INTEGER NOT NULL,
+              updatedAt INTEGER NOT NULL,
+              PRIMARY KEY (userId, sessionKey),
+              UNIQUE (userId, orderIndex)
+            );
+          `);
+          const insert = seededDb.prepare(
+            `INSERT INTO stream_sessions
+               (userId, sessionKey, displayName, kind, orderIndex, isBuiltIn, adopted, createdAt, updatedAt)
+             VALUES (?, ?, ?, ?, ?, ?, 0, 1, 1)`,
+          );
+          insert.run("flynn", personalKey, "Personal", "main", 0, 1);
+          insert.run("flynn", globalKey, "Global DM", "global_dm", 1, 1);
+          insert.run("flynn", alphaKey, "Alpha", "custom", 2, 0);
+          insert.run("flynn", bravoKey, "Bravo", "custom", 3, 0);
+          seededDb.close();
+        },
+      },
+    );
+    try {
+      const userPair = await performPairRequest(ctx.port, userDeviceId);
+      const adminPair = await performPairRequest(ctx.port, adminDeviceId);
+      const userToken = userPair.token as string;
+      const adminToken = adminPair.token as string;
+      const { ws: userWs } = await authenticateDevice(ctx.port, userDeviceId, userToken);
+      const { ws: adminWs } = await authenticateDevice(ctx.port, adminDeviceId, adminToken);
+      const userQueue = createMessageQueue(userWs);
+      const adminQueue = createMessageQueue(adminWs);
+      const waitForSnapshot = async (queue: ReturnType<typeof createMessageQueue>) =>
+        (await waitForQueuedMessageWithTimeout(
+          queue,
+          (value) =>
+            typeof value === "object" &&
+            value !== null &&
+            (value as { type?: string }).type === "stream_snapshot",
+        )) as { streams: Array<{ sessionKey: string }> };
+      const sessionKeys = (snapshot: { streams: Array<{ sessionKey: string }> }) =>
+        snapshot.streams.map((stream) => stream.sessionKey);
+
+      const userOrder = [bravoKey, personalKey, alphaKey];
+      const userReorderResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${userToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ sessionKeys: userOrder }),
+      });
+      expect(userReorderResponse.status).toBe(200);
+      const userResponse = (await userReorderResponse.json()) as {
+        streams: Array<{ sessionKey: string }>;
+      };
+      expect(sessionKeys(userResponse)).toEqual(userOrder);
+      expect(sessionKeys(await waitForSnapshot(userQueue))).toEqual(userOrder);
+      expect(sessionKeys(await waitForSnapshot(adminQueue))).toEqual([
+        bravoKey,
+        globalKey,
+        personalKey,
+        alphaKey,
+      ]);
+
+      const adminOrder = [globalKey, alphaKey, bravoKey, personalKey];
+      const adminReorderResponse = await fetch(`http://127.0.0.1:${ctx.port}/api/streams`, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${adminToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ sessionKeys: adminOrder }),
+      });
+      expect(adminReorderResponse.status).toBe(200);
+      const adminResponse = (await adminReorderResponse.json()) as {
+        streams: Array<{ sessionKey: string }>;
+      };
+      expect(sessionKeys(adminResponse)).toEqual(adminOrder);
+      expect(sessionKeys(await waitForSnapshot(adminQueue))).toEqual(adminOrder);
+      expect(sessionKeys(await waitForSnapshot(userQueue))).toEqual([
+        alphaKey,
+        bravoKey,
+        personalKey,
+      ]);
+
+      userQueue.dispose();
+      adminQueue.dispose();
+      userWs.terminate();
+      adminWs.terminate();
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
   it("rejects stale partial stream reorder requests", async () => {
     const deviceId = randomUUID();
     const entry = createAllowlistEntry({
