@@ -2423,10 +2423,12 @@ function compareSessionEntryPairsBySortIndexThenUpdatedAt(
   a: SessionEntryPair,
   b: SessionEntryPair,
 ): number {
-  const aHasSortIndex = hasSessionSortIndex(a[1]);
-  const bHasSortIndex = hasSessionSortIndex(b[1]);
-  if (aHasSortIndex && bHasSortIndex && a[1].sortIndex !== b[1].sortIndex) {
-    return a[1].sortIndex - b[1].sortIndex;
+  const aEntry = a[1];
+  const bEntry = b[1];
+  const aHasSortIndex = hasSessionSortIndex(aEntry);
+  const bHasSortIndex = hasSessionSortIndex(bEntry);
+  if (aHasSortIndex && bHasSortIndex && aEntry.sortIndex !== bEntry.sortIndex) {
+    return aEntry.sortIndex - bEntry.sortIndex;
   }
   if (aHasSortIndex !== bHasSortIndex) {
     return aHasSortIndex ? -1 : 1;
