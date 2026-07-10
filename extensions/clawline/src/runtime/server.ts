@@ -42,6 +42,7 @@ import {
   optimizeImageToJpeg,
   optimizeImageToPng,
   parseAgentSessionKey,
+  prepareProviderUsageBinding,
   rawDataToString,
   redactToolPayloadText,
   recordInboundSession,
@@ -69,6 +70,11 @@ import {
   type ReplyPayload,
 } from "../runtime-api.js";
 import { clawlineAttachmentsToImages } from "./attachments.js";
+import {
+  ClawlineCodexUsageCache,
+  type ClawlineCodexUsage,
+  unavailableCodexUsage,
+} from "./codex-usage.js";
 import type { ClawlineAdapterOverrides } from "./config.js";
 import type {
   AllowlistEntry,
@@ -2036,6 +2042,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     resolveIdentityName(resolveAgentIdFromSessionKey(sessionKey));
   const activeSessionRuns = new Map<string, SessionStatusActiveRun>();
   const sessionRuntimeStatusSnapshots = new Map<string, SessionStatusRuntimeSnapshot>();
+  const codexUsageCache = new ClawlineCodexUsageCache();
   const queuedPromptTurnsBySession = new Map<string, PromptTurnAdmissionFacts[]>();
   const startingPromptTurnsBySession = new Map<string, PromptTurnAdmissionFacts>();
   const scheduledPromptTurnCountsBySession = new Map<string, number>();
@@ -7045,6 +7052,61 @@ button.deny { background: #9b1c31; color: white; }
     return "unknown";
   }
 
+  function resolveCodexUsageDisplay(params: {
+    sessionKey: string;
+    entry: SessionEntry | undefined;
+    runtimeContext: SessionControlRuntimeContext;
+  }): {
+    authMode: "oauth" | "api-key" | "token" | "api_key" | "unknown";
+    codexUsage?: ClawlineCodexUsage;
+  } {
+    const configuredAuthMode = resolveClientAuthMode(params.runtimeContext);
+    const isOpenAiCodexSession =
+      isCodexSessionControlRuntime(params.runtimeContext.runtime) &&
+      params.runtimeContext.provider.trim().toLowerCase() === "openai";
+    if (!isOpenAiCodexSession) {
+      return { authMode: configuredAuthMode };
+    }
+    const authProfileId = normalizeStatusString(params.entry?.authProfileOverride);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      let prepared;
+      try {
+        prepared = prepareProviderUsageBinding({
+          provider: "codex",
+          authProfileId: authProfileId ?? null,
+          agentId: resolveAgentIdFromSessionKey(params.sessionKey),
+          config: openClawCfg,
+          timeoutMs: 5_000,
+        });
+      } catch {
+        prepared = null;
+      }
+      if (!prepared) {
+        return authProfileId
+          ? {
+              authMode: "oauth",
+              codexUsage: unavailableCodexUsage("account_binding_unavailable"),
+            }
+          : { authMode: configuredAuthMode };
+      }
+      if (prepared.authKind !== "oauth") {
+        return { authMode: prepared.authKind };
+      }
+      const codexUsage = codexUsageCache.read(
+        prepared.bindingKey,
+        prepared.fetchSnapshot,
+        prepared.isCurrent,
+      );
+      if (codexUsage) {
+        return { authMode: "oauth", codexUsage };
+      }
+    }
+    return {
+      authMode: "oauth",
+      codexUsage: unavailableCodexUsage("account_binding_unavailable"),
+    };
+  }
+
   function rememberSessionRuntimeStatus(
     sessionKey: string,
     snapshot: SessionStatusRuntimeSnapshot,
@@ -7075,6 +7137,7 @@ button.deny { background: #9b1c31; color: white; }
       null;
     const fastMode = resolveStatusFastMode(entry, activeRun ?? snapshot);
     const runtimeContext = resolveSessionControlRuntimeContext(sessionKey, modelStatus);
+    const usageDisplay = resolveCodexUsageDisplay({ sessionKey, entry, runtimeContext });
     const codexFastControl =
       resolvedCodexFastControl ?? (await resolveCodexFastControlState(sessionKey, runtimeContext));
     const displayFastMode = isCodexSessionControlRuntime(runtimeContext.runtime)
@@ -7102,7 +7165,8 @@ button.deny { background: #9b1c31; color: white; }
         fallbackModels: null,
         provider: modelStatus.provider,
         harness: runtimeContext.runtime,
-        authMode: resolveClientAuthMode(runtimeContext),
+        authMode: usageDisplay.authMode,
+        ...(usageDisplay.codexUsage ? { codexUsage: usageDisplay.codexUsage } : {}),
         reasoningLevel: normalizeStatusString(entry?.reasoningLevel),
         thinkingLevel,
         fastMode: displayFastMode,

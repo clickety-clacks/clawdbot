@@ -109,6 +109,7 @@ type CodexAppServerClientOptions = {
   startOptions?: CodexAppServerStartOptions;
   timeoutMs?: number;
   authProfileId?: string | null;
+  exactAuthProfile?: boolean;
   agentDir?: string;
   config?: Parameters<typeof resolveCodexAppServerAuthProfileIdForAgent>[0]["config"];
   onStartedClient?: (client: CodexAppServerClient) => void;
@@ -158,6 +159,7 @@ async function resolveCodexAppServerClientStartContext(
     startOptions: managedStartOptions,
     agentDir,
     authProfileId: usesNativeAuth ? null : authProfileId,
+    ...(options?.exactAuthProfile ? { exactAuthProfile: true } : {}),
     config: options?.config,
     ...(authProfileStore ? { authProfileStore } : {}),
   });
@@ -253,6 +255,7 @@ async function acquireSharedCodexAppServerClient(
           client,
           agentDir,
           authProfileId: usesNativeAuth ? null : authProfileId,
+          ...(options?.exactAuthProfile ? { exactAuthProfile: true } : {}),
           startOptions,
           config: options?.config,
         });
@@ -302,6 +305,7 @@ export async function createIsolatedCodexAppServerClient(
       return await refreshCodexAppServerAuthTokens({
         agentDir,
         authProfileId,
+        ...(options?.exactAuthProfile ? { exactAuthProfile: true } : {}),
         ...(authProfileStore ? { authProfileStore } : {}),
         config: options?.config,
       });
@@ -314,6 +318,7 @@ export async function createIsolatedCodexAppServerClient(
       client,
       agentDir,
       authProfileId: usesNativeAuth ? null : authProfileId,
+      ...(options?.exactAuthProfile ? { exactAuthProfile: true } : {}),
       startOptions,
       config: options?.config,
       ...(authProfileStore ? { authProfileStore } : {}),

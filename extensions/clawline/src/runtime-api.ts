@@ -66,6 +66,13 @@ export {
 export { redactToolPayloadText } from "openclaw/plugin-sdk/logging-core";
 export { isPrivateOrLoopbackHost } from "openclaw/plugin-sdk/ssrf-runtime";
 export {
+  prepareProviderUsageBinding,
+  ProviderUsageBindingError,
+  type PreparedProviderUsageBinding,
+  type ProviderUsageFetchResult,
+  type ProviderUsageSnapshot,
+} from "openclaw/plugin-sdk/provider-usage";
+export {
   DEFAULT_ACCOUNT_ID,
   parseAgentSessionKey,
   resolveAgentIdFromSessionKey,

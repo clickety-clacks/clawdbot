@@ -1,4 +1,5 @@
 // Codex tests cover auth bridge plugin behavior.
+import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -13,17 +14,20 @@ import {
   applyCodexAppServerAuthProfile,
   bridgeCodexAppServerStartOptions,
   refreshCodexAppServerAuthTokens,
+  readCodexNativeAuthRevision,
   resolveCodexAppServerAuthAccountCacheKey,
   resolveCodexAppServerAuthProfileId,
   resolveCodexAppServerAuthProfileStore,
   resolveCodexAppServerFallbackApiKeyCacheKey,
   resolveCodexAppServerHomeDir,
   resolveCodexAppServerNativeHomeDir,
+  resolveCodexNativeUsageAuth,
 } from "./auth-bridge.js";
 import type { CodexAppServerStartOptions } from "./config.js";
 
 const oauthMocks = vi.hoisted(() => ({
   refreshOpenAICodexToken: vi.fn(),
+  resolveApiKeyForProfileParams: vi.fn(),
 }));
 
 const providerRuntimeMocks = vi.hoisted(() => ({
@@ -50,6 +54,7 @@ vi.mock("openclaw/plugin-sdk/agent-runtime", async (importOriginal) => {
     resolveApiKeyForProfile: async (
       params: Parameters<typeof actual.resolveApiKeyForProfile>[0],
     ) => {
+      oauthMocks.resolveApiKeyForProfileParams(params);
       const credential = params.store.profiles[params.profileId];
       if (!credential) {
         return null;
@@ -117,6 +122,7 @@ afterEach(() => {
   vi.unstubAllEnvs();
   clearRuntimeAuthProfileStoreSnapshots();
   oauthMocks.refreshOpenAICodexToken.mockReset();
+  oauthMocks.resolveApiKeyForProfileParams.mockReset();
   providerRuntimeMocks.formatProviderAuthProfileApiKeyWithPlugin.mockReset();
   providerRuntimeMocks.refreshProviderOAuthCredentialWithPlugin.mockClear();
 });
@@ -236,6 +242,81 @@ describe("bridgeCodexAppServerStartOptions", () => {
       await expectPathMissing(nativeHome);
       expect(startOptions.env).toBeUndefined();
     } finally {
+      await fs.rm(agentDir, { recursive: true, force: true });
+    }
+  });
+
+  it("forces native null bindings onto the exact agent-owned Codex home", async () => {
+    const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-codex-native-home-"));
+    try {
+      await expect(
+        bridgeCodexAppServerStartOptions({
+          startOptions: createStartOptions({ env: { CODEX_HOME: path.join(agentDir, "other") } }),
+          agentDir,
+          authProfileId: null,
+          exactAuthProfile: true,
+        }),
+      ).resolves.toMatchObject({
+        env: { CODEX_HOME: resolveCodexAppServerHomeDir(agentDir) },
+      });
+    } finally {
+      await fs.rm(agentDir, { recursive: true, force: true });
+    }
+  });
+
+  it("revisions native auth coherently across same-content replacement and ABA", async () => {
+    const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-codex-native-revision-"));
+    const codexHome = resolveCodexAppServerHomeDir(agentDir);
+    const authPath = path.join(codexHome, "auth.json");
+    const replacementPath = path.join(codexHome, "replacement.json");
+    const oauthA = JSON.stringify({ auth_mode: "chatgpt", tokens: { access_token: "a" } });
+    const oauthB = JSON.stringify({ auth_mode: "chatgpt", tokens: { access_token: "b" } });
+    try {
+      await fs.mkdir(codexHome, { recursive: true });
+      await fs.writeFile(authPath, oauthA);
+      const first = readCodexNativeAuthRevision(agentDir);
+      expect(resolveCodexNativeUsageAuth(agentDir)).toEqual({
+        authKind: "oauth",
+        revision: first,
+      });
+
+      await fs.writeFile(replacementPath, oauthA);
+      await fs.rename(replacementPath, authPath);
+      const sameContentReplacement = readCodexNativeAuthRevision(agentDir);
+      expect(sameContentReplacement).not.toBe(first);
+
+      await fs.writeFile(replacementPath, oauthB);
+      await fs.rename(replacementPath, authPath);
+      const middle = readCodexNativeAuthRevision(agentDir);
+      await fs.writeFile(replacementPath, oauthA);
+      await fs.rename(replacementPath, authPath);
+      const aba = readCodexNativeAuthRevision(agentDir);
+      expect(middle).not.toBe(sameContentReplacement);
+      expect(aba).not.toBe(sameContentReplacement);
+    } finally {
+      await fs.rm(agentDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a native auth observation replaced below its open descriptor", async () => {
+    const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-codex-native-race-"));
+    const codexHome = resolveCodexAppServerHomeDir(agentDir);
+    const authPath = path.join(codexHome, "auth.json");
+    const replacementPath = path.join(codexHome, "replacement.json");
+    try {
+      await fs.mkdir(codexHome, { recursive: true });
+      await fs.writeFile(authPath, JSON.stringify({ tokens: { access_token: "a" } }));
+      await fs.writeFile(replacementPath, JSON.stringify({ tokens: { access_token: "b" } }));
+      const readFileSync = fsSync.readFileSync;
+      const readSpy = vi.spyOn(fsSync, "readFileSync").mockImplementation((...args) => {
+        const bytes = readFileSync(...args);
+        fsSync.renameSync(replacementPath, authPath);
+        return bytes;
+      });
+      expect(readCodexNativeAuthRevision(agentDir)).toBeNull();
+      readSpy.mockRestore();
+    } finally {
+      vi.restoreAllMocks();
       await fs.rm(agentDir, { recursive: true, force: true });
     }
   });
@@ -598,6 +679,7 @@ describe("bridgeCodexAppServerStartOptions", () => {
         client: { request } as never,
         agentDir,
         authProfileId: "openai:work",
+        exactAuthProfile: true,
       });
 
       expect(request).toHaveBeenCalledWith("account/login/start", {
@@ -606,6 +688,12 @@ describe("bridgeCodexAppServerStartOptions", () => {
         chatgptAccountId: "account-123",
         chatgptPlanType: null,
       });
+      expect(oauthMocks.resolveApiKeyForProfileParams).toHaveBeenCalledWith(
+        expect.objectContaining({
+          profileId: "openai:work",
+          allowLegacyProfileFallback: false,
+        }),
+      );
     } finally {
       await fs.rm(agentDir, { recursive: true, force: true });
     }

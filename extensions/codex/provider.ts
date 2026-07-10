@@ -1,6 +1,7 @@
 /**
  * Codex provider plugin and live app-server model catalog discovery.
  */
+import { createHash } from "node:crypto";
 import { createSubsystemLogger } from "openclaw/plugin-sdk/core";
 import { resolvePluginConfigObject } from "openclaw/plugin-sdk/plugin-config-runtime";
 import type { ProviderRuntimeModel } from "openclaw/plugin-sdk/plugin-entry";
@@ -19,6 +20,10 @@ import {
   FALLBACK_CODEX_MODELS,
 } from "./provider-catalog.js";
 import {
+  isCodexAppServerUsageAuthProfileCompatible,
+  resolveCodexNativeUsageAuth,
+} from "./src/app-server/auth-bridge.js";
+import {
   type CodexAppServerStartOptions,
   readCodexPluginConfig,
   resolveCodexAppServerRuntimeOptions,
@@ -28,6 +33,7 @@ import type {
   CodexAppServerModelListResult,
 } from "./src/app-server/models.js";
 import { buildCodexAppServerUsageSnapshot } from "./src/app-server/rate-limits.js";
+import { resolveCodexAppServerSpawnEnv } from "./src/app-server/transport-stdio.js";
 
 const DEFAULT_DISCOVERY_TIMEOUT_MS = 2500;
 const LIVE_DISCOVERY_ENV = "OPENCLAW_CODEX_DISCOVERY_LIVE";
@@ -50,7 +56,8 @@ type CodexModelLister = (options: {
 type CodexRateLimitReader = (options: {
   timeoutMs: number;
   agentDir?: string;
-  authProfileId?: string;
+  authProfileId?: string | null;
+  exactAuthProfile?: boolean;
   config?: Parameters<typeof requestCodexAppServerRateLimitsLazy>[0]["config"];
   startOptions?: CodexAppServerStartOptions;
 }) => Promise<unknown>;
@@ -120,8 +127,37 @@ export function buildCodexProvider(options: BuildCodexProviderOptions = {}): Pro
       source: "codex-app-server",
       mode: "token",
     }),
+    resolveNativeUsageAuth: (ctx) => {
+      const runtimePluginConfig = resolvePluginConfigObject(ctx.config, CODEX_PROVIDER_ID);
+      const pluginConfig = runtimePluginConfig ?? (ctx.config ? undefined : options.pluginConfig);
+      const appServer = resolveCodexAppServerRuntimeOptions({
+        pluginConfig,
+        env: ctx.env,
+        agentDir: ctx.agentDir,
+      });
+      if (appServer.start.transport !== "stdio") {
+        return null;
+      }
+      // Native usage revisioning currently observes the agent-owned Codex home.
+      // Fail closed when this provider launches against another home so the
+      // footer can never display a different account's limits.
+      if (ctx.env.CODEX_HOME?.trim() || appServer.start.env?.CODEX_HOME?.trim()) {
+        return null;
+      }
+      const spawnEnv = resolveCodexAppServerSpawnEnv(appServer.start, ctx.env);
+      const accessToken = spawnEnv.CODEX_ACCESS_TOKEN?.trim();
+      return accessToken
+        ? { authKind: "token", revision: nativeAuthRevision("token", accessToken) }
+        : resolveCodexNativeUsageAuth(ctx.agentDir);
+    },
+    isUsageAuthProfileCompatible: (ctx) =>
+      isCodexAppServerUsageAuthProfileCompatible({
+        type: ctx.authKind === "api-key" ? "api_key" : ctx.authKind,
+        provider: ctx.authProvider,
+        config: ctx.config,
+      }),
     fetchUsageSnapshot: async (ctx) => {
-      if (ctx.token !== CODEX_APP_SERVER_AUTH_MARKER) {
+      if (ctx.token !== CODEX_APP_SERVER_AUTH_MARKER || ctx.authProfileId === undefined) {
         return null;
       }
       const runtimePluginConfig = resolvePluginConfigObject(ctx.config, CODEX_PROVIDER_ID);
@@ -130,7 +166,8 @@ export function buildCodexProvider(options: BuildCodexProviderOptions = {}): Pro
       const rateLimits = await (options.readRateLimits ?? requestCodexAppServerRateLimitsLazy)({
         timeoutMs: ctx.timeoutMs,
         agentDir: ctx.agentDir,
-        ...(ctx.authProfileId ? { authProfileId: ctx.authProfileId } : {}),
+        authProfileId: ctx.authProfileId,
+        exactAuthProfile: true,
         config: ctx.config,
         startOptions: appServer.start,
       });
@@ -239,7 +276,8 @@ async function listCodexAppServerModelsLazy(options: {
 async function requestCodexAppServerRateLimitsLazy(options: {
   timeoutMs: number;
   agentDir?: string;
-  authProfileId?: string;
+  authProfileId?: string | null;
+  exactAuthProfile?: boolean;
   config?: Parameters<
     typeof import("./src/app-server/request.js").requestCodexAppServerJson
   >[0]["config"];
@@ -250,11 +288,21 @@ async function requestCodexAppServerRateLimitsLazy(options: {
     method: "account/rateLimits/read",
     timeoutMs: options.timeoutMs,
     agentDir: options.agentDir,
-    ...(options.authProfileId ? { authProfileId: options.authProfileId } : {}),
+    authProfileId: options.authProfileId,
+    ...(options.exactAuthProfile ? { exactAuthProfile: true } : {}),
     config: options.config,
     startOptions: options.startOptions,
     isolated: true,
   });
+}
+
+function nativeAuthRevision(authKind: string, source: string): string {
+  return createHash("sha256")
+    .update("openclaw:codex-native-usage-auth:v1\0")
+    .update(authKind)
+    .update("\0")
+    .update(source)
+    .digest("hex");
 }
 
 function normalizeTimeoutMs(value: unknown): number {

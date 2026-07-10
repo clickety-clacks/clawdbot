@@ -55,24 +55,28 @@ async function fetchProviderUsageSnapshot(params: {
   timeoutMs: number;
   fetchFn: typeof fetch;
 }): Promise<ProviderUsageSnapshot> {
-  const pluginSnapshot = await resolveProviderUsageSnapshotWithPlugin({
-    provider: params.auth.hookProvider ?? params.auth.provider,
-    config: params.config,
-    workspaceDir: params.workspaceDir,
-    env: params.env,
-    context: {
-      config: params.config,
-      agentDir: params.agentDir,
-      workspaceDir: params.workspaceDir,
-      env: params.env,
-      provider: params.auth.provider,
-      token: params.auth.token,
-      accountId: params.auth.accountId,
-      authProfileId: params.auth.authProfileId,
-      timeoutMs: params.timeoutMs,
-      fetchFn: params.fetchFn,
-    },
-  });
+  const hasUnboundExplicitHook =
+    params.auth.hookProvider !== undefined && params.auth.authProfileId === undefined;
+  const pluginSnapshot = hasUnboundExplicitHook
+    ? null
+    : await resolveProviderUsageSnapshotWithPlugin({
+        provider: params.auth.hookProvider ?? params.auth.provider,
+        config: params.config,
+        workspaceDir: params.workspaceDir,
+        env: params.env,
+        context: {
+          config: params.config,
+          agentDir: params.agentDir,
+          workspaceDir: params.workspaceDir,
+          env: params.env,
+          provider: params.auth.provider,
+          token: params.auth.token,
+          accountId: params.auth.accountId,
+          authProfileId: params.auth.authProfileId ?? null,
+          timeoutMs: params.timeoutMs,
+          fetchFn: params.fetchFn,
+        },
+      });
   if (pluginSnapshot) {
     return pluginSnapshot;
   }

@@ -604,6 +604,15 @@ API key auth, and dynamic model resolution.
         auth but has no usable usage token, and OpenClaw must skip generic
         API-key/OAuth fallback. Return `null` or `undefined` when the provider did
         not handle the request and OpenClaw should continue with generic fallback.
+
+        Account-bound usage providers can additionally implement
+        `resolveNativeUsageAuth` and `isUsageAuthProfileCompatible` before
+        `fetchUsageSnapshot`. For those providers,
+        `ProviderFetchUsageSnapshotContext.authProfileId` is always present:
+        an exact profile ID selects that profile and `null` selects the
+        provider-owned native auth source. Implementations must preserve that
+        distinction without consulting generic profile order or logging account
+        identifiers, profile IDs, or credentials.
       </Tab>
     </Tabs>
 
