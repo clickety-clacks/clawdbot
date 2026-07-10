@@ -175,6 +175,7 @@ export class ClawlineCodexUsageCache {
         if (error instanceof ProviderUsageBindingError && error.unsettledWork) {
           return error.unsettledWork;
         }
+        return undefined;
       })
       .finally(() => {
         entry.inFlight = undefined;
