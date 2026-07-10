@@ -185,6 +185,7 @@ type ResolveApiKeyForProfileParams = {
   profileId: string;
   agentDir?: string;
   forceRefresh?: boolean;
+  allowLegacyProfileFallback?: boolean;
 };
 
 type SecretDefaults = NonNullable<OpenClawConfig["secrets"]>["defaults"];
@@ -483,12 +484,15 @@ export async function resolveApiKeyForProfile(
       }
       refreshedStore = loadAuthProfileStoreForSecretsRuntime(params.agentDir);
     }
-    const fallbackProfileId = suggestOAuthProfileIdForLegacyDefault({
-      cfg,
-      store: refreshedStore,
-      provider: cred.provider,
-      legacyProfileId: profileId,
-    });
+    const fallbackProfileId =
+      params.allowLegacyProfileFallback === false
+        ? undefined
+        : suggestOAuthProfileIdForLegacyDefault({
+            cfg,
+            store: refreshedStore,
+            provider: cred.provider,
+            legacyProfileId: profileId,
+          });
     if (fallbackProfileId && fallbackProfileId !== profileId) {
       try {
         const fallbackResolved = await tryResolveOAuthProfile({

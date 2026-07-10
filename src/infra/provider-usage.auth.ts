@@ -31,7 +31,7 @@ export type ProviderAuth = {
   provider: UsageProviderId;
   token: string;
   accountId?: string;
-  authProfileId?: string;
+  authProfileId?: string | null;
   hookProvider?: string;
 };
 
@@ -245,6 +245,7 @@ async function resolveOAuthToken(params: {
       return {
         provider: params.provider as UsageProviderId,
         token: resolved.apiKey,
+        authProfileId: resolved.profileId,
         accountId:
           cred.type === "oauth" && "accountId" in cred
             ? (cred as { accountId?: string }).accountId
@@ -287,6 +288,7 @@ async function resolveProviderUsageAuthViaPlugin(params: {
         return auth
           ? {
               token: auth.token,
+              authProfileId: auth.authProfileId,
               ...(auth.accountId ? { accountId: auth.accountId } : {}),
             }
           : null;
@@ -304,6 +306,7 @@ async function resolveProviderUsageAuthViaPlugin(params: {
     auth: {
       provider: params.provider,
       token: resolved.token,
+      authProfileId: resolved.authProfileId ?? null,
       ...(resolved.accountId ? { accountId: resolved.accountId } : {}),
     },
   };
@@ -332,6 +335,7 @@ async function resolveProviderUsageAuthFallback(params: {
     return {
       provider: params.provider,
       token: apiKey,
+      authProfileId: null,
     };
   }
 

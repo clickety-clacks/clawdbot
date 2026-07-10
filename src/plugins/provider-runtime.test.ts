@@ -2190,6 +2190,7 @@ describe("provider-runtime", () => {
               config: {} as never,
               env: process.env,
               token: "usage-token",
+              authProfileId: null,
               timeoutMs: 5_000,
               fetchFn: vi.fn() as never,
             }),

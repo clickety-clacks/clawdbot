@@ -5,6 +5,14 @@ export type {
   UsageProviderId,
   UsageWindow,
 } from "../infra/provider-usage.types.js";
+export type { ProviderUsageAuthKind } from "../plugins/types.js";
+
+export {
+  prepareProviderUsageBinding,
+  ProviderUsageBindingError,
+  type PreparedProviderUsageBinding,
+  type ProviderUsageFetchResult,
+} from "../infra/provider-usage.exact-profile.js";
 
 export {
   fetchClaudeUsage,

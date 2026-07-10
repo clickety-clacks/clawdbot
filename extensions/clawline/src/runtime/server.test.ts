@@ -34,6 +34,7 @@ const readCodexConversationFastModeMock = vi.fn();
 const setCodexConversationFastModeMock = vi.fn();
 const loadModelCatalogMock = vi.fn();
 const loadSessionStoreMock = vi.fn();
+const prepareProviderUsageBindingMock = vi.fn();
 vi.mock("@openclaw/codex/runtime-api.js", () => ({
   readCodexConversationFastMode: (...args: unknown[]) => readCodexConversationFastModeMock(...args),
   setCodexConversationFastMode: (...args: unknown[]) => setCodexConversationFastModeMock(...args),
@@ -55,6 +56,16 @@ vi.mock("../runtime-api.js", async () => {
       ).loadSessionStore(...args);
     },
     loadModelCatalog: (...args: unknown[]) => loadModelCatalogMock(...args),
+    prepareProviderUsageBinding: (...args: unknown[]) => {
+      const overridden = prepareProviderUsageBindingMock(...args);
+      return overridden === undefined
+        ? (
+            actual as {
+              prepareProviderUsageBinding: (...innerArgs: unknown[]) => unknown;
+            }
+          ).prepareProviderUsageBinding(...args)
+        : overridden;
+    },
   };
 });
 
@@ -422,6 +433,7 @@ beforeEach(() => {
     },
   ]);
   loadSessionStoreMock.mockClear();
+  prepareProviderUsageBindingMock.mockReset();
   sendMessageMock.mockReset();
   sendMessageMock.mockResolvedValue({
     channel: "clawline",
@@ -1181,6 +1193,7 @@ describe.sequential("clawline provider server", () => {
           ]),
         },
       });
+      expect(statusJson.display).not.toHaveProperty("codexUsage");
       expect(JSON.stringify(statusJson)).not.toContain("t318-fake-anthropic-oauth-token");
       expect(JSON.stringify(statusJson)).not.toContain("t318-fake-openai-api-key");
 
@@ -1527,6 +1540,22 @@ describe.sequential("clawline provider server", () => {
       const authToken = pairResult.token as string;
       const { ws } = await authenticateDevice(codexCtx.port, codexEntry.deviceId, authToken);
       const authHeader = `Bearer ${authToken}`;
+      const fetchUsageSnapshot = vi.fn(async () => ({
+        bindingKey: "opaque-native-binding",
+        snapshot: {
+          provider: "openai" as const,
+          displayName: "OpenAI",
+          windows: [
+            { label: "5h", usedPercent: 36 },
+            { label: "Week", usedPercent: 72 },
+          ],
+        },
+      }));
+      prepareProviderUsageBindingMock.mockReturnValue({
+        authKind: "oauth",
+        bindingKey: "opaque-native-binding",
+        fetchSnapshot: fetchUsageSnapshot,
+      });
 
       const codexStatusResponse = await fetch(
         `http://127.0.0.1:${codexCtx.port}/api/session-status?sessionKey=${encodeURIComponent(
@@ -1542,6 +1571,12 @@ describe.sequential("clawline provider server", () => {
           model: "gpt-5.5",
           harness: "codex",
           authMode: "oauth",
+          codexUsage: {
+            freshness: "loading",
+            fetchedAt: null,
+            windows: [],
+            unavailableReason: null,
+          },
           fastMode: false,
           mode: "normal",
         },
@@ -1581,6 +1616,47 @@ describe.sequential("clawline provider server", () => {
           runtime: "codex",
           models: expect.arrayContaining([expect.objectContaining({ ref: "openai/gpt-5.5" })]),
         },
+      });
+      expect(prepareProviderUsageBindingMock).toHaveBeenCalledWith(
+        expect.objectContaining({ authProfileId: null, timeoutMs: 5_000 }),
+      );
+      await new Promise((resolve) => {
+        setTimeout(resolve, 0);
+      });
+      const refreshedStatusResponse = await fetch(
+        `http://127.0.0.1:${codexCtx.port}/api/session-status?sessionKey=${encodeURIComponent(
+          sessionKey,
+        )}`,
+        { headers: { Authorization: authHeader } },
+      );
+      const refreshedStatusJson = await refreshedStatusResponse.json();
+      expect(refreshedStatusJson.display.codexUsage).toEqual({
+        freshness: "fresh",
+        fetchedAt: expect.any(Number),
+        windows: [
+          { label: "5h", remainingPercent: 64, resetAt: null },
+          { label: "Week", remainingPercent: 28, resetAt: null },
+        ],
+        unavailableReason: null,
+      });
+      expect(JSON.stringify(refreshedStatusJson.display.codexUsage)).not.toContain(
+        "opaque-native-binding",
+      );
+      expect(fetchUsageSnapshot).toHaveBeenCalledOnce();
+      prepareProviderUsageBindingMock.mockReturnValue(null);
+      const unboundStatusResponse = await fetch(
+        `http://127.0.0.1:${codexCtx.port}/api/session-status?sessionKey=${encodeURIComponent(
+          sessionKey,
+        )}`,
+        { headers: { Authorization: authHeader } },
+      );
+      expect((await unboundStatusResponse.json()).display).toMatchObject({
+        authMode: "oauth",
+      });
+      prepareProviderUsageBindingMock.mockReturnValue({
+        authKind: "oauth",
+        bindingKey: "opaque-native-binding",
+        fetchSnapshot: fetchUsageSnapshot,
       });
       const codexCatalogRefs = (
         codexStatusJson as { modelCatalog?: { models?: Array<{ ref?: string }> } }
@@ -1740,6 +1816,138 @@ describe.sequential("clawline provider server", () => {
         action: "set_model",
         code: "unsupported_runtime_model",
       });
+
+      await fs.writeFile(
+        codexCtx.sessionStorePath,
+        JSON.stringify({
+          [sessionKey]: {
+            sessionId: "codex-session-control-test",
+            sessionFile: codexSessionFile,
+            updatedAt: Date.now() + 90_000,
+            modelProvider: "openai",
+            model: "gpt-5.5",
+            authProfileOverride: "openai:work",
+          },
+        }),
+      );
+      const profileFetchSnapshot = vi.fn(async () => ({
+        bindingKey: "opaque-profile-binding",
+        snapshot: {
+          provider: "openai" as const,
+          displayName: "OpenAI",
+          windows: [
+            { label: "5h", usedPercent: 36 },
+            { label: "Week", usedPercent: 72 },
+          ],
+        },
+      }));
+      prepareProviderUsageBindingMock.mockReturnValue({
+        authKind: "oauth",
+        bindingKey: "opaque-profile-binding",
+        fetchSnapshot: profileFetchSnapshot,
+      });
+      const pinnedLoadingResponse = await fetch(
+        `http://127.0.0.1:${codexCtx.port}/api/session-status?sessionKey=${encodeURIComponent(
+          sessionKey,
+        )}`,
+        { headers: { Authorization: authHeader } },
+      );
+      expect((await pinnedLoadingResponse.json()).display.codexUsage.freshness).toBe("loading");
+      await new Promise((resolve) => {
+        setTimeout(resolve, 0);
+      });
+      const pinnedFreshResponse = await fetch(
+        `http://127.0.0.1:${codexCtx.port}/api/session-status?sessionKey=${encodeURIComponent(
+          sessionKey,
+        )}`,
+        { headers: { Authorization: authHeader } },
+      );
+      expect((await pinnedFreshResponse.json()).display.codexUsage.windows).toEqual([
+        { label: "5h", remainingPercent: 64, resetAt: null },
+        { label: "Week", remainingPercent: 28, resetAt: null },
+      ]);
+      expect(prepareProviderUsageBindingMock).toHaveBeenLastCalledWith(
+        expect.objectContaining({ authProfileId: "openai:work" }),
+      );
+      expect(profileFetchSnapshot).toHaveBeenCalledOnce();
+
+      await fs.writeFile(
+        codexCtx.sessionStorePath,
+        JSON.stringify({
+          [sessionKey]: {
+            sessionId: "codex-session-control-test",
+            sessionFile: codexSessionFile,
+            updatedAt: Date.now() + 120_000,
+            modelProvider: "openai",
+            model: "gpt-5.5",
+            authProfileOverride: "openai:non-oauth",
+          },
+        }),
+      );
+      for (const authKind of ["api-key", "token"] as const) {
+        prepareProviderUsageBindingMock.mockReturnValue({
+          authKind,
+          bindingKey: `opaque-${authKind}-binding`,
+          fetchSnapshot: fetchUsageSnapshot,
+        });
+        const response = await fetch(
+          `http://127.0.0.1:${codexCtx.port}/api/session-status?sessionKey=${encodeURIComponent(
+            sessionKey,
+          )}`,
+          { headers: { Authorization: authHeader } },
+        );
+        const json = await response.json();
+        expect(json.display.authMode).toBe(authKind);
+        expect(json.display).not.toHaveProperty("codexUsage");
+      }
+      expect(prepareProviderUsageBindingMock).toHaveBeenLastCalledWith(
+        expect.objectContaining({ authProfileId: "openai:non-oauth" }),
+      );
+      expect(fetchUsageSnapshot).toHaveBeenCalledOnce();
+
+      prepareProviderUsageBindingMock.mockReturnValue(null);
+      const unavailableResponse = await fetch(
+        `http://127.0.0.1:${codexCtx.port}/api/session-status?sessionKey=${encodeURIComponent(
+          sessionKey,
+        )}`,
+        { headers: { Authorization: authHeader } },
+      );
+      const unavailableJson = await unavailableResponse.json();
+      expect(unavailableJson.display).toMatchObject({
+        authMode: "oauth",
+        codexUsage: {
+          freshness: "unavailable",
+          fetchedAt: null,
+          windows: [],
+          unavailableReason: "account_binding_unavailable",
+        },
+      });
+      expect(JSON.stringify(unavailableJson.display)).not.toContain("openai:non-oauth");
+
+      const bindingCallsBeforeNonOpenAiStatus = prepareProviderUsageBindingMock.mock.calls.length;
+      await fs.writeFile(
+        codexCtx.sessionStorePath,
+        JSON.stringify({
+          [sessionKey]: {
+            sessionId: "codex-session-control-test",
+            sessionFile: codexSessionFile,
+            updatedAt: Date.now() + 180_000,
+            modelProvider: "gibson",
+            model: "qwen3.6-35b-a3b",
+          },
+        }),
+      );
+      const nonOpenAiResponse = await fetch(
+        `http://127.0.0.1:${codexCtx.port}/api/session-status?sessionKey=${encodeURIComponent(
+          sessionKey,
+        )}`,
+        { headers: { Authorization: authHeader } },
+      );
+      const nonOpenAiJson = await nonOpenAiResponse.json();
+      expect(nonOpenAiJson.display).not.toHaveProperty("codexUsage");
+      expect(prepareProviderUsageBindingMock).toHaveBeenCalledTimes(
+        bindingCallsBeforeNonOpenAiStatus,
+      );
 
       ws.terminate();
     } finally {

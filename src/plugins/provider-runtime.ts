@@ -80,6 +80,8 @@ import type {
   ProviderPlugin,
   ProviderResolveExternalAuthProfilesContext,
   ProviderPrepareRuntimeAuthContext,
+  ProviderResolveNativeUsageAuthContext,
+  ProviderUsageAuthProfileContext,
   ProviderApplyConfigDefaultsContext,
   ProviderResolveConfigApiKeyContext,
   ProviderSanitizeReplayHistoryContext,
@@ -651,6 +653,28 @@ export async function resolveProviderUsageSnapshotWithPlugin(params: {
   context: ProviderFetchUsageSnapshotContext;
 }) {
   return await resolveProviderRuntimePlugin(params)?.fetchUsageSnapshot?.(params.context);
+}
+
+export function resolveProviderNativeUsageAuthWithPlugin(params: {
+  provider: string;
+  config?: OpenClawConfig;
+  workspaceDir?: string;
+  env?: NodeJS.ProcessEnv;
+  context: ProviderResolveNativeUsageAuthContext;
+}) {
+  return resolveProviderRuntimePlugin(params)?.resolveNativeUsageAuth?.(params.context);
+}
+
+export function isProviderUsageAuthProfileCompatibleWithPlugin(params: {
+  provider: string;
+  config?: OpenClawConfig;
+  workspaceDir?: string;
+  env?: NodeJS.ProcessEnv;
+  context: ProviderUsageAuthProfileContext;
+}): boolean {
+  return (
+    resolveProviderRuntimePlugin(params)?.isUsageAuthProfileCompatible?.(params.context) ?? true
+  );
 }
 
 export function matchesProviderContextOverflowWithPlugin(params: {

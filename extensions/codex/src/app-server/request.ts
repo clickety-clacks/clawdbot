@@ -25,6 +25,7 @@ export async function requestCodexAppServerJson<M extends CodexAppServerRequestM
   timeoutMs?: number;
   startOptions?: CodexAppServerStartOptions;
   authProfileId?: string | null;
+  exactAuthProfile?: boolean;
   agentDir?: string;
   config?: Parameters<typeof resolveCodexAppServerAuthProfileIdForAgent>[0]["config"];
   sessionKey?: string;
@@ -37,6 +38,7 @@ export async function requestCodexAppServerJson<T = JsonValue | undefined>(param
   timeoutMs?: number;
   startOptions?: CodexAppServerStartOptions;
   authProfileId?: string | null;
+  exactAuthProfile?: boolean;
   agentDir?: string;
   config?: Parameters<typeof resolveCodexAppServerAuthProfileIdForAgent>[0]["config"];
   sessionKey?: string;
@@ -49,6 +51,7 @@ export async function requestCodexAppServerJson<T = JsonValue | undefined>(param
   timeoutMs?: number;
   startOptions?: CodexAppServerStartOptions;
   authProfileId?: string | null;
+  exactAuthProfile?: boolean;
   agentDir?: string;
   config?: Parameters<typeof resolveCodexAppServerAuthProfileIdForAgent>[0]["config"];
   sessionKey?: string;
@@ -74,6 +77,7 @@ export async function requestCodexAppServerJson<T = JsonValue | undefined>(param
         startOptions: params.startOptions,
         timeoutMs,
         authProfileId: params.authProfileId,
+        ...(params.exactAuthProfile ? { exactAuthProfile: true } : {}),
         agentDir: params.agentDir,
         config: params.config,
       });

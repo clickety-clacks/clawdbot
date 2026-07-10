@@ -49,6 +49,9 @@ const CODEX_APP_SERVER_HOME_ENV_VARS = [CODEX_HOME_ENV_VAR, HOME_ENV_VAR];
 const CODEX_AUTH_JSON_FILENAME = "auth.json";
 const CODEX_HOME_DIRNAME = ".codex";
 
+type CodexNativeAuthKind = "oauth" | "api-key" | "token" | "unknown";
+type CodexNativeAuthSource = { authKind: CodexNativeAuthKind; revision: string };
+
 type AuthProfileOrderConfig = Parameters<typeof resolveAuthProfileOrder>[0]["cfg"];
 const scopedOAuthRefreshQueues = new WeakMap<
   AuthProfileStore,
@@ -59,6 +62,7 @@ export async function bridgeCodexAppServerStartOptions(params: {
   startOptions: CodexAppServerStartOptions;
   agentDir: string;
   authProfileId?: string | null;
+  exactAuthProfile?: boolean;
   authProfileStore?: AuthProfileStore;
   config?: AuthProfileOrderConfig;
 }): Promise<CodexAppServerStartOptions> {
@@ -68,6 +72,7 @@ export async function bridgeCodexAppServerStartOptions(params: {
   const isolatedStartOptions = await withAgentCodexHomeEnvironment(
     params.startOptions,
     params.agentDir,
+    params.authProfileId === null && params.exactAuthProfile === true,
   );
   if (params.authProfileId === null) {
     return isolatedStartOptions;
@@ -333,13 +338,124 @@ export function resolveCodexAppServerNativeHomeDir(agentDir: string): string {
   return path.join(resolveCodexAppServerHomeDir(agentDir), CODEX_APP_SERVER_NATIVE_HOME_DIRNAME);
 }
 
+function sameNativeAuthStat(left: fsSync.BigIntStats, right: fsSync.BigIntStats): boolean {
+  return (
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.size === right.size &&
+    left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs
+  );
+}
+
+function readCodexNativeAuthObservation(
+  agentDir: string,
+): { bytes: Buffer; revision: string } | null {
+  const authPath = path.join(resolveCodexAppServerHomeDir(agentDir), CODEX_AUTH_JSON_FILENAME);
+  let descriptor: number | undefined;
+  try {
+    descriptor = fsSync.openSync(authPath, "r");
+    const before = fsSync.fstatSync(descriptor, { bigint: true });
+    const bytes = fsSync.readFileSync(descriptor);
+    const after = fsSync.fstatSync(descriptor, { bigint: true });
+    const finalPath = fsSync.statSync(authPath, { bigint: true });
+    if (
+      !sameNativeAuthStat(before, after) ||
+      finalPath.dev !== after.dev ||
+      finalPath.ino !== after.ino
+    ) {
+      return null;
+    }
+    const revision = createHash("sha256")
+      .update(bytes)
+      .update("\0")
+      .update(
+        [after.dev, after.ino, after.size, after.mtimeNs, after.ctimeNs].map(String).join(":"),
+      )
+      .digest("hex");
+    return { bytes, revision };
+  } catch {
+    return null;
+  } finally {
+    if (descriptor !== undefined) {
+      fsSync.closeSync(descriptor);
+    }
+  }
+}
+
+/** Opaque ABA-safe revision of the native Codex auth source used by null bindings. */
+export function readCodexNativeAuthRevision(agentDir: string): string | null {
+  return readCodexNativeAuthObservation(agentDir)?.revision ?? null;
+}
+
+/** Reads native auth kind and revision from one coherent auth.json observation. */
+export function resolveCodexNativeUsageAuth(agentDir: string): CodexNativeAuthSource | null {
+  const observation = readCodexNativeAuthObservation(agentDir);
+  if (!observation) {
+    return null;
+  }
+  let auth: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(observation.bytes.toString("utf8")) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
+    }
+    auth = parsed as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  const mode =
+    typeof auth.auth_mode === "string"
+      ? auth.auth_mode.replaceAll(/[^a-zA-Z]/g, "").toLowerCase()
+      : "";
+  const authKind = mode ? resolveNativeAuthKind(mode, auth) : inferNativeAuthKind(auth);
+  return { authKind, revision: observation.revision };
+}
+
+function resolveNativeAuthKind(mode: string, auth: Record<string, unknown>): CodexNativeAuthKind {
+  if (mode === "chatgpt" || mode === "chatgptauthtokens") {
+    return hasNativeOAuthTokens(auth) ? "oauth" : "unknown";
+  }
+  if (mode === "apikey") {
+    return hasNativeAuthSecret(auth.OPENAI_API_KEY) ? "api-key" : "unknown";
+  }
+  if (mode === "personalaccesstoken") {
+    return hasNativeAuthSecret(auth.personal_access_token) ? "token" : "unknown";
+  }
+  return "unknown";
+}
+
+function inferNativeAuthKind(auth: Record<string, unknown>): CodexNativeAuthKind {
+  if (hasNativeAuthSecret(auth.personal_access_token)) {
+    return "token";
+  }
+  if (hasNativeAuthSecret(auth.OPENAI_API_KEY)) {
+    return "api-key";
+  }
+  return hasNativeOAuthTokens(auth) ? "oauth" : "unknown";
+}
+
+function hasNativeOAuthTokens(auth: Record<string, unknown>): boolean {
+  if (!auth.tokens || typeof auth.tokens !== "object" || Array.isArray(auth.tokens)) {
+    return false;
+  }
+  const tokens = auth.tokens as Record<string, unknown>;
+  return hasNativeAuthSecret(tokens.access_token) || hasNativeAuthSecret(tokens.refresh_token);
+}
+
+function hasNativeAuthSecret(value: unknown): boolean {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
 async function withAgentCodexHomeEnvironment(
   startOptions: CodexAppServerStartOptions,
   agentDir: string,
+  forceAgentCodexHome = false,
 ): Promise<CodexAppServerStartOptions> {
-  const codexHome = startOptions.env?.[CODEX_HOME_ENV_VAR]?.trim()
-    ? startOptions.env[CODEX_HOME_ENV_VAR]
-    : resolveCodexAppServerHomeDir(agentDir);
+  const codexHome =
+    !forceAgentCodexHome && startOptions.env?.[CODEX_HOME_ENV_VAR]?.trim()
+      ? startOptions.env[CODEX_HOME_ENV_VAR]
+      : resolveCodexAppServerHomeDir(agentDir);
   const nativeHome = startOptions.env?.[HOME_ENV_VAR]?.trim()
     ? startOptions.env[HOME_ENV_VAR]
     : undefined;
@@ -377,6 +493,7 @@ export async function applyCodexAppServerAuthProfile(params: {
   client: CodexAppServerClient;
   agentDir: string;
   authProfileId?: string | null;
+  exactAuthProfile?: boolean;
   authProfileStore?: AuthProfileStore;
   startOptions?: CodexAppServerStartOptions;
   config?: AuthProfileOrderConfig;
@@ -387,6 +504,7 @@ export async function applyCodexAppServerAuthProfile(params: {
   const loginParams = await resolveCodexAppServerAuthProfileLoginParams({
     agentDir: params.agentDir,
     authProfileId: params.authProfileId,
+    exactAuthProfile: params.exactAuthProfile,
     authProfileStore: params.authProfileStore,
     config: params.config,
   });
@@ -411,6 +529,7 @@ export async function applyCodexAppServerAuthProfile(params: {
 function resolveCodexAppServerAuthProfileLoginParams(params: {
   agentDir: string;
   authProfileId?: string;
+  exactAuthProfile?: boolean;
   authProfileStore?: AuthProfileStore;
   config?: AuthProfileOrderConfig;
 }): Promise<CodexLoginAccountParams | undefined> {
@@ -420,6 +539,7 @@ function resolveCodexAppServerAuthProfileLoginParams(params: {
 export async function refreshCodexAppServerAuthTokens(params: {
   agentDir: string;
   authProfileId?: string;
+  exactAuthProfile?: boolean;
   authProfileStore?: AuthProfileStore;
   config?: AuthProfileOrderConfig;
 }): Promise<CodexChatgptAuthTokensRefreshResponse> {
@@ -442,6 +562,7 @@ async function resolveCodexAppServerAuthProfileLoginParamsInternal(params: {
   authProfileId?: string;
   authProfileStore?: AuthProfileStore;
   forceOAuthRefresh?: boolean;
+  exactAuthProfile?: boolean;
   config?: AuthProfileOrderConfig;
 }): Promise<CodexLoginAccountParams | undefined> {
   const store = resolveCodexAppServerAuthProfileStore({
@@ -472,6 +593,7 @@ async function resolveCodexAppServerAuthProfileLoginParamsInternal(params: {
     store,
     preferStoreCredential: Boolean(params.authProfileStore?.profiles[profileId]),
     forceOAuthRefresh: params.forceOAuthRefresh === true,
+    exactAuthProfile: params.exactAuthProfile === true,
     config: params.config,
   });
   if (!loginParams) {
@@ -560,6 +682,7 @@ async function resolveLoginParamsForCredential(
     store: AuthProfileStore;
     preferStoreCredential: boolean;
     forceOAuthRefresh: boolean;
+    exactAuthProfile: boolean;
     config?: AuthProfileOrderConfig;
   },
 ): Promise<CodexLoginAccountParams | undefined> {
@@ -573,6 +696,7 @@ async function resolveLoginParamsForCredential(
         : ensureAuthProfileStore(params.agentDir, { allowKeychainPrompt: false }),
       profileId,
       agentDir: params.agentDir,
+      allowLegacyProfileFallback: params.exactAuthProfile ? false : undefined,
     });
     const apiKey = resolved?.apiKey?.trim();
     return apiKey ? { type: "apiKey", apiKey } : undefined;
@@ -584,6 +708,7 @@ async function resolveLoginParamsForCredential(
         : ensureAuthProfileStore(params.agentDir, { allowKeychainPrompt: false }),
       profileId,
       agentDir: params.agentDir,
+      allowLegacyProfileFallback: params.exactAuthProfile ? false : undefined,
     });
     const accessToken = resolved?.apiKey?.trim();
     return accessToken
@@ -598,6 +723,7 @@ async function resolveLoginParamsForCredential(
     store: params.store,
     preferStoreCredential: params.preferStoreCredential,
     forceRefresh: params.forceOAuthRefresh,
+    exactAuthProfile: params.exactAuthProfile,
     config: params.config,
   });
   const accessToken = resolvedCredential.access?.trim();
@@ -614,6 +740,7 @@ async function resolveOAuthCredentialForCodexAppServer(
     store: AuthProfileStore;
     preferStoreCredential: boolean;
     forceRefresh: boolean;
+    exactAuthProfile: boolean;
     config?: AuthProfileOrderConfig;
   },
 ): Promise<OAuthCredential> {
@@ -676,6 +803,7 @@ async function resolveOAuthCredentialForCodexAppServer(
     profileId,
     agentDir: ownerAgentDir,
     forceRefresh: params.forceRefresh && Boolean(persistedOAuthCredential),
+    allowLegacyProfileFallback: params.exactAuthProfile ? false : undefined,
   });
   const refreshed = useScopedCredential
     ? undefined
@@ -793,13 +921,15 @@ function isCodexAppServerAuthProvider(provider: string, config?: AuthProfileOrde
   );
 }
 
-function isOpenAIApiKeyBackupCredential(
-  credential: AuthProfileCredential,
-  config?: AuthProfileOrderConfig,
-): boolean {
+export function isCodexAppServerUsageAuthProfileCompatible(params: {
+  type: AuthProfileCredential["type"];
+  provider: string;
+  config?: AuthProfileOrderConfig;
+}): boolean {
   return (
-    credential.type === "api_key" &&
-    resolveProviderIdForAuth(credential.provider, { config }) === OPENAI_PROVIDER
+    isCodexAppServerAuthProvider(params.provider, params.config) ||
+    (params.type === "api_key" &&
+      resolveProviderIdForAuth(params.provider, { config: params.config }) === OPENAI_PROVIDER)
   );
 }
 
@@ -807,10 +937,11 @@ function isCodexAppServerAuthProfileCredential(
   credential: AuthProfileCredential,
   config?: AuthProfileOrderConfig,
 ): boolean {
-  return (
-    isCodexAppServerAuthProvider(credential.provider, config) ||
-    isOpenAIApiKeyBackupCredential(credential, config)
-  );
+  return isCodexAppServerUsageAuthProfileCompatible({
+    type: credential.type,
+    provider: credential.provider,
+    config,
+  });
 }
 
 function shouldClearOpenAiApiKeyForCodexAuthProfile(params: {

@@ -648,7 +648,32 @@ export type ProviderResolveUsageAuthContext = {
   resolveOAuthToken: (params?: { provider?: string }) => Promise<ProviderUsageAuthToken | null>;
 };
 
-export type ProviderUsageAuthToken = { token: string; accountId?: string };
+export type ProviderUsageAuthToken = {
+  token: string;
+  accountId?: string;
+  authProfileId?: string | null;
+};
+
+export type ProviderUsageAuthKind = "oauth" | "api-key" | "token" | "unknown";
+
+export type ProviderResolveNativeUsageAuthContext = {
+  config: OpenClawConfig;
+  agentDir: string;
+  env: NodeJS.ProcessEnv;
+  provider: string;
+};
+
+export type ProviderResolvedNativeUsageAuth = {
+  authKind: ProviderUsageAuthKind;
+  revision: string;
+};
+
+export type ProviderUsageAuthProfileContext = {
+  config: OpenClawConfig;
+  provider: string;
+  authKind: Exclude<ProviderUsageAuthKind, "unknown">;
+  authProvider: string;
+};
 
 /**
  * Result of `resolveUsageAuth`.
@@ -680,7 +705,7 @@ export type ProviderFetchUsageSnapshotContext = {
   provider: string;
   token: string;
   accountId?: string;
-  authProfileId?: string;
+  authProfileId: string | null;
   timeoutMs: number;
   fetchFn: typeof fetch;
 };
@@ -1546,6 +1571,12 @@ export type ProviderPlugin = {
     | ProviderResolvedUsageAuth
     | null
     | undefined;
+  /** Resolves a provider-owned native usage auth source without exposing identity or secrets. */
+  resolveNativeUsageAuth?: (
+    ctx: ProviderResolveNativeUsageAuthContext,
+  ) => ProviderResolvedNativeUsageAuth | null | undefined;
+  /** Returns whether a pinned auth profile can serve this provider's usage hook. */
+  isUsageAuthProfileCompatible?: (ctx: ProviderUsageAuthProfileContext) => boolean;
   /**
    * Usage/quota snapshot fetch hook.
    *

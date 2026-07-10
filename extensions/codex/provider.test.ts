@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 // Codex tests cover provider plugin behavior.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CODEX_GPT5_BEHAVIOR_CONTRACT } from "./prompt-overlay.js";
@@ -415,7 +418,7 @@ describe("codex provider", () => {
     });
   });
 
-  it("fetches usage from native Codex app-server rate limits for synthetic auth", async () => {
+  it("refuses synthetic usage when the exact string/null binding is absent", async () => {
     const readRateLimits = vi.fn(async () => ({
       rateLimitsByLimitId: {
         codex: {
@@ -439,21 +442,109 @@ describe("codex provider", () => {
         env: {},
         fetchFn: fetch,
       } as never),
-    ).resolves.toEqual({
-      provider: "openai",
-      displayName: "OpenAI",
-      windows: [{ label: "5h", usedPercent: 9, resetAt: 1_700_003_600_000 }],
-      plan: undefined,
-    });
-    expect(readRateLimits).toHaveBeenCalledWith({
+    ).resolves.toBeNull();
+    expect(readRateLimits).not.toHaveBeenCalled();
+  });
+
+  it("classifies native auth from the exact Codex auth source and revisions it", () => {
+    const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-codex-native-auth-"));
+    try {
+      const codexHome = path.join(agentDir, "codex-home");
+      fs.mkdirSync(codexHome);
+      fs.writeFileSync(
+        path.join(codexHome, "auth.json"),
+        JSON.stringify({ auth_mode: "chatgpt", tokens: { access_token: "secret" } }),
+      );
+      const provider = buildCodexProvider();
+
+      const first = provider.resolveNativeUsageAuth?.({
+        provider: "codex",
+        agentDir,
+        config: {},
+        env: {},
+      });
+      expect(first).toEqual({ authKind: "oauth", revision: expect.any(String) });
+
+      fs.writeFileSync(
+        path.join(codexHome, "auth.json"),
+        JSON.stringify({ auth_mode: "personalAccessToken", personal_access_token: "secret" }),
+      );
+      const second = provider.resolveNativeUsageAuth?.({
+        provider: "codex",
+        agentDir,
+        config: {},
+        env: {},
+      });
+      expect(second).toEqual({ authKind: "token", revision: expect.any(String) });
+      expect(second?.revision).not.toBe(first?.revision);
+    } finally {
+      fs.rmSync(agentDir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails native usage closed when app-server uses a custom CODEX_HOME", () => {
+    const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-codex-custom-home-"));
+    try {
+      const codexHome = path.join(agentDir, "codex-home");
+      fs.mkdirSync(codexHome);
+      fs.writeFileSync(
+        path.join(codexHome, "auth.json"),
+        JSON.stringify({ auth_mode: "chatgpt", tokens: { access_token: "wrong-account" } }),
+      );
+      const provider = buildCodexProvider();
+
+      expect(
+        provider.resolveNativeUsageAuth?.({
+          provider: "codex",
+          agentDir,
+          config: {},
+          env: { CODEX_HOME: "/tmp/custom-codex-home" },
+        }),
+      ).toBeNull();
+    } finally {
+      fs.rmSync(agentDir, { recursive: true, force: true });
+    }
+  });
+
+  it("classifies native Codex access tokens before auth.json without exposing them", () => {
+    const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-codex-native-token-"));
+    try {
+      const codexHome = path.join(agentDir, "codex-home");
+      fs.mkdirSync(codexHome);
+      fs.writeFileSync(
+        path.join(codexHome, "auth.json"),
+        JSON.stringify({ auth_mode: "chatgpt", tokens: { access_token: "old-oauth" } }),
+      );
+      const provider = buildCodexProvider();
+      const resolved = provider.resolveNativeUsageAuth?.({
+        provider: "codex",
+        agentDir,
+        config: {},
+        env: { CODEX_ACCESS_TOKEN: "native-secret" },
+      });
+
+      expect(resolved).toEqual({ authKind: "token", revision: expect.any(String) });
+      expect(JSON.stringify(resolved)).not.toContain("native-secret");
+    } finally {
+      fs.rmSync(agentDir, { recursive: true, force: true });
+    }
+  });
+
+  it("passes null through for native app-server rate-limit reads", async () => {
+    const readRateLimits = vi.fn(async () => ({ rateLimitsByLimitId: {} }));
+    const provider = buildCodexProvider({ readRateLimits });
+
+    await provider.fetchUsageSnapshot?.({
+      provider: "codex",
+      token: "codex-app-server",
+      authProfileId: null,
       timeoutMs: 3500,
-      agentDir: undefined,
       config: {},
-      startOptions: expect.objectContaining({
-        command: "codex",
-        commandSource: "managed",
-      }),
+      env: {},
+      fetchFn: fetch,
     });
+
+    expect(readRateLimits).toHaveBeenCalledWith(expect.objectContaining({ authProfileId: null }));
   });
 
   it("keeps synthetic usage rate-limit reads on the configured Codex auth bridge", async () => {
@@ -489,6 +580,7 @@ describe("codex provider", () => {
         timeoutMs: 3500,
         agentDir: undefined,
         authProfileId: "openai:work",
+        exactAuthProfile: true,
         config: {
           plugins: {
             entries: {
