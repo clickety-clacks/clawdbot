@@ -21,6 +21,7 @@ const authProfileUsageLog = createSubsystemLogger("agent/embedded");
 import { updateAuthProfileStoreWithLock } from "./store.js";
 import type {
   AuthProfileBlockedSource,
+  AuthProfileCredential,
   AuthProfileFailureReason,
   AuthProfileStore,
   ProfileUsageStats,
@@ -115,17 +116,32 @@ type WhamCooldownProbeResult = {
 };
 
 function shouldProbeWhamForFailure(
-  provider: string | undefined,
+  profile: AuthProfileCredential | undefined,
   reason: AuthProfileFailureReason,
 ): boolean {
-  const normalizedProvider = normalizeProviderId(provider ?? "");
+  const normalizedProvider = normalizeProviderId(profile?.provider ?? "");
   return (
+    profile?.type === "oauth" &&
+    Boolean(profile.access) &&
     normalizedProvider === "openai" &&
     (reason === "rate_limit" ||
       reason === "empty_response" ||
       reason === "no_error_details" ||
       reason === "unclassified" ||
       reason === "unknown")
+  );
+}
+
+function isSameWhamCredential(
+  expected: AuthProfileCredential,
+  current: AuthProfileCredential | undefined,
+): boolean {
+  return (
+    expected.type === "oauth" &&
+    current?.type === "oauth" &&
+    normalizeProviderId(expected.provider) === normalizeProviderId(current.provider) &&
+    expected.access === current.access &&
+    expected.accountId === current.accountId
   );
 }
 
@@ -720,9 +736,14 @@ export async function markAuthProfileFailure(params: {
     return;
   }
 
-  const whamResult = shouldProbeWhamForFailure(profile.provider, reason)
-    ? await probeWhamForCooldown(store, profileId)
-    : null;
+  const shouldProbeWham = shouldProbeWhamForFailure(profile, reason);
+  // A detail-less provider failure carries no credential-health evidence.
+  // Only OpenAI OAuth can disambiguate it with the canonical WHAM probe.
+  if (reason === "no_error_details" && !shouldProbeWham) {
+    return;
+  }
+
+  const whamResult = shouldProbeWham ? await probeWhamForCooldown(store, profileId) : null;
 
   let nextStats: ProfileUsageStats | undefined;
   let previousStats: ProfileUsageStats | undefined;
@@ -732,6 +753,17 @@ export async function markAuthProfileFailure(params: {
     updater: (freshStore) => {
       const profileValue = freshStore.profiles[profileId];
       if (!profileValue || isAuthCooldownBypassedForProvider(profileValue.provider)) {
+        return false;
+      }
+      const currentWhamResult =
+        whamResult &&
+        shouldProbeWhamForFailure(profileValue, reason) &&
+        isSameWhamCredential(profile, profileValue)
+          ? whamResult
+          : null;
+      // The WHAM response belongs to the credential snapshot used for the
+      // probe. A concurrent profile replacement must not inherit its result.
+      if (reason === "no_error_details" && !currentWhamResult) {
         return false;
       }
       const now = Date.now();
@@ -750,15 +782,14 @@ export async function markAuthProfileFailure(params: {
         cfgResolved,
         modelId,
       });
-      nextStats =
-        whamResult && shouldProbeWhamForFailure(profileValue.provider, reason)
-          ? applyWhamCooldownResult({
-              existing: previousStats ?? {},
-              computed,
-              now,
-              whamResult,
-            })
-          : computed;
+      nextStats = currentWhamResult
+        ? applyWhamCooldownResult({
+            existing: previousStats ?? {},
+            computed,
+            now,
+            whamResult: currentWhamResult,
+          })
+        : computed;
       updateUsageStatsEntry(freshStore, profileId, () => nextStats ?? computed);
       return true;
     },
