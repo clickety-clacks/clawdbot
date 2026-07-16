@@ -166,6 +166,10 @@ describe("registerPreActionHooks", () => {
       .option("--lint")
       .action(() => {});
     programLocal.command("completion").action(() => {});
+    const infer = programLocal.command("infer").alias("capability");
+    const model = infer.command("model");
+    model.command("run").action(() => {});
+    model.command("list").action(() => {});
     programLocal.command("secrets").action(() => {});
     programLocal
       .command("agents")
@@ -316,6 +320,33 @@ describe("registerPreActionHooks", () => {
     });
     expect(reloadTrustedGatewayRunEnvironmentMock).toHaveBeenCalledWith({
       runtime: runtimeMock,
+    });
+  });
+
+  it.each(["infer", "capability"])(
+    "passes the registered %s model run path to the state migration boundary",
+    async (rootCommand) => {
+      await runPreAction({
+        parseArgv: [rootCommand, "model", "run"],
+        processArgv: ["node", "openclaw", rootCommand, "model", "run"],
+      });
+
+      expect(ensureConfigReadyMock).toHaveBeenCalledWith({
+        runtime: runtimeMock,
+        commandPath: [rootCommand, "model", "run"],
+      });
+    },
+  );
+
+  it("keeps the registered infer model sibling on the migration path", async () => {
+    await runPreAction({
+      parseArgv: ["infer", "model", "list"],
+      processArgv: ["node", "openclaw", "infer", "model", "list"],
+    });
+
+    expect(ensureConfigReadyMock).toHaveBeenCalledWith({
+      runtime: runtimeMock,
+      commandPath: ["infer", "model", "list"],
     });
   });
 
