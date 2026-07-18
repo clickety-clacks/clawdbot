@@ -1589,6 +1589,7 @@ describe.sequential("clawline provider server", () => {
       expect(codexStatusResponse.status).toBe(200);
       const codexStatusJson = await codexStatusResponse.json();
       expect(codexStatusJson).toMatchObject({
+        metadataContextGeneration: expect.any(String),
         display: {
           provider: "openai",
           model: "gpt-5.5",
@@ -1653,6 +1654,9 @@ describe.sequential("clawline provider server", () => {
         { headers: { Authorization: authHeader } },
       );
       const refreshedStatusJson = await refreshedStatusResponse.json();
+      expect(refreshedStatusJson.metadataContextGeneration).toBe(
+        codexStatusJson.metadataContextGeneration,
+      );
       expect(refreshedStatusJson.display.codexUsage).toEqual({
         freshness: "fresh",
         fetchedAt: expect.any(Number),
@@ -1673,9 +1677,14 @@ describe.sequential("clawline provider server", () => {
         )}`,
         { headers: { Authorization: authHeader } },
       );
-      expect((await unboundStatusResponse.json()).display).toMatchObject({
+      const unboundStatusJson = await unboundStatusResponse.json();
+      expect(unboundStatusJson.display).toMatchObject({
         authMode: "oauth",
       });
+      expect(unboundStatusJson.metadataContextGeneration).not.toBe(
+        codexStatusJson.metadataContextGeneration,
+      );
+      expect(JSON.stringify(unboundStatusJson)).not.toContain("opaque-native-binding");
       prepareProviderUsageBindingMock.mockReturnValue({
         authKind: "oauth",
         bindingKey: "opaque-native-binding",
@@ -1722,6 +1731,12 @@ describe.sequential("clawline provider server", () => {
           },
         },
       });
+      expect(codexFastJson.status.metadataContextGeneration).not.toBe(
+        codexStatusJson.metadataContextGeneration,
+      );
+      expect(codexFastJson.status.metadataContextGeneration).not.toBe(
+        unboundStatusJson.metadataContextGeneration,
+      );
       const persistedCodexSessionStore = JSON.parse(
         await fs.readFile(codexCtx.sessionStorePath, "utf8"),
       ) as Record<string, { fastMode?: boolean }>;

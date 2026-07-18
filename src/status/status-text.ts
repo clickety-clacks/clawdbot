@@ -9,7 +9,6 @@ import {
   resolveSessionAgentId,
   resolveAgentModelFallbacksOverride,
 } from "../agents/agent-scope.js";
-import { resolveAuthProfileOrder } from "../agents/auth-profiles/order.js";
 import { ensureAuthProfileStore } from "../agents/auth-profiles/store.js";
 import { resolveContextTokensForModel } from "../agents/context.js";
 import { resolveFastModeState } from "../agents/fast-mode.js";
@@ -200,6 +199,9 @@ function resolveCodexSyntheticUsageAuthProfileId(params: {
   agentDir?: string;
 }): string | undefined {
   const normalizedProfileId = params.profileId?.trim();
+  if (!normalizedProfileId) {
+    return undefined;
+  }
   try {
     const store = ensureAuthProfileStore(params.agentDir, {
       allowKeychainPrompt: false,
@@ -207,10 +209,7 @@ function resolveCodexSyntheticUsageAuthProfileId(params: {
       readOnly: true,
       syncExternalCli: false,
     });
-    const candidateIds = normalizedProfileId
-      ? [normalizedProfileId]
-      : resolveAuthProfileOrder({ cfg: params.cfg, store, provider: "openai" });
-    return candidateIds.find((profileId) => {
+    return [normalizedProfileId].find((profileId) => {
       const credential = store.profiles[profileId];
       if (!credential) {
         return false;

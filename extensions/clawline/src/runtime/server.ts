@@ -108,6 +108,7 @@ import {
 import { createAssetHandlers } from "./http-assets.js";
 import { buildClawlineInboundContext } from "./inbound-context.js";
 import { resolveClawlineMessageReferenceContexts } from "./message-reference-context.js";
+import { ClawlineMetadataContextGenerations } from "./metadata-context-generation.js";
 import { runWithClawlineOutboundCorrelation } from "./outbound.js";
 import { createClawlineProviderLaneQueue, createPerUserTaskQueue } from "./per-user-task-queue.js";
 import {
@@ -2053,6 +2054,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const activeSessionRuns = new Map<string, SessionStatusActiveRun>();
   const sessionRuntimeStatusSnapshots = new Map<string, SessionStatusRuntimeSnapshot>();
   const codexUsageCache = new ClawlineCodexUsageCache();
+  const metadataContextGenerations = new ClawlineMetadataContextGenerations();
   const queuedPromptTurnsBySession = new Map<string, PromptTurnAdmissionFacts[]>();
   const startingPromptTurnsBySession = new Map<string, PromptTurnAdmissionFacts>();
   const scheduledPromptTurnCountsBySession = new Map<string, number>();
@@ -7240,15 +7242,20 @@ button.deny { background: #9b1c31; color: white; }
   }): {
     authMode: "oauth" | "api-key" | "token" | "api_key" | "unknown";
     codexUsage?: ClawlineCodexUsage;
+    bindingContextKey: string;
   } {
     const configuredAuthMode = resolveClientAuthMode(params.runtimeContext);
     const isOpenAiCodexSession =
       isCodexSessionControlRuntime(params.runtimeContext.runtime) &&
       params.runtimeContext.provider.trim().toLowerCase() === "openai";
     if (!isOpenAiCodexSession) {
-      return { authMode: configuredAuthMode };
+      return {
+        authMode: configuredAuthMode,
+        bindingContextKey: `provider:${params.runtimeContext.provider}`,
+      };
     }
     const authProfileId = normalizeStatusString(params.entry?.authProfileOverride);
+    const unavailableContextKey = `codex:${authProfileId ?? "native"}:unavailable`;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       let prepared;
       try {
@@ -7267,11 +7274,13 @@ button.deny { background: #9b1c31; color: white; }
           ? {
               authMode: "oauth",
               codexUsage: unavailableCodexUsage("account_binding_unavailable"),
+              bindingContextKey: unavailableContextKey,
             }
-          : { authMode: configuredAuthMode };
+          : { authMode: configuredAuthMode, bindingContextKey: unavailableContextKey };
       }
+      const bindingContextKey = `codex:${prepared.authKind}:${prepared.bindingKey}`;
       if (prepared.authKind !== "oauth") {
-        return { authMode: prepared.authKind };
+        return { authMode: prepared.authKind, bindingContextKey };
       }
       const codexUsage = codexUsageCache.read(
         prepared.bindingKey,
@@ -7279,12 +7288,13 @@ button.deny { background: #9b1c31; color: white; }
         prepared.isCurrent,
       );
       if (codexUsage) {
-        return { authMode: "oauth", codexUsage };
+        return { authMode: "oauth", codexUsage, bindingContextKey };
       }
     }
     return {
       authMode: "oauth",
       codexUsage: unavailableCodexUsage("account_binding_unavailable"),
+      bindingContextKey: unavailableContextKey,
     };
   }
 
@@ -7318,7 +7328,6 @@ button.deny { background: #9b1c31; color: white; }
       null;
     const fastMode = resolveStatusFastMode(entry, activeRun ?? snapshot);
     const runtimeContext = resolveSessionControlRuntimeContext(sessionKey, modelStatus);
-    const usageDisplay = resolveCodexUsageDisplay({ sessionKey, entry, runtimeContext });
     const codexFastControl =
       resolvedCodexFastControl ?? (await resolveCodexFastControlState(sessionKey, runtimeContext));
     const displayFastMode = isCodexSessionControlRuntime(runtimeContext.runtime)
@@ -7339,8 +7348,16 @@ button.deny { background: #9b1c31; color: white; }
         reason: modelCatalog.reason,
       };
     }
+    // Resolve immediately before publication so native revision checks and the
+    // session authority generation describe the same exact binding observation.
+    const usageDisplay = resolveCodexUsageDisplay({ sessionKey, entry, runtimeContext });
+    const metadataContextGeneration = metadataContextGenerations.resolve(
+      normalizedSessionKey,
+      usageDisplay.bindingContextKey,
+    );
     return {
       sessionKey,
+      metadataContextGeneration,
       display: {
         model: modelStatus.model,
         fallbackModels: null,
