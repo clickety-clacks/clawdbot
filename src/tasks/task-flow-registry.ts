@@ -208,8 +208,11 @@ export function deriveTaskFlowStatusFromTask(
   if (task.status === "queued") {
     return "queued";
   }
-  if (task.status === "running") {
+  if (task.status === "submitting" || task.status === "running") {
     return "running";
+  }
+  if (task.status === "blocked") {
+    return "blocked";
   }
   if (task.status === "succeeded") {
     return task.terminalOutcome === "blocked" ? "blocked" : "succeeded";

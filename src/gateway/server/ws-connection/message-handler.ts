@@ -688,7 +688,6 @@ export function attachGatewayWsMessageHandler(params: GatewayWsMessageHandlerPar
       }
     };
     try {
-      const payloadBytes = getRawDataByteLength(data);
       const parsed = JSON.parse(text);
       const frameType =
         parsed && typeof parsed === "object" && "type" in parsed

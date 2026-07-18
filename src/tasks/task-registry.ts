@@ -127,7 +127,7 @@ export function isParentFlowLinkError(error: unknown): error is ParentFlowLinkEr
 }
 
 function isActiveTaskStatus(status: TaskStatus): boolean {
-  return status === "queued" || status === "running";
+  return status === "queued" || status === "submitting" || status === "running";
 }
 
 function isTerminalFlowStatus(status: TaskFlowRecord["status"]): boolean {
@@ -463,10 +463,13 @@ function normalizeTaskSummary(value: string | null | undefined): string | undefi
 function normalizeTaskStatus(value: TaskStatus | null | undefined): TaskStatus {
   return value === "running" ||
     value === "queued" ||
+    value === "submitting" ||
+    value === "blocked" ||
     value === "succeeded" ||
     value === "failed" ||
     value === "timed_out" ||
     value === "cancelled" ||
+    value === "replaced" ||
     value === "lost"
     ? value
     : "queued";
@@ -1046,7 +1049,10 @@ function syncManagedFlowCancellationFromTask(task: TaskRecord): void {
         updatedAt: endedAt,
       },
     });
-    if (result.applied || result.reason === "not_found") {
+    if (result.applied) {
+      return;
+    }
+    if (result.reason === "not_found") {
       return;
     }
     flow = result.current;

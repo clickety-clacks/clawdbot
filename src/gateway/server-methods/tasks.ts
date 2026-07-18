@@ -31,21 +31,24 @@ type TaskLedgerStatus = TaskSummary["status"];
 // runtime registry tracks finer-grained task states such as `lost`.
 const TASK_STATUS_TO_LEDGER_STATUS: Record<TaskStatus, TaskLedgerStatus> = {
   queued: "queued",
+  submitting: "running",
   running: "running",
   succeeded: "completed",
   failed: "failed",
   timed_out: "timed_out",
   cancelled: "cancelled",
   lost: "failed",
+  blocked: "failed",
+  replaced: "cancelled",
 };
 
 const LEDGER_STATUS_TO_TASK_STATUSES: Record<TaskLedgerStatus, TaskStatus[]> = {
   queued: ["queued"],
-  running: ["running"],
+  running: ["submitting", "running"],
   completed: ["succeeded"],
-  failed: ["failed", "lost"],
+  failed: ["failed", "lost", "blocked"],
   timed_out: ["timed_out"],
-  cancelled: ["cancelled"],
+  cancelled: ["cancelled", "replaced"],
 };
 
 function taskUpdatedAt(task: TaskRecord): number {

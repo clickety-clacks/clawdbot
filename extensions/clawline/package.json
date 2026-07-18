@@ -4,8 +4,10 @@
   "description": "OpenClaw Clawline channel plugin",
   "type": "module",
   "dependencies": {
-    "@openclaw/codex": "workspace:*",
     "@lydell/node-pty": "1.2.0-beta.12",
+    "@openclaw/agent-core": "workspace:*",
+    "@openclaw/codex": "workspace:*",
+    "@openclaw/llm-core": "workspace:*",
     "@sinclair/typebox": "0.34.49",
     "better-sqlite3": "12.6.2",
     "busboy": "1.6.0",

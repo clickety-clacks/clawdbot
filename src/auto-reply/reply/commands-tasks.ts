@@ -20,11 +20,14 @@ const MAX_VISIBLE_TASKS = 5;
 
 const TASK_STATUS_ICONS: Record<TaskRecord["status"], string> = {
   queued: "🟡",
+  submitting: "🟡",
   running: "🟢",
+  blocked: "⛔️",
   succeeded: "✅",
   failed: "🔴",
   timed_out: "⏱️",
   cancelled: "⚪️",
+  replaced: "⚪️",
   lost: "⚠️",
 };
 

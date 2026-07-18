@@ -1,4 +1,4 @@
-import type { ImageContent } from "@earendil-works/pi-ai";
+import type { ImageContent } from "@openclaw/llm-core";
 import type { NormalizedAttachment } from "./domain.js";
 
 type AssetImageLoadResult = {

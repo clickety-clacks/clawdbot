@@ -35,6 +35,7 @@
   "config-contracts",
   "config-types",
   "plugin-config-runtime",
+  "foreman-runtime",
   "config-mutation",
   "cron-store-runtime",
   "config-schema",

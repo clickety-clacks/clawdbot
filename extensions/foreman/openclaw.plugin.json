@@ -1,0 +1,49 @@
+{
+  "id": "foreman",
+  "activation": {
+    "onStartup": true
+  },
+  "name": "Foreman",
+  "description": "Managed TaskFlow bridge for tmux-backed coding agents.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "controllerBaseUrl": { "type": "string", "minLength": 1 },
+      "controllerEventsUrl": { "type": "string", "minLength": 1 },
+      "eventToken": { "type": "string", "minLength": 1 },
+      "eventTokenRef": { "type": "string", "minLength": 1 },
+      "workers": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "hostId": { "type": "string", "minLength": 1 },
+            "baseUrl": { "type": "string", "minLength": 1 },
+            "token": { "type": "string", "minLength": 1 },
+            "tokenRef": { "type": "string", "minLength": 1 },
+            "capabilities": { "type": "array", "items": { "type": "string" } },
+            "defaultIdleAfterMs": { "type": "number", "minimum": 0 },
+            "submitAckTimeoutMs": { "type": "number", "minimum": 0 }
+          },
+          "required": ["hostId", "baseUrl"]
+        }
+      },
+      "worker": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": { "type": "boolean" },
+          "hostId": { "type": "string", "minLength": 1 },
+          "bindHost": { "type": "string", "minLength": 1 },
+          "port": { "type": "number", "minimum": 1 },
+          "token": { "type": "string", "minLength": 1 },
+          "tokenRef": { "type": "string", "minLength": 1 },
+          "pendingEventsFile": { "type": "string", "minLength": 1 },
+          "watchesFile": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  }
+}

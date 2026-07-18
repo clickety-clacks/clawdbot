@@ -871,11 +871,14 @@ describe("task-registry", () => {
         failures: 1,
         byStatus: {
           queued: 1,
+          submitting: 0,
           running: 1,
+          blocked: 0,
           succeeded: 0,
           failed: 0,
           timed_out: 1,
           cancelled: 0,
+          replaced: 0,
           lost: 0,
         },
         byRuntime: {

@@ -40,11 +40,14 @@ describe("redactSensitiveStatusSummary", () => {
         failures: 1,
         byStatus: {
           queued: 1,
+          submitting: 0,
           running: 0,
+          blocked: 0,
           succeeded: 0,
           failed: 1,
           timed_out: 0,
           cancelled: 0,
+          replaced: 0,
           lost: 0,
         },
         byRuntime: {
