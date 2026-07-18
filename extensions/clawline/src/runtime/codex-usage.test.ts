@@ -125,9 +125,43 @@ describe("ClawlineCodexUsageCache", () => {
     );
   });
 
-  it("rejects partial, duplicate, extra, and malformed window snapshots", async () => {
+  it.each([
+    {
+      name: "5h only",
+      windows: [{ label: "5h", usedPercent: 36 }],
+      expected: [{ label: "5h", remainingPercent: 64, resetAt: null }],
+    },
+    {
+      name: "Week only",
+      windows: [{ label: "Week", usedPercent: 19 }],
+      expected: [{ label: "Week", remainingPercent: 81, resetAt: null }],
+    },
+    {
+      name: "reversed pair",
+      windows: [
+        { label: "Week", usedPercent: 72 },
+        { label: "5h", usedPercent: 36 },
+      ],
+      expected: [
+        { label: "5h", remainingPercent: 64, resetAt: null },
+        { label: "Week", remainingPercent: 28, resetAt: null },
+      ],
+    },
+  ] satisfies Array<{
+    name: string;
+    windows: ProviderUsageSnapshot["windows"];
+    expected: Array<{ label: string; remainingPercent: number; resetAt: null }>;
+  }>)("accepts and orders $name usage", async ({ windows, expected }) => {
+    const cache = createUsageCache(() => 1_000);
+    const value: ProviderUsageSnapshot = { ...snapshot(1, 2), windows };
+    cache.read("profile", async () => value);
+    await settle();
+    expect(cache.read("profile", async () => value).windows).toEqual(expected);
+  });
+
+  it("rejects empty, duplicate, extra, and malformed window snapshots", async () => {
     const invalidSnapshots: ProviderUsageSnapshot[] = [
-      { ...snapshot(1, 2), windows: [{ label: "5h", usedPercent: 1 }] },
+      { ...snapshot(1, 2), windows: [] },
       {
         ...snapshot(1, 2),
         windows: [

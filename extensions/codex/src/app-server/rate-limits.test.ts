@@ -201,6 +201,25 @@ describe("buildCodexAppServerUsageSnapshot", () => {
     );
   });
 
+  it("preserves a routed Codex account's weekly-only window", () => {
+    const result = buildCodexAppServerUsageSnapshot({
+      rateLimits: {
+        limitId: "codex",
+        planType: "pro",
+        primary: {
+          usedPercent: 19,
+          windowDurationMins: 7 * 24 * 60,
+          resetsAt: 1_784_952_589,
+        },
+        secondary: null,
+      },
+    });
+
+    expect(result.windows).toEqual([
+      { label: "Week", usedPercent: 19, resetAt: 1_784_952_589_000 },
+    ]);
+  });
+
   it("formats unlimited Codex credits without currency wording", () => {
     const result = buildCodexAppServerUsageSnapshot({
       rate_limits: {

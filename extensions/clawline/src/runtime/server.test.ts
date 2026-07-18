@@ -1873,10 +1873,7 @@ describe.sequential("clawline provider server", () => {
         snapshot: {
           provider: "openai" as const,
           displayName: "OpenAI",
-          windows: [
-            { label: "5h", usedPercent: 36 },
-            { label: "Week", usedPercent: 72 },
-          ],
+          windows: [{ label: "Week", usedPercent: 19 }],
         },
       }));
       prepareProviderUsageBindingMock.mockReturnValue({
@@ -1901,8 +1898,7 @@ describe.sequential("clawline provider server", () => {
         { headers: { Authorization: authHeader } },
       );
       expect((await pinnedFreshResponse.json()).display.codexUsage.windows).toEqual([
-        { label: "5h", remainingPercent: 64, resetAt: null },
-        { label: "Week", remainingPercent: 28, resetAt: null },
+        { label: "Week", remainingPercent: 81, resetAt: null },
       ]);
       expect(prepareProviderUsageBindingMock).toHaveBeenLastCalledWith(
         expect.objectContaining({ authProfileId: "openai:work" }),

@@ -220,15 +220,16 @@ export function unavailableCodexUsage(
 }
 
 function normalizeUsageWindows(snapshot: ProviderUsageSnapshot): ClawlineCodexUsageWindow[] {
-  if (snapshot.windows.length !== 2) {
+  if (snapshot.windows.length === 0) {
     throw new InvalidUsageError();
   }
   const fiveHour = snapshot.windows.filter((window) => window.label === "5h");
   const week = snapshot.windows.filter((window) => window.label === "Week");
-  if (fiveHour.length !== 1 || week.length !== 1) {
+  const ordered = [...fiveHour, ...week];
+  if (fiveHour.length > 1 || week.length > 1 || ordered.length !== snapshot.windows.length) {
     throw new InvalidUsageError();
   }
-  return [fiveHour[0], week[0]].map((window) => {
+  return ordered.map((window) => {
     if (!Number.isFinite(window.usedPercent)) {
       throw new InvalidUsageError();
     }
