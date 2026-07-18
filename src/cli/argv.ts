@@ -600,7 +600,7 @@ export function shouldMigrateStateFromPath(path: string[]): boolean {
   if (path.length === 0) {
     return true;
   }
-  const [primary, secondary] = path;
+  const [primary, secondary, tertiary] = path;
   if (primary === "health" || primary === "sessions") {
     return false;
   }
@@ -608,6 +608,14 @@ export function shouldMigrateStateFromPath(path: string[]): boolean {
     return false;
   }
   if (primary === "config" && (secondary === "get" || secondary === "unset")) {
+    return false;
+  }
+  if (
+    (primary === "infer" || primary === "capability") &&
+    secondary === "model" &&
+    tertiary === "run" &&
+    path.length === 3
+  ) {
     return false;
   }
   return true;

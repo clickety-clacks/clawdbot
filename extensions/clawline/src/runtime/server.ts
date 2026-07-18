@@ -392,7 +392,7 @@ const EXEC_COMPLETION_ALERT_PROMPT =
 const USER_ID_MAX_LENGTH = 48;
 const COMBINING_MARKS_REGEX = /[\u0300-\u036f]/g;
 const WEBROOT_PREFIX = "/www";
-const STREAM_DB_VERSION = 5;
+const STREAM_DB_VERSION = 6;
 const STREAM_SUFFIX_REGEX = /^s_[0-9a-f]{8}$/;
 const STREAM_DISPLAY_NAME_FALLBACK = "Stream";
 const STREAM_IDEMPOTENCY_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
@@ -434,10 +434,20 @@ type ClawlineAlertPromptTurn = {
   attachments?: unknown[];
   dedupe: boolean;
   idempotencyKey: string;
+  gatewayIdempotencyKey?: string;
   prompt: string;
   sessionKey: string;
   source?: string;
 };
+
+type DurableAlertAcknowledgement = {
+  ok: true;
+  accepted: true;
+  idempotencyKey: string;
+  acknowledgementId: string;
+};
+
+const JANUS_OPERATIONAL_HUMAN_ALERT_SOURCE = "janus-operational-human-verification";
 
 function truncateUtf8(value: string, maxBytes: number): string {
   if (Buffer.byteLength(value, "utf8") <= maxBytes) {
@@ -2048,6 +2058,7 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
   const scheduledPromptTurnCountsBySession = new Map<string, number>();
   const pendingAlertPromptTurnCountsBySession = new Map<string, number>();
   const scheduledAlertPromptTurnsByIdempotencyKey = new Map<string, number>();
+  const durableAlertRetryTimers = new Set<NodeJS.Timeout>();
 
   type SessionInfo = {
     dmScope: string;
@@ -2821,6 +2832,30 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
       );
       CREATE INDEX IF NOT EXISTS idx_stream_read_state_user_updated
         ON stream_read_state(userId, updatedAt);
+      CREATE TABLE IF NOT EXISTS alert_acceptances (
+        normalizedSessionKey TEXT NOT NULL,
+        idempotencyKey TEXT NOT NULL,
+        payloadDigest TEXT NOT NULL,
+        acknowledgementId TEXT NOT NULL,
+        responseStatus INTEGER NOT NULL,
+        responseJson TEXT NOT NULL,
+        createdAt INTEGER NOT NULL,
+        PRIMARY KEY (normalizedSessionKey, idempotencyKey)
+      );
+      CREATE TABLE IF NOT EXISTS alert_prompt_queue (
+        normalizedSessionKey TEXT NOT NULL,
+        idempotencyKey TEXT NOT NULL,
+        alertJson TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('pending', 'delivered')),
+        createdAt INTEGER NOT NULL,
+        deliveredAt INTEGER,
+        PRIMARY KEY (normalizedSessionKey, idempotencyKey),
+        FOREIGN KEY (normalizedSessionKey, idempotencyKey)
+          REFERENCES alert_acceptances(normalizedSessionKey, idempotencyKey)
+          ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_alert_prompt_queue_state_created
+        ON alert_prompt_queue(state, createdAt);
     `);
     if (!tableHasColumn("stream_sessions", "adopted")) {
       database.exec(`ALTER TABLE stream_sessions ADD COLUMN adopted INTEGER NOT NULL DEFAULT 0`);
@@ -4343,14 +4378,44 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         sessionKey: alertResolvedKey,
         source: payload.source,
       });
-      await wakeGatewayForAlertPromptTurn({
+      const alert: ClawlineAlertPromptTurn = {
         attachments: payload.attachments,
         dedupe: Boolean(payload.idempotencyKey),
         idempotencyKey,
         prompt: text,
         sessionKey: alertResolvedKey,
         source: payload.source,
-      });
+      };
+      if (payload.source === JANUS_OPERATIONAL_HUMAN_ALERT_SOURCE) {
+        if (!payload.idempotencyKey) {
+          throw new HttpError(400, "invalid_request", "idempotencyKey is required");
+        }
+        alert.gatewayIdempotencyKey = resolveGatewayAlertIdempotencyKey(
+          alertResolvedKey,
+          idempotencyKey,
+        );
+        const acceptance = acceptDurableAlert(alert, sha256(payload.raw));
+        if (acceptance.kind === "conflict") {
+          throw new HttpError(
+            409,
+            "idempotency_conflict",
+            "idempotencyKey was already used with a different payload",
+          );
+        }
+        if (acceptance.kind === "accepted") {
+          try {
+            await dispatchDurableAlertQueueItem(alert);
+          } catch (err) {
+            logger.error?.(`durable_alert_dispatch_failed: ${formatError(err)}`);
+          }
+        }
+        res.setHeader("Content-Type", "application/json");
+        res.writeHead(acceptance.responseStatus);
+        res.end(acceptance.responseJson);
+        logHttpRequest("alert_request_complete");
+        return;
+      }
+      await wakeGatewayForAlertPromptTurn(alert);
       res.setHeader("Content-Type", "application/json");
       res.writeHead(200);
       res.end(JSON.stringify({ ok: true }));
@@ -4363,6 +4428,115 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
         logger.error?.(`alert_request_failed: ${formatError(err)}`);
         sendHttpError(res, 500, "server_error", "Internal error");
       }
+    }
+  }
+
+  function acceptDurableAlert(
+    alert: ClawlineAlertPromptTurn,
+    payloadDigest: string,
+  ):
+    | { kind: "accepted" | "replay"; responseStatus: number; responseJson: string }
+    | { kind: "conflict" } {
+    if (!db) {
+      throw new Error("database is not initialized");
+    }
+    const database = db;
+    const normalizedSessionKey = normalizeSessionKey(alert.sessionKey);
+    return database.transaction(() => {
+      const existing = database
+        .prepare(
+          `SELECT payloadDigest, responseStatus, responseJson
+             FROM alert_acceptances
+            WHERE normalizedSessionKey = ? AND idempotencyKey = ?`,
+        )
+        .get(normalizedSessionKey, alert.idempotencyKey) as
+        | { payloadDigest: string; responseStatus: number; responseJson: string }
+        | undefined;
+      if (existing) {
+        return existing.payloadDigest === payloadDigest
+          ? {
+              kind: "replay" as const,
+              responseStatus: existing.responseStatus,
+              responseJson: existing.responseJson,
+            }
+          : { kind: "conflict" as const };
+      }
+      const acknowledgement: DurableAlertAcknowledgement = {
+        ok: true,
+        accepted: true,
+        idempotencyKey: alert.idempotencyKey,
+        acknowledgementId: `alert_ack_${randomUUID()}`,
+      };
+      const responseStatus = 200;
+      const responseJson = JSON.stringify(acknowledgement);
+      const createdAt = nowMs();
+      database
+        .prepare(
+          `INSERT INTO alert_acceptances
+           (normalizedSessionKey, idempotencyKey, payloadDigest, acknowledgementId,
+            responseStatus, responseJson, createdAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          normalizedSessionKey,
+          alert.idempotencyKey,
+          payloadDigest,
+          acknowledgement.acknowledgementId,
+          responseStatus,
+          responseJson,
+          createdAt,
+        );
+      database
+        .prepare(
+          `INSERT INTO alert_prompt_queue
+           (normalizedSessionKey, idempotencyKey, alertJson, state, createdAt)
+         VALUES (?, ?, ?, 'pending', ?)`,
+        )
+        .run(normalizedSessionKey, alert.idempotencyKey, JSON.stringify(alert), createdAt);
+      return { kind: "accepted" as const, responseStatus, responseJson };
+    })();
+  }
+
+  function scheduleDurableAlertRetry(alert: ClawlineAlertPromptTurn): void {
+    const timer = setTimeout(() => {
+      durableAlertRetryTimers.delete(timer);
+      dispatchDurableAlertQueueItem(alert).catch((err) =>
+        logger.error?.(`durable_alert_retry_failed: ${formatError(err)}`),
+      );
+    }, 1000);
+    durableAlertRetryTimers.add(timer);
+    timer.unref?.();
+  }
+
+  function markDurableAlertDelivered(alert: ClawlineAlertPromptTurn): void {
+    db?.prepare(
+      `UPDATE alert_prompt_queue
+          SET state = 'delivered', deliveredAt = ?
+        WHERE normalizedSessionKey = ? AND idempotencyKey = ? AND state = 'pending'`,
+    ).run(nowMs(), normalizeSessionKey(alert.sessionKey), alert.idempotencyKey);
+  }
+
+  async function dispatchDurableAlertQueueItem(alert: ClawlineAlertPromptTurn): Promise<void> {
+    await wakeGatewayForAlertPromptTurn(alert, {
+      onDrop: () => scheduleDurableAlertRetry(alert),
+      onSent: () => markDurableAlertDelivered(alert),
+    });
+  }
+
+  async function recoverDurableAlertQueue(): Promise<void> {
+    if (!db) {
+      return;
+    }
+    const rows = db
+      .prepare(
+        `SELECT alertJson
+           FROM alert_prompt_queue
+          WHERE state = 'pending'
+          ORDER BY createdAt ASC, normalizedSessionKey ASC, idempotencyKey ASC`,
+      )
+      .all() as Array<{ alertJson: string }>;
+    for (const row of rows) {
+      await dispatchDurableAlertQueueItem(JSON.parse(row.alertJson) as ClawlineAlertPromptTurn);
     }
   }
 
@@ -5002,7 +5176,10 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
     return null;
   }
 
-  async function wakeGatewayForAlertPromptTurn(alert: ClawlineAlertPromptTurn): Promise<boolean> {
+  async function wakeGatewayForAlertPromptTurn(
+    alert: ClawlineAlertPromptTurn,
+    lifecycle?: { onDrop: () => void; onSent: () => void },
+  ): Promise<boolean> {
     try {
       const resolvedSessionKey = resolveAlertSessionKey(alert.sessionKey);
       const gatewayToken =
@@ -5071,10 +5248,9 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
                   sessionKey: targetSessionKey,
                   message: item.prompt,
                   attachments: item.attachments,
-                  idempotencyKey: resolveGatewayAlertIdempotencyKey(
-                    targetSessionKey,
-                    correlatedRunId,
-                  ),
+                  idempotencyKey:
+                    alert.gatewayIdempotencyKey ??
+                    resolveGatewayAlertIdempotencyKey(targetSessionKey, correlatedRunId),
                 },
                 timeoutMs: 300_000,
               });
@@ -5098,13 +5274,18 @@ export async function createProviderServer(options: ProviderOptions): Promise<Pr
             }
           });
         },
-        onDrop: clearDroppedAlertIdempotencyKeys,
+        onDrop: (items) => {
+          clearDroppedAlertIdempotencyKeys(items);
+          lifecycle?.onDrop();
+        },
         onSent: (item) => {
           clearPendingAlertPromptTurn(item.sessionKey);
+          lifecycle?.onSent();
         },
       });
       if (!queued) {
         scheduledAlertPromptTurnsByIdempotencyKey.delete(alertDedupeKey);
+        lifecycle?.onDrop();
         logAlertRunPhase("dropped", phaseBase);
         logger.warn?.(
           `[clawline] alert_wake_result outcome=dropped sessionKey=${resolvedSessionKey}`,
@@ -12654,6 +12835,7 @@ button.deny { background: #9b1c31; color: white; }
         });
       });
       started = true;
+      await recoverDurableAlertQueue();
       const port = readBoundPort();
       const protocol = providerTls.enabled ? "wss" : "ws";
       logger.info(`Provider listening on ${protocol}://${config.network.bindAddress}:${port}`);
@@ -12673,6 +12855,10 @@ button.deny { background: #9b1c31; color: white; }
         clearInterval(streamIdempotencyCleanupInterval);
         streamIdempotencyCleanupInterval = null;
       }
+      for (const timer of durableAlertRetryTimers) {
+        clearTimeout(timer);
+      }
+      durableAlertRetryTimers.clear();
       // Force-close any active clients so shutdown doesn't hang.
       for (const client of wss.clients) {
         try {

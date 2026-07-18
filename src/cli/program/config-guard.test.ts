@@ -168,6 +168,21 @@ describe("ensureConfigReady", () => {
       commandPath: ["message"],
       expectedDoctorCalls: 1,
     },
+    {
+      name: "skips doctor flow for infer model run",
+      commandPath: ["infer", "model", "run"],
+      expectedDoctorCalls: 0,
+    },
+    {
+      name: "skips doctor flow for capability model run",
+      commandPath: ["capability", "model", "run"],
+      expectedDoctorCalls: 0,
+    },
+    {
+      name: "keeps doctor flow for infer model siblings",
+      commandPath: ["infer", "model", "list"],
+      expectedDoctorCalls: 1,
+    },
   ])("$name", async ({ commandPath, expectedDoctorCalls }) => {
     await runEnsureConfigReady(commandPath);
     expect(loadAndMaybeMigrateDoctorConfigMock).toHaveBeenCalledTimes(expectedDoctorCalls);

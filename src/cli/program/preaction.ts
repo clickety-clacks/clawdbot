@@ -5,7 +5,11 @@ import { setVerbose } from "../../globals.js";
 import type { LogLevel } from "../../logging/levels.js";
 import { defaultRuntime } from "../../runtime.js";
 import { resolveCliArgvInvocation } from "../argv-invocation.js";
-import { getVerboseFlag, isHelpOrVersionInvocation } from "../argv.js";
+import {
+  getCommandPathWithRootOptions,
+  getVerboseFlag,
+  isHelpOrVersionInvocation,
+} from "../argv.js";
 import { resolveCliName } from "../cli-name.js";
 import {
   applyCliExecutionStartupPresentation,
@@ -122,6 +126,11 @@ export function registerPreActionHooks(program: Command, programVersion: string)
       jsonOutputMode,
       env: process.env,
     });
+    // Preserve the invoked alias and registered leaf so only one-shot model runs can skip migration.
+    const configCommandPath =
+      (commandPath[0] === "infer" || commandPath[0] === "capability") && commandPath[1] === "model"
+        ? getCommandPathWithRootOptions(argv, 3)
+        : commandPath;
     await applyCliExecutionStartupPresentation({
       startupPolicy,
       version: programVersion,
@@ -165,7 +174,7 @@ export function registerPreActionHooks(program: Command, programVersion: string)
     }
     await ensureCliExecutionBootstrap({
       runtime: defaultRuntime,
-      commandPath,
+      commandPath: configCommandPath,
       startupPolicy,
       allowInvalid: shouldAllowInvalidConfigForAction(actionCommand, commandPath),
       ...(beforeStateMigrations ? { beforeStateMigrations } : {}),

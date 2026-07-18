@@ -638,6 +638,29 @@ async function setupTestServer(
   };
 }
 
+async function restartTestServer(ctx: TestServerContext): Promise<ProviderServer> {
+  const server = await createProviderServer({
+    config: {
+      port: 0,
+      statePath: path.dirname(ctx.allowlistPath),
+      media: {
+        storagePath: ctx.mediaPath,
+        maxInlineBytes: 256_000,
+        maxUploadBytes: 8_000_000,
+        unreferencedUploadTtlSeconds: 86_400,
+      },
+      alertInstructionsPath: ctx.alertInstructionsPath,
+      webRootPath: ctx.webRootPath,
+    },
+    openClawConfig: testOpenClawConfig,
+    replyResolver: testReplyResolver,
+    logger: silentLogger,
+    sessionStorePath: ctx.sessionStorePath,
+  });
+  await server.start();
+  return server;
+}
+
 type PairRequestOverrides = {
   claimedName?: string;
   deviceInfo?: Partial<{
@@ -7161,6 +7184,135 @@ describe.sequential("clawline provider server", () => {
     }
   });
 
+  it("durably accepts Janus wakes, replays the exact acknowledgement, and rejects conflicts", async () => {
+    const entry = createAllowlistEntry();
+    const ctx = await setupTestServer([entry]);
+    const authHeader = await createAuthHeader(ctx, entry);
+    const body = JSON.stringify({
+      sessionKey: "agent:main:clawline:flynn:main",
+      message: "Condition observed; resume proof",
+      source: "janus-operational-human-verification",
+      idempotencyKey: "ohv:T1595:OHV000001:1:wake",
+      noOverlay: true,
+    });
+    try {
+      const first = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: authHeader },
+        body,
+      });
+      expect(first.status).toBe(200);
+      const firstText = await first.text();
+      expect(JSON.parse(firstText)).toEqual({
+        ok: true,
+        accepted: true,
+        idempotencyKey: "ohv:T1595:OHV000001:1:wake",
+        acknowledgementId: expect.stringMatching(/^alert_ack_/),
+      });
+
+      const replay = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: authHeader },
+        body,
+      });
+      expect(replay.status).toBe(200);
+      expect(await replay.text()).toBe(firstText);
+      expect(enqueueAnnounceMock).toHaveBeenCalledTimes(1);
+
+      const conflict = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: authHeader },
+        body: JSON.stringify({
+          ...JSON.parse(body),
+          message: "Conflicting wake",
+        }),
+      });
+      expect(conflict.status).toBe(409);
+      expect(await conflict.json()).toEqual({
+        type: "error",
+        code: "idempotency_conflict",
+        message: "idempotencyKey was already used with a different payload",
+      });
+      expect(enqueueAnnounceMock).toHaveBeenCalledTimes(1);
+
+      const db = new BetterSqlite3(path.join(path.dirname(ctx.allowlistPath), "clawline.sqlite"));
+      try {
+        expect(db.prepare(`SELECT COUNT(*) AS count FROM alert_acceptances`).get()).toEqual({
+          count: 1,
+        });
+        const queued = db.prepare(`SELECT state, alertJson FROM alert_prompt_queue`).get() as {
+          state: string;
+          alertJson: string;
+        };
+        expect(queued.state).toBe("pending");
+        expect(JSON.parse(queued.alertJson)).toEqual(
+          expect.objectContaining({
+            gatewayIdempotencyKey: expect.stringMatching(
+              /^alert:[0-9a-f]{16}:ohv:T1595:OHV000001:1:wake$/,
+            ),
+          }),
+        );
+      } finally {
+        db.close();
+      }
+    } finally {
+      await ctx.cleanup();
+    }
+  });
+
+  it("recovers a committed Janus wake after restart and replays its original acknowledgement", async () => {
+    const entry = createAllowlistEntry();
+    const ctx = await setupTestServer([entry]);
+    const authHeader = await createAuthHeader(ctx, entry);
+    const body = JSON.stringify({
+      sessionKey: "agent:main:clawline:flynn:main",
+      message: "Condition observed; resume proof",
+      source: "janus-operational-human-verification",
+      idempotencyKey: "ohv:T1595:OHV000001:1:restart",
+      noOverlay: true,
+    });
+    let restarted: ProviderServer | null = null;
+    try {
+      const first = await fetch(`http://127.0.0.1:${ctx.port}/alert`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: authHeader },
+        body,
+      });
+      const firstText = await first.text();
+      expect(first.status).toBe(200);
+      expect(enqueueAnnounceMock).toHaveBeenCalledTimes(1);
+
+      await ctx.server.stop();
+      enqueueAnnounceMock.mockClear();
+      restarted = await restartTestServer(ctx);
+      expect(enqueueAnnounceMock).toHaveBeenCalledTimes(1);
+
+      const replay = await fetch(`http://127.0.0.1:${restarted.getPort()}/alert`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: authHeader },
+        body,
+      });
+      expect(replay.status).toBe(200);
+      expect(await replay.text()).toBe(firstText);
+      expect(enqueueAnnounceMock).toHaveBeenCalledTimes(1);
+
+      await sendQueuedAnnounce(0);
+      await vi.waitFor(() => expect(gatewayCallMock).toHaveBeenCalledTimes(1));
+      expect(gatewayCallMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          request: expect.objectContaining({
+            idempotencyKey: expect.stringMatching(
+              /^alert:[0-9a-f]{16}:ohv:T1595:OHV000001:1:restart$/,
+            ),
+          }),
+        }),
+      );
+    } finally {
+      await restarted?.stop();
+      await ctx.cleanup();
+    }
+  });
+
   it("allows retry when a queued alert with an idempotency key is dropped", async () => {
     const entry = createAllowlistEntry();
     const ctx = await setupTestServer([entry]);
@@ -10899,7 +11051,7 @@ describe.sequential("clawline provider server", () => {
       const db = new BetterSqlite3(dbPath, { readonly: true });
       try {
         const userVersion = db.pragma("user_version", { simple: true }) as number;
-        expect(userVersion).toBe(5);
+        expect(userVersion).toBe(6);
         const eventsColumns = db.prepare(`PRAGMA table_info(events)`).all() as Array<{
           name: string;
         }>;
